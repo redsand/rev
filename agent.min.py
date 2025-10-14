@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
 """
-Local Dev+Ops Agent (status-enhanced copy)
-- Adds real-time status updates while actions/tools run for better visibility.
+Local Dev+Ops Agent — with interactive guard, SSH/SFTP, WinRM/PowerShell,
+HTTP client, Bitwarden lookups, secret redaction, and REPL console.
 
-This file is based on agent.py with instrumentation added.
+Updates in this version:
+- FIX: http_request tool schema no longer declares a top-level array for json_body
+       (prevents "array schema missing items" error). Use 'data' (string) when
+       you need to POST a top-level JSON array.
+- FIX: SFTP connect logic: single paramiko.Transport.connect() call with
+       pkey/password handling (no duplicate connect).
+
+Usage
+-----
+# Save OPENAI_API_KEY (or use --api-key once with --save-key)
+python agent.py --repl
+you> initialize a git repo and add a README with usage examples
 """
 
-import os, re, sys, json, glob, shlex, argparse, pathlib, subprocess, tempfile, getpass, hashlib, datetime
+import os, re, sys, json, glob, shlex, argparse, pathlib, subprocess, tempfile, getpass, hashlib
 from typing import Dict, Any, List
 
 # ----- optional deps (soft import) -----
@@ -48,7 +59,6 @@ MUTATING_CMD_PATTERNS = [
 
 # ----- secret redaction -----
 REDACT: set[str] = set()
-
 def _register_secret(val: str | None):
     if not val:
         return
@@ -62,21 +72,7 @@ def _redact_text(s: str | None) -> str:
         t = t.replace(secret, "********")
     return t
 
-# ----- status logging -----
-STATUS_ENABLED = True
-
-SENSITIVE_ARG_KEYS = {"bearer_token", "basic_pass", "password", "Authorization", "x-api-key", "api_key"}
-
-def _fmt_ts():
-    return datetime.datetime.now().strftime("%H:%M:%S")
-
-def _status(msg: str):
-    if not STATUS_ENABLED:
-        return
-    print(f"[{_fmt_ts()}] [STATUS] {_redact_text(str(msg))}")
-
 # ----- prefs (persisted allow rules) -----
-
 def _load_prefs() -> Dict[str, Any]:
     if PREFS_FILE.exists():
         try:
@@ -85,21 +81,15 @@ def _load_prefs() -> Dict[str, Any]:
             pass
     return {"allow_always": []}
 
-
 def _save_prefs(prefs: Dict[str, Any]) -> None:
     try:
         PREFS_FILE.write_text(json.dumps(prefs, indent=2), encoding="utf-8")
     except Exception:
         pass
 
-
 PREFS = _load_prefs()
-
-
 def _allowed_by_prefs(sig: str) -> bool:
     return sig in set(PREFS.get("allow_always", []))
-
-
 def _remember_allow(sig: str) -> None:
     aa = set(PREFS.get("allow_always", []))
     aa.add(sig)
@@ -107,13 +97,11 @@ def _remember_allow(sig: str) -> None:
     _save_prefs(PREFS)
 
 # ----- helpers -----
-
 def _safe_path(rel: str) -> pathlib.Path:
     p = (ROOT / rel).resolve()
     if not str(p).startswith(str(ROOT)):
         raise ValueError(f"path escapes repo: {rel}")
     return p
-
 
 def _is_text_file(path: pathlib.Path) -> bool:
     try:
@@ -122,20 +110,16 @@ def _is_text_file(path: pathlib.Path) -> bool:
     except Exception:
         return False
 
-
 def _should_skip(path: pathlib.Path) -> bool:
     return any(part in EXCLUDE_DIRS for part in path.parts)
-
 
 def _iter_files(include_glob: str) -> List[pathlib.Path]:
     all_paths = [pathlib.Path(p) for p in glob.glob(str(ROOT / include_glob), recursive=True)]
     files = [p for p in all_paths if p.is_file()]
     return [p for p in files if not _should_skip(p)]
 
-
 def _run_shell(cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, shell=True, cwd=str(ROOT), text=True, capture_output=True, timeout=timeout)
-
 
 def _hash_text(s: str) -> str:
     try:
@@ -143,12 +127,10 @@ def _hash_text(s: str) -> str:
     except Exception:
         return "na"
 
-
 def _is_mutating_cmd(cmd: str) -> bool:
     return any(re.search(pat, cmd) for pat in MUTATING_CMD_PATTERNS)
 
 # ----- interactive guard (C/A/S) -----
-
 def _prompt_guard(action_sig: str, human_desc: str, non_interactive: bool) -> Dict[str, Any]:
     if _allowed_by_prefs(action_sig):
         return {"decision": "continue"}
@@ -171,9 +153,7 @@ def _prompt_guard(action_sig: str, human_desc: str, non_interactive: bool) -> Di
     return {"decision": "stop", "reason": reason or "User requested instructions."}
 
 # ----- local tools -----
-
 def read_file(path: str) -> str:
-    _status(f"read_file -> {path}")
     p = _safe_path(path)
     if not p.exists():
         return json.dumps({"error": f"Not found: {path}"})
@@ -187,57 +167,43 @@ def read_file(path: str) -> str:
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
-
 def write_file(path: str, content: str, non_interactive: bool = False) -> str:
     sig = f"write_file:{path}"
-    _status(f"write_file pending -> {path} ({len(content)} bytes)")
     guard = _prompt_guard(sig, f"write_file -> {path} ({len(content)} bytes)", non_interactive)
     if guard["decision"] == "stop":
-        _status(f"write_file stopped by guard for {path}")
         return json.dumps({"user_decision": "stop", "action_sig": sig, "reason": guard["reason"]})
     p = _safe_path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content, encoding="utf-8")
-    _status(f"write_file done -> {path}")
     return json.dumps({"wrote": str(p.relative_to(ROOT)), "bytes": len(content),
                        "always_allowed": guard["decision"] == "allow_always"})
 
-
 def list_dir(pattern: str = "**/*") -> str:
-    _status(f"list_dir -> pattern={pattern}")
     files = _iter_files(pattern)
     rels = sorted(str(p.relative_to(ROOT)).replace("\\", "/") for p in files)[:LIST_LIMIT]
     return json.dumps({"count": len(rels), "files": rels})
 
-
 def run_cmd(cmd: str, timeout: int = 300, non_interactive: bool = False) -> str:
-    _status(f"run_cmd start -> {cmd}")
     parts0 = shlex.split(cmd)[:1]
     ok = parts0 and (parts0[0] in ALLOW_CMDS or parts0[0] == "npx")
     if not ok:
-        _status(f"run_cmd blocked -> {parts0}")
         return json.dumps({"blocked": parts0, "allow": sorted(ALLOW_CMDS)})
     if _is_mutating_cmd(cmd):
         sig = f"run_cmd:{cmd}"
         guard = _prompt_guard(sig, f"run_cmd -> {cmd}", non_interactive)
         if guard["decision"] == "stop":
-            _status(f"run_cmd stopped by guard -> {cmd}")
             return json.dumps({"user_decision": "stop", "action_sig": sig, "reason": guard["reason"]})
     try:
         proc = _run_shell(cmd, timeout=timeout)
-        _status(f"run_cmd done -> {cmd} (rc={proc.returncode})")
         return json.dumps({"cmd": cmd, "rc": proc.returncode,
                            "stdout": proc.stdout[-8000:], "stderr": proc.stderr[-8000:]})
     except subprocess.TimeoutExpired:
-        _status(f"run_cmd timeout -> {cmd}")
         return json.dumps({"timeout": timeout, "cmd": cmd})
 
 # ----- search / diff / patch / format / tests / context -----
-
 def search_code(pattern: str, include: str = "**/*", exclude: List[str] | None = None,
                 regex: bool = True, case_sensitive: bool = False,
                 max_matches: int = SEARCH_MATCH_LIMIT) -> str:
-    _status(f"search_code -> pattern={pattern} include={include}")
     exclude = exclude or []
     flags = 0 if case_sensitive else re.IGNORECASE
     try:
@@ -262,9 +228,7 @@ def search_code(pattern: str, include: str = "**/*", exclude: List[str] | None =
             pass
     return json.dumps({"matches": matches, "truncated": False})
 
-
 def git_diff(pathspec: str = ".", staged: bool = False, context: int = 3) -> str:
-    _status(f"git_diff -> staged={staged} context={context} pathspec={pathspec}")
     args = ["git", "diff", f"-U{context}"]
     if staged:
         args.insert(1, "--staged")
@@ -273,22 +237,17 @@ def git_diff(pathspec: str = ".", staged: bool = False, context: int = 3) -> str
     proc = _run_shell(" ".join(shlex.quote(a) for a in args))
     return json.dumps({"rc": proc.returncode, "diff": proc.stdout[-120000:], "stderr": proc.stderr[-4000:]})
 
-
 def make_patch(paths: str = ".") -> str:
-    _status(f"make_patch -> paths={paths}")
     proc = _run_shell(f"git diff -U3 {shlex.quote(paths)}")
     return json.dumps({"rc": proc.returncode, "patch": proc.stdout[-120000:], "stderr": proc.stderr[-4000:]})
-
 
 def apply_patch(patch: str, dry_run: bool = False, three_way: bool = True, reject: bool = True,
                 non_interactive: bool = False) -> str:
     h = _hash_text(patch[:10000])
-    _status(f"apply_patch -> sha={h} dry_run={dry_run}")
     sig = f"apply_patch:{h}"
     if not dry_run:
         guard = _prompt_guard(sig, f"apply_patch (apply) sha={h}", non_interactive)
         if guard["decision"] == "stop":
-            _status("apply_patch stopped by guard")
             return json.dumps({"user_decision": "stop", "action_sig": sig, "reason": guard["reason"]})
     with tempfile.NamedTemporaryFile("w+", delete=False, encoding="utf-8") as tf:
         tf.write(patch)
@@ -301,7 +260,6 @@ def apply_patch(patch: str, dry_run: bool = False, three_way: bool = True, rejec
         if reject: args.append("--reject")
         args.append(tfp)
         proc = _run_shell(" ".join(shlex.quote(a) for a in args))
-        _status(f"apply_patch done rc={proc.returncode}")
         return json.dumps({"rc": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr, "dry_run": dry_run})
     finally:
         try:
@@ -309,11 +267,9 @@ def apply_patch(patch: str, dry_run: bool = False, three_way: bool = True, rejec
         except Exception:
             pass
 
-
 def search_replace(pattern: str, replacement: str, include: str = "**/*",
                    exclude: List[str] | None = None, regex: bool = True, case_sensitive: bool = False,
                    dry_run: bool = True, non_interactive: bool = False) -> str:
-    _status(f"search_replace -> pattern={pattern} dry_run={dry_run}")
     exclude = exclude or []
     flags = 0 if case_sensitive else re.IGNORECASE
     try:
@@ -324,7 +280,6 @@ def search_replace(pattern: str, replacement: str, include: str = "**/*",
     if not dry_run:
         guard = _prompt_guard(sig, f"search_replace (apply) pattern={pattern!r}", non_interactive)
         if guard["decision"] == "stop":
-            _status("search_replace stopped by guard")
             return json.dumps({"user_decision": "stop", "action_sig": sig, "reason": guard["reason"]})
     changed = []
     for p in _iter_files(include):
@@ -342,16 +297,12 @@ def search_replace(pattern: str, replacement: str, include: str = "**/*",
                     p.write_text(new, encoding="utf-8")
         except Exception:
             pass
-    _status(f"search_replace changed {len(changed)} files")
     return json.dumps({"changed": changed, "dry_run": dry_run})
 
-
 def format_code(tool: str = "auto", non_interactive: bool = False) -> str:
-    _status(f"format_code -> tool={tool}")
     sig = f"format_code:{tool}"
     guard = _prompt_guard(sig, f"format_code -> {tool}", non_interactive)
     if guard["decision"] == "stop":
-        _status("format_code stopped by guard")
         return json.dumps({"user_decision": "stop", "action_sig": sig, "reason": guard["reason"]})
     cmds = []
     if tool == "auto":
@@ -372,27 +323,20 @@ def format_code(tool: str = "auto", non_interactive: bool = False) -> str:
         proc = _run_shell(c)
         results.append({"cmd": c, "rc": proc.returncode,
                         "stdout": proc.stdout[-4000:], "stderr": proc.stderr[-4000:]})
-    _status(f"format_code completed {len(results)} steps")
     return json.dumps({"results": results})
 
-
 def run_tests(cmd: str = "pytest -q", timeout: int = 600) -> str:
-    _status(f"run_tests -> cmd={cmd}")
     p0 = shlex.split(cmd)[0]
     if p0 not in ALLOW_CMDS and p0 != "npx":
         return json.dumps({"blocked": p0})
     try:
         proc = _run_shell(cmd, timeout=timeout)
-        _status(f"run_tests done rc={proc.returncode}")
         return json.dumps({"cmd": cmd, "rc": proc.returncode,
                            "stdout": proc.stdout[-12000:], "stderr": proc.stderr[-4000:]})
     except subprocess.TimeoutExpired:
-        _status(f"run_tests timeout for {cmd}")
         return json.dumps({"timeout": timeout, "cmd": cmd})
 
-
 def get_repo_context(commits: int = 6) -> str:
-    _status("get_repo_context")
     st = _run_shell("git status -s")
     lg = _run_shell(f"git log -n {int(commits)} --oneline")
     top = []
@@ -403,9 +347,7 @@ def get_repo_context(commits: int = 6) -> str:
     return json.dumps({"status": st.stdout, "log": lg.stdout, "top_level": top[:100]})
 
 # ----- Bitwarden (bw CLI) -----
-
 def bw_get(what: str, ref: str, field: str | None = None) -> str:
-    _status(f"bw_get -> what={what} ref={ref}")
     """
     what: 'password' | 'item' | 'username' | 'totp'
     ref : item id or name (bw-compatible)
@@ -452,7 +394,6 @@ def bw_get(what: str, ref: str, field: str | None = None) -> str:
         return json.dumps({"error": "Unsupported 'what' for bw_get"})
 
 # ----- HTTP client -----
-
 def http_request(method: str, url: str, headers: Dict[str, str] | None = None, params: Dict[str, str] | None = None,
                  json_body: Dict[str, Any] | None = None, data: str | None = None, timeout: int = 30,
                  verify_tls: bool = True, bearer_token: str | None = None,
@@ -473,7 +414,6 @@ def http_request(method: str, url: str, headers: Dict[str, str] | None = None, p
         _register_secret(basic_user)
         _register_secret(basic_pass)
         auth = (basic_user, basic_pass)
-    _status(f"http_request -> {method.upper()} {url}")
     try:
         resp = requests.request(method.upper(), url, headers=headers, params=params,
                                 json=json_body, data=data, timeout=timeout, verify=verify_tls, auth=auth)
@@ -481,23 +421,18 @@ def http_request(method: str, url: str, headers: Dict[str, str] | None = None, p
         body = resp.text
         if len(body) > 12000:
             body = body[:12000] + "\n...[truncated]..."
-        _status(f"http_request done -> {method.upper()} {url} (status={resp.status_code})")
         return json.dumps({"status": resp.status_code, "headers": safe_headers, "body": _redact_text(body)})
     except Exception as e:
-        _status(f"http_request error -> {method.upper()} {url}: {type(e).__name__}")
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
 # ----- SSH / SFTP -----
-
 def ssh_exec(host: str, user: str, cmd: str, port: int = 22, password: str | None = None, key_path: str | None = None,
              accept_unknown_host: bool = False, timeout: int = 120, non_interactive: bool = False) -> str:
     if "paramiko" in _REQ_ERR:
         return json.dumps({"error": f"paramiko not installed: {_REQ_ERR['paramiko']}"})
     sig = f"ssh_exec:{user}@{host}:{port}:{cmd}"
-    _status(f"ssh_exec -> {user}@{host}:{port} {cmd}")
     guard = _prompt_guard(sig, f"SSH {user}@{host}:{port} -> {cmd}", non_interactive)
     if guard["decision"] == "stop":
-        _status("ssh_exec stopped by guard")
         return json.dumps({"user_decision": "stop", "action_sig": sig, "reason": guard["reason"]})
     _register_secret(password)
     try:
@@ -508,21 +443,17 @@ def ssh_exec(host: str, user: str, cmd: str, port: int = 22, password: str | Non
         out, err = stdout.read().decode(errors="ignore"), stderr.read().decode(errors="ignore")
         rc = stdout.channel.recv_exit_status()
         client.close()
-        _status(f"ssh_exec done rc={rc}")
         return json.dumps({"rc": rc, "stdout": out[-8000:], "stderr": err[-8000:]})
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
-
 
 def sftp_put(host: str, user: str, local_path: str, remote_path: str, port: int = 22, password: str | None = None,
              key_path: str | None = None, accept_unknown_host: bool = False, non_interactive: bool = False) -> str:
     if "paramiko" in _REQ_ERR:
         return json.dumps({"error": f"paramiko not installed: {_REQ_ERR['paramiko']}"})
     sig = f"sftp_put:{user}@{host}:{remote_path}"
-    _status(f"sftp_put -> {local_path} to {user}@{host}:{remote_path}")
     guard = _prompt_guard(sig, f"SFTP PUT {local_path} -> {user}@{host}:{remote_path}", non_interactive)
     if guard["decision"] == "stop":
-        _status("sftp_put stopped by guard")
         return json.dumps({"user_decision": "stop", "action_sig": sig, "reason": guard["reason"]})
     _register_secret(password)
     try:
@@ -531,23 +462,21 @@ def sftp_put(host: str, user: str, local_path: str, remote_path: str, port: int 
         pkey = None
         if key_path:
             pkey = paramiko.RSAKey.from_private_key_file(key_path)
+        # single connect call; choose pkey or password
         transport.connect(username=user, password=None if pkey else password, pkey=pkey)
         sftp = paramiko.SFTPClient.from_transport(transport)
         sftp.put(str(lp), remote_path)
         sftp.close()
         transport.close()
-        _status("sftp_put done")
         return json.dumps({"ok": True, "bytes": pathlib.Path(lp).stat().st_size})
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
-
 
 def sftp_get(host: str, user: str, remote_path: str, local_path: str, port: int = 22, password: str | None = None,
              key_path: str | None = None, accept_unknown_host: bool = False) -> str:
     if "paramiko" in _REQ_ERR:
         return json.dumps({"error": f"paramiko not installed: {_REQ_ERR['paramiko']}"})
     _register_secret(password)
-    _status(f"sftp_get -> {user}@{host}:{remote_path} to {local_path}")
     try:
         lp = _safe_path(local_path)
         lp.parent.mkdir(parents=True, exist_ok=True)
@@ -560,13 +489,11 @@ def sftp_get(host: str, user: str, remote_path: str, local_path: str, port: int 
         sftp.get(remote_path, str(lp))
         sftp.close()
         transport.close()
-        _status("sftp_get done")
         return json.dumps({"ok": True, "dest": str(lp.relative_to(ROOT))})
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
 # ----- WinRM / PowerShell -----
-
 def winrm_exec(host: str | None = None, endpoint: str | None = None, command: str | None = None,
                ps_script: str | None = None, username: str | None = None, password: str | None = None,
                use_https: bool = True, port: int = 5986, auth: str = "ntlm",
@@ -579,10 +506,8 @@ def winrm_exec(host: str | None = None, endpoint: str | None = None, command: st
         scheme = "https" if use_https else "http"
         endpoint = f"{scheme}://{host}:{port}/wsman"
     sig = f"winrm_exec:{username}@{endpoint}:{'ps' if ps_script else 'cmd'}"
-    _status(f"winrm_exec -> endpoint={endpoint}")
     guard = _prompt_guard(sig, f"WinRM -> {endpoint}", non_interactive)
     if guard["decision"] == "stop":
-        _status("winrm_exec stopped by guard")
         return json.dumps({"user_decision": "stop", "action_sig": sig, "reason": guard["reason"]})
     _register_secret(username)
     _register_secret(password)
@@ -597,7 +522,6 @@ def winrm_exec(host: str | None = None, endpoint: str | None = None, command: st
             r = s.run_cmd(command)
         out = (r.std_out or b"").decode(errors="ignore")
         err = (r.std_err or b"").decode(errors="ignore")
-        _status(f"winrm_exec done rc={r.status_code}")
         return json.dumps({"rc": r.status_code, "stdout": out[-8000:], "stderr": err[-8000:]})
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
@@ -730,56 +654,29 @@ TOOLS = [
     }}
 ]
 
-
-def _safe_args_for_status(args: Dict[str, Any]) -> Dict[str, Any]:
-    # shallow copy; mask sensitive keys
-    safe = {}
-    for k, v in (args or {}).items():
-        if k in SENSITIVE_ARG_KEYS:
-            safe[k] = "********"
-        else:
-            safe[k] = v
-    return safe
-
-
 def _handle_tool(name: str, args: Dict[str, Any], non_interactive: bool) -> str:
     try:
-        _status(f"TOOL start -> {name} args={_safe_args_for_status(args)}")
-        if name == "read_file":         res = read_file(args["path"])
-        elif name == "write_file":      res = write_file(args["path"], args["content"], non_interactive=non_interactive)
-        elif name == "list_dir":        res = list_dir(args.get("pattern", "**/*"))
-        elif name == "run_cmd":         res = run_cmd(args["cmd"], int(args.get("timeout", 300)), non_interactive=non_interactive)
-        elif name == "search_code":     res = search_code(args["pattern"], args.get("include","**/*"), args.get("exclude"), bool(args.get("regex", True)), bool(args.get("case_sensitive", False)), int(args.get("max_matches", SEARCH_MATCH_LIMIT)))
-        elif name == "git_diff":        res = git_diff(args.get("pathspec","."), bool(args.get("staged", False)), int(args.get("context", 3)))
-        elif name == "make_patch":      res = make_patch(args.get("paths","."))
-        elif name == "apply_patch":     res = apply_patch(args["patch"], bool(args.get("dry_run", False)), bool(args.get("three_way", True)), bool(args.get("reject", True)), non_interactive=non_interactive)
-        elif name == "search_replace":  res = search_replace(args["pattern"], args["replacement"], args.get("include","**/*"), args.get("exclude"), bool(args.get("regex", True)), bool(args.get("case_sensitive", False)), bool(args.get("dry_run", True)), non_interactive=non_interactive)
-        elif name == "format_code":     res = format_code(args.get("tool","auto"), non_interactive=non_interactive)
-        elif name == "run_tests":       res = run_tests(args.get("cmd","pytest -q"), int(args.get("timeout", 600)))
-        elif name == "get_repo_context":res = get_repo_context(int(args.get("commits", 6)))
-        elif name == "bw_get":          res = bw_get(args["what"], args["ref"], args.get("field"))
-        elif name == "http_request":    res = http_request(args["method"], args["url"], args.get("headers"), args.get("params"), args.get("json_body"), args.get("data"), int(args.get("timeout",30)), bool(args.get("verify_tls", True)), args.get("bearer_token"), args.get("basic_user"), args.get("basic_pass"))
-        elif name == "ssh_exec":        res = ssh_exec(args["host"], args["user"], args["cmd"], int(args.get("port",22)), args.get("password"), args.get("key_path"), bool(args.get("accept_unknown_host", False)), int(args.get("timeout",120)), non_interactive=non_interactive)
-        elif name == "sftp_put":        res = sftp_put(args["host"], args["user"], args["local_path"], args["remote_path"], int(args.get("port",22)), args.get("password"), args.get("key_path"), bool(args.get("accept_unknown_host", False)), non_interactive=non_interactive)
-        elif name == "sftp_get":        res = sftp_get(args["host"], args["user"], args["remote_path"], args["local_path"], int(args.get("port",22)), args.get("password"), args.get("key_path"), bool(args.get("accept_unknown_host", False)))
-        elif name == "winrm_exec":      res = winrm_exec(args.get("host"), args.get("endpoint"), args.get("command"), args.get("ps_script"), args.get("username"), args.get("password"), bool(args.get("use_https", True)), int(args.get("port",5986)), args.get("auth","ntlm"), bool(args.get("verify_tls", False)), int(args.get("timeout",120)), non_interactive=non_interactive)
-        else:
-            res = json.dumps({"error": f"unknown tool: {name}"})
-        # summarize result
-        try:
-            obj = json.loads(res)
-            if isinstance(obj, dict) and "error" in obj:
-                _status(f"TOOL error -> {name}: {obj['error']}")
-            else:
-                # try to include key fields
-                summary = {k: obj.get(k) for k in ("rc","status","wrote","ok","changed","matches") if isinstance(obj, dict) and k in obj}
-                _status(f"TOOL done -> {name} summary={summary if summary else 'ok'}")
-        except Exception:
-            _status(f"TOOL done -> {name}")
-        return res
+        if name == "read_file":         return read_file(args["path"])
+        if name == "write_file":        return write_file(args["path"], args["content"], non_interactive=non_interactive)
+        if name == "list_dir":          return list_dir(args.get("pattern", "**/*"))
+        if name == "run_cmd":           return run_cmd(args["cmd"], int(args.get("timeout", 300)), non_interactive=non_interactive)
+        if name == "search_code":       return search_code(args["pattern"], args.get("include","**/*"), args.get("exclude"), bool(args.get("regex", True)), bool(args.get("case_sensitive", False)), int(args.get("max_matches", SEARCH_MATCH_LIMIT)))
+        if name == "git_diff":          return git_diff(args.get("pathspec","."), bool(args.get("staged", False)), int(args.get("context", 3)))
+        if name == "make_patch":        return make_patch(args.get("paths","."))
+        if name == "apply_patch":       return apply_patch(args["patch"], bool(args.get("dry_run", False)), bool(args.get("three_way", True)), bool(args.get("reject", True)), non_interactive=non_interactive)
+        if name == "search_replace":    return search_replace(args["pattern"], args["replacement"], args.get("include","**/*"), args.get("exclude"), bool(args.get("regex", True)), bool(args.get("case_sensitive", False)), bool(args.get("dry_run", True)), non_interactive=non_interactive)
+        if name == "format_code":       return format_code(args.get("tool","auto"), non_interactive=non_interactive)
+        if name == "run_tests":         return run_tests(args.get("cmd","pytest -q"), int(args.get("timeout", 600)))
+        if name == "get_repo_context":  return get_repo_context(int(args.get("commits", 6)))
+        if name == "bw_get":            return bw_get(args["what"], args["ref"], args.get("field"))
+        if name == "http_request":      return http_request(args["method"], args["url"], args.get("headers"), args.get("params"), args.get("json_body"), args.get("data"), int(args.get("timeout",30)), bool(args.get("verify_tls", True)), args.get("bearer_token"), args.get("basic_user"), args.get("basic_pass"))
+        if name == "ssh_exec":          return ssh_exec(args["host"], args["user"], args["cmd"], int(args.get("port",22)), args.get("password"), args.get("key_path"), bool(args.get("accept_unknown_host", False)), int(args.get("timeout",120)), non_interactive=non_interactive)
+        if name == "sftp_put":          return sftp_put(args["host"], args["user"], args["local_path"], args["remote_path"], int(args.get("port",22)), args.get("password"), args.get("key_path"), bool(args.get("accept_unknown_host", False)), non_interactive=non_interactive)
+        if name == "sftp_get":          return sftp_get(args["host"], args["user"], args["remote_path"], args["local_path"], int(args.get("port",22)), args.get("password"), args.get("key_path"), bool(args.get("accept_unknown_host", False)))
+        if name == "winrm_exec":        return winrm_exec(args.get("host"), args.get("endpoint"), args.get("command"), args.get("ps_script"), args.get("username"), args.get("password"), bool(args.get("use_https", True)), int(args.get("port",5986)), args.get("auth","ntlm"), bool(args.get("verify_tls", False)), int(args.get("timeout",120)), non_interactive=non_interactive)
+        return json.dumps({"error": f"unknown tool: {name}"})
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
-
 
 def load_api_key(cli_key: str | None, save_key: bool) -> str:
     if cli_key:
@@ -805,9 +702,13 @@ def load_api_key(cli_key: str | None, save_key: bool) -> str:
     if save_key:
         (ROOT / ".dev_agent.env").write_text(f"OPENAI_API_KEY={key}\n", encoding="utf-8")
     return key
-
-
+    
+    
 def _append_assistant_with_tool_calls(messages, msg):
+    """
+    Append the assistant message that requested tools so that the following
+    tool-role messages have a valid preceding 'tool_calls' origin.
+    """
     tool_calls_payload = []
     for tc in (msg.tool_calls or []):
         fn = tc.function
@@ -821,30 +722,29 @@ def _append_assistant_with_tool_calls(messages, msg):
         })
     messages.append({
         "role": "assistant",
-        "content": None,
+        "content": None,           # tool-call messages typically have no content
         "tool_calls": tool_calls_payload
     })
 
 
 def _chat_once(prompt: str, model: str, client: OpenAI, non_interactive: bool, temperature: float | None):
     messages = [{"role":"system","content":SYSTEM},{"role":"user","content":prompt}]
-    _status(f"chat_once start -> model={model}")
     while True:
         resp = _chat_create(client, model=model, messages=messages, tools=TOOLS, tool_choice="auto", temperature=temperature)
         msg = resp.choices[0].message
+
+        # If the assistant asked to call tools, append THAT assistant message first.
         if getattr(msg, "tool_calls", None):
             _append_assistant_with_tool_calls(messages, msg)
             for tc in msg.tool_calls:
-                try:
-                    args = json.loads(tc.function.arguments or "{}")
-                except Exception:
-                    args = {}
-                _status(f"assistant requested tool -> {tc.function.name}")
+                args = json.loads(tc.function.arguments or "{}")
                 result = _handle_tool(tc.function.name, args, non_interactive=non_interactive)
                 messages.append({"role":"tool", "tool_call_id": tc.id, "content": result})
+            # loop again so the model can see tool outputs
             continue
+
+        # Otherwise, it's a normal assistant message with content.
         print(_redact_text(msg.content or ""))
-        _status("chat_once done")
         break
 
 
@@ -857,21 +757,23 @@ def repl(model: str, client: OpenAI, non_interactive: bool, temperature: float |
             break
         if not user:
             continue
+
         messages.append({"role":"user","content":user})
         while True:
             resp = _chat_create(client, model=model, messages=messages, tools=TOOLS, tool_choice="auto", temperature=temperature)
             msg = resp.choices[0].message
+
             if getattr(msg, "tool_calls", None):
+                # Record the assistant tool-call message BEFORE adding tool responses
                 _append_assistant_with_tool_calls(messages, msg)
                 for tc in msg.tool_calls:
-                    try:
-                        args = json.loads(tc.function.arguments or "{}")
-                    except Exception:
-                        args = {}
-                    _status(f"assistant requested tool -> {tc.function.name}")
+                    args = json.loads(tc.function.arguments or "{}")
                     result = _handle_tool(tc.function.name, args, non_interactive=non_interactive)
                     messages.append({"role":"tool", "tool_call_id": tc.id, "content": result})
+                # Continue inner loop so model can read tool outputs and respond
                 continue
+
+            # Normal assistant reply: print + keep in the transcript
             print(_redact_text(msg.content or ""))
             messages.append({"role":"assistant","content": msg.content or ""})
             break
@@ -883,22 +785,19 @@ def _chat_create(client, *, model, messages, tools, tool_choice, temperature):
         kwargs["temperature"] = temperature
     return client.chat.completions.create(**kwargs)
 
-
 def main():
-    ap = argparse.ArgumentParser(description="Local dev+ops agent (SSH/WinRM/HTTP/Bitwarden) with guard + REPL + status.")
+    ap = argparse.ArgumentParser(description="Local dev+ops agent (SSH/WinRM/HTTP/Bitwarden) with guard + REPL.")
     ap.add_argument("task", nargs="*", help="One-shot task (omit to use --repl).")
     ap.add_argument("--model", default="gpt-5", help="Model name")
-    ap.add_argument("--temperature", type=float, default=None, help="Sampling temperature")
+    ap.add_argument("--temperature", type=float, default=None,
+                    help="Sampling temperature. Omit to use the model default (recommended).")
+
     ap.add_argument("--api-key", help="API key; else env or .dev_agent.env")
     ap.add_argument("--save-key", action="store_true", help="Persist key to .dev_agent.env")
     ap.add_argument("--base-url", default=None, help="Custom API base URL (optional)")
     ap.add_argument("--repl", action="store_true", help="Interactive chat console")
     ap.add_argument("--yes", action="store_true", help="Non-interactive: auto-STOP mutating ops (prints instructions)")
-    ap.add_argument("--no-status", action="store_true", help="Disable status lines")
     args = ap.parse_args()
-
-    global STATUS_ENABLED
-    STATUS_ENABLED = not args.no_status
 
     key = load_api_key(args.api_key, args.save_key)
     client = OpenAI(api_key=key, base_url=args.base_url) if args.base_url else OpenAI(api_key=key)
@@ -907,6 +806,6 @@ def main():
         repl(args.model, client, non_interactive=args.yes, temperature=args.temperature)
     else:
         _chat_once(" ".join(args.task), args.model, client, non_interactive=args.yes, temperature=args.temperature)
-
+        
 if __name__ == "__main__":
     main()
