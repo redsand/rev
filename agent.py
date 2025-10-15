@@ -562,15 +562,43 @@ def winrm_exec(host: Optional[str]=None, endpoint: Optional[str]=None, command: 
 
 # ---------- OpenAI wiring ----------
 SYSTEM = f"""
-You are a precise coding + ops agent working at repo: {ROOT}
-You can:
-- edit files, run linters/tests;
-- manage remote servers via SSH/SFTP and WinRM/PowerShell;
-- call HTTP APIs; fetch secrets from Bitwarden.
-Guardrail protocol:
-- Before any mutating action (local or remote), runtime may prompt the user (C/A/S).
-- If a tool returns "user_decision":"stop", STOP changes and produce clear manual instructions.
-- Keep outputs compact; show minimal diffs/snippets and commands. Never print secrets; they are redacted.
+You are a precise coding + ops agent working at repo: {ROOT}.
+
+## Stepwise Build Protocol (STRICT)
+- Work in **small, atomic steps**. For each cycle:
+  1) PLAN the smallest next change (1 file or tiny set of lines).
+  2) SHOW what you’ll change (file + lines) and why.
+  3) APPLY the change using tools (prefer `apply_patch` with a unified diff).
+  4) VALIDATE: run tests/lints minimally (e.g., `run_tests`).
+  5) REPORT: summarize result and the **next** smallest step.
+- **One tool action per round** (plan → single tool call → reflect). Do not batch multiple tool calls in one assistant turn.
+- Prefer `search_code` → `git_diff` to inspect before editing.
+- **Whitespace & indentation are sacred**:
+  - Never “cleanup formatting” unless explicitly asked.
+  - Preserve exact spacing and newlines in patches.
+  - Use `apply_patch` (unified diff) for edits; avoid inline code dumps unless asked to show snippets.
+  - After each patch, run `git diff --check` (via `run_cmd`) if needed to detect whitespace issues.
+- Testing:
+  - After each change, **run tests** (e.g., `run_tests` with pytest).
+  - If failing, read the failure, patch the smallest fix, re-run tests.
+  - Iterate until green or the change is clearly blocked.
+- Safety:
+  - For any mutating action, expect a human guard (Continue / Always / Stop).
+  - Never print secrets; redact if seen. Use Bitwarden via `bw_get` when needed.
+
+## Output Rules
+- Keep responses compact.
+- When proposing file edits, **use `apply_patch`** with a unified diff (`diff -u`/`git diff` style).
+- If you must show code in chat, wrap it in triple backticks and **do not reformat or normalize indentation**.
+- Do not run formatters (`black`, `prettier`, etc.) unless explicitly requested.
+"""
+
+# === Item 2: Strict Wrapper (adds stepwise enforcement to each user prompt) ===
+STRICT_TASK_WRAPPER = """Follow the Stepwise Build Protocol (STRICT).
+Work one tiny step at a time: plan → single tool call → validate tests → report next step.
+Preserve whitespace exactly; use `apply_patch` unified diffs for edits; do not run formatters unless asked.
+
+Task:
 """
 
 TOOLS = [
@@ -749,8 +777,9 @@ def _append_assistant_with_tool_calls(messages: List[Dict[str, Any]], msg_obj: A
         })
     messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls_payload})
 
-def _chat_once(prompt: str, model: str, client: OpenAI, non_interactive: bool, temperature: Optional[float]) -> None:
-    messages: List[Dict[str, Any]] = [{"role":"system","content":SYSTEM},{"role":"user","content":prompt}]
+def _chat_once(prompt: str, model: str, client: OpenAI, non_interactive: bool, temperature: Optional[float], strict: bool) -> None:
+    start_prompt = (STRICT_TASK_WRAPPER + prompt) if strict else prompt
+    messages: List[Dict[str, Any]] = [{"role":"system","content":SYSTEM},{"role":"user","content":start_prompt}]
     while True:
         resp = _chat_create(client, model=model, messages=messages, tools=TOOLS, tool_choice="auto", temperature=temperature)
         msg = resp.choices[0].message
@@ -766,7 +795,7 @@ def _chat_once(prompt: str, model: str, client: OpenAI, non_interactive: bool, t
         print(_redact_text(msg.content or ""))
         break
 
-def repl(model: str, client: OpenAI, non_interactive: bool, temperature: Optional[float]) -> None:
+def repl(model: str, client: OpenAI, non_interactive: bool, temperature: Optional[float], strict: bool) -> None:
     print("Interactive dev+ops agent REPL. Type /exit to quit.")
     messages: List[Dict[str, Any]] = [{"role":"system","content":SYSTEM}]
     while True:
@@ -781,7 +810,8 @@ def repl(model: str, client: OpenAI, non_interactive: bool, temperature: Optiona
         if not user:
             continue
 
-        messages.append({"role":"user","content":user})
+        user_content = (STRICT_TASK_WRAPPER + user) if strict else user
+        messages.append({"role":"user","content":user_content})
         while True:
             resp = _chat_create(client, model=model, messages=messages, tools=TOOLS, tool_choice="auto", temperature=temperature)
             msg = resp.choices[0].message
@@ -809,6 +839,7 @@ def main():
     ap.add_argument("--repl", action="store_true", help="Interactive chat console")
     ap.add_argument("--yes", action="store_true", help="Non-interactive: auto-STOP mutating ops (prints instructions)")
     ap.add_argument("--temperature", type=float, default=None, help="Sampling temperature. Omit to use the model default.")
+    ap.add_argument("--strict", action="store_true", help="Prepend a strict stepwise wrapper to each user prompt.")
     args = ap.parse_args()
 
     key = load_api_key(args.api_key, args.save_key)
@@ -816,9 +847,9 @@ def main():
 
     try:
         if args.repl or not args.task:
-            repl(args.model, client, non_interactive=args.yes, temperature=args.temperature)
+            repl(args.model, client, non_interactive=args.yes, temperature=args.temperature, strict=args.strict)
         else:
-            _chat_once(" ".join(args.task), args.model, client, non_interactive=args.yes, temperature=args.temperature)
+            _chat_once(" ".join(args.task), args.model, client, non_interactive=args.yes, temperature=args.temperature, strict=args.strict)
     except KeyboardInterrupt:
         print("\nAborted by Ctrl+C")
 
