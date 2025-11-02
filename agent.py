@@ -1,30 +1,3 @@
-def _add_del_from_patch_text(patch: str):
-    adds = dels = 0
-    files = []
-    try:
-        for line in patch.splitlines():
-            if line.startswith("+++ ") and not line.startswith("+++ /dev/null"):
-                fp = line[4:].strip()
-                if fp.startswith("b/"):
-                    fp = fp[2:]
-                if fp not in files:
-                    files.append(fp)
-                continue
-            if not line or line.startswith(("--- ","+++ ","@@","diff --git")):
-                continue
-            if line.startswith("+"):
-                adds += 1
-            elif line.startswith("-"):
-                dels += 1
-    except Exception:
-        pass
-    return adds, dels, files
-
-def _print_substatus(msg: str) -> None:
-    if OUTPUT_STYLE == "claude":
-        print(f"  ⎿ {msg}")
-        return
-    print(f"[STATUS] {msg}")
 
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
@@ -87,6 +60,9 @@ from openai import OpenAI
 
 # ===== Add near your imports =====
 from collections import deque
+
+global SUPPRESS_ALL_RUNTIME
+SUPPRESS_ALL_RUNTIME = False
 
 # ===== Add globals / config (top-level is fine) =====
 HARD_LOCK_DEFAULT_MAX = int(os.getenv("AGENT_MAX_TOOL_CALLS_PER_TASK", "0"))
@@ -268,16 +244,58 @@ def _is_mutating_cmd(cmd: str) -> bool:
 def _print_guard_header(human_desc: str, preview: Optional[str]=None) -> None:
     if COLOR_ENABLED and _HAS_COLOR and sys.stdout.isatty():
         print(f"\n{Style.BRIGHT}{Fore.YELLOW}[GUARD]{Style.RESET_ALL} Pending change:\n  - {human_desc}")
+         
         if preview:
             print(f"{Style.DIM}--- Preview ---{Style.RESET_ALL}\n{_redact_text(preview)}\n{Style.DIM}--- End Preview ---{Style.RESET_ALL}")
-        print(f"Choose: {Style.BRIGHT}[C]{Style.RESET_ALL} Continue  |  {Style.BRIGHT}[A]{Style.RESET_ALL} Continue & don’t prompt again  |  {Style.BRIGHT}[S]{Style.RESET_ALL} Stop & provide instructions")
+        print(
+            f"Choose: {Style.BRIGHT}[C]{Style.RESET_ALL} Continue  |  "
+            f"{Style.BRIGHT}[A]{Style.RESET_ALL} Continue & don’t prompt again (session-wide)  |  "
+            f"{Style.BRIGHT}[S]{Style.RESET_ALL} Stop & provide instructions  |  "
+            f"{Style.BRIGHT}[Esc]{Style.RESET_ALL} Stop (instant)"
+        )
     else:
         print("\n[GUARD] Pending change:\n  - " + human_desc)
         if preview:
             print("--- Preview ---\n" + _redact_text(preview) + "\n--- End Preview ---")
-        print("Choose: [C] Continue  |  [A] Continue & don’t prompt again  |  [S] Stop & provide instructions")
+        print("Choose: [C] Continue  |  [A] Continue & don’t prompt again (session-wide)  |  [S] Stop & provide instructions  |  [Esc] Stop")
 
+def _guard_read_choice() -> str:
+    """
+    Returns one of: 'c', 'a', 's', 'esc'
+    - On Windows, supports raw Esc without Enter using msvcrt.getwch().
+    - On POSIX, falls back to input(); users can type 'esc' or choose S.
+    """
+    # Windows: single-key read (Esc works without Enter)
+    if os.name == "nt":
+        try:
+            import msvcrt
+            print("Your choice (C/A/S or Esc): ", end="", flush=True)
+            while True:
+                ch = msvcrt.getwch()
+                if not ch:
+                    continue
+                if ch in ("c","C"): print("C"); return "c"
+                if ch in ("a","A"): print("A"); return "a"
+                if ch in ("s","S"): print("S"); return "s"
+                # Escape
+                if ch == "\x1b":
+                    print("Esc")
+                    return "esc"
+        except Exception:
+            # fall through to input() if msvcrt is unavailable
+            pass
+    # POSIX or fallback: line input
+    choice = input("Your choice (C/A/S or type 'esc'): ").strip().lower()
+    if choice == "esc":
+        return "esc"
+    return choice
+ 
+ 
 def _prompt_guard(action_sig: str, human_desc: str, non_interactive: bool, preview: Optional[str]=None) -> Dict[str, Any]:
+    
+    # Session-wide suppression (set by pressing A once)
+    if SUPPRESS_ALL_RUNTIME:
+        return {"decision": "allow_always"}
     if _allowed_by_prefs(action_sig):
         return {"decision": "continue"}
     if ASSUME_YES:
@@ -302,15 +320,22 @@ def _prompt_guard(action_sig: str, human_desc: str, non_interactive: bool, previ
     _print_guard_header(human_desc, preview)
     try:
         while True:
-            choice = input("Your choice (C/A/S): ").strip().lower()
-            if choice in ("c", "a", "s"):
+            choice = _guard_read_choice()
+            if choice in ("c", "a", "s", "esc"):
                 break
         if choice == "c":
             return {"decision": "continue"}
         if choice == "a":
             _remember_allow(action_sig)
             print(f"[GUARD] Remembered: {action_sig}")
+            # Also suppress all further prompts for this session
+            SUPPRESS_ALL_RUNTIME = True
+            print("[GUARD] Session-wide suppression enabled: further guarded actions will auto-continue.")
             return {"decision": "allow_always"}
+        if choice == "esc":
+            # Instant stop without requiring Enter
+            reason = "Interrupted via Esc"
+            return {"decision": "stop", "reason": reason}
         reason = input("Briefly describe what you want instead (optional): ").strip()
         return {"decision": "stop", "reason": (reason or "User requested instructions.")}
     except KeyboardInterrupt:
@@ -1148,6 +1173,35 @@ def _chat_once(prompt: str, model: str, client: OpenAI, non_interactive: bool,
         # Natural answer — print and finish the one-shot
         print(_redact_text(msg.content or ""))
         break
+        
+def _add_del_from_patch_text(patch: str):
+    adds = dels = 0
+    files = []
+    try:
+        for line in patch.splitlines():
+            if line.startswith("+++ ") and not line.startswith("+++ /dev/null"):
+                fp = line[4:].strip()
+                if fp.startswith("b/"):
+                    fp = fp[2:]
+                if fp not in files:
+                    files.append(fp)
+                continue
+            if not line or line.startswith(("--- ","+++ ","@@","diff --git")):
+                continue
+            if line.startswith("+"):
+                adds += 1
+            elif line.startswith("-"):
+                dels += 1
+    except Exception:
+        pass
+    return adds, dels, files
+
+def _print_substatus(msg: str) -> None:
+    if OUTPUT_STYLE == "claude":
+        print(f"  ⎿ {msg}")
+        return
+    print(f"[STATUS] {msg}")
+
 
 def repl(model: str, client: OpenAI, non_interactive: bool, temperature: Optional[float], strict: bool) -> None:
     print("Interactive dev+ops agent REPL. Type /exit to quit.")
