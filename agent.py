@@ -82,9 +82,32 @@ ASSUME_YES            = os.getenv("AGENT_ASSUME_YES", "0") == "1"
 AUTO_CONTINUE         = os.getenv("AGENT_AUTO_CONTINUE", "1") == "1"
 ALLOW_ALWAYS_REGEX    = [re.compile(p) for p in os.getenv("AGENT_ALLOW_ALWAYS_REGEX", "").split(",") if p.strip()]
 
+VERBOSE_BLOCK         = os.getenv("AGENT_VERBOSE_BLOCK", "0") == "1"
+_LAST_GATE_SNAPSHOT: Dict[str, Any] = {}
+
+def _snapshot_gate(gate, reason: Optional[str] = None):
+    try:
+        state = {
+            "locked": getattr(gate, "locked", None),
+            "calls": getattr(gate, "calls", None),
+            "max_calls": getattr(gate, "max_calls", None),
+            "recent": list(getattr(gate, "recent", [])),
+        }
+    except Exception:
+        state = {}
+    if reason:
+        state["reason"] = reason
+    globals()["_LAST_GATE_SNAPSHOT"] = state
+    if VERBOSE_BLOCK:
+        _print_status(f"[Block] {reason} | locked={state.get('locked')} calls={state.get('calls')}/{state.get('max_calls')} recent={state.get('recent')}")
+    return state
 
 _API_CALLS_GLOBAL = 0
 _API_TOKENS_GLOBAL = 0
+# Subprocess decoding guard (avoid cp1252/locale crashes on Windows)
+_SUBPROC_ENCODING = os.getenv("AGENT_SUBPROCESS_ENCODING", "utf-8")
+_SUBPROC_ERRORS = os.getenv("AGENT_SUBPROCESS_ERRORS", "replace")
+
 
 def _tok_usage_total(resp) -> int:
     try:
@@ -229,7 +252,16 @@ def _iter_files(include_glob: str) -> List[pathlib.Path]:
     return [p for p in files if not _should_skip(p)]
 
 def _run_shell(cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, shell=True, cwd=str(ROOT), text=True, capture_output=True, timeout=timeout)
+    return subprocess.run(
+        cmd,
+        shell=True,
+        cwd=str(ROOT),
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        encoding=_SUBPROC_ENCODING,
+        errors=_SUBPROC_ERRORS,
+    )
 
 def _hash_text(s: str) -> str:
     try:
@@ -606,14 +638,14 @@ def bw_get(what: str, ref: str, field: Optional[str]=None) -> str:
     env["BW_SESSION"] = bw_sess
 
     if what in {"password","username","totp"}:
-        proc = subprocess.run(["bw","get",what,ref], text=True, capture_output=True, env=env)
+        proc = subprocess.run(["bw","get",what,ref], text=True, capture_output=True, env=env, encoding=_SUBPROC_ENCODING, errors=_SUBPROC_ERRORS)
         if proc.returncode != 0:
             return json.dumps({"error":proc.stderr.strip() or "bw get failed"})
         secret = proc.stdout.strip()
         _register_secret(secret)
         return json.dumps({what: "********"})
     elif what == "item":
-        proc = subprocess.run(["bw","get","item",ref], text=True, capture_output=True, env=env)
+        proc = subprocess.run(["bw","get","item",ref], text=True, capture_output=True, env=env, encoding=_SUBPROC_ENCODING, errors=_SUBPROC_ERRORS)
         if proc.returncode != 0:
             return json.dumps({"error":proc.stderr.strip() or "bw get item failed"})
         try:
@@ -1118,7 +1150,10 @@ def _chat_once(prompt: str, model: str, client: OpenAI, non_interactive: bool,
             print("[Budget] Task cap reached (calls/tokens). Halting.")
             break
 
-        tool_choice_mode = "auto" if gate.can_attempt() else "none"
+        _can = gate.can_attempt()
+        if VERBOSE_BLOCK and not _can:
+            _snapshot_gate(gate, "can_attempt=False")
+        tool_choice_mode = "auto" if _can else "none"
         resp = _chat_create(client, model=model, messages=messages, tools=TOOLS,
                             tool_choice=tool_choice_mode, temperature=temperature)
         task_api_calls += 1
@@ -1138,6 +1173,7 @@ def _chat_once(prompt: str, model: str, client: OpenAI, non_interactive: bool,
 
             allowed, note = gate.vet(name, args)
             if not allowed:
+                _snapshot_gate(gate, f"{name}:{note}")
                 # Return a synthetic tool result that blocks the call, then steer the model.
                 messages.append({
                     "role": "tool",
@@ -1161,9 +1197,11 @@ def _chat_once(prompt: str, model: str, client: OpenAI, non_interactive: bool,
                 parsed = {}
 
             if parsed.get("user_decision") == "stop":
-                gate.hard_lock() if HARD_LOCK_AFTER_TOOL else None
-                messages.append({"role": "system",
-                                 "content": "Mutating step was stopped. Provide step-by-step instructions; do NOT call tools."})
+                if HARD_LOCK_AFTER_TOOL:
+                    gate.hard_lock()
+                    _snapshot_gate(gate, "hard_lock_after_stop")
+                #messages.append({"role": "system",
+                #                 "content": "Mutating step was stopped. Provide step-by-step instructions; do NOT call tools."})
             else:
                 messages.append({"role": "system",
                                  "content": "TOOL STEP COMPLETE. If more work remains, PLAN the next smallest step and call the appropriate tool."})
@@ -1216,6 +1254,9 @@ def repl(model: str, client: OpenAI, non_interactive: bool, temperature: Optiona
         if user in {"/exit", ":q", "quit"}:
             print("Exiting REPL.")
             return
+        if user in {"/why", "/gate"}:
+            print(json.dumps(_LAST_GATE_SNAPSHOT or {"note": "no snapshot yet"}, indent=2))
+            continue
         if not user:
             continue
 
@@ -1237,8 +1278,11 @@ def repl(model: str, client: OpenAI, non_interactive: bool, temperature: Optiona
                 print("[Budget] Task cap reached (calls/tokens). Halting this prompt.")
                 messages.append({"role": "assistant", "content": "Budget reached for this step. Summarize next steps without tools."})
                 break
-
-            tool_choice_mode = "auto" if gate.can_attempt() else "none"
+                
+            _can = gate.can_attempt()
+            if VERBOSE_BLOCK and not _can:
+                _snapshot_gate(gate, "can_attempt=False")
+            tool_choice_mode = "auto" if _can else "none"
             resp = _chat_create(client, model=model, messages=messages, tools=TOOLS,
                                 tool_choice=tool_choice_mode, temperature=temperature)
             task_api_calls += 1
@@ -1257,6 +1301,7 @@ def repl(model: str, client: OpenAI, non_interactive: bool, temperature: Optiona
 
                 allowed, note = gate.vet(name, args)
                 if not allowed:
+                    _snapshot_gate(gate, f"{name}:{note}")
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
