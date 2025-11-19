@@ -93,11 +93,465 @@ def _get_system_info_cached() -> Dict[str, Any]:
     return _SYSTEM_INFO
 
 
+# ========== Intelligent Caching System ==========
+
+import time
+import pickle
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from typing import Tuple
+
+
+@dataclass
+class CacheEntry:
+    """A cache entry with metadata."""
+    value: Any
+    timestamp: float
+    size: int = 0
+    access_count: int = 0
+    last_access: float = field(default_factory=time.time)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class IntelligentCache:
+    """
+    Intelligent cache with TTL, LRU eviction, and size limits.
+
+    Features:
+    - Time-to-live (TTL) based expiration
+    - LRU (Least Recently Used) eviction
+    - Size-based limits
+    - Hit/miss statistics
+    - Optional disk persistence
+    """
+
+    def __init__(
+        self,
+        name: str = "cache",
+        ttl: float = 300,  # 5 minutes default
+        max_entries: int = 1000,
+        max_size_bytes: int = 100 * 1024 * 1024,  # 100MB
+        persist_path: Optional[pathlib.Path] = None
+    ):
+        self.name = name
+        self.ttl = ttl
+        self.max_entries = max_entries
+        self.max_size_bytes = max_size_bytes
+        self.persist_path = persist_path
+
+        # OrderedDict for LRU tracking
+        self._cache: OrderedDict[str, CacheEntry] = OrderedDict()
+        self._lock = threading.Lock()
+
+        # Statistics
+        self.stats = {
+            "hits": 0,
+            "misses": 0,
+            "evictions": 0,
+            "expirations": 0,
+            "total_size": 0
+        }
+
+        # Load from disk if persistence enabled
+        if self.persist_path and self.persist_path.exists():
+            self._load_from_disk()
+
+    def _compute_size(self, value: Any) -> int:
+        """Estimate size of value in bytes."""
+        try:
+            if isinstance(value, str):
+                return len(value.encode('utf-8'))
+            elif isinstance(value, (int, float)):
+                return 8
+            elif isinstance(value, (list, dict)):
+                return len(json.dumps(value).encode('utf-8'))
+            else:
+                return len(pickle.dumps(value))
+        except:
+            return 0
+
+    def _is_expired(self, entry: CacheEntry) -> bool:
+        """Check if cache entry is expired."""
+        if self.ttl <= 0:  # TTL of 0 or negative means never expire
+            return False
+        return (time.time() - entry.timestamp) > self.ttl
+
+    def _evict_lru(self):
+        """Evict least recently used entry."""
+        if not self._cache:
+            return
+
+        # OrderedDict maintains insertion order, so first item is LRU
+        key, entry = self._cache.popitem(last=False)
+        self.stats["total_size"] -= entry.size
+        self.stats["evictions"] += 1
+
+    def _cleanup_expired(self):
+        """Remove all expired entries."""
+        expired_keys = [
+            k for k, v in self._cache.items()
+            if self._is_expired(v)
+        ]
+
+        for key in expired_keys:
+            entry = self._cache.pop(key)
+            self.stats["total_size"] -= entry.size
+            self.stats["expirations"] += 1
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Get value from cache."""
+        with self._lock:
+            if key not in self._cache:
+                self.stats["misses"] += 1
+                return default
+
+            entry = self._cache[key]
+
+            # Check if expired
+            if self._is_expired(entry):
+                self._cache.pop(key)
+                self.stats["total_size"] -= entry.size
+                self.stats["expirations"] += 1
+                self.stats["misses"] += 1
+                return default
+
+            # Update access metadata and move to end (most recently used)
+            entry.access_count += 1
+            entry.last_access = time.time()
+            self._cache.move_to_end(key)
+
+            self.stats["hits"] += 1
+            return entry.value
+
+    def set(self, key: str, value: Any, metadata: Optional[Dict[str, Any]] = None):
+        """Set value in cache."""
+        with self._lock:
+            # Compute size
+            size = self._compute_size(value)
+
+            # Remove existing entry if present
+            if key in self._cache:
+                old_entry = self._cache.pop(key)
+                self.stats["total_size"] -= old_entry.size
+
+            # Evict entries if we're over limits
+            while (len(self._cache) >= self.max_entries or
+                   self.stats["total_size"] + size > self.max_size_bytes):
+                if not self._cache:
+                    break
+                self._evict_lru()
+
+            # Create new entry
+            entry = CacheEntry(
+                value=value,
+                timestamp=time.time(),
+                size=size,
+                access_count=0,
+                last_access=time.time(),
+                metadata=metadata or {}
+            )
+
+            self._cache[key] = entry
+            self.stats["total_size"] += size
+
+            # Periodic cleanup of expired entries
+            if len(self._cache) % 100 == 0:
+                self._cleanup_expired()
+
+    def invalidate(self, key: str) -> bool:
+        """Invalidate a specific cache entry."""
+        with self._lock:
+            if key in self._cache:
+                entry = self._cache.pop(key)
+                self.stats["total_size"] -= entry.size
+                return True
+            return False
+
+    def clear(self):
+        """Clear entire cache."""
+        with self._lock:
+            self._cache.clear()
+            self.stats["total_size"] = 0
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        with self._lock:
+            total_requests = self.stats["hits"] + self.stats["misses"]
+            hit_rate = (
+                self.stats["hits"] / total_requests
+                if total_requests > 0 else 0
+            )
+
+            return {
+                "name": self.name,
+                "entries": len(self._cache),
+                "total_size_bytes": self.stats["total_size"],
+                "total_size_mb": round(self.stats["total_size"] / (1024 * 1024), 2),
+                "hits": self.stats["hits"],
+                "misses": self.stats["misses"],
+                "hit_rate": round(hit_rate * 100, 2),
+                "evictions": self.stats["evictions"],
+                "expirations": self.stats["expirations"],
+                "ttl_seconds": self.ttl,
+                "max_entries": self.max_entries,
+                "max_size_mb": round(self.max_size_bytes / (1024 * 1024), 2)
+            }
+
+    def _save_to_disk(self):
+        """Persist cache to disk."""
+        if not self.persist_path:
+            return
+
+        try:
+            with self._lock:
+                data = {
+                    "cache": dict(self._cache),
+                    "stats": self.stats
+                }
+                self.persist_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self.persist_path, 'wb') as f:
+                    pickle.dump(data, f)
+        except Exception as e:
+            # Don't fail if persistence fails
+            pass
+
+    def _load_from_disk(self):
+        """Load cache from disk."""
+        if not self.persist_path or not self.persist_path.exists():
+            return
+
+        try:
+            with open(self.persist_path, 'rb') as f:
+                data = pickle.load(f)
+                self._cache = OrderedDict(data.get("cache", {}))
+                self.stats = data.get("stats", self.stats)
+
+                # Clean up expired entries after loading
+                self._cleanup_expired()
+        except Exception as e:
+            # If loading fails, start fresh
+            self._cache.clear()
+            self.stats = {
+                "hits": 0,
+                "misses": 0,
+                "evictions": 0,
+                "expirations": 0,
+                "total_size": 0
+            }
+
+
+class FileContentCache(IntelligentCache):
+    """Cache for file contents with modification time tracking."""
+
+    def __init__(self, **kwargs):
+        super().__init__(name="file_content", ttl=60, **kwargs)
+
+    def get_file(self, file_path: pathlib.Path) -> Optional[str]:
+        """Get file content from cache, checking modification time."""
+        if not file_path.exists():
+            return None
+
+        # Use file path + mtime as cache key
+        mtime = file_path.stat().st_mtime
+        cache_key = f"{file_path}:{mtime}"
+
+        # Check if we have cached version
+        cached = self.get(cache_key)
+        if cached is not None:
+            return cached
+
+        # Invalidate any old versions of this file
+        old_prefix = f"{file_path}:"
+        to_invalidate = [k for k in self._cache.keys() if k.startswith(old_prefix)]
+        for key in to_invalidate:
+            self.invalidate(key)
+
+        return None
+
+    def set_file(self, file_path: pathlib.Path, content: str):
+        """Cache file content with modification time."""
+        if not file_path.exists():
+            return
+
+        mtime = file_path.stat().st_mtime
+        cache_key = f"{file_path}:{mtime}"
+        self.set(cache_key, content, metadata={"file_path": str(file_path), "mtime": mtime})
+
+
+class LLMResponseCache(IntelligentCache):
+    """Cache for LLM responses based on message hash."""
+
+    def __init__(self, **kwargs):
+        super().__init__(name="llm_response", ttl=3600, **kwargs)  # 1 hour TTL
+
+    def _hash_messages(self, messages: List[Dict[str, str]], tools: Optional[List[Dict]] = None) -> str:
+        """Create hash of messages for cache key."""
+        # Create deterministic string representation
+        key_data = json.dumps(messages, sort_keys=True)
+        if tools:
+            key_data += json.dumps(tools, sort_keys=True)
+
+        # Hash it
+        return hashlib.sha256(key_data.encode()).hexdigest()
+
+    def get_response(self, messages: List[Dict[str, str]], tools: Optional[List[Dict]] = None) -> Optional[Dict[str, Any]]:
+        """Get cached LLM response."""
+        cache_key = self._hash_messages(messages, tools)
+        return self.get(cache_key)
+
+    def set_response(self, messages: List[Dict[str, str]], response: Dict[str, Any], tools: Optional[List[Dict]] = None):
+        """Cache LLM response."""
+        cache_key = self._hash_messages(messages, tools)
+        self.set(cache_key, response, metadata={"messages_count": len(messages)})
+
+
+class RepoContextCache(IntelligentCache):
+    """Cache for repository context (git status, log, file tree)."""
+
+    def __init__(self, **kwargs):
+        super().__init__(name="repo_context", ttl=30, **kwargs)  # 30 seconds TTL
+
+    def get_context(self) -> Optional[str]:
+        """Get cached repository context."""
+        # Use current git HEAD commit as part of cache key
+        try:
+            proc = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=ROOT
+            )
+            head_commit = proc.stdout.strip() if proc.returncode == 0 else "no-git"
+        except:
+            head_commit = "no-git"
+
+        cache_key = f"context:{head_commit}"
+        return self.get(cache_key)
+
+    def set_context(self, context: str):
+        """Cache repository context."""
+        try:
+            proc = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=ROOT
+            )
+            head_commit = proc.stdout.strip() if proc.returncode == 0 else "no-git"
+        except:
+            head_commit = "no-git"
+
+        cache_key = f"context:{head_commit}"
+        self.set(cache_key, context, metadata={"commit": head_commit})
+
+
+class DependencyTreeCache(IntelligentCache):
+    """Cache for dependency analysis results."""
+
+    def __init__(self, **kwargs):
+        super().__init__(name="dependency_tree", ttl=600, **kwargs)  # 10 minutes TTL
+
+    def get_dependencies(self, language: str) -> Optional[str]:
+        """Get cached dependency analysis."""
+        # Check if dependency file has changed
+        dep_file_path = None
+
+        if language == "python":
+            if (ROOT / "requirements.txt").exists():
+                dep_file_path = ROOT / "requirements.txt"
+            elif (ROOT / "pyproject.toml").exists():
+                dep_file_path = ROOT / "pyproject.toml"
+        elif language == "javascript":
+            if (ROOT / "package.json").exists():
+                dep_file_path = ROOT / "package.json"
+        elif language == "rust":
+            if (ROOT / "Cargo.toml").exists():
+                dep_file_path = ROOT / "Cargo.toml"
+        elif language == "go":
+            if (ROOT / "go.mod").exists():
+                dep_file_path = ROOT / "go.mod"
+
+        if dep_file_path and dep_file_path.exists():
+            mtime = dep_file_path.stat().st_mtime
+            cache_key = f"{language}:{dep_file_path}:{mtime}"
+            return self.get(cache_key)
+
+        return None
+
+    def set_dependencies(self, language: str, result: str):
+        """Cache dependency analysis."""
+        dep_file_path = None
+
+        if language == "python":
+            if (ROOT / "requirements.txt").exists():
+                dep_file_path = ROOT / "requirements.txt"
+            elif (ROOT / "pyproject.toml").exists():
+                dep_file_path = ROOT / "pyproject.toml"
+        elif language == "javascript":
+            if (ROOT / "package.json").exists():
+                dep_file_path = ROOT / "package.json"
+        elif language == "rust":
+            if (ROOT / "Cargo.toml").exists():
+                dep_file_path = ROOT / "Cargo.toml"
+        elif language == "go":
+            if (ROOT / "go.mod").exists():
+                dep_file_path = ROOT / "go.mod"
+
+        if dep_file_path and dep_file_path.exists():
+            mtime = dep_file_path.stat().st_mtime
+            cache_key = f"{language}:{dep_file_path}:{mtime}"
+            self.set(cache_key, result, metadata={"language": language, "file": str(dep_file_path)})
+
+
+# Global cache instances
+_CACHE_DIR = ROOT / ".rev_cache"
+_FILE_CACHE = FileContentCache(persist_path=_CACHE_DIR / "file_cache.pkl")
+_LLM_CACHE = LLMResponseCache(persist_path=_CACHE_DIR / "llm_cache.pkl")
+_REPO_CACHE = RepoContextCache(persist_path=_CACHE_DIR / "repo_cache.pkl")
+_DEP_CACHE = DependencyTreeCache(persist_path=_CACHE_DIR / "dep_cache.pkl")
+
+
+def get_all_cache_stats() -> Dict[str, Any]:
+    """Get statistics for all caches."""
+    return {
+        "file_content": _FILE_CACHE.get_stats(),
+        "llm_response": _LLM_CACHE.get_stats(),
+        "repo_context": _REPO_CACHE.get_stats(),
+        "dependency_tree": _DEP_CACHE.get_stats()
+    }
+
+
+def clear_all_caches():
+    """Clear all caches."""
+    _FILE_CACHE.clear()
+    _LLM_CACHE.clear()
+    _REPO_CACHE.clear()
+    _DEP_CACHE.clear()
+
+
+def save_all_caches():
+    """Persist all caches to disk."""
+    _FILE_CACHE._save_to_disk()
+    _LLM_CACHE._save_to_disk()
+    _REPO_CACHE._save_to_disk()
+    _DEP_CACHE._save_to_disk()
+
+
 class TaskStatus(Enum):
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class RiskLevel(Enum):
+    """Risk levels for tasks."""
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
 
 
 class Task:
@@ -111,6 +565,15 @@ class Task:
         self.dependencies = dependencies or []  # List of task indices this task depends on
         self.task_id = None  # Will be set when added to plan
 
+        # Advanced planning features
+        self.risk_level = RiskLevel.LOW  # Risk assessment
+        self.risk_reasons = []  # List of reasons for risk level
+        self.impact_scope = []  # List of files/modules affected
+        self.estimated_changes = 0  # Estimated number of lines/files changed
+        self.breaking_change = False  # Whether this might break existing functionality
+        self.rollback_plan = None  # Rollback instructions if things go wrong
+        self.validation_steps = []  # Steps to validate task completion
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "description": self.description,
@@ -119,7 +582,14 @@ class Task:
             "result": self.result,
             "error": self.error,
             "dependencies": self.dependencies,
-            "task_id": self.task_id
+            "task_id": self.task_id,
+            "risk_level": self.risk_level.value,
+            "risk_reasons": self.risk_reasons,
+            "impact_scope": self.impact_scope,
+            "estimated_changes": self.estimated_changes,
+            "breaking_change": self.breaking_change,
+            "rollback_plan": self.rollback_plan,
+            "validation_steps": self.validation_steps
         }
 
 
@@ -214,6 +684,287 @@ class ExecutionPlan:
         total = len(self.tasks)
         return f"Progress: {completed}/{total} completed, {failed} failed, {in_progress} in progress"
 
+    def analyze_dependencies(self) -> Dict[str, Any]:
+        """Analyze task dependencies and create optimal ordering.
+
+        Returns:
+            Dict with dependency graph, execution order, and parallel opportunities
+        """
+        dependency_graph = {}
+        reverse_deps = {}  # Which tasks depend on each task
+
+        for task in self.tasks:
+            task_id = task.task_id
+            dependency_graph[task_id] = task.dependencies.copy()
+
+            # Build reverse dependency map
+            for dep_id in task.dependencies:
+                if dep_id not in reverse_deps:
+                    reverse_deps[dep_id] = []
+                reverse_deps[dep_id].append(task_id)
+
+        # Find tasks with no dependencies (can start immediately)
+        root_tasks = [t.task_id for t in self.tasks if not t.dependencies]
+
+        # Find critical path (longest chain of dependencies)
+        def get_depth(task_id, visited=None):
+            if visited is None:
+                visited = set()
+            if task_id in visited:
+                return 0
+            visited.add(task_id)
+
+            if task_id >= len(self.tasks):
+                return 0
+
+            deps = self.tasks[task_id].dependencies
+            if not deps:
+                return 1
+            return 1 + max(get_depth(dep_id, visited.copy()) for dep_id in deps)
+
+        critical_path = []
+        max_depth = 0
+        for task in self.tasks:
+            depth = get_depth(task.task_id)
+            if depth > max_depth:
+                max_depth = depth
+                critical_path = [task.task_id]
+
+        # Find parallelizable tasks (tasks at same depth level with no interdependencies)
+        parallel_groups = []
+        processed = set()
+
+        for depth in range(max_depth):
+            group = []
+            for task in self.tasks:
+                if task.task_id in processed:
+                    continue
+                task_depth = get_depth(task.task_id)
+                if task_depth == depth + 1:
+                    group.append(task.task_id)
+                    processed.add(task.task_id)
+            if group:
+                parallel_groups.append(group)
+
+        return {
+            "dependency_graph": dependency_graph,
+            "reverse_dependencies": reverse_deps,
+            "root_tasks": root_tasks,
+            "critical_path_length": max_depth,
+            "parallel_groups": parallel_groups,
+            "total_tasks": len(self.tasks),
+            "parallelization_potential": sum(len(g) for g in parallel_groups if len(g) > 1)
+        }
+
+    def assess_impact(self, task: Task) -> Dict[str, Any]:
+        """Assess the potential impact of a task.
+
+        Args:
+            task: The task to assess
+
+        Returns:
+            Dict with impact analysis including affected files, dependencies, etc.
+        """
+        impact = {
+            "task_id": task.task_id,
+            "description": task.description,
+            "action_type": task.action_type,
+            "affected_files": [],
+            "affected_modules": [],
+            "dependent_tasks": [],
+            "estimated_scope": "unknown"
+        }
+
+        # Analyze based on action type
+        if task.action_type == "delete":
+            impact["estimated_scope"] = "high"
+            impact["warning"] = "Destructive operation - data loss possible"
+        elif task.action_type in ["edit", "add"]:
+            impact["estimated_scope"] = "medium"
+        elif task.action_type in ["review", "test"]:
+            impact["estimated_scope"] = "low"
+
+        # Find dependent tasks
+        for other_task in self.tasks:
+            if task.task_id in other_task.dependencies:
+                impact["dependent_tasks"].append({
+                    "task_id": other_task.task_id,
+                    "description": other_task.description
+                })
+
+        # Extract file patterns from description
+        file_patterns = re.findall(r'(?:in |to |for |file |module )[\w/.-]+\.[a-z]+', task.description.lower())
+        impact["affected_files"] = list(set(file_patterns))
+
+        # Estimate affected modules from description
+        module_patterns = re.findall(r'(?:in |to |for )(\w+)(?:\s+module| package| service)', task.description.lower())
+        impact["affected_modules"] = list(set(module_patterns))
+
+        return impact
+
+    def evaluate_risk(self, task: Task) -> RiskLevel:
+        """Evaluate the risk level of a task.
+
+        Args:
+            task: The task to evaluate
+
+        Returns:
+            RiskLevel enum value
+        """
+        risk_score = 0
+        task.risk_reasons = []
+
+        # Risk factors
+
+        # 1. Action type risk
+        action_risks = {
+            "delete": 3,
+            "edit": 2,
+            "add": 1,
+            "rename": 2,
+            "test": 0,
+            "review": 0
+        }
+        action_risk = action_risks.get(task.action_type, 1)
+        risk_score += action_risk
+
+        if action_risk >= 2:
+            task.risk_reasons.append(f"Destructive/modifying action: {task.action_type}")
+
+        # 2. Keywords indicating risk
+        high_risk_keywords = [
+            "database", "schema", "migration", "production", "deploy",
+            "auth", "security", "password", "token", "api key",
+            "config", "configuration", "settings"
+        ]
+
+        desc_lower = task.description.lower()
+        for keyword in high_risk_keywords:
+            if keyword in desc_lower:
+                risk_score += 1
+                task.risk_reasons.append(f"High-risk component: {keyword}")
+                break
+
+        # 3. Scope of changes
+        if any(word in desc_lower for word in ["all", "entire", "whole", "every"]):
+            risk_score += 1
+            task.risk_reasons.append("Wide scope of changes")
+
+        # 4. Breaking changes indicators
+        breaking_indicators = ["breaking", "incompatible", "remove support", "deprecate"]
+        if any(indicator in desc_lower for indicator in breaking_indicators):
+            risk_score += 2
+            task.breaking_change = True
+            task.risk_reasons.append("Potentially breaking change")
+
+        # 5. Dependencies
+        if len(task.dependencies) > 3:
+            risk_score += 1
+            task.risk_reasons.append(f"Many dependencies ({len(task.dependencies)})")
+
+        # Map score to risk level
+        if risk_score >= 5:
+            return RiskLevel.CRITICAL
+        elif risk_score >= 3:
+            return RiskLevel.HIGH
+        elif risk_score >= 1:
+            return RiskLevel.MEDIUM
+        else:
+            return RiskLevel.LOW
+
+    def create_rollback_plan(self, task: Task) -> str:
+        """Create a rollback plan for a task.
+
+        Args:
+            task: The task to create rollback plan for
+
+        Returns:
+            String describing rollback procedure
+        """
+        rollback_steps = []
+
+        # Action-specific rollback
+        if task.action_type == "add":
+            rollback_steps.append("Delete the newly created files")
+            rollback_steps.append("Run: git clean -fd (after review)")
+
+        elif task.action_type == "edit":
+            rollback_steps.append("Revert changes using: git checkout -- <files>")
+            rollback_steps.append("Or apply inverse patch")
+
+        elif task.action_type == "delete":
+            rollback_steps.append("⚠️  CRITICAL: Deleted files cannot be recovered without backup")
+            rollback_steps.append("Restore from git history: git checkout HEAD~1 -- <files>")
+            rollback_steps.append("Or restore from backup if available")
+
+        elif task.action_type == "rename":
+            rollback_steps.append("Rename files back to original names")
+            rollback_steps.append("Update imports and references")
+
+        # General rollback steps
+        rollback_steps.append("")
+        rollback_steps.append("General rollback procedure:")
+        rollback_steps.append("1. Stop any running services")
+        rollback_steps.append("2. Revert code changes: git reset --hard HEAD")
+        rollback_steps.append("3. If changes were committed: git revert <commit-hash>")
+        rollback_steps.append("4. Run tests to verify rollback: pytest / npm test")
+        rollback_steps.append("5. Review logs for any issues")
+
+        # Database rollback
+        if "database" in task.description.lower() or "migration" in task.description.lower():
+            rollback_steps.append("")
+            rollback_steps.append("Database rollback:")
+            rollback_steps.append("1. Run down migration: alembic downgrade -1")
+            rollback_steps.append("2. Or restore from database backup")
+            rollback_steps.append("3. Verify data integrity")
+
+        return "\n".join(rollback_steps)
+
+    def generate_validation_steps(self, task: Task) -> List[str]:
+        """Generate validation steps for a task.
+
+        Args:
+            task: The task to generate validation for
+
+        Returns:
+            List of validation steps
+        """
+        steps = []
+
+        # Common validation
+        steps.append("Check for syntax errors")
+
+        if task.action_type in ["add", "edit"]:
+            steps.append("Run linter to check code quality")
+            steps.append("Verify imports and dependencies")
+
+        if task.action_type in ["add", "edit", "delete", "rename"]:
+            steps.append("Run test suite: pytest / npm test")
+            steps.append("Check for failing tests")
+
+        # Specific validations
+        if "api" in task.description.lower():
+            steps.append("Test API endpoints manually or with integration tests")
+            steps.append("Verify response formats and status codes")
+
+        if "database" in task.description.lower():
+            steps.append("Run database migrations")
+            steps.append("Verify schema changes")
+            steps.append("Check data integrity")
+
+        if "security" in task.description.lower():
+            steps.append("Run security scanner: bandit / npm audit")
+            steps.append("Check for exposed secrets")
+
+        if task.action_type == "delete":
+            steps.append("Verify no references to deleted code remain")
+            steps.append("Check import statements")
+            steps.append("Run full test suite")
+
+        steps.append("Review git diff for unintended changes")
+
+        return steps
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "tasks": [t.to_dict() for t in self.tasks],
@@ -276,10 +1027,20 @@ def read_file(path: str) -> str:
         return json.dumps({"error": f"Not found: {path}"})
     if p.stat().st_size > MAX_FILE_BYTES:
         return json.dumps({"error": f"Too large (> {MAX_FILE_BYTES} bytes): {path}"})
+
+    # Try to get from cache first
+    cached_content = _FILE_CACHE.get_file(p)
+    if cached_content is not None:
+        return cached_content
+
     try:
         txt = p.read_text(encoding="utf-8", errors="ignore")
         if len(txt) > READ_RETURN_LIMIT:
             txt = txt[:READ_RETURN_LIMIT] + "\n...[truncated]..."
+
+        # Cache the content
+        _FILE_CACHE.set_file(p, txt)
+
         return txt
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
@@ -402,6 +1163,12 @@ def run_tests(cmd: str = "pytest -q", timeout: int = 600) -> str:
 
 def get_repo_context(commits: int = 6) -> str:
     """Get repository context."""
+    # Try to get from cache first
+    cached_context = _REPO_CACHE.get_context()
+    if cached_context is not None:
+        return cached_context
+
+    # Generate context
     st = _run_shell("git status -s")
     lg = _run_shell(f"git log -n {int(commits)} --oneline")
     top = []
@@ -409,11 +1176,17 @@ def get_repo_context(commits: int = 6) -> str:
         if p.name in EXCLUDE_DIRS:
             continue
         top.append({"name": p.name, "type": ("dir" if p.is_dir() else "file")})
-    return json.dumps({
+
+    context = json.dumps({
         "status": st.stdout,
         "log": lg.stdout,
         "top_level": top[:100]
     })
+
+    # Cache it
+    _REPO_CACHE.set_context(context)
+
+    return context
 
 
 # ========== Additional File Operations ==========
@@ -969,6 +1742,917 @@ def ssh_list_connections() -> str:
     return json.dumps(result)
 
 
+# ========== File Format Conversion Tools ==========
+
+def convert_json_to_yaml(json_path: str, yaml_path: str = None) -> str:
+    """Convert JSON file to YAML format.
+
+    Args:
+        json_path: Path to JSON file
+        yaml_path: Output YAML path (optional, defaults to .yaml extension)
+
+    Returns:
+        JSON string with conversion result
+    """
+    try:
+        import yaml
+    except ImportError:
+        return json.dumps({"error": "PyYAML not installed. Run: pip install pyyaml"})
+
+    try:
+        json_file = _safe_path(json_path)
+        if not json_file.exists():
+            return json.dumps({"error": f"File not found: {json_path}"})
+
+        # Read JSON
+        with open(json_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        # Determine output path
+        if yaml_path is None:
+            yaml_path = json_path.rsplit('.', 1)[0] + '.yaml'
+        yaml_file = _safe_path(yaml_path)
+
+        # Write YAML
+        yaml_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(yaml_file, 'w', encoding='utf-8') as f:
+            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+
+        return json.dumps({
+            "converted": str(json_file.relative_to(ROOT)),
+            "to": str(yaml_file.relative_to(ROOT)),
+            "format": "YAML"
+        })
+    except Exception as e:
+        return json.dumps({"error": f"Conversion failed: {type(e).__name__}: {e}"})
+
+
+def convert_yaml_to_json(yaml_path: str, json_path: str = None) -> str:
+    """Convert YAML file to JSON format.
+
+    Args:
+        yaml_path: Path to YAML file
+        json_path: Output JSON path (optional, defaults to .json extension)
+
+    Returns:
+        JSON string with conversion result
+    """
+    try:
+        import yaml
+    except ImportError:
+        return json.dumps({"error": "PyYAML not installed. Run: pip install pyyaml"})
+
+    try:
+        yaml_file = _safe_path(yaml_path)
+        if not yaml_file.exists():
+            return json.dumps({"error": f"File not found: {yaml_path}"})
+
+        # Read YAML
+        with open(yaml_file, 'r', encoding='utf-8') as f:
+            data = yaml.safe_load(f)
+
+        # Determine output path
+        if json_path is None:
+            json_path = yaml_path.rsplit('.', 1)[0] + '.json'
+        json_file = _safe_path(json_path)
+
+        # Write JSON
+        json_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(json_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+
+        return json.dumps({
+            "converted": str(yaml_file.relative_to(ROOT)),
+            "to": str(json_file.relative_to(ROOT)),
+            "format": "JSON"
+        })
+    except Exception as e:
+        return json.dumps({"error": f"Conversion failed: {type(e).__name__}: {e}"})
+
+
+def convert_csv_to_json(csv_path: str, json_path: str = None) -> str:
+    """Convert CSV file to JSON format.
+
+    Args:
+        csv_path: Path to CSV file
+        json_path: Output JSON path (optional)
+
+    Returns:
+        JSON string with conversion result
+    """
+    try:
+        import csv
+
+        csv_file = _safe_path(csv_path)
+        if not csv_file.exists():
+            return json.dumps({"error": f"File not found: {csv_path}"})
+
+        # Read CSV
+        with open(csv_file, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            data = list(reader)
+
+        # Determine output path
+        if json_path is None:
+            json_path = csv_path.rsplit('.', 1)[0] + '.json'
+        json_file = _safe_path(json_path)
+
+        # Write JSON
+        json_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(json_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+
+        return json.dumps({
+            "converted": str(csv_file.relative_to(ROOT)),
+            "to": str(json_file.relative_to(ROOT)),
+            "rows": len(data),
+            "format": "JSON"
+        })
+    except Exception as e:
+        return json.dumps({"error": f"Conversion failed: {type(e).__name__}: {e}"})
+
+
+def convert_json_to_csv(json_path: str, csv_path: str = None) -> str:
+    """Convert JSON file (array of objects) to CSV format.
+
+    Args:
+        json_path: Path to JSON file (must contain array of objects)
+        csv_path: Output CSV path (optional)
+
+    Returns:
+        JSON string with conversion result
+    """
+    try:
+        import csv
+
+        json_file = _safe_path(json_path)
+        if not json_file.exists():
+            return json.dumps({"error": f"File not found: {json_path}"})
+
+        # Read JSON
+        with open(json_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        if not isinstance(data, list) or not data:
+            return json.dumps({"error": "JSON must contain a non-empty array of objects"})
+
+        # Determine output path
+        if csv_path is None:
+            csv_path = json_path.rsplit('.', 1)[0] + '.csv'
+        csv_file = _safe_path(csv_path)
+
+        # Write CSV
+        csv_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(csv_file, 'w', encoding='utf-8', newline='') as f:
+            if data:
+                fieldnames = list(data[0].keys())
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(data)
+
+        return json.dumps({
+            "converted": str(json_file.relative_to(ROOT)),
+            "to": str(csv_file.relative_to(ROOT)),
+            "rows": len(data),
+            "format": "CSV"
+        })
+    except Exception as e:
+        return json.dumps({"error": f"Conversion failed: {type(e).__name__}: {e}"})
+
+
+def convert_env_to_json(env_path: str, json_path: str = None) -> str:
+    """Convert .env file to JSON format.
+
+    Args:
+        env_path: Path to .env file
+        json_path: Output JSON path (optional)
+
+    Returns:
+        JSON string with conversion result
+    """
+    try:
+        env_file = _safe_path(env_path)
+        if not env_file.exists():
+            return json.dumps({"error": f"File not found: {env_path}"})
+
+        # Parse .env file
+        data = {}
+        with open(env_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    if '=' in line:
+                        key, value = line.split('=', 1)
+                        # Remove quotes if present
+                        value = value.strip().strip('"').strip("'")
+                        data[key.strip()] = value
+
+        # Determine output path
+        if json_path is None:
+            json_path = env_path + '.json'
+        json_file = _safe_path(json_path)
+
+        # Write JSON
+        json_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(json_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+
+        return json.dumps({
+            "converted": str(env_file.relative_to(ROOT)),
+            "to": str(json_file.relative_to(ROOT)),
+            "variables": len(data),
+            "format": "JSON"
+        })
+    except Exception as e:
+        return json.dumps({"error": f"Conversion failed: {type(e).__name__}: {e}"})
+
+
+# ========== Code Refactoring Utilities ==========
+
+def remove_unused_imports(file_path: str, language: str = "python") -> str:
+    """Remove unused imports from a code file.
+
+    Args:
+        file_path: Path to code file
+        language: Programming language (python, javascript, typescript)
+
+    Returns:
+        JSON string with result
+    """
+    try:
+        file = _safe_path(file_path)
+        if not file.exists():
+            return json.dumps({"error": f"File not found: {file_path}"})
+
+        if language.lower() == "python":
+            # Use autoflake if available
+            try:
+                result = _run_shell(f"autoflake --remove-all-unused-imports --in-place {shlex.quote(str(file))}")
+                if result.returncode == 0:
+                    return json.dumps({
+                        "refactored": str(file.relative_to(ROOT)),
+                        "removed": "unused imports",
+                        "language": "Python"
+                    })
+                else:
+                    return json.dumps({"error": "autoflake not installed or failed. Run: pip install autoflake"})
+            except Exception:
+                return json.dumps({"error": "autoflake not installed. Run: pip install autoflake"})
+
+        else:
+            return json.dumps({"error": f"Language '{language}' not supported yet"})
+
+    except Exception as e:
+        return json.dumps({"error": f"Refactoring failed: {type(e).__name__}: {e}"})
+
+
+def extract_constants(file_path: str, threshold: int = 3) -> str:
+    """Identify magic numbers/strings that should be constants.
+
+    Args:
+        file_path: Path to code file
+        threshold: Minimum occurrences to suggest extraction
+
+    Returns:
+        JSON string with suggestions
+    """
+    try:
+        file = _safe_path(file_path)
+        if not file.exists():
+            return json.dumps({"error": f"File not found: {file_path}"})
+
+        content = file.read_text(encoding='utf-8', errors='ignore')
+
+        # Find magic numbers (excluding 0, 1, common values)
+        magic_numbers = re.findall(r'\b\d{2,}\b', content)
+        number_counts = {}
+        for num in magic_numbers:
+            if num not in ['00', '01', '10', '100']:
+                number_counts[num] = number_counts.get(num, 0) + 1
+
+        # Find magic strings (quoted strings used multiple times)
+        magic_strings = re.findall(r'["\']([^"\']{4,})["\']', content)
+        string_counts = {}
+        for s in magic_strings:
+            if not s.startswith('import ') and not s.startswith('from '):
+                string_counts[s] = string_counts.get(s, 0) + 1
+
+        suggestions = []
+
+        # Suggest constants for repeated numbers
+        for num, count in number_counts.items():
+            if count >= threshold:
+                const_name = f"CONSTANT_{num}"
+                suggestions.append({
+                    "type": "number",
+                    "value": num,
+                    "occurrences": count,
+                    "suggested_name": const_name
+                })
+
+        # Suggest constants for repeated strings
+        for string, count in string_counts.items():
+            if count >= threshold:
+                const_name = string.upper().replace(' ', '_')[:30]
+                suggestions.append({
+                    "type": "string",
+                    "value": string,
+                    "occurrences": count,
+                    "suggested_name": const_name
+                })
+
+        return json.dumps({
+            "file": str(file.relative_to(ROOT)),
+            "suggestions": suggestions,
+            "count": len(suggestions)
+        })
+
+    except Exception as e:
+        return json.dumps({"error": f"Analysis failed: {type(e).__name__}: {e}"})
+
+
+def simplify_conditionals(file_path: str) -> str:
+    """Identify complex conditionals that could be simplified.
+
+    Args:
+        file_path: Path to code file
+
+    Returns:
+        JSON string with suggestions
+    """
+    try:
+        file = _safe_path(file_path)
+        if not file.exists():
+            return json.dumps({"error": f"File not found: {file_path}"})
+
+        content = file.read_text(encoding='utf-8', errors='ignore')
+        lines = content.split('\n')
+
+        suggestions = []
+
+        # Find complex if statements
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+
+            # Check for multiple conditions
+            if stripped.startswith('if ') or stripped.startswith('elif '):
+                and_count = line.count(' and ')
+                or_count = line.count(' or ')
+                paren_depth = line.count('(') - line.count(')')
+
+                if and_count + or_count >= 3 or paren_depth >= 2:
+                    suggestions.append({
+                        "line": i,
+                        "issue": "Complex conditional",
+                        "complexity": and_count + or_count,
+                        "suggestion": "Consider extracting to a boolean variable or method"
+                    })
+
+            # Check for nested ternary
+            if line.count('if') >= 2 and line.count('else') >= 2:
+                suggestions.append({
+                    "line": i,
+                    "issue": "Nested ternary operator",
+                    "suggestion": "Consider using if-else statements for clarity"
+                })
+
+        return json.dumps({
+            "file": str(file.relative_to(ROOT)),
+            "complex_conditionals": suggestions,
+            "count": len(suggestions)
+        })
+
+    except Exception as e:
+        return json.dumps({"error": f"Analysis failed: {type(e).__name__}: {e}"})
+
+
+# ========== Dependency Management ==========
+
+def analyze_dependencies(language: str = "auto") -> str:
+    """Analyze project dependencies and check for issues.
+
+    Args:
+        language: Language/ecosystem (python, javascript, auto)
+
+    Returns:
+        JSON string with dependency analysis
+    """
+    try:
+        if language == "auto":
+            # Auto-detect from project files
+            if (ROOT / "requirements.txt").exists() or (ROOT / "pyproject.toml").exists():
+                language = "python"
+            elif (ROOT / "package.json").exists():
+                language = "javascript"
+            elif (ROOT / "Cargo.toml").exists():
+                language = "rust"
+            elif (ROOT / "go.mod").exists():
+                language = "go"
+
+        # Try to get from cache first
+        cached_result = _DEP_CACHE.get_dependencies(language)
+        if cached_result is not None:
+            return cached_result
+
+        result = {
+            "language": language,
+            "dependencies": [],
+            "issues": []
+        }
+
+        if language == "python":
+            # Check requirements.txt
+            req_file = ROOT / "requirements.txt"
+            if req_file.exists():
+                content = req_file.read_text(encoding='utf-8')
+                deps = [line.strip() for line in content.split('\n') if line.strip() and not line.startswith('#')]
+                result["dependencies"] = deps
+                result["count"] = len(deps)
+                result["file"] = "requirements.txt"
+
+                # Check for unpinned versions
+                unpinned = [d for d in deps if '==' not in d and '>=' not in d]
+                if unpinned:
+                    result["issues"].append({
+                        "type": "unpinned_versions",
+                        "count": len(unpinned),
+                        "packages": unpinned[:10]
+                    })
+
+            # Check for virtual environment
+            if not (ROOT / "venv").exists() and not (ROOT / ".venv").exists():
+                result["issues"].append({
+                    "type": "no_virtual_environment",
+                    "message": "No virtual environment detected"
+                })
+
+        elif language == "javascript":
+            pkg_file = ROOT / "package.json"
+            if pkg_file.exists():
+                pkg_data = json.loads(pkg_file.read_text(encoding='utf-8'))
+                deps = pkg_data.get("dependencies", {})
+                dev_deps = pkg_data.get("devDependencies", {})
+
+                result["dependencies"] = list(deps.keys())
+                result["dev_dependencies"] = list(dev_deps.keys())
+                result["count"] = len(deps) + len(dev_deps)
+                result["file"] = "package.json"
+
+                # Check for caret/tilde versions
+                risky_versions = []
+                for pkg, ver in {**deps, **dev_deps}.items():
+                    if ver.startswith('^') or ver.startswith('~'):
+                        risky_versions.append(f"{pkg}@{ver}")
+
+                if risky_versions:
+                    result["issues"].append({
+                        "type": "flexible_versions",
+                        "count": len(risky_versions),
+                        "message": "Using ^ or ~ version ranges",
+                        "packages": risky_versions[:10]
+                    })
+
+        # Cache the result
+        result_json = json.dumps(result)
+        _DEP_CACHE.set_dependencies(language, result_json)
+
+        return result_json
+
+    except Exception as e:
+        return json.dumps({"error": f"Analysis failed: {type(e).__name__}: {e}"})
+
+
+def update_dependencies(language: str = "auto", major: bool = False) -> str:
+    """Update project dependencies to latest versions.
+
+    Args:
+        language: Language/ecosystem (python, javascript, auto)
+        major: Allow major version updates (default: False)
+
+    Returns:
+        JSON string with update results
+    """
+    try:
+        if language == "auto":
+            if (ROOT / "requirements.txt").exists():
+                language = "python"
+            elif (ROOT / "package.json").exists():
+                language = "javascript"
+
+        if language == "python":
+            # Update using pip-upgrader or similar
+            cmd = "pip list --outdated --format=json"
+            result = _run_shell(cmd)
+
+            if result.returncode == 0:
+                outdated = json.loads(result.stdout) if result.stdout else []
+                return json.dumps({
+                    "language": "python",
+                    "outdated": outdated,
+                    "count": len(outdated),
+                    "message": "Use 'pip install --upgrade <package>' to update"
+                })
+            else:
+                return json.dumps({"error": "Failed to check outdated packages"})
+
+        elif language == "javascript":
+            # Check for npm updates
+            cmd = "npm outdated --json"
+            result = _run_shell(cmd, timeout=60)
+
+            try:
+                outdated = json.loads(result.stdout) if result.stdout else {}
+                return json.dumps({
+                    "language": "javascript",
+                    "outdated": outdated,
+                    "count": len(outdated),
+                    "message": "Use 'npm update' to update dependencies"
+                })
+            except:
+                return json.dumps({
+                    "language": "javascript",
+                    "message": "No outdated packages found or npm not available"
+                })
+
+        return json.dumps({"error": f"Language '{language}' not supported"})
+
+    except Exception as e:
+        return json.dumps({"error": f"Update check failed: {type(e).__name__}: {e}"})
+
+
+# ========== Security Scanning ==========
+
+def scan_dependencies_vulnerabilities(language: str = "auto") -> str:
+    """Scan dependencies for known vulnerabilities.
+
+    Args:
+        language: Language/ecosystem (python, javascript, auto)
+
+    Returns:
+        JSON string with vulnerability report
+    """
+    try:
+        if language == "auto":
+            if (ROOT / "requirements.txt").exists():
+                language = "python"
+            elif (ROOT / "package.json").exists():
+                language = "javascript"
+
+        result = {
+            "language": language,
+            "vulnerabilities": [],
+            "tool": ""
+        }
+
+        if language == "python":
+            # Try safety first
+            cmd = "safety check --json --file requirements.txt"
+            proc = _run_shell(cmd, timeout=60)
+
+            if proc.returncode == 0 or proc.stdout:
+                try:
+                    safety_data = json.loads(proc.stdout) if proc.stdout else []
+                    result["tool"] = "safety"
+                    result["vulnerabilities"] = safety_data
+                    result["count"] = len(safety_data)
+                    return json.dumps(result)
+                except:
+                    pass
+
+            # Try pip-audit as fallback
+            cmd = "pip-audit --format json"
+            proc = _run_shell(cmd, timeout=60)
+
+            if proc.returncode == 0 or proc.stdout:
+                try:
+                    audit_data = json.loads(proc.stdout) if proc.stdout else {"dependencies": []}
+                    result["tool"] = "pip-audit"
+                    result["vulnerabilities"] = audit_data.get("dependencies", [])
+                    result["count"] = len(audit_data.get("dependencies", []))
+                    return json.dumps(result)
+                except:
+                    pass
+
+            return json.dumps({
+                "error": "No security scanning tool available",
+                "message": "Install safety or pip-audit: pip install safety pip-audit"
+            })
+
+        elif language == "javascript":
+            # Use npm audit
+            cmd = "npm audit --json"
+            proc = _run_shell(cmd, timeout=60)
+
+            try:
+                audit_data = json.loads(proc.stdout) if proc.stdout else {}
+                vulnerabilities = audit_data.get("vulnerabilities", {})
+
+                result["tool"] = "npm audit"
+                result["vulnerabilities"] = vulnerabilities
+                result["count"] = len(vulnerabilities)
+                result["summary"] = audit_data.get("metadata", {})
+
+                return json.dumps(result)
+            except:
+                return json.dumps({
+                    "language": "javascript",
+                    "message": "npm audit not available or no vulnerabilities found"
+                })
+
+        return json.dumps({"error": f"Language '{language}' not supported"})
+
+    except Exception as e:
+        return json.dumps({"error": f"Vulnerability scan failed: {type(e).__name__}: {e}"})
+
+
+def scan_code_security(path: str = ".", tool: str = "auto") -> str:
+    """Perform static security analysis on code.
+
+    Args:
+        path: Path to scan (file or directory)
+        tool: Security tool to use (bandit, semgrep, auto)
+
+    Returns:
+        JSON string with security findings
+    """
+    try:
+        scan_path = _safe_path(path)
+        if not scan_path.exists():
+            return json.dumps({"error": f"Path not found: {path}"})
+
+        findings = []
+        tools_used = []
+
+        # Python: Use bandit
+        if tool in ["auto", "bandit"]:
+            cmd = f"bandit -r {shlex.quote(str(scan_path))} -f json"
+            proc = _run_shell(cmd, timeout=120)
+
+            if proc.returncode != 127:  # Command exists
+                try:
+                    bandit_data = json.loads(proc.stdout) if proc.stdout else {}
+                    results = bandit_data.get("results", [])
+                    findings.extend(results)
+                    tools_used.append("bandit")
+                except:
+                    pass
+
+        # Multi-language: Use semgrep
+        if tool in ["auto", "semgrep"]:
+            cmd = f"semgrep --config=auto --json {shlex.quote(str(scan_path))}"
+            proc = _run_shell(cmd, timeout=120)
+
+            if proc.returncode != 127:
+                try:
+                    semgrep_data = json.loads(proc.stdout) if proc.stdout else {}
+                    results = semgrep_data.get("results", [])
+                    findings.extend(results)
+                    tools_used.append("semgrep")
+                except:
+                    pass
+
+        if not tools_used:
+            return json.dumps({
+                "error": "No security scanning tools available",
+                "message": "Install bandit (Python) or semgrep: pip install bandit semgrep"
+            })
+
+        # Categorize by severity
+        by_severity = {}
+        for finding in findings:
+            severity = finding.get("severity", "MEDIUM").upper()
+            if severity not in by_severity:
+                by_severity[severity] = []
+            by_severity[severity].append(finding)
+
+        return json.dumps({
+            "scanned": str(scan_path.relative_to(ROOT)),
+            "tools": tools_used,
+            "findings": findings,
+            "count": len(findings),
+            "by_severity": {k: len(v) for k, v in by_severity.items()}
+        })
+
+    except Exception as e:
+        return json.dumps({"error": f"Security scan failed: {type(e).__name__}: {e}"})
+
+
+def detect_secrets(path: str = ".") -> str:
+    """Scan for accidentally committed secrets and credentials.
+
+    Args:
+        path: Path to scan
+
+    Returns:
+        JSON string with detected secrets
+    """
+    try:
+        scan_path = _safe_path(path)
+        if not scan_path.exists():
+            return json.dumps({"error": f"Path not found: {path}"})
+
+        # Try detect-secrets tool
+        cmd = f"detect-secrets scan {shlex.quote(str(scan_path))}"
+        proc = _run_shell(cmd, timeout=60)
+
+        if proc.returncode == 127:
+            return json.dumps({
+                "error": "detect-secrets not installed",
+                "message": "Install with: pip install detect-secrets"
+            })
+
+        try:
+            secrets_data = json.loads(proc.stdout) if proc.stdout else {}
+            results = secrets_data.get("results", {})
+
+            # Count total secrets
+            total_secrets = sum(len(secrets) for secrets in results.values())
+
+            # Get summary by file
+            by_file = {}
+            for file_path, secrets in results.items():
+                by_file[file_path] = len(secrets)
+
+            return json.dumps({
+                "scanned": str(scan_path.relative_to(ROOT)),
+                "tool": "detect-secrets",
+                "secrets_found": total_secrets,
+                "files_with_secrets": len(results),
+                "by_file": by_file
+            })
+        except:
+            return json.dumps({
+                "scanned": str(scan_path.relative_to(ROOT)),
+                "message": "No secrets detected or scan completed successfully"
+            })
+
+    except Exception as e:
+        return json.dumps({"error": f"Secret detection failed: {type(e).__name__}: {e}"})
+
+
+def check_license_compliance(path: str = ".") -> str:
+    """Check dependency licenses for compliance issues.
+
+    Args:
+        path: Project path
+
+    Returns:
+        JSON string with license information
+    """
+    try:
+        # Python: Use pip-licenses
+        if (ROOT / "requirements.txt").exists():
+            cmd = "pip-licenses --format=json"
+            proc = _run_shell(cmd, timeout=60)
+
+            if proc.returncode != 127:
+                try:
+                    licenses = json.loads(proc.stdout) if proc.stdout else []
+
+                    # Flag potentially problematic licenses
+                    restricted = ["GPL-3.0", "AGPL-3.0", "GPL-2.0"]
+                    issues = []
+
+                    for pkg in licenses:
+                        license_name = pkg.get("License", "")
+                        if any(r in license_name for r in restricted):
+                            issues.append({
+                                "package": pkg.get("Name"),
+                                "license": license_name,
+                                "issue": "Restrictive license"
+                            })
+
+                    return json.dumps({
+                        "language": "python",
+                        "tool": "pip-licenses",
+                        "total_packages": len(licenses),
+                        "licenses": licenses,
+                        "compliance_issues": issues,
+                        "issue_count": len(issues)
+                    })
+                except:
+                    pass
+
+        # JavaScript: Use license-checker
+        if (ROOT / "package.json").exists():
+            cmd = "npx license-checker --json"
+            proc = _run_shell(cmd, timeout=60)
+
+            try:
+                licenses = json.loads(proc.stdout) if proc.stdout else {}
+
+                restricted = ["GPL-3.0", "AGPL-3.0", "GPL-2.0"]
+                issues = []
+
+                for pkg_name, pkg_info in licenses.items():
+                    license_name = pkg_info.get("licenses", "")
+                    if any(r in str(license_name) for r in restricted):
+                        issues.append({
+                            "package": pkg_name,
+                            "license": license_name,
+                            "issue": "Restrictive license"
+                        })
+
+                return json.dumps({
+                    "language": "javascript",
+                    "tool": "license-checker",
+                    "total_packages": len(licenses),
+                    "compliance_issues": issues,
+                    "issue_count": len(issues)
+                })
+            except:
+                pass
+
+        return json.dumps({
+            "message": "No license checking tool available",
+            "install": "pip install pip-licenses (Python) or npm install license-checker (JavaScript)"
+        })
+
+    except Exception as e:
+        return json.dumps({"error": f"License check failed: {type(e).__name__}: {e}"})
+
+
+# ========== Cache Management ==========
+
+def get_cache_stats() -> str:
+    """Get statistics for all caches.
+
+    Returns:
+        JSON string with cache statistics including hit rates, sizes, and performance metrics
+    """
+    try:
+        stats = get_all_cache_stats()
+        return json.dumps(stats, indent=2)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to get cache stats: {type(e).__name__}: {e}"})
+
+
+def clear_caches(cache_name: str = "all") -> str:
+    """Clear one or all caches.
+
+    Args:
+        cache_name: Name of cache to clear (file_content, llm_response, repo_context, dependency_tree, or all)
+
+    Returns:
+        JSON string with result
+    """
+    try:
+        if cache_name == "all":
+            clear_all_caches()
+            return json.dumps({
+                "cleared": "all",
+                "message": "All caches cleared successfully"
+            })
+        elif cache_name == "file_content":
+            _FILE_CACHE.clear()
+            return json.dumps({
+                "cleared": "file_content",
+                "message": "File content cache cleared"
+            })
+        elif cache_name == "llm_response":
+            _LLM_CACHE.clear()
+            return json.dumps({
+                "cleared": "llm_response",
+                "message": "LLM response cache cleared"
+            })
+        elif cache_name == "repo_context":
+            _REPO_CACHE.clear()
+            return json.dumps({
+                "cleared": "repo_context",
+                "message": "Repository context cache cleared"
+            })
+        elif cache_name == "dependency_tree":
+            _DEP_CACHE.clear()
+            return json.dumps({
+                "cleared": "dependency_tree",
+                "message": "Dependency tree cache cleared"
+            })
+        else:
+            return json.dumps({
+                "error": f"Unknown cache: {cache_name}",
+                "valid_caches": ["file_content", "llm_response", "repo_context", "dependency_tree", "all"]
+            })
+    except Exception as e:
+        return json.dumps({"error": f"Failed to clear cache: {type(e).__name__}: {e}"})
+
+
+def persist_caches() -> str:
+    """Save all caches to disk for persistence across sessions.
+
+    Returns:
+        JSON string with result
+    """
+    try:
+        save_all_caches()
+        return json.dumps({
+            "persisted": True,
+            "message": "All caches saved to disk successfully",
+            "cache_dir": str(_CACHE_DIR)
+        })
+    except Exception as e:
+        return json.dumps({"error": f"Failed to persist caches: {type(e).__name__}: {e}"})
+
+
 # ========== MCP (Model Context Protocol) Support ==========
 
 class MCPClient:
@@ -1054,6 +2738,13 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
 
     For cloud models (ending with -cloud), this handles authentication flow.
     """
+    # Try to get cached response first
+    cached_response = _LLM_CACHE.get_response(messages, tools)
+    if cached_response is not None:
+        if OLLAMA_DEBUG:
+            print("[DEBUG] Using cached LLM response")
+        return cached_response
+
     url = f"{OLLAMA_BASE_URL}/api/chat"
 
     # Build base payload
@@ -1143,7 +2834,12 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
                 resp = requests.post(url, json=payload_no_tools, timeout=timeout)
 
             resp.raise_for_status()
-            return resp.json()
+            response = resp.json()
+
+            # Cache the successful response
+            _LLM_CACHE.set_response(messages, response, tools)
+
+            return response
 
         except requests.exceptions.Timeout as e:
             if attempt < max_retries - 1:
@@ -1689,6 +3385,245 @@ TOOLS = [
                 "required": ["server", "tool"]
             }
         }
+    },
+    # File conversion utilities
+    {
+        "type": "function",
+        "function": {
+            "name": "convert_json_to_yaml",
+            "description": "Convert JSON file to YAML format",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "json_path": {"type": "string", "description": "Path to JSON file"},
+                    "yaml_path": {"type": "string", "description": "Output YAML path (optional)"}
+                },
+                "required": ["json_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "convert_yaml_to_json",
+            "description": "Convert YAML file to JSON format",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "yaml_path": {"type": "string", "description": "Path to YAML file"},
+                    "json_path": {"type": "string", "description": "Output JSON path (optional)"}
+                },
+                "required": ["yaml_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "convert_csv_to_json",
+            "description": "Convert CSV file to JSON array",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "csv_path": {"type": "string", "description": "Path to CSV file"},
+                    "json_path": {"type": "string", "description": "Output JSON path (optional)"}
+                },
+                "required": ["csv_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "convert_json_to_csv",
+            "description": "Convert JSON array to CSV file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "json_path": {"type": "string", "description": "Path to JSON file"},
+                    "csv_path": {"type": "string", "description": "Output CSV path (optional)"}
+                },
+                "required": ["json_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "convert_env_to_json",
+            "description": "Convert .env file to JSON format",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "env_path": {"type": "string", "description": "Path to .env file"},
+                    "json_path": {"type": "string", "description": "Output JSON path (optional)"}
+                },
+                "required": ["env_path"]
+            }
+        }
+    },
+    # Code refactoring utilities
+    {
+        "type": "function",
+        "function": {
+            "name": "remove_unused_imports",
+            "description": "Remove unused imports from Python files (requires autoflake)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to file"},
+                    "language": {"type": "string", "description": "Language (default: python)"}
+                },
+                "required": ["file_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "extract_constants",
+            "description": "Identify magic numbers and strings that should be constants",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to file"},
+                    "threshold": {"type": "integer", "description": "Minimum occurrences (default: 3)"}
+                },
+                "required": ["file_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "simplify_conditionals",
+            "description": "Find overly complex conditional statements",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to file"}
+                },
+                "required": ["file_path"]
+            }
+        }
+    },
+    # Dependency management
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_dependencies",
+            "description": "Analyze project dependencies and check for issues",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "language": {"type": "string", "description": "Language (auto/python/javascript)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_dependencies",
+            "description": "Check for outdated dependencies",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "language": {"type": "string", "description": "Language (auto/python/javascript)"},
+                    "major": {"type": "boolean", "description": "Include major version updates"}
+                }
+            }
+        }
+    },
+    # Security scanning
+    {
+        "type": "function",
+        "function": {
+            "name": "scan_dependencies_vulnerabilities",
+            "description": "Scan dependencies for known vulnerabilities (requires safety/pip-audit/npm)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "language": {"type": "string", "description": "Language (auto/python/javascript)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scan_code_security",
+            "description": "Perform static code security analysis (requires bandit/semgrep)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to scan (default: .)"},
+                    "tool": {"type": "string", "description": "Tool to use (auto/bandit/semgrep)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "detect_secrets",
+            "description": "Scan for accidentally committed secrets (requires detect-secrets)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to scan (default: .)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_license_compliance",
+            "description": "Check dependency licenses for compliance issues",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to scan (default: .)"}
+                }
+            }
+        }
+    },
+    # Cache management
+    {
+        "type": "function",
+        "function": {
+            "name": "get_cache_stats",
+            "description": "Get statistics for all caches including hit rates and sizes",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clear_caches",
+            "description": "Clear one or all caches to free memory",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "cache_name": {"type": "string", "description": "Cache to clear (file_content, llm_response, repo_context, dependency_tree, or all)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "persist_caches",
+            "description": "Save all caches to disk for persistence across sessions",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
     }
 ]
 
@@ -1826,8 +3761,16 @@ Return ONLY a JSON array of tasks in this format:
 Be thorough but concise. Each task should be independently executable."""
 
 
-def planning_mode(user_request: str) -> ExecutionPlan:
-    """Generate execution plan from user request."""
+def planning_mode(user_request: str, enable_advanced_analysis: bool = True) -> ExecutionPlan:
+    """Generate execution plan from user request with advanced analysis.
+
+    Args:
+        user_request: The user's task request
+        enable_advanced_analysis: Enable dependency, impact, and risk analysis
+
+    Returns:
+        ExecutionPlan with comprehensive task breakdown and analysis
+    """
     print("=" * 60)
     print("PLANNING MODE")
     print("=" * 60)
@@ -1881,13 +3824,109 @@ Generate a comprehensive execution plan."""}
         print(f"Warning: Error parsing plan: {e}")
         plan.add_task(user_request, "general")
 
+    # Advanced planning analysis
+    if enable_advanced_analysis and len(plan.tasks) > 0:
+        print("\n→ Performing advanced planning analysis...")
+
+        # 1. Dependency Analysis
+        print("  ├─ Analyzing task dependencies...")
+        dep_analysis = plan.analyze_dependencies()
+
+        # 2. Risk Evaluation for each task
+        print("  ├─ Evaluating risks...")
+        high_risk_tasks = []
+        for task in plan.tasks:
+            task.risk_level = plan.evaluate_risk(task)
+            if task.risk_level in [RiskLevel.HIGH, RiskLevel.CRITICAL]:
+                high_risk_tasks.append(task)
+
+        # 3. Impact Assessment
+        print("  ├─ Assessing impact scope...")
+        for task in plan.tasks:
+            impact = plan.assess_impact(task)
+            task.impact_scope = impact.get("affected_files", []) + impact.get("affected_modules", [])
+            task.estimated_changes = len(task.impact_scope)
+
+        # 4. Generate Rollback Plans for risky tasks
+        print("  ├─ Creating rollback plans...")
+        for task in plan.tasks:
+            if task.risk_level in [RiskLevel.MEDIUM, RiskLevel.HIGH, RiskLevel.CRITICAL]:
+                task.rollback_plan = plan.create_rollback_plan(task)
+
+        # 5. Generate Validation Steps
+        print("  └─ Generating validation steps...")
+        for task in plan.tasks:
+            task.validation_steps = plan.generate_validation_steps(task)
+
     # Display plan
     print("\n" + "=" * 60)
     print("EXECUTION PLAN")
     print("=" * 60)
     for i, task in enumerate(plan.tasks, 1):
+        risk_emoji = {
+            RiskLevel.LOW: "🟢",
+            RiskLevel.MEDIUM: "🟡",
+            RiskLevel.HIGH: "🟠",
+            RiskLevel.CRITICAL: "🔴"
+        }.get(task.risk_level, "⚪")
+
         print(f"{i}. [{task.action_type.upper()}] {task.description}")
+
+        if enable_advanced_analysis:
+            print(f"   Risk: {risk_emoji} {task.risk_level.value.upper()}", end="")
+            if task.risk_reasons:
+                print(f" ({task.risk_reasons[0]})")
+            else:
+                print()
+
+            if task.dependencies:
+                dep_desc = [f"#{d+1}" for d in task.dependencies]
+                print(f"   Depends on: {', '.join(dep_desc)}")
+
+            if task.breaking_change:
+                print("   ⚠️  Warning: Potentially breaking change")
+
     print("=" * 60)
+
+    # Display analysis summary
+    if enable_advanced_analysis:
+        print("\n" + "=" * 60)
+        print("PLANNING ANALYSIS SUMMARY")
+        print("=" * 60)
+
+        # Risk summary
+        risk_counts = {}
+        for level in RiskLevel:
+            count = sum(1 for t in plan.tasks if t.risk_level == level)
+            if count > 0:
+                risk_counts[level] = count
+
+        print(f"Total tasks: {len(plan.tasks)}")
+        print(f"Risk distribution:")
+        for level, count in sorted(risk_counts.items(), key=lambda x: ["LOW", "MEDIUM", "HIGH", "CRITICAL"].index(x[0].value)):
+            emoji = {"low": "🟢", "medium": "🟡", "high": "🟠", "critical": "🔴"}[level.value]
+            print(f"  {emoji} {level.value.upper()}: {count}")
+
+        # Dependency insights
+        if dep_analysis["parallelization_potential"] > 0:
+            print(f"\n⚡ Parallelization potential: {dep_analysis['parallelization_potential']} tasks can run concurrently")
+            print(f"   Critical path length: {dep_analysis['critical_path_length']} steps")
+
+        # High-risk warnings
+        critical_tasks = [t for t in plan.tasks if t.risk_level == RiskLevel.CRITICAL]
+        high_risk_tasks = [t for t in plan.tasks if t.risk_level == RiskLevel.HIGH]
+
+        if critical_tasks:
+            print(f"\n🔴 CRITICAL: {len(critical_tasks)} high-risk task(s) require extra caution")
+            for task in critical_tasks:
+                print(f"   - Task #{task.task_id + 1}: {task.description[:60]}...")
+                if task.rollback_plan:
+                    print(f"     Rollback plan available")
+
+        if high_risk_tasks:
+            print(f"\n🟠 WARNING: {len(high_risk_tasks)} task(s) have elevated risk")
+
+        print("=" * 60)
 
     return plan
 
