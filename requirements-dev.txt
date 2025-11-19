@@ -1,3 +1,4 @@
 -r requirements.txt
-pytest
-pytest-cov
+pytest>=9.0.0
+pytest-cov>=7.0.0
+coverage>=7.12.0
