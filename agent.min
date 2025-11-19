@@ -667,20 +667,93 @@ After making changes, run tests to ensure nothing broke.
 Be concise. Execute the task and report success or failure."""
 
 
-def execution_mode(plan: ExecutionPlan, approved: bool = False) -> bool:
-    """Execute all tasks in the plan iteratively."""
+# Destructive operations that require confirmation
+SCARY_OPERATIONS = {
+    "keywords": ["delete", "remove", "rm ", "clean", "reset", "force", "destroy", "drop", "truncate"],
+    "git_commands": ["reset --hard", "clean -f", "clean -fd", "push --force", "push -f"],
+    "action_types": ["delete"]  # Task action types that are destructive
+}
+
+
+def is_scary_operation(tool_name: str, args: Dict[str, Any], action_type: str = "") -> tuple[bool, str]:
+    """
+    Check if an operation is potentially destructive and requires confirmation.
+    Returns: (is_scary: bool, reason: str)
+    """
+    # Check action type
+    if action_type in SCARY_OPERATIONS["action_types"]:
+        return True, f"Destructive action type: {action_type}"
+
+    # Check for file deletion
+    if tool_name == "run_cmd":
+        cmd = args.get("cmd", "").lower()
+
+        # Check for dangerous git commands
+        for git_cmd in SCARY_OPERATIONS["git_commands"]:
+            if git_cmd in cmd:
+                return True, f"Dangerous git command: {git_cmd}"
+
+        # Check for scary keywords
+        for keyword in SCARY_OPERATIONS["keywords"]:
+            if keyword in cmd:
+                return True, f"Potentially destructive command contains: {keyword}"
+
+    # Check for patch operations without dry-run
+    if tool_name == "apply_patch" and not args.get("dry_run", False):
+        return True, "Applying patch (not dry-run)"
+
+    return False, ""
+
+
+def prompt_scary_operation(operation: str, reason: str) -> bool:
+    """
+    Prompt user to confirm a scary operation.
+    Returns True if user approves, False otherwise.
+    """
+    print(f"\n{'='*60}")
+    print(f"⚠️  POTENTIALLY DESTRUCTIVE OPERATION DETECTED")
+    print(f"{'='*60}")
+    print(f"Operation: {operation}")
+    print(f"Reason: {reason}")
+    print(f"{'='*60}")
+
+    try:
+        response = input("Continue with this operation? [y/N]: ").strip().lower()
+        return response in ["y", "yes"]
+    except (KeyboardInterrupt, EOFError):
+        print("\n[Cancelled by user]")
+        return False
+
+
+def execution_mode(plan: ExecutionPlan, approved: bool = False, auto_approve: bool = True) -> bool:
+    """Execute all tasks in the plan iteratively.
+
+    Args:
+        plan: ExecutionPlan with tasks to execute
+        approved: Legacy parameter (ignored, kept for compatibility)
+        auto_approve: If True (default), runs autonomously without initial approval.
+                      Scary operations still require confirmation regardless.
+
+    Returns:
+        True if all tasks completed successfully, False otherwise
+    """
     print("\n" + "=" * 60)
     print("EXECUTION MODE")
     print("=" * 60)
 
-    if not approved:
-        print("\nThis will execute all tasks with full autonomy (no further prompts).")
-        response = input("Approve execution? [y/N]: ").strip().lower()
+    # No upfront approval needed - runs autonomously
+    # Scary operations will still prompt individually
+    if not auto_approve:
+        print("\nThis will execute all tasks with full autonomy.")
+        print("⚠️  Note: Destructive operations will still require confirmation.")
+        response = input("Start execution? [y/N]: ").strip().lower()
         if response not in ["y", "yes"]:
             print("Execution cancelled.")
             return False
 
-    print("\n✓ Execution approved. Starting autonomous execution...\n")
+    print("\n✓ Starting autonomous execution...\n")
+    if auto_approve:
+        print("  ℹ️  Running in autonomous mode. Destructive operations will prompt for confirmation.\n")
 
     messages = [{"role": "system", "content": EXECUTION_SYSTEM}]
     max_iterations = 100
@@ -766,6 +839,21 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         except:
                             tool_args = {}
 
+                    # Check if this is a scary operation
+                    is_scary, scary_reason = is_scary_operation(
+                        tool_name,
+                        tool_args,
+                        current_task.action_type
+                    )
+
+                    if is_scary:
+                        operation_desc = f"{tool_name}({', '.join(f'{k}={v!r}' for k, v in list(tool_args.items())[:3])})"
+                        if not prompt_scary_operation(operation_desc, scary_reason):
+                            print(f"  ✗ Operation cancelled by user")
+                            plan.mark_failed("User cancelled destructive operation")
+                            task_complete = True
+                            break
+
                     result = execute_tool(tool_name, tool_args)
 
                     # Add tool result to conversation
@@ -817,8 +905,17 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
 # ========== REPL Mode ==========
 
 def repl_mode():
-    """Interactive REPL for iterative development."""
+    """Interactive REPL for iterative development with session memory."""
     print("agent.min REPL - Type /exit to quit, /help for commands")
+    print("  ℹ️  Running in autonomous mode - destructive operations will prompt")
+
+    # Session context to maintain memory across prompts
+    session_context = {
+        "tasks_completed": [],
+        "files_modified": set(),
+        "files_reviewed": set(),
+        "last_summary": ""
+    }
 
     while True:
         try:
@@ -832,6 +929,11 @@ def repl_mode():
 
         if user_input in ["/exit", "/quit", ":q"]:
             print("Exiting REPL")
+            if session_context["tasks_completed"]:
+                print(f"\nSession Summary:")
+                print(f"  - Tasks completed: {len(session_context['tasks_completed'])}")
+                print(f"  - Files reviewed: {len(session_context['files_reviewed'])}")
+                print(f"  - Files modified: {len(session_context['files_modified'])}")
             break
 
         if user_input == "/help":
@@ -839,14 +941,53 @@ def repl_mode():
 Commands:
   /exit, /quit, :q  - Exit REPL
   /help             - Show this help
+  /status           - Show session summary
+  /clear            - Clear session memory
 
 Otherwise, describe a task and the agent will plan and execute it.
+Autonomous mode: destructive operations require confirmation, others run automatically.
             """)
             continue
 
-        # Execute task
+        if user_input == "/status":
+            print(f"\nSession Summary:")
+            print(f"  - Tasks completed: {len(session_context['tasks_completed'])}")
+            print(f"  - Files reviewed: {len(session_context['files_reviewed'])}")
+            print(f"  - Files modified: {len(session_context['files_modified'])}")
+            if session_context["last_summary"]:
+                print(f"\nLast execution:")
+                print(f"  {session_context['last_summary']}")
+            continue
+
+        if user_input == "/clear":
+            session_context = {
+                "tasks_completed": [],
+                "files_modified": set(),
+                "files_reviewed": set(),
+                "last_summary": ""
+            }
+            print("Session memory cleared")
+            continue
+
+        # Execute task with auto-approve (no initial prompt, scary ops still prompt)
         plan = planning_mode(user_input)
-        execution_mode(plan)
+        success = execution_mode(plan, auto_approve=True)
+
+        # Update session context
+        for task in plan.tasks:
+            if task.status == TaskStatus.COMPLETED:
+                session_context["tasks_completed"].append(task.description)
+                # Track files for context
+                if task.action_type in ["review", "read"]:
+                    # Extract file names from task description
+                    import re
+                    files = re.findall(r'[\w\-./]+\.\w+', task.description)
+                    session_context["files_reviewed"].update(files)
+                elif task.action_type in ["edit", "add", "write"]:
+                    files = re.findall(r'[\w\-./]+\.\w+', task.description)
+                    session_context["files_modified"].update(files)
+
+        session_context["last_summary"] = plan.get_summary()
 
 
 # ========== Main Entry Point ==========
@@ -878,9 +1019,9 @@ def main():
         help=f"Ollama base URL (default: {OLLAMA_BASE_URL})"
     )
     parser.add_argument(
-        "--yes",
+        "--prompt",
         action="store_true",
-        help="Auto-approve execution (skip confirmation)"
+        help="Prompt for approval before execution (default: auto-approve)"
     )
 
     args = parser.parse_args()
@@ -893,6 +1034,8 @@ def main():
     print(f"Model: {OLLAMA_MODEL}")
     print(f"Ollama: {OLLAMA_BASE_URL}")
     print(f"Repository: {ROOT}")
+    if not args.prompt:
+        print("  ℹ️  Autonomous mode: destructive operations will prompt for confirmation")
     print()
 
     try:
@@ -901,7 +1044,8 @@ def main():
         else:
             task_description = " ".join(args.task)
             plan = planning_mode(task_description)
-            execution_mode(plan, approved=args.yes)
+            # Default to auto-approve (no initial prompt), unless --prompt flag is used
+            execution_mode(plan, auto_approve=not args.prompt)
     except KeyboardInterrupt:
         print("\n\nAborted by user")
         sys.exit(1)

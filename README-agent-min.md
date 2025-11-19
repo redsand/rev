@@ -100,7 +100,7 @@ pip install -r requirements-min.txt
 
 ### One-Shot Mode
 
-Execute a single task with autonomous completion:
+Execute a single task with **fully autonomous** operation:
 
 ```bash
 python agent.min "Add error handling to all API endpoints"
@@ -109,33 +109,72 @@ python agent.min "Add error handling to all API endpoints"
 The agent will:
 1. Analyze your repository
 2. Generate an execution plan
-3. Ask for approval (press `y`)
-4. Execute all tasks autonomously
+3. **Execute autonomously** (no approval needed)
+4. Prompt ONLY for destructive operations (delete, force push, etc.)
 5. Show final summary
+
+**New in v2: Autonomous by default!** No more repeated approval prompts. The agent only asks permission for potentially destructive operations.
 
 ### Interactive REPL
 
-For iterative development:
+For iterative development with **session memory**:
 
 ```bash
 python agent.min --repl
 ```
 
-Then enter tasks interactively:
+The REPL now maintains context across multiple prompts:
 
 ```
-agent> Add input validation to user registration
-agent> Refactor database connection to use connection pooling
-agent> Update tests to cover new error cases
+agent> Review all documentation files
+  ℹ️  Running in autonomous mode - destructive operations will prompt
+  ... reviews README.md, COVERAGE.md, etc ...
+
+agent> Now create a project overview document based on what you reviewed
+  ... uses knowledge from previous reviews to create comprehensive overview ...
+
+agent> /status
+Session Summary:
+  - Tasks completed: 15
+  - Files reviewed: 8
+  - Files modified: 1
 ```
 
-### Auto-Approve Mode
+**New REPL Commands:**
+- `/status` - Show what's been done in this session
+- `/clear` - Clear session memory
+- `/help` - Show all commands
+- `/exit` - Exit with session summary
 
-Skip the approval prompt (useful for CI/CD):
+### Manual Approval Mode
+
+If you want to manually approve the execution plan (old behavior):
 
 ```bash
-python agent.min --yes "Run all tests and fix any failures"
+python agent.min --prompt "Run all tests and fix any failures"
 ```
+
+With `--prompt`, the agent will ask for approval before starting execution.
+**Default behavior: Runs autonomously without prompting** (except for scary operations).
+
+### What Operations Require Confirmation?
+
+Even in autonomous mode, the agent will **always prompt** for potentially destructive operations:
+
+**Scary Operations (will prompt):**
+- File deletion or removal
+- Git operations: `reset --hard`, `clean -f`, `push --force`
+- Commands containing: delete, remove, rm, clean, reset, force, destroy, drop, truncate
+- Applying patches without dry-run first
+- Tasks with "delete" action type
+
+**Safe Operations (no prompt):**
+- Reading files
+- Searching code
+- Running tests
+- Creating/modifying files
+- Git diff/log/status
+- Running linters/formatters
 
 ## Configuration
 
