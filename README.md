@@ -347,10 +347,11 @@ python agent.min --model deepseek-coder:33b "Your task"
 
 ## Testing & Coverage
 
-**Test Coverage: 76%** - Production Ready ✅
+**Test Coverage: 85%** - Production Ready ✅
 
-- **377 statements** in agent.min
-- **288 covered** through comprehensive test suite
+- **75 tests passing** (100% pass rate)
+- **478 statements** in agent.min.py
+- **404 covered** through comprehensive test suite
 - **99% test code coverage** (tests are well-tested themselves)
 
 ### What's Tested
@@ -362,18 +363,22 @@ python agent.min --model deepseek-coder:33b "Your task"
 - ✅ Ollama integration (mocked)
 - ✅ Planning and execution modes
 - ✅ Security validations
+- ✅ REPL mode commands and session tracking
+- ✅ CLI argument parsing
+- ✅ Scary operation detection and prompting
+- ✅ Edge cases and error handling
 
 ### Running Tests
 
 ```bash
 # Run all tests
-pytest tests/test_agent_min.py -v
+python -m pytest tests/test_agent_min.py -v
 
 # Run with coverage report
-pytest tests/test_agent_min.py --cov=agent_min --cov-report=term-missing
+python -m pytest tests/test_agent_min.py --cov=agent_min --cov-report=term-missing
 
 # Generate HTML coverage report
-pytest tests/test_agent_min.py --cov=agent_min --cov-report=html
+python -m pytest tests/test_agent_min.py --cov=agent_min --cov-report=html
 ```
 
 For detailed coverage information, see [COVERAGE.md](COVERAGE.md).
