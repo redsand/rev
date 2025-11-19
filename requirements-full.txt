@@ -1,0 +1,6 @@
+openai 
+requests 
+paramiko 
+pywinrm
+playwright
+colorama
