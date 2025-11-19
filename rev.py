@@ -988,6 +988,8 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
     Note: Ollama's tool/function calling support varies by model and version.
     This implementation sends tools in OpenAI format but gracefully falls back
     if the model doesn't support them.
+
+    For cloud models (ending with -cloud), this handles authentication flow.
     """
     url = f"{OLLAMA_BASE_URL}/api/chat"
 
@@ -1013,6 +1015,9 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
     max_retries = 3
     base_timeout = 600  # 10 minutes
 
+    # Track if we've already prompted for auth in this call
+    auth_prompted = False
+
     for attempt in range(max_retries):
         timeout = base_timeout * (attempt + 1)  # 600, 1200, 1800
 
@@ -1025,6 +1030,41 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
             if OLLAMA_DEBUG:
                 print(f"[DEBUG] Response status: {resp.status_code}")
                 print(f"[DEBUG] Response: {resp.text[:500]}")
+
+            # Handle 401 Unauthorized for cloud models
+            if resp.status_code == 401:
+                try:
+                    error_data = resp.json()
+                    signin_url = error_data.get("signin_url")
+
+                    if signin_url and not auth_prompted:
+                        auth_prompted = True
+                        print("\n" + "=" * 60)
+                        print("OLLAMA CLOUD AUTHENTICATION REQUIRED")
+                        print("=" * 60)
+                        print(f"\nModel '{OLLAMA_MODEL}' requires authentication.")
+                        print(f"\nTo authenticate:")
+                        print(f"1. Visit this URL in your browser:")
+                        print(f"   {signin_url}")
+                        print(f"\n2. Sign in with your Ollama account")
+                        print(f"3. Authorize this device")
+                        print("\n" + "=" * 60)
+
+                        # Wait for user to authenticate
+                        try:
+                            input("\nPress Enter after completing authentication, or Ctrl+C to cancel...")
+                        except KeyboardInterrupt:
+                            return {"error": "Authentication cancelled by user"}
+
+                        # Retry the request after authentication
+                        print("\nRetrying request...")
+                        continue
+                    else:
+                        # If we've already prompted or no signin_url, return error
+                        return {"error": f"Ollama API error: {resp.status_code} {resp.reason} - {resp.text}"}
+
+                except json.JSONDecodeError:
+                    return {"error": f"Ollama API error: {resp.status_code} {resp.reason}"}
 
             # If we get a 400 and we sent tools, try again without tools
             if resp.status_code == 400 and tools:
