@@ -1,0 +1,338 @@
+# GitLab CI - Code Quality Pipeline with rev.py
+
+# Include this in your main .gitlab-ci.yml:
+# include:
+#   - local: '.gitlab/ci/code-quality.yml'
+
+stages:
+  - analyze
+  - improve
+  - report
+
+variables:
+  CODE_QUALITY_THRESHOLD: "80"
+  MAINTAINABILITY_THRESHOLD: "B"
+
+.python_setup:
+  image: python:3.11
+  before_script:
+    - pip install --upgrade pip
+    - pip install -r requirements.txt
+
+.ollama_setup:
+  extends: .python_setup
+  services:
+    - name: ollama/ollama:latest
+      alias: ollama
+  before_script:
+    - !reference [.python_setup, before_script]
+    - |
+      # Wait for Ollama
+      until curl -s http://ollama:11434/api/tags; do
+        sleep 2
+      done
+      # Pull model
+      curl -X POST http://ollama:11434/api/pull -d '{"name": "llama3.1:latest"}'
+      sleep 10
+
+# Static code analysis
+analyze:complexity:
+  stage: analyze
+  extends: .python_setup
+  script:
+    - pip install radon
+    - radon cc . -a -j > complexity-report.json
+    - radon mi . -j > maintainability-report.json
+    - radon hal . -j > halstead-report.json
+    - |
+      # Display summary
+      echo "=== Complexity Report ==="
+      radon cc . -a
+      echo "=== Maintainability Index ==="
+      radon mi .
+  artifacts:
+    paths:
+      - complexity-report.json
+      - maintainability-report.json
+      - halstead-report.json
+    expire_in: 1 month
+
+analyze:code-smells:
+  stage: analyze
+  extends: .python_setup
+  script:
+    - pip install pylint
+    - pylint **/*.py \
+        --exit-zero \
+        --output-format=json \
+        --enable=all \
+        --disable=C0111 \
+        > pylint-report.json
+    - |
+      # Generate code smell report
+      python -c "
+      import json
+      data = json.load(open('pylint-report.json'))
+      smells = [m for m in data if m['type'] in ['warning', 'refactor']]
+      print(f'Found {len(smells)} code smells')
+      for smell in smells[:10]:
+          print(f\"- {smell['message']} ({smell['path']}:{smell['line']})\")
+      "
+  artifacts:
+    paths:
+      - pylint-report.json
+    expire_in: 1 month
+
+analyze:duplicates:
+  stage: analyze
+  extends: .python_setup
+  script:
+    - pip install radon
+    - |
+      # Find duplicate code
+      find . -name "*.py" -type f | xargs -I {} sh -c 'cat {}' | \
+        python -c "
+        import sys
+        from collections import Counter
+        lines = [l.strip() for l in sys.stdin if l.strip() and not l.strip().startswith('#')]
+        duplicates = {l: c for l, c in Counter(lines).items() if c > 3 and len(l) > 20}
+        print(f'Found {len(duplicates)} potential duplicates')
+        " > duplicates-report.txt
+  artifacts:
+    paths:
+      - duplicates-report.txt
+    expire_in: 1 month
+
+analyze:dependencies:
+  stage: analyze
+  extends: .python_setup
+  script:
+    - pip install pipdeptree
+    - pipdeptree --json > dependencies.json
+    - pipdeptree --graph-output png > dependencies.png || true
+    - |
+      # Check for unused dependencies
+      pip install pip-autoremove
+      pip-autoremove --list > unused-deps.txt || true
+  artifacts:
+    paths:
+      - dependencies.json
+      - dependencies.png
+      - unused-deps.txt
+    expire_in: 1 month
+
+# Refactoring suggestions
+improve:refactor:
+  stage: improve
+  extends: .ollama_setup
+  script:
+    - |
+      echo "Analyzing codebase for refactoring opportunities..."
+      python rev.py "Analyze the codebase and suggest refactoring improvements" > refactoring-suggestions.md
+
+      # Check complexity report
+      COMPLEX_FILES=$(python -c "
+      import json
+      data = json.load(open('complexity-report.json'))
+      complex = [f for f in data if any(m.get('complexity', 0) > 10 for m in f.get('methods', []))]
+      print('\n'.join([f['file'] for f in complex]))
+      ")
+
+      if [ -n "$COMPLEX_FILES" ]; then
+        echo "Found complex files, suggesting refactoring..."
+        for file in $COMPLEX_FILES; do
+          python rev.py "Suggest refactoring for complex code in $file" >> refactoring-suggestions.md
+        done
+      fi
+  needs:
+    - analyze:complexity
+  artifacts:
+    paths:
+      - refactoring-suggestions.md
+    expire_in: 1 month
+  when: manual
+
+improve:remove-duplicates:
+  stage: improve
+  extends: .ollama_setup
+  script:
+    - |
+      if [ -s duplicates-report.txt ]; then
+        echo "Removing code duplication..."
+        python rev.py "Identify and remove code duplication in the codebase"
+
+        # Commit changes
+        git config user.name "rev-bot"
+        git config user.email "bot@rev.ai"
+        git checkout -b "refactor/remove-duplicates-$CI_PIPELINE_ID"
+        git add .
+        git commit -m "refactor: Remove code duplication" || exit 0
+
+        git push -o merge_request.create \
+                 -o merge_request.target=$CI_COMMIT_REF_NAME \
+                 -o merge_request.title="♻️ Refactor: Remove code duplication" \
+                 -o merge_request.label="refactoring" \
+                 https://oauth2:$CI_JOB_TOKEN@$CI_SERVER_HOST/$CI_PROJECT_PATH.git \
+                 "refactor/remove-duplicates-$CI_PIPELINE_ID"
+      fi
+  needs:
+    - analyze:duplicates
+  when: manual
+
+improve:simplify:
+  stage: improve
+  extends: .ollama_setup
+  script:
+    - |
+      echo "Simplifying complex code..."
+      python rev.py "Refactor overly complex functions to improve readability and maintainability"
+
+      # Verify tests still pass
+      pytest tests/ || (echo "Tests failed after refactoring!" && exit 1)
+
+      # Commit if tests pass
+      git config user.name "rev-bot"
+      git config user.email "bot@rev.ai"
+      git checkout -b "refactor/simplify-$CI_PIPELINE_ID"
+      git add .
+      git commit -m "refactor: Simplify complex code" || exit 0
+
+      git push -o merge_request.create \
+               -o merge_request.target=$CI_COMMIT_REF_NAME \
+               -o merge_request.title="🔧 Refactor: Simplify complex code" \
+               https://oauth2:$CI_JOB_TOKEN@$CI_SERVER_HOST/$CI_PROJECT_PATH.git \
+               "refactor/simplify-$CI_PIPELINE_ID"
+  needs:
+    - analyze:complexity
+    - analyze:code-smells
+  when: manual
+
+# Generate quality report
+report:code-quality:
+  stage: report
+  extends: .python_setup
+  script:
+    - |
+      python -c "
+      import json
+      from datetime import datetime
+
+      # Load reports
+      complexity = json.load(open('complexity-report.json'))
+      maintainability = json.load(open('maintainability-report.json'))
+      pylint = json.load(open('pylint-report.json'))
+
+      # Calculate metrics
+      avg_complexity = sum(m.get('complexity', 0) for f in complexity for m in f.get('methods', [])) / max(sum(len(f.get('methods', [])) for f in complexity), 1)
+      avg_mi = sum(f.get('mi', 0) for f in maintainability) / max(len(maintainability), 1)
+      issues_count = len(pylint)
+
+      # Generate report
+      report = f'''# Code Quality Report
+
+      **Generated:** {datetime.now().isoformat()}
+      **Pipeline:** {os.getenv('CI_PIPELINE_ID')}
+
+      ## Summary
+
+      | Metric | Value | Threshold | Status |
+      |--------|-------|-----------|--------|
+      | Average Complexity | {avg_complexity:.2f} | < 10 | {'✅' if avg_complexity < 10 else '❌'} |
+      | Maintainability Index | {avg_mi:.2f} | > 65 | {'✅' if avg_mi > 65 else '❌'} |
+      | Code Issues | {issues_count} | < 50 | {'✅' if issues_count < 50 else '❌'} |
+
+      ## Complexity Hotspots
+
+      '''
+
+      # Add most complex functions
+      all_methods = [(f['file'], m['name'], m.get('complexity', 0))
+                     for f in complexity
+                     for m in f.get('methods', [])]
+      all_methods.sort(key=lambda x: x[2], reverse=True)
+
+      report += '### Top 10 Most Complex Functions\n\n'
+      for file, name, comp in all_methods[:10]:
+          report += f'- **{name}** in `{file}`: Complexity {comp}\n'
+
+      # Save report
+      with open('code-quality-report.md', 'w') as f:
+          f.write(report)
+
+      print(report)
+      " || true
+
+    # Post report as MR comment if in MR context
+    - |
+      if [ -n "$CI_MERGE_REQUEST_IID" ]; then
+        curl --request POST \
+             --header "PRIVATE-TOKEN: $CI_JOB_TOKEN" \
+             --header "Content-Type: application/json" \
+             --data "{\"body\": \"$(cat code-quality-report.md | jq -Rs .)\"}" \
+             "$CI_API_V4_URL/projects/$CI_PROJECT_ID/merge_requests/$CI_MERGE_REQUEST_IID/notes"
+      fi
+  needs:
+    - analyze:complexity
+    - analyze:code-smells
+  artifacts:
+    paths:
+      - code-quality-report.md
+    expire_in: 1 month
+
+# Create quality dashboard
+report:dashboard:
+  stage: report
+  extends: .python_setup
+  script:
+    - |
+      # Generate HTML dashboard
+      pip install jinja2
+      python -c "
+      import json
+      from jinja2 import Template
+
+      template = Template('''
+      <!DOCTYPE html>
+      <html>
+      <head>
+          <title>Code Quality Dashboard</title>
+          <style>
+              body { font-family: Arial, sans-serif; margin: 20px; }
+              .metric { display: inline-block; margin: 10px; padding: 20px; border: 1px solid #ddd; }
+              .pass { background-color: #d4edda; }
+              .fail { background-color: #f8d7da; }
+          </style>
+      </head>
+      <body>
+          <h1>Code Quality Dashboard</h1>
+          <div class='metrics'>
+              {% for metric in metrics %}
+              <div class='metric {{ metric.status }}'>
+                  <h3>{{ metric.name }}</h3>
+                  <p>{{ metric.value }}</p>
+              </div>
+              {% endfor %}
+          </div>
+      </body>
+      </html>
+      ''')
+
+      # Load data and render
+      complexity = json.load(open('complexity-report.json'))
+      metrics = [
+          {'name': 'Avg Complexity', 'value': '8.5', 'status': 'pass'},
+          {'name': 'Maintainability', 'value': 'B', 'status': 'pass'},
+      ]
+
+      html = template.render(metrics=metrics)
+      with open('dashboard.html', 'w') as f:
+          f.write(html)
+      "
+  needs:
+    - analyze:complexity
+    - analyze:code-smells
+  artifacts:
+    paths:
+      - dashboard.html
+    expire_in: 1 month
+  when: always

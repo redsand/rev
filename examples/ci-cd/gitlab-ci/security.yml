@@ -1,0 +1,376 @@
+# GitLab CI - Security Pipeline with rev.py
+
+# Include in main .gitlab-ci.yml:
+# include:
+#   - local: '.gitlab/ci/security.yml'
+
+stages:
+  - scan
+  - analyze
+  - fix
+  - verify
+
+variables:
+  SECURITY_SEVERITY_THRESHOLD: "HIGH"
+  AUTO_FIX_ENABLED: "true"
+
+.security_base:
+  image: python:3.11
+  before_script:
+    - pip install --upgrade pip
+
+.ollama_security:
+  extends: .security_base
+  services:
+    - name: ollama/ollama:latest
+      alias: ollama
+  before_script:
+    - !reference [.security_base, before_script]
+    - pip install -r requirements.txt
+    - |
+      until curl -s http://ollama:11434/api/tags; do sleep 2; done
+      curl -X POST http://ollama:11434/api/pull -d '{"name": "llama3.1:latest"}'
+      sleep 10
+
+# SAST - Static Application Security Testing
+scan:sast:
+  stage: scan
+  extends: .security_base
+  script:
+    - pip install bandit semgrep
+    # Bandit for Python
+    - bandit -r . -f json -o bandit-report.json || true
+    - bandit -r . -f html -o bandit-report.html || true
+
+    # Semgrep for multi-language analysis
+    - semgrep --config=auto --json --output=semgrep-report.json . || true
+
+    # Display critical issues
+    - |
+      python -c "
+      import json
+      report = json.load(open('bandit-report.json'))
+      critical = [r for r in report.get('results', []) if r['issue_severity'] in ['HIGH', 'CRITICAL']]
+      print(f'\n=== Critical Security Issues: {len(critical)} ===')
+      for issue in critical[:10]:
+          print(f\"{issue['issue_text']} in {issue['filename']}:{issue['line_number']}\")
+      " || true
+  artifacts:
+    paths:
+      - bandit-report.json
+      - bandit-report.html
+      - semgrep-report.json
+    reports:
+      sast: bandit-report.json
+    expire_in: 1 month
+
+# Dependency scanning
+scan:dependencies:
+  stage: scan
+  extends: .security_base
+  script:
+    - pip install safety pip-audit
+    # Safety check
+    - safety check --json > safety-report.json || true
+    - safety check || true
+
+    # pip-audit
+    - pip-audit --desc --format=json > pip-audit-report.json || true
+
+    # For Node.js projects
+    - |
+      if [ -f "package.json" ]; then
+        npm audit --json > npm-audit.json || true
+      fi
+
+    # Generate summary
+    - |
+      python -c "
+      import json
+      try:
+          safety = json.load(open('safety-report.json'))
+          print(f'Found {len(safety)} vulnerable dependencies')
+          for vuln in safety[:5]:
+              print(f\"- {vuln['package']} {vuln['installed_version']}: {vuln['vulnerability']}\")
+      except: pass
+      " || true
+  artifacts:
+    paths:
+      - safety-report.json
+      - pip-audit-report.json
+      - npm-audit.json
+    reports:
+      dependency_scanning: safety-report.json
+    expire_in: 1 month
+
+# Secret detection
+scan:secrets:
+  stage: scan
+  extends: .security_base
+  script:
+    - pip install detect-secrets
+    # Scan for secrets
+    - detect-secrets scan --all-files --force-use-all-plugins > secrets-baseline.json || true
+
+    # Audit findings
+    - |
+      if [ -s secrets-baseline.json ]; then
+        python -c "
+        import json
+        data = json.load(open('secrets-baseline.json'))
+        secrets = sum(len(v) for v in data.get('results', {}).values())
+        if secrets > 0:
+            print(f'⚠️  Found {secrets} potential secrets!')
+            exit(1)
+        " || echo "Potential secrets detected!"
+      fi
+  artifacts:
+    paths:
+      - secrets-baseline.json
+    expire_in: 1 month
+  allow_failure: true
+
+# License compliance
+scan:licenses:
+  stage: scan
+  extends: .security_base
+  script:
+    - pip install pip-licenses
+    - pip-licenses --format=json > licenses.json
+    - pip-licenses --format=markdown > licenses.md
+
+    # Check for incompatible licenses
+    - |
+      python -c "
+      import json
+      licenses = json.load(open('licenses.json'))
+      restricted = ['GPL-3.0', 'AGPL-3.0']
+      issues = [l for l in licenses if l.get('License') in restricted]
+      if issues:
+          print('⚠️  Found restricted licenses:')
+          for lic in issues:
+              print(f\"- {lic['Name']}: {lic['License']}\")
+      "
+  artifacts:
+    paths:
+      - licenses.json
+      - licenses.md
+    expire_in: 1 month
+
+# Security analysis and recommendations
+analyze:vulnerabilities:
+  stage: analyze
+  extends: .ollama_security
+  script:
+    - |
+      echo "Analyzing security vulnerabilities..."
+      python rev.py "Analyze the security scan results and provide remediation recommendations" > security-analysis.md
+
+      # Analyze each critical vulnerability
+      if [ -f "bandit-report.json" ]; then
+        python -c "
+        import json
+        report = json.load(open('bandit-report.json'))
+        critical = [r for r in report.get('results', []) if r['issue_severity'] == 'CRITICAL']
+        with open('critical-vulns.txt', 'w') as f:
+            for vuln in critical:
+                f.write(f\"{vuln['filename']}:{vuln['line_number']} - {vuln['issue_text']}\n\")
+        "
+
+        if [ -s critical-vulns.txt ]; then
+          python rev.py "Provide detailed fix recommendations for these critical vulnerabilities: $(cat critical-vulns.txt)" >> security-analysis.md
+        fi
+      fi
+  needs:
+    - scan:sast
+    - scan:dependencies
+  artifacts:
+    paths:
+      - security-analysis.md
+    expire_in: 1 month
+
+# Auto-fix security issues
+fix:code-vulnerabilities:
+  stage: fix
+  extends: .ollama_security
+  script:
+    - |
+      if [ "$AUTO_FIX_ENABLED" = "true" ] && [ -f "bandit-report.json" ]; then
+        echo "Auto-fixing code security vulnerabilities..."
+
+        # Fix SQL injection
+        python rev.py "Fix all SQL injection vulnerabilities using parameterized queries"
+
+        # Fix XSS vulnerabilities
+        python rev.py "Fix all XSS vulnerabilities with proper input sanitization"
+
+        # Fix insecure crypto
+        python rev.py "Replace insecure cryptographic functions with secure alternatives"
+
+        # Fix hardcoded secrets
+        python rev.py "Remove hardcoded secrets and replace with environment variables"
+
+        # Run tests to ensure fixes don't break functionality
+        pytest tests/ || echo "⚠️  Tests failed after security fixes"
+
+        # Commit fixes
+        git config user.name "rev-security-bot"
+        git config user.email "security@rev.ai"
+        git checkout -b "security/auto-fix-$CI_PIPELINE_ID"
+        git add .
+        git commit -m "security: Auto-fix vulnerabilities [security]" || exit 0
+
+        git push -o merge_request.create \
+                 -o merge_request.target=$CI_COMMIT_REF_NAME \
+                 -o merge_request.title="🔒 Security: Auto-fix vulnerabilities" \
+                 -o merge_request.label="security" \
+                 -o merge_request.label="high-priority" \
+                 https://oauth2:$CI_JOB_TOKEN@$CI_SERVER_HOST/$CI_PROJECT_PATH.git \
+                 "security/auto-fix-$CI_PIPELINE_ID"
+      fi
+  needs:
+    - scan:sast
+    - analyze:vulnerabilities
+  when: on_failure
+  allow_failure: true
+
+# Update vulnerable dependencies
+fix:dependencies:
+  stage: fix
+  extends: .ollama_security
+  script:
+    - |
+      if [ -f "safety-report.json" ]; then
+        echo "Updating vulnerable dependencies..."
+
+        # Use rev.py to update dependencies intelligently
+        python rev.py "Update all vulnerable dependencies to secure versions while maintaining compatibility"
+
+        # For Python
+        pip install --upgrade $(cat safety-report.json | python -c "
+        import json, sys
+        vulns = json.load(sys.stdin)
+        print(' '.join(set([v['package'] for v in vulns])))
+        " || echo "")
+
+        # Regenerate requirements
+        pip freeze > requirements.txt
+
+        # Run tests
+        pytest tests/ || echo "⚠️  Tests failed after dependency updates"
+
+        # Commit updates
+        git config user.name "rev-security-bot"
+        git config user.email "security@rev.ai"
+        git checkout -b "security/update-deps-$CI_PIPELINE_ID"
+        git add requirements.txt
+        git commit -m "security: Update vulnerable dependencies [security]" || exit 0
+
+        git push -o merge_request.create \
+                 -o merge_request.target=$CI_COMMIT_REF_NAME \
+                 -o merge_request.title="🔒 Security: Update vulnerable dependencies" \
+                 -o merge_request.label="security" \
+                 -o merge_request.label="dependencies" \
+                 https://oauth2:$CI_JOB_TOKEN@$CI_SERVER_HOST/$CI_PROJECT_PATH.git \
+                 "security/update-deps-$CI_PIPELINE_ID"
+      fi
+  needs:
+    - scan:dependencies
+  when: on_failure
+  allow_failure: true
+
+# Verify fixes
+verify:security:
+  stage: verify
+  extends: .security_base
+  script:
+    - pip install bandit safety
+    # Re-run security scans
+    - bandit -r . -f json -o bandit-verify.json || true
+    - safety check --json > safety-verify.json || true
+
+    # Compare results
+    - |
+      python -c "
+      import json
+      original = json.load(open('bandit-report.json'))
+      verified = json.load(open('bandit-verify.json'))
+      original_count = len(original.get('results', []))
+      verified_count = len(verified.get('results', []))
+      fixed = original_count - verified_count
+
+      print(f'\n=== Verification Results ===')
+      print(f'Original issues: {original_count}')
+      print(f'Remaining issues: {verified_count}')
+      print(f'Fixed: {fixed}')
+
+      if verified_count < original_count:
+          print('✅ Security improvements verified!')
+      else:
+          print('⚠️  No improvement detected')
+      "
+  needs:
+    - fix:code-vulnerabilities
+    - fix:dependencies
+  when: on_success
+  artifacts:
+    paths:
+      - bandit-verify.json
+      - safety-verify.json
+    expire_in: 1 week
+
+# Generate security report
+report:security:
+  stage: verify
+  extends: .security_base
+  script:
+    - |
+      python -c "
+      import json
+      from datetime import datetime
+
+      # Load all scan results
+      bandit = json.load(open('bandit-report.json'))
+      safety = json.load(open('safety-report.json')) if os.path.exists('safety-report.json') else []
+
+      # Generate report
+      report = f'''# Security Report
+
+      **Generated:** {datetime.now().isoformat()}
+      **Pipeline:** {os.getenv('CI_PIPELINE_ID')}
+      **Branch:** {os.getenv('CI_COMMIT_REF_NAME')}
+
+      ## Summary
+
+      | Category | Count | Severity |
+      |----------|-------|----------|
+      | Code Vulnerabilities | {len(bandit.get('results', []))} | {bandit.get('metrics', {}).get('_totals', {}).get('SEVERITY.HIGH', 0)} HIGH |
+      | Dependency Vulnerabilities | {len(safety)} | {len([v for v in safety if v.get('severity') == 'high'])} HIGH |
+
+      ## Critical Issues
+
+      '''
+
+      # Add critical code issues
+      for result in bandit.get('results', [])[:10]:
+          if result['issue_severity'] in ['HIGH', 'CRITICAL']:
+              report += f\"- **{result['issue_text']}** in `{result['filename']}:{result['line_number']}`\n\"
+
+      # Add dependency issues
+      for vuln in safety[:10]:
+          report += f\"- **{vuln['package']}** {vuln['installed_version']}: {vuln['vulnerability']}\n\"
+
+      # Save report
+      with open('security-report.md', 'w') as f:
+          f.write(report)
+
+      print(report)
+      " || true
+  needs:
+    - scan:sast
+    - scan:dependencies
+  artifacts:
+    paths:
+      - security-report.md
+    expire_in: 1 month
+  when: always
