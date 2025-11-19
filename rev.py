@@ -29,6 +29,7 @@ import subprocess
 import tempfile
 import hashlib
 import difflib
+import platform
 from typing import Dict, Any, List, Optional
 from enum import Enum
 
@@ -38,6 +39,14 @@ try:
 except ImportError:
     print("Error: requests library required. Install with: pip install requests")
     sys.exit(1)
+
+# SSH support (optional)
+try:
+    import paramiko
+    SSH_AVAILABLE = True
+except ImportError:
+    SSH_AVAILABLE = False
+    paramiko = None
 
 # Configuration
 ROOT = pathlib.Path(os.getcwd()).resolve()
@@ -58,6 +67,28 @@ ALLOW_CMDS = {
     "python", "pip", "pytest", "ruff", "black", "isort", "mypy",
     "node", "npm", "npx", "pnpm", "prettier", "eslint", "git", "make"
 }
+
+# System information (cached)
+_SYSTEM_INFO = None
+
+
+def _get_system_info_cached() -> Dict[str, Any]:
+    """Get cached system information."""
+    global _SYSTEM_INFO
+    if _SYSTEM_INFO is None:
+        _SYSTEM_INFO = {
+            "os": platform.system(),
+            "os_version": platform.version(),
+            "os_release": platform.release(),
+            "architecture": platform.machine(),
+            "python_version": platform.python_version(),
+            "platform": platform.platform(),
+            "is_windows": platform.system() == "Windows",
+            "is_linux": platform.system() == "Linux",
+            "is_macos": platform.system() == "Darwin",
+            "shell_type": "powershell" if platform.system() == "Windows" else "bash"
+        }
+    return _SYSTEM_INFO
 
 
 class TaskStatus(Enum):
@@ -322,6 +353,630 @@ def get_repo_context(commits: int = 6) -> str:
     })
 
 
+# ========== Additional File Operations ==========
+
+def delete_file(path: str) -> str:
+    """Delete a file."""
+    try:
+        p = _safe_path(path)
+        if not p.exists():
+            return json.dumps({"error": f"Not found: {path}"})
+        if p.is_dir():
+            return json.dumps({"error": f"Cannot delete directory (use delete_directory): {path}"})
+        p.unlink()
+        return json.dumps({"deleted": str(p.relative_to(ROOT))})
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def move_file(src: str, dest: str) -> str:
+    """Move or rename a file."""
+    try:
+        src_p = _safe_path(src)
+        dest_p = _safe_path(dest)
+        if not src_p.exists():
+            return json.dumps({"error": f"Source not found: {src}"})
+        dest_p.parent.mkdir(parents=True, exist_ok=True)
+        src_p.rename(dest_p)
+        return json.dumps({
+            "moved": str(src_p.relative_to(ROOT)),
+            "to": str(dest_p.relative_to(ROOT))
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def append_to_file(path: str, content: str) -> str:
+    """Append content to a file."""
+    try:
+        p = _safe_path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as f:
+            f.write(content)
+        return json.dumps({"appended_to": str(p.relative_to(ROOT)), "bytes": len(content)})
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def replace_in_file(path: str, find: str, replace: str, regex: bool = False) -> str:
+    """Find and replace within a file."""
+    try:
+        p = _safe_path(path)
+        if not p.exists():
+            return json.dumps({"error": f"Not found: {path}"})
+        content = p.read_text(encoding="utf-8", errors="ignore")
+
+        if regex:
+            new_content = re.sub(find, replace, content)
+        else:
+            new_content = content.replace(find, replace)
+
+        if content == new_content:
+            return json.dumps({"replaced": 0, "file": str(p.relative_to(ROOT))})
+
+        p.write_text(new_content, encoding="utf-8")
+        count = len(content.split(find)) - 1 if not regex else len(re.findall(find, content))
+        return json.dumps({
+            "replaced": count,
+            "file": str(p.relative_to(ROOT))
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def create_directory(path: str) -> str:
+    """Create a directory."""
+    try:
+        p = _safe_path(path)
+        p.mkdir(parents=True, exist_ok=True)
+        return json.dumps({"created": str(p.relative_to(ROOT))})
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def get_file_info(path: str) -> str:
+    """Get file metadata."""
+    try:
+        p = _safe_path(path)
+        if not p.exists():
+            return json.dumps({"error": f"Not found: {path}"})
+        stat = p.stat()
+        return json.dumps({
+            "path": str(p.relative_to(ROOT)),
+            "size": stat.st_size,
+            "modified": stat.st_mtime,
+            "is_file": p.is_file(),
+            "is_dir": p.is_dir()
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def copy_file(src: str, dest: str) -> str:
+    """Copy a file."""
+    try:
+        src_p = _safe_path(src)
+        dest_p = _safe_path(dest)
+        if not src_p.exists():
+            return json.dumps({"error": f"Source not found: {src}"})
+        if src_p.is_dir():
+            return json.dumps({"error": f"Cannot copy directory: {src}"})
+        dest_p.parent.mkdir(parents=True, exist_ok=True)
+        import shutil
+        shutil.copy2(src_p, dest_p)
+        return json.dumps({
+            "copied": str(src_p.relative_to(ROOT)),
+            "to": str(dest_p.relative_to(ROOT))
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def file_exists(path: str) -> str:
+    """Check if a file or directory exists."""
+    try:
+        p = _safe_path(path)
+        return json.dumps({
+            "path": path,
+            "exists": p.exists(),
+            "is_file": p.is_file() if p.exists() else False,
+            "is_dir": p.is_dir() if p.exists() else False
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def read_file_lines(path: str, start: int = 1, end: int = None) -> str:
+    """Read specific lines from a file."""
+    try:
+        p = _safe_path(path)
+        if not p.exists():
+            return json.dumps({"error": f"Not found: {path}"})
+        if p.stat().st_size > MAX_FILE_BYTES:
+            return json.dumps({"error": f"Too large (> {MAX_FILE_BYTES} bytes): {path}"})
+
+        lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
+        start_idx = max(0, start - 1)  # Convert to 0-based index
+        end_idx = len(lines) if end is None else min(len(lines), end)
+
+        selected_lines = lines[start_idx:end_idx]
+        return json.dumps({
+            "path": str(p.relative_to(ROOT)),
+            "start": start,
+            "end": end_idx,
+            "total_lines": len(lines),
+            "lines": selected_lines
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def tree_view(path: str = ".", max_depth: int = 3, max_files: int = 100) -> str:
+    """Generate a tree view of directory structure."""
+    try:
+        p = _safe_path(path)
+        if not p.exists():
+            return json.dumps({"error": f"Not found: {path}"})
+        if not p.is_dir():
+            return json.dumps({"error": f"Not a directory: {path}"})
+
+        tree = []
+        count = 0
+
+        def build_tree(dir_path, prefix="", depth=0):
+            nonlocal count
+            if depth > max_depth or count >= max_files:
+                return
+
+            try:
+                items = sorted(dir_path.iterdir(), key=lambda x: (not x.is_dir(), x.name))
+                for idx, item in enumerate(items):
+                    if count >= max_files:
+                        break
+
+                    is_last = idx == len(items) - 1
+                    current_prefix = "└── " if is_last else "├── "
+                    tree.append(prefix + current_prefix + item.name)
+                    count += 1
+
+                    if item.is_dir() and item.name not in EXCLUDE_DIRS:
+                        extension = "    " if is_last else "│   "
+                        build_tree(item, prefix + extension, depth + 1)
+            except PermissionError:
+                pass
+
+        tree.append(p.name if p != ROOT else ".")
+        build_tree(p)
+
+        return json.dumps({
+            "path": str(p.relative_to(ROOT)) if p != ROOT else ".",
+            "tree": "\n".join(tree),
+            "files_shown": count
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+# ========== Additional Git Operations ==========
+
+def git_commit(message: str, files: str = ".") -> str:
+    """Commit changes to git."""
+    try:
+        # Add files
+        add_result = _run_shell(f"git add {shlex.quote(files)}")
+        if add_result.returncode != 0:
+            return json.dumps({"error": f"git add failed: {add_result.stderr}"})
+
+        # Commit
+        commit_result = _run_shell(f"git commit -m {shlex.quote(message)}")
+        if commit_result.returncode != 0:
+            return json.dumps({"error": f"git commit failed: {commit_result.stderr}"})
+
+        return json.dumps({
+            "committed": True,
+            "message": message,
+            "output": commit_result.stdout
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def git_status() -> str:
+    """Get git status."""
+    try:
+        result = _run_shell("git status")
+        return json.dumps({
+            "status": result.stdout,
+            "returncode": result.returncode
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def git_log(count: int = 10, oneline: bool = False) -> str:
+    """Get git log."""
+    try:
+        cmd = f"git log -n {int(count)}"
+        if oneline:
+            cmd += " --oneline"
+        result = _run_shell(cmd)
+        return json.dumps({
+            "log": result.stdout,
+            "returncode": result.returncode
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def git_branch(action: str = "list", branch_name: str = None) -> str:
+    """Git branch operations (list, create, switch, current)."""
+    try:
+        if action == "list":
+            result = _run_shell("git branch -a")
+            return json.dumps({
+                "action": "list",
+                "branches": result.stdout,
+                "returncode": result.returncode
+            })
+        elif action == "current":
+            result = _run_shell("git branch --show-current")
+            return json.dumps({
+                "action": "current",
+                "branch": result.stdout.strip(),
+                "returncode": result.returncode
+            })
+        elif action == "create" and branch_name:
+            result = _run_shell(f"git branch {shlex.quote(branch_name)}")
+            return json.dumps({
+                "action": "create",
+                "branch": branch_name,
+                "returncode": result.returncode,
+                "output": result.stdout
+            })
+        elif action == "switch" and branch_name:
+            result = _run_shell(f"git checkout {shlex.quote(branch_name)}")
+            return json.dumps({
+                "action": "switch",
+                "branch": branch_name,
+                "returncode": result.returncode,
+                "output": result.stdout
+            })
+        else:
+            return json.dumps({"error": f"Invalid action or missing branch_name: {action}"})
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+# ========== Utility Tools ==========
+
+def install_package(package: str) -> str:
+    """Install a Python package."""
+    try:
+        result = _run_shell(f"pip install {shlex.quote(package)}", timeout=300)
+        return json.dumps({
+            "installed": package,
+            "returncode": result.returncode,
+            "output": result.stdout + result.stderr
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def web_fetch(url: str) -> str:
+    """Fetch content from a URL."""
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        return json.dumps({
+            "url": url,
+            "status_code": response.status_code,
+            "content": response.text[:50000],  # Limit to 50KB
+            "headers": dict(response.headers)
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def execute_python(code: str) -> str:
+    """Execute Python code in a safe context."""
+    try:
+        # Create a restricted namespace
+        namespace = {
+            '__builtins__': __builtins__,
+            'json': json,
+            'os': os,
+            're': re,
+            'pathlib': pathlib
+        }
+
+        # Capture output
+        import io
+        import contextlib
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            exec(code, namespace)
+
+        return json.dumps({
+            "executed": True,
+            "output": output.getvalue()
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def get_system_info() -> str:
+    """Get system information (OS, version, architecture, shell type)."""
+    try:
+        info = _get_system_info_cached()
+        return json.dumps(info)
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+# ========== SSH Remote Execution Support ==========
+
+class SSHConnectionManager:
+    """Manage SSH connections to remote hosts."""
+
+    def __init__(self):
+        self.connections = {}  # {connection_id: {"client": SSHClient, "host": str, "user": str}}
+
+    def connect(self, host: str, username: str, password: str = None, key_file: str = None,
+                port: int = 22) -> Dict[str, Any]:
+        """Connect to a remote host via SSH."""
+        if not SSH_AVAILABLE:
+            return {"error": "SSH not available. Install with: pip install paramiko"}
+
+        connection_id = f"{username}@{host}:{port}"
+
+        try:
+            # Close existing connection if any
+            if connection_id in self.connections:
+                self.disconnect(connection_id)
+
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+            # Connect with password or key
+            if key_file:
+                client.connect(host, port=port, username=username, key_filename=key_file, timeout=10)
+            elif password:
+                client.connect(host, port=port, username=username, password=password, timeout=10)
+            else:
+                # Try default SSH keys
+                client.connect(host, port=port, username=username, timeout=10)
+
+            self.connections[connection_id] = {
+                "client": client,
+                "host": host,
+                "username": username,
+                "port": port,
+                "connected_at": json.dumps({"timestamp": "now"})  # Placeholder
+            }
+
+            return {
+                "connected": True,
+                "connection_id": connection_id,
+                "host": host,
+                "username": username,
+                "port": port
+            }
+
+        except Exception as e:
+            return {"error": f"SSH connection failed: {type(e).__name__}: {e}"}
+
+    def execute(self, connection_id: str, command: str, timeout: int = 30) -> Dict[str, Any]:
+        """Execute a command on a remote host."""
+        if connection_id not in self.connections:
+            return {"error": f"Connection not found: {connection_id}"}
+
+        try:
+            client = self.connections[connection_id]["client"]
+            stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+
+            exit_status = stdout.channel.recv_exit_status()
+            stdout_text = stdout.read().decode('utf-8', errors='ignore')
+            stderr_text = stderr.read().decode('utf-8', errors='ignore')
+
+            return {
+                "connection_id": connection_id,
+                "command": command,
+                "exit_code": exit_status,
+                "stdout": stdout_text,
+                "stderr": stderr_text,
+                "success": exit_status == 0
+            }
+
+        except Exception as e:
+            return {"error": f"Command execution failed: {type(e).__name__}: {e}"}
+
+    def copy_file_to_remote(self, connection_id: str, local_path: str, remote_path: str) -> Dict[str, Any]:
+        """Copy a file to the remote host."""
+        if connection_id not in self.connections:
+            return {"error": f"Connection not found: {connection_id}"}
+
+        try:
+            client = self.connections[connection_id]["client"]
+            sftp = client.open_sftp()
+            sftp.put(local_path, remote_path)
+            sftp.close()
+
+            return {
+                "copied": True,
+                "local_path": local_path,
+                "remote_path": remote_path,
+                "connection_id": connection_id
+            }
+
+        except Exception as e:
+            return {"error": f"File copy failed: {type(e).__name__}: {e}"}
+
+    def copy_file_from_remote(self, connection_id: str, remote_path: str, local_path: str) -> Dict[str, Any]:
+        """Copy a file from the remote host."""
+        if connection_id not in self.connections:
+            return {"error": f"Connection not found: {connection_id}"}
+
+        try:
+            client = self.connections[connection_id]["client"]
+            sftp = client.open_sftp()
+            sftp.get(remote_path, local_path)
+            sftp.close()
+
+            return {
+                "copied": True,
+                "remote_path": remote_path,
+                "local_path": local_path,
+                "connection_id": connection_id
+            }
+
+        except Exception as e:
+            return {"error": f"File copy failed: {type(e).__name__}: {e}"}
+
+    def disconnect(self, connection_id: str) -> Dict[str, Any]:
+        """Disconnect from a remote host."""
+        if connection_id not in self.connections:
+            return {"error": f"Connection not found: {connection_id}"}
+
+        try:
+            client = self.connections[connection_id]["client"]
+            client.close()
+            del self.connections[connection_id]
+
+            return {
+                "disconnected": True,
+                "connection_id": connection_id
+            }
+
+        except Exception as e:
+            return {"error": f"Disconnect failed: {type(e).__name__}: {e}"}
+
+    def list_connections(self) -> Dict[str, Any]:
+        """List all active SSH connections."""
+        return {
+            "connections": [
+                {
+                    "connection_id": conn_id,
+                    "host": info["host"],
+                    "username": info["username"],
+                    "port": info["port"]
+                }
+                for conn_id, info in self.connections.items()
+            ]
+        }
+
+
+# Global SSH connection manager
+ssh_manager = SSHConnectionManager()
+
+
+def ssh_connect(host: str, username: str, password: str = None, key_file: str = None, port: int = 22) -> str:
+    """Connect to a remote host via SSH."""
+    result = ssh_manager.connect(host, username, password, key_file, port)
+    return json.dumps(result)
+
+
+def ssh_exec(connection_id: str, command: str, timeout: int = 30) -> str:
+    """Execute a command on a remote host."""
+    result = ssh_manager.execute(connection_id, command, timeout)
+    return json.dumps(result)
+
+
+def ssh_copy_to(connection_id: str, local_path: str, remote_path: str) -> str:
+    """Copy a file to the remote host."""
+    result = ssh_manager.copy_file_to_remote(connection_id, local_path, remote_path)
+    return json.dumps(result)
+
+
+def ssh_copy_from(connection_id: str, remote_path: str, local_path: str) -> str:
+    """Copy a file from the remote host."""
+    result = ssh_manager.copy_file_from_remote(connection_id, remote_path, local_path)
+    return json.dumps(result)
+
+
+def ssh_disconnect(connection_id: str) -> str:
+    """Disconnect from a remote host."""
+    result = ssh_manager.disconnect(connection_id)
+    return json.dumps(result)
+
+
+def ssh_list_connections() -> str:
+    """List all active SSH connections."""
+    result = ssh_manager.list_connections()
+    return json.dumps(result)
+
+
+# ========== MCP (Model Context Protocol) Support ==========
+
+class MCPClient:
+    """Client for Model Context Protocol servers."""
+
+    def __init__(self):
+        self.servers = {}
+        self.tools = {}
+
+    def add_server(self, name: str, command: str, args: List[str] = None) -> Dict[str, Any]:
+        """Add an MCP server."""
+        try:
+            # Store server configuration
+            self.servers[name] = {
+                "command": command,
+                "args": args or [],
+                "connected": False
+            }
+            return {"added": name, "command": command}
+        except Exception as e:
+            return {"error": f"{type(e).__name__}: {e}"}
+
+    def list_servers(self) -> Dict[str, Any]:
+        """List configured MCP servers."""
+        return {"servers": list(self.servers.keys())}
+
+    def call_mcp_tool(self, server: str, tool: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Call a tool on an MCP server."""
+        try:
+            if server not in self.servers:
+                return {"error": f"Server not found: {server}"}
+
+            # For now, return a placeholder
+            # Full MCP implementation would use stdio communication
+            return {
+                "mcp_call": True,
+                "server": server,
+                "tool": tool,
+                "note": "MCP server communication would happen here"
+            }
+        except Exception as e:
+            return {"error": f"{type(e).__name__}: {e}"}
+
+
+# Global MCP client instance
+mcp_client = MCPClient()
+
+
+def mcp_add_server(name: str, command: str, args: str = "") -> str:
+    """Add an MCP server."""
+    arg_list = args.split() if args else []
+    result = mcp_client.add_server(name, command, arg_list)
+    return json.dumps(result)
+
+
+def mcp_list_servers() -> str:
+    """List MCP servers."""
+    result = mcp_client.list_servers()
+    return json.dumps(result)
+
+
+def mcp_call_tool(server: str, tool: str, arguments: str = "{}") -> str:
+    """Call an MCP tool."""
+    try:
+        args_dict = json.loads(arguments)
+        result = mcp_client.call_mcp_tool(server, tool, args_dict)
+        return json.dumps(result)
+    except json.JSONDecodeError as e:
+        return json.dumps({"error": f"Invalid JSON arguments: {e}"})
+
+
 # ========== Ollama Integration ==========
 
 # Debug mode - set to True to see API requests/responses
@@ -354,38 +1009,57 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
         if tools:
             print(f"[DEBUG] Tools: {len(tools)} tools provided")
 
-    try:
-        resp = requests.post(url, json=payload, timeout=300)
+    # Retry with increasing timeouts: 10m, 20m, 30m
+    max_retries = 3
+    base_timeout = 600  # 10 minutes
 
-        if OLLAMA_DEBUG:
-            print(f"[DEBUG] Response status: {resp.status_code}")
-            print(f"[DEBUG] Response: {resp.text[:500]}")
+    for attempt in range(max_retries):
+        timeout = base_timeout * (attempt + 1)  # 600, 1200, 1800
 
-        # If we get a 400 and we sent tools, try again without tools
-        if resp.status_code == 400 and tools:
-            if OLLAMA_DEBUG:
-                print("[DEBUG] Got 400 with tools, retrying without tools...")
+        if OLLAMA_DEBUG and attempt > 0:
+            print(f"[DEBUG] Retry attempt {attempt + 1}/{max_retries} with timeout {timeout}s ({timeout // 60}m)")
 
-            # Retry without tools
-            payload_no_tools = {
-                "model": OLLAMA_MODEL,
-                "messages": messages,
-                "stream": False
-            }
-            resp = requests.post(url, json=payload_no_tools, timeout=300)
-
-        resp.raise_for_status()
-        return resp.json()
-
-    except requests.exceptions.HTTPError as e:
-        error_detail = ""
         try:
-            error_detail = f" - {resp.text}"
-        except:
-            pass
-        return {"error": f"Ollama API error: {e}{error_detail}"}
-    except Exception as e:
-        return {"error": f"Ollama API error: {e}"}
+            resp = requests.post(url, json=payload, timeout=timeout)
+
+            if OLLAMA_DEBUG:
+                print(f"[DEBUG] Response status: {resp.status_code}")
+                print(f"[DEBUG] Response: {resp.text[:500]}")
+
+            # If we get a 400 and we sent tools, try again without tools
+            if resp.status_code == 400 and tools:
+                if OLLAMA_DEBUG:
+                    print("[DEBUG] Got 400 with tools, retrying without tools...")
+
+                # Retry without tools
+                payload_no_tools = {
+                    "model": OLLAMA_MODEL,
+                    "messages": messages,
+                    "stream": False
+                }
+                resp = requests.post(url, json=payload_no_tools, timeout=timeout)
+
+            resp.raise_for_status()
+            return resp.json()
+
+        except requests.exceptions.Timeout as e:
+            if attempt < max_retries - 1:
+                if OLLAMA_DEBUG:
+                    print(f"[DEBUG] Request timed out after {timeout}s, will retry with longer timeout...")
+                continue  # Retry with longer timeout
+            else:
+                return {"error": f"Ollama API timeout after {max_retries} attempts (final timeout: {timeout}s)"}
+
+        except requests.exceptions.HTTPError as e:
+            error_detail = ""
+            try:
+                error_detail = f" - {resp.text}"
+            except:
+                pass
+            return {"error": f"Ollama API error: {e}{error_detail}"}
+
+        except Exception as e:
+            return {"error": f"Ollama API error: {e}"}
 
 
 # ========== Tool Definitions ==========
@@ -517,6 +1191,401 @@ TOOLS = [
                 }
             }
         }
+    },
+    # File operations
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_file",
+            "description": "Delete a file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to file to delete"}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "move_file",
+            "description": "Move or rename a file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "src": {"type": "string", "description": "Source path"},
+                    "dest": {"type": "string", "description": "Destination path"}
+                },
+                "required": ["src", "dest"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "append_to_file",
+            "description": "Append content to a file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to file"},
+                    "content": {"type": "string", "description": "Content to append"}
+                },
+                "required": ["path", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "replace_in_file",
+            "description": "Find and replace text within a file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to file"},
+                    "find": {"type": "string", "description": "Text to find"},
+                    "replace": {"type": "string", "description": "Replacement text"},
+                    "regex": {"type": "boolean", "description": "Use regex matching"}
+                },
+                "required": ["path", "find", "replace"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_directory",
+            "description": "Create a directory",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Directory path"}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_file_info",
+            "description": "Get file metadata (size, modified time, etc.)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to file"}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "copy_file",
+            "description": "Copy a file to a new location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "src": {"type": "string", "description": "Source path"},
+                    "dest": {"type": "string", "description": "Destination path"}
+                },
+                "required": ["src", "dest"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "file_exists",
+            "description": "Check if a file or directory exists",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to check"}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file_lines",
+            "description": "Read specific line range from a file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to file"},
+                    "start": {"type": "integer", "description": "Start line number (1-indexed)"},
+                    "end": {"type": "integer", "description": "End line number (inclusive)"}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tree_view",
+            "description": "Generate a tree view of directory structure",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Directory path (default: .)"},
+                    "max_depth": {"type": "integer", "description": "Maximum depth (default: 3)"},
+                    "max_files": {"type": "integer", "description": "Maximum files to show (default: 100)"}
+                }
+            }
+        }
+    },
+    # Git operations
+    {
+        "type": "function",
+        "function": {
+            "name": "git_commit",
+            "description": "Commit changes to git",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "description": "Commit message"},
+                    "files": {"type": "string", "description": "Files to add (default: .)"}
+                },
+                "required": ["message"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_status",
+            "description": "Get git status",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_log",
+            "description": "Get git log",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "count": {"type": "integer", "description": "Number of commits (default: 10)"},
+                    "oneline": {"type": "boolean", "description": "Use oneline format"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_branch",
+            "description": "Git branch operations (list, create, switch, current)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "description": "Action: list, current, create, or switch"},
+                    "branch_name": {"type": "string", "description": "Branch name (for create/switch)"}
+                }
+            }
+        }
+    },
+    # Utility tools
+    {
+        "type": "function",
+        "function": {
+            "name": "install_package",
+            "description": "Install a Python package using pip",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string", "description": "Package name"}
+                },
+                "required": ["package"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_fetch",
+            "description": "Fetch content from a URL",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to fetch"}
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_python",
+            "description": "Execute Python code and return output",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "Python code to execute"}
+                },
+                "required": ["code"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_system_info",
+            "description": "Get system information (OS, version, architecture, shell type)",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    # SSH remote execution tools
+    {
+        "type": "function",
+        "function": {
+            "name": "ssh_connect",
+            "description": "Connect to a remote host via SSH",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "host": {"type": "string", "description": "Remote host address"},
+                    "username": {"type": "string", "description": "SSH username"},
+                    "password": {"type": "string", "description": "SSH password (optional)"},
+                    "key_file": {"type": "string", "description": "Path to SSH key file (optional)"},
+                    "port": {"type": "integer", "description": "SSH port (default: 22)"}
+                },
+                "required": ["host", "username"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ssh_exec",
+            "description": "Execute a command on a remote host via SSH",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "connection_id": {"type": "string", "description": "SSH connection ID (username@host:port)"},
+                    "command": {"type": "string", "description": "Command to execute"},
+                    "timeout": {"type": "integer", "description": "Command timeout in seconds (default: 30)"}
+                },
+                "required": ["connection_id", "command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ssh_copy_to",
+            "description": "Copy a file to the remote host via SFTP",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "connection_id": {"type": "string", "description": "SSH connection ID"},
+                    "local_path": {"type": "string", "description": "Local file path"},
+                    "remote_path": {"type": "string", "description": "Remote file path"}
+                },
+                "required": ["connection_id", "local_path", "remote_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ssh_copy_from",
+            "description": "Copy a file from the remote host via SFTP",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "connection_id": {"type": "string", "description": "SSH connection ID"},
+                    "remote_path": {"type": "string", "description": "Remote file path"},
+                    "local_path": {"type": "string", "description": "Local file path"}
+                },
+                "required": ["connection_id", "remote_path", "local_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ssh_disconnect",
+            "description": "Disconnect from a remote host",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "connection_id": {"type": "string", "description": "SSH connection ID"}
+                },
+                "required": ["connection_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ssh_list_connections",
+            "description": "List all active SSH connections",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    # MCP tools
+    {
+        "type": "function",
+        "function": {
+            "name": "mcp_add_server",
+            "description": "Add an MCP (Model Context Protocol) server",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Server name"},
+                    "command": {"type": "string", "description": "Command to run server"},
+                    "args": {"type": "string", "description": "Space-separated arguments"}
+                },
+                "required": ["name", "command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mcp_list_servers",
+            "description": "List configured MCP servers",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mcp_call_tool",
+            "description": "Call a tool on an MCP server",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "Server name"},
+                    "tool": {"type": "string", "description": "Tool name"},
+                    "arguments": {"type": "string", "description": "JSON-encoded arguments"}
+                },
+                "required": ["server", "tool"]
+            }
+        }
     }
 ]
 
@@ -528,6 +1597,7 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
     print(f"  → Executing: {name}({', '.join(f'{k}={v!r}' for k, v in args.items())})")
 
     try:
+        # Original tools
         if name == "read_file":
             return read_file(args["path"])
         elif name == "write_file":
@@ -546,6 +1616,72 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
             return run_tests(args.get("cmd", "pytest -q"), args.get("timeout", 600))
         elif name == "get_repo_context":
             return get_repo_context(args.get("commits", 6))
+
+        # File operations
+        elif name == "delete_file":
+            return delete_file(args["path"])
+        elif name == "move_file":
+            return move_file(args["src"], args["dest"])
+        elif name == "append_to_file":
+            return append_to_file(args["path"], args["content"])
+        elif name == "replace_in_file":
+            return replace_in_file(args["path"], args["find"], args["replace"], args.get("regex", False))
+        elif name == "create_directory":
+            return create_directory(args["path"])
+        elif name == "get_file_info":
+            return get_file_info(args["path"])
+        elif name == "copy_file":
+            return copy_file(args["src"], args["dest"])
+        elif name == "file_exists":
+            return file_exists(args["path"])
+        elif name == "read_file_lines":
+            return read_file_lines(args["path"], args.get("start", 1), args.get("end"))
+        elif name == "tree_view":
+            return tree_view(args.get("path", "."), args.get("max_depth", 3), args.get("max_files", 100))
+
+        # Git operations
+        elif name == "git_commit":
+            return git_commit(args["message"], args.get("files", "."))
+        elif name == "git_status":
+            return git_status()
+        elif name == "git_log":
+            return git_log(args.get("count", 10), args.get("oneline", False))
+        elif name == "git_branch":
+            return git_branch(args.get("action", "list"), args.get("branch_name"))
+
+        # Utility tools
+        elif name == "install_package":
+            return install_package(args["package"])
+        elif name == "web_fetch":
+            return web_fetch(args["url"])
+        elif name == "execute_python":
+            return execute_python(args["code"])
+        elif name == "get_system_info":
+            return get_system_info()
+
+        # SSH remote execution tools
+        elif name == "ssh_connect":
+            return ssh_connect(args["host"], args["username"], args.get("password"),
+                             args.get("key_file"), args.get("port", 22))
+        elif name == "ssh_exec":
+            return ssh_exec(args["connection_id"], args["command"], args.get("timeout", 30))
+        elif name == "ssh_copy_to":
+            return ssh_copy_to(args["connection_id"], args["local_path"], args["remote_path"])
+        elif name == "ssh_copy_from":
+            return ssh_copy_from(args["connection_id"], args["remote_path"], args["local_path"])
+        elif name == "ssh_disconnect":
+            return ssh_disconnect(args["connection_id"])
+        elif name == "ssh_list_connections":
+            return ssh_list_connections()
+
+        # MCP tools
+        elif name == "mcp_add_server":
+            return mcp_add_server(args["name"], args["command"], args.get("args", ""))
+        elif name == "mcp_list_servers":
+            return mcp_list_servers()
+        elif name == "mcp_call_tool":
+            return mcp_call_tool(args["server"], args["tool"], args.get("arguments", "{}"))
+
         else:
             return json.dumps({"error": f"Unknown tool: {name}"})
     except Exception as e:
@@ -560,6 +1696,13 @@ Your job is to:
 1. Understand the user's request
 2. Analyze the repository structure
 3. Create a comprehensive, ordered checklist of tasks
+
+IMPORTANT - System Context:
+You will be provided with the operating system information. Use this to:
+- Choose appropriate shell commands (bash for Linux/Mac, PowerShell for Windows)
+- Select platform-specific tools and utilities
+- Use correct path separators and file conventions
+- Adapt commands to the target environment
 
 Break down the work into atomic tasks:
 - Review: Analyze existing code
@@ -586,13 +1729,20 @@ def planning_mode(user_request: str) -> ExecutionPlan:
     print("PLANNING MODE")
     print("=" * 60)
 
-    # Get repository context
-    print("→ Analyzing repository...")
+    # Get system and repository context
+    print("→ Analyzing system and repository...")
+    sys_info = _get_system_info_cached()
     context = get_repo_context()
 
     messages = [
         {"role": "system", "content": PLANNING_SYSTEM},
-        {"role": "user", "content": f"""Repository context:
+        {"role": "user", "content": f"""System Information:
+OS: {sys_info['os']} {sys_info['os_release']}
+Platform: {sys_info['platform']}
+Architecture: {sys_info['architecture']}
+Shell Type: {sys_info['shell_type']}
+
+Repository context:
 {context}
 
 User request:
@@ -643,6 +1793,13 @@ Generate a comprehensive execution plan."""}
 
 EXECUTION_SYSTEM = """You are an autonomous CI/CD agent executing tasks.
 
+IMPORTANT - System Context:
+You will be provided with OS information. Use this to:
+- Choose correct shell commands (bash for Linux/Mac, PowerShell/cmd for Windows)
+- Select platform-specific tools and file paths
+- Use appropriate path separators (/ for Unix, \\ for Windows)
+- Adapt commands to the target environment
+
 You have these tools available:
 - read_file: Read file contents
 - write_file: Create or modify files
@@ -650,9 +1807,10 @@ You have these tools available:
 - search_code: Search code with regex
 - git_diff: View current changes
 - apply_patch: Apply unified diff patches
-- run_cmd: Execute shell commands
+- run_cmd: Execute shell commands (use shell-appropriate syntax)
 - run_tests: Run test suite
 - get_repo_context: Get repo status
+- get_system_info: Get OS, version, architecture, and shell type
 
 Work methodically:
 1. Understand the current task
@@ -755,7 +1913,17 @@ def execution_mode(plan: ExecutionPlan, approved: bool = False, auto_approve: bo
     if auto_approve:
         print("  ℹ️  Running in autonomous mode. Destructive operations will prompt for confirmation.\n")
 
-    messages = [{"role": "system", "content": EXECUTION_SYSTEM}]
+    # Get system info for context
+    sys_info = _get_system_info_cached()
+    system_context = f"""System Information:
+OS: {sys_info['os']} {sys_info['os_release']}
+Platform: {sys_info['platform']}
+Architecture: {sys_info['architecture']}
+Shell Type: {sys_info['shell_type']}
+
+{EXECUTION_SYSTEM}"""
+
+    messages = [{"role": "system", "content": system_context}]
     max_iterations = 100
     iteration = 0
 

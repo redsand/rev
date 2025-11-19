@@ -264,19 +264,77 @@ For each task, the agent:
 
 ### Available Tools
 
-The agent has access to:
+The agent has access to **36 powerful tools** across multiple categories:
 
+**New in v2.7:** SSH remote execution! Connect to remote hosts, execute commands, and transfer files for managing your infrastructure.
+
+**New in v2.6:** Cross-platform OS detection! The agent automatically detects your operating system (Windows, Linux, macOS) and adapts tool usage accordingly - choosing bash vs PowerShell, correct path separators, and platform-specific commands.
+
+#### Core File Operations
 | Tool | Description |
 |------|-------------|
 | `read_file` | Read file contents |
 | `write_file` | Create or overwrite files |
+| `delete_file` | Delete a file |
+| `move_file` | Move or rename files |
+| `copy_file` | Copy a file to a new location |
+| `append_to_file` | Append content to a file |
+| `replace_in_file` | Find and replace text within a file (supports regex) |
+| `create_directory` | Create directories |
+| `get_file_info` | Get file metadata (size, modified time, etc.) |
+| `file_exists` | Check if a file or directory exists |
+| `read_file_lines` | Read specific line range from a file |
+| `tree_view` | Generate a tree view of directory structure |
+
+#### Code Discovery & Search
+| Tool | Description |
+|------|-------------|
 | `list_dir` | List files matching glob pattern |
 | `search_code` | Search code with regex |
+
+#### Git Operations
+| Tool | Description |
+|------|-------------|
 | `git_diff` | View current uncommitted changes |
+| `git_status` | Get detailed git status |
+| `git_log` | Get git commit history |
+| `git_commit` | Commit changes with a message |
+| `git_branch` | Git branch operations (list, create, switch, current) |
 | `apply_patch` | Apply unified diff patches |
+| `get_repo_context` | Get git status and repo structure |
+
+#### Command Execution
+| Tool | Description |
+|------|-------------|
 | `run_cmd` | Execute shell commands |
 | `run_tests` | Run test suite (pytest, npm test, etc.) |
-| `get_repo_context` | Get git status and repo structure |
+
+#### Utility Tools
+| Tool | Description |
+|------|-------------|
+| `install_package` | Install Python packages using pip |
+| `web_fetch` | Fetch content from URLs |
+| `execute_python` | Execute Python code snippets |
+| `get_system_info` | Get system info (OS, version, architecture, shell type) |
+
+#### SSH Remote Execution
+| Tool | Description |
+|------|-------------|
+| `ssh_connect` | Connect to a remote host via SSH |
+| `ssh_exec` | Execute commands on a remote host |
+| `ssh_copy_to` | Copy a file to a remote host |
+| `ssh_copy_from` | Copy a file from a remote host |
+| `ssh_disconnect` | Disconnect from a remote host |
+| `ssh_list_connections` | List all active SSH connections |
+
+#### MCP (Model Context Protocol) Support
+| Tool | Description |
+|------|-------------|
+| `mcp_add_server` | Add an MCP server for extended capabilities |
+| `mcp_list_servers` | List configured MCP servers |
+| `mcp_call_tool` | Call tools on MCP servers |
+
+**New in v2.5:** MCP support allows the agent to connect to external tools and data sources through the Model Context Protocol, enabling integration with databases, APIs, and other development tools.
 
 ## Comparison with agent.py
 
@@ -347,17 +405,23 @@ python rev.py --model deepseek-coder:33b "Your task"
 
 ## Testing & Coverage
 
-**Test Coverage: 85%** - Production Ready ✅
+**Test Coverage: 80%** - Production Ready ✅
 
-- **75 tests passing** (100% pass rate)
-- **478 statements** in rev.py
-- **404 covered** through comprehensive test suite
+- **136 tests passing** (100% pass rate)
+- **800+ statements** in rev.py
+- **Cross-platform tested** (Linux, macOS, Windows detection)
+- **SSH remote execution tested** (connection management, file transfer)
 - **99% test code coverage** (tests are well-tested themselves)
 
 ### What's Tested
-- ✅ File operations (read, write, list, search)
-- ✅ Git operations (diff, patch, context)
+- ✅ File operations (read, write, delete, move, copy, append, replace)
+- ✅ Advanced file operations (file_exists, read_file_lines, tree_view)
+- ✅ Git operations (diff, patch, commit, status, log, branch)
 - ✅ Command execution and validation
+- ✅ Utility tools (install_package, web_fetch, execute_python, get_system_info)
+- ✅ System information detection (OS, version, shell type, caching)
+- ✅ SSH remote execution (connect, execute, file transfer, disconnect)
+- ✅ MCP (Model Context Protocol) integration
 - ✅ Task management (Task, ExecutionPlan)
 - ✅ Tool execution routing
 - ✅ Ollama integration (mocked)

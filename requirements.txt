@@ -1,2 +1,5 @@
 # Minimal requirements for agent.min
 requests>=2.31.0
+
+# Optional: For SSH remote execution
+# paramiko>=3.0.0
