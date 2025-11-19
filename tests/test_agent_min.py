@@ -1,0 +1,798 @@
+"""
+Comprehensive test suite for agent.min - Autonomous CI/CD Agent
+
+Tests cover:
+- File operations
+- Task management
+- Planning mode
+- Execution mode
+- Ollama integration (mocked)
+- End-to-end workflows
+"""
+
+import json
+import os
+import shutil
+import uuid
+import sys
+from pathlib import Path
+from unittest.mock import Mock, patch, MagicMock
+
+import pytest
+
+# Import agent.min module
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Load agent.min file (without .py extension) using direct file execution
+agent_min_path = Path(__file__).parent.parent / "agent.min"
+if not agent_min_path.exists():
+    raise ImportError(f"agent.min not found at {agent_min_path}")
+
+# Create a module to load code into
+import types
+agent_min = types.ModuleType("agent_min")
+agent_min.__file__ = str(agent_min_path)
+
+# Execute the file in the module's namespace
+with open(agent_min_path, 'r', encoding='utf-8') as f:
+    code = compile(f.read(), str(agent_min_path), 'exec')
+    exec(code, agent_min.__dict__)
+
+# Add to sys.modules so imports work
+sys.modules['agent_min'] = agent_min
+
+
+# ========== Fixtures ==========
+
+@pytest.fixture
+def temp_dir():
+    """Create temporary directory for testing."""
+    d = agent_min.ROOT / "tests_tmp_agent_min" / f"test_{uuid.uuid4().hex[:8]}"
+    d.mkdir(parents=True, exist_ok=True)
+    yield d
+    shutil.rmtree(d, ignore_errors=True)
+
+
+@pytest.fixture
+def mock_ollama_response():
+    """Mock Ollama API response."""
+    def _make_response(content="", tool_calls=None):
+        return {
+            "message": {
+                "content": content,
+                "tool_calls": tool_calls or []
+            }
+        }
+    return _make_response
+
+
+# ========== Unit Tests: File Operations ==========
+
+class TestFileOperations:
+    """Test core file operation functions."""
+
+    def test_safe_path_blocks_escape(self):
+        """Test that _safe_path prevents directory traversal."""
+        with pytest.raises(ValueError, match="Path escapes repo"):
+            agent_min._safe_path("../../etc/passwd")
+
+    def test_safe_path_allows_valid_relative(self):
+        """Test that _safe_path allows valid relative paths."""
+        path = agent_min._safe_path("tests/test_agent_min.py")
+        assert str(path).startswith(str(agent_min.ROOT))
+
+    def test_read_file_success(self, temp_dir):
+        """Test successful file reading."""
+        test_file = temp_dir / "test.txt"
+        test_content = "Hello, World!"
+        test_file.write_text(test_content, encoding="utf-8")
+
+        rel_path = str(test_file.relative_to(agent_min.ROOT))
+        result = agent_min.read_file(rel_path)
+
+        assert result == test_content
+
+    def test_read_file_not_found(self):
+        """Test reading non-existent file."""
+        result = agent_min.read_file("nonexistent_file_12345.txt")
+        data = json.loads(result)
+        assert "error" in data
+        assert "Not found" in data["error"]
+
+    def test_read_file_too_large(self, temp_dir):
+        """Test reading file that exceeds size limit."""
+        test_file = temp_dir / "large.txt"
+        # Create file larger than MAX_FILE_BYTES
+        large_content = "x" * (agent_min.MAX_FILE_BYTES + 1000)
+        test_file.write_text(large_content, encoding="utf-8")
+
+        rel_path = str(test_file.relative_to(agent_min.ROOT))
+        result = agent_min.read_file(rel_path)
+        data = json.loads(result)
+
+        assert "error" in data
+        assert "Too large" in data["error"]
+
+    def test_write_file_success(self, temp_dir):
+        """Test successful file writing."""
+        test_path = str((temp_dir / "new_file.txt").relative_to(agent_min.ROOT))
+        test_content = "New content"
+
+        result = agent_min.write_file(test_path, test_content)
+        data = json.loads(result)
+
+        assert "wrote" in data
+        assert data["bytes"] == len(test_content)
+
+        # Verify file was actually written
+        full_path = agent_min.ROOT / test_path
+        assert full_path.exists()
+        assert full_path.read_text(encoding="utf-8") == test_content
+
+    def test_write_file_creates_parent_dirs(self, temp_dir):
+        """Test that write_file creates parent directories."""
+        nested_path = str((temp_dir / "deep" / "nested" / "file.txt").relative_to(agent_min.ROOT))
+
+        result = agent_min.write_file(nested_path, "content")
+        data = json.loads(result)
+
+        assert "wrote" in data
+        assert (agent_min.ROOT / nested_path).exists()
+
+    def test_list_dir(self, temp_dir):
+        """Test listing directory files."""
+        # Create test files
+        (temp_dir / "file1.txt").write_text("test")
+        (temp_dir / "file2.py").write_text("test")
+        (temp_dir / "file3.md").write_text("test")
+
+        pattern = str(temp_dir.relative_to(agent_min.ROOT)) + "/*"
+        result = agent_min.list_dir(pattern)
+        data = json.loads(result)
+
+        assert "files" in data
+        assert data["count"] >= 3
+        filenames = [Path(f).name for f in data["files"]]
+        assert "file1.txt" in filenames
+        assert "file2.py" in filenames
+
+    def test_search_code_regex(self, temp_dir):
+        """Test code search with regex."""
+        # Create test file with searchable content
+        test_file = temp_dir / "search_test.py"
+        test_file.write_text("def hello():\n    print('Hello')\n    return True", encoding="utf-8")
+
+        pattern = r"def\s+\w+\("
+        include = str(temp_dir.relative_to(agent_min.ROOT)) + "/**/*"
+        result = agent_min.search_code(pattern, include=include, regex=True)
+        data = json.loads(result)
+
+        assert "matches" in data
+        matches = data["matches"]
+        assert len(matches) > 0
+        assert any("def hello(" in m["text"] for m in matches)
+
+    def test_search_code_case_insensitive(self, temp_dir):
+        """Test case-insensitive search."""
+        test_file = temp_dir / "case_test.txt"
+        test_file.write_text("HELLO\nhello\nHeLLo", encoding="utf-8")
+
+        pattern = "hello"
+        include = str(temp_dir.relative_to(agent_min.ROOT)) + "/**/*"
+        result = agent_min.search_code(pattern, include=include, case_sensitive=False)
+        data = json.loads(result)
+
+        assert len(data["matches"]) == 3
+
+
+# ========== Unit Tests: Git Operations ==========
+
+class TestGitOperations:
+    """Test git-related functions."""
+
+    def test_git_diff_no_changes(self):
+        """Test git diff with no changes."""
+        result = agent_min.git_diff(".")
+        data = json.loads(result)
+
+        assert "diff" in data
+        assert data["rc"] == 0
+
+    def test_apply_patch_dry_run(self, temp_dir):
+        """Test applying patch in dry-run mode."""
+        # Create a simple patch
+        patch = """--- a/test.txt
++++ b/test.txt
+@@ -1 +1 @@
+-old content
++new content
+"""
+        result = agent_min.apply_patch(patch, dry_run=True)
+        data = json.loads(result)
+
+        assert "dry_run" in data
+        assert data["dry_run"] is True
+
+    def test_get_repo_context(self):
+        """Test getting repository context."""
+        result = agent_min.get_repo_context(commits=3)
+        data = json.loads(result)
+
+        assert "status" in data
+        assert "log" in data
+        assert "top_level" in data
+        assert isinstance(data["top_level"], list)
+
+
+# ========== Unit Tests: Command Execution ==========
+
+class TestCommandExecution:
+    """Test command execution functions."""
+
+    def test_run_cmd_blocks_disallowed(self):
+        """Test that disallowed commands are blocked."""
+        result = agent_min.run_cmd("curl http://example.com")
+        data = json.loads(result)
+
+        assert "blocked" in data
+        assert "allow" in data
+
+    def test_run_cmd_allows_python(self):
+        """Test that allowed commands (python) work."""
+        result = agent_min.run_cmd("python --version", timeout=10)
+        data = json.loads(result)
+
+        assert "rc" in data
+        assert data["rc"] == 0
+        output = data.get("stdout", "") + data.get("stderr", "")
+        assert "Python" in output
+
+    def test_run_cmd_allows_git(self):
+        """Test that git commands are allowed."""
+        result = agent_min.run_cmd("git status", timeout=10)
+        data = json.loads(result)
+
+        assert "rc" in data
+        # Git should be available in repo
+        assert data["rc"] == 0
+
+    def test_run_tests_default_command(self):
+        """Test run_tests with default pytest command."""
+        # This might fail if pytest isn't installed, but should not crash
+        result = agent_min.run_tests()
+        data = json.loads(result)
+
+        # Should have either rc or blocked/timeout
+        assert "rc" in data or "blocked" in data or "timeout" in data
+
+
+# ========== Unit Tests: Task Management ==========
+
+class TestTaskManagement:
+    """Test Task and ExecutionPlan classes."""
+
+    def test_task_creation(self):
+        """Test creating a task."""
+        task = agent_min.Task("Test task", "edit")
+
+        assert task.description == "Test task"
+        assert task.action_type == "edit"
+        assert task.status == agent_min.TaskStatus.PENDING
+        assert task.result is None
+        assert task.error is None
+
+    def test_task_to_dict(self):
+        """Test task serialization."""
+        task = agent_min.Task("Test task", "add")
+        task.status = agent_min.TaskStatus.COMPLETED
+        task.result = "Success"
+
+        data = task.to_dict()
+
+        assert data["description"] == "Test task"
+        assert data["action_type"] == "add"
+        assert data["status"] == "completed"
+        assert data["result"] == "Success"
+
+    def test_execution_plan_add_task(self):
+        """Test adding tasks to execution plan."""
+        plan = agent_min.ExecutionPlan()
+
+        plan.add_task("Task 1", "review")
+        plan.add_task("Task 2", "edit")
+        plan.add_task("Task 3", "test")
+
+        assert len(plan.tasks) == 3
+        assert plan.tasks[0].description == "Task 1"
+        assert plan.tasks[1].action_type == "edit"
+
+    def test_execution_plan_current_task(self):
+        """Test getting current task from plan."""
+        plan = agent_min.ExecutionPlan()
+        plan.add_task("Task 1")
+        plan.add_task("Task 2")
+
+        current = plan.get_current_task()
+        assert current is not None
+        assert current.description == "Task 1"
+
+    def test_execution_plan_mark_completed(self):
+        """Test marking task as completed."""
+        plan = agent_min.ExecutionPlan()
+        plan.add_task("Task 1")
+        plan.add_task("Task 2")
+
+        plan.mark_completed("Success")
+
+        assert plan.tasks[0].status == agent_min.TaskStatus.COMPLETED
+        assert plan.tasks[0].result == "Success"
+        assert plan.current_index == 1
+
+    def test_execution_plan_mark_failed(self):
+        """Test marking task as failed."""
+        plan = agent_min.ExecutionPlan()
+        plan.add_task("Task 1")
+
+        plan.mark_failed("Error occurred")
+
+        assert plan.tasks[0].status == agent_min.TaskStatus.FAILED
+        assert plan.tasks[0].error == "Error occurred"
+
+    def test_execution_plan_is_complete(self):
+        """Test checking if plan is complete."""
+        plan = agent_min.ExecutionPlan()
+        plan.add_task("Task 1")
+        plan.add_task("Task 2")
+
+        assert not plan.is_complete()
+
+        plan.mark_completed()
+        assert not plan.is_complete()
+
+        plan.mark_completed()
+        assert plan.is_complete()
+
+    def test_execution_plan_summary(self):
+        """Test getting plan summary."""
+        plan = agent_min.ExecutionPlan()
+        plan.add_task("Task 1")
+        plan.add_task("Task 2")
+        plan.add_task("Task 3")
+
+        plan.mark_completed()
+        plan.mark_failed("error")
+
+        summary = plan.get_summary()
+
+        assert "1/3 completed" in summary
+        assert "1 failed" in summary
+
+
+# ========== Unit Tests: Tool Execution ==========
+
+class TestToolExecution:
+    """Test execute_tool function."""
+
+    def test_execute_tool_read_file(self, temp_dir):
+        """Test executing read_file tool."""
+        test_file = temp_dir / "tool_test.txt"
+        test_file.write_text("Tool test content", encoding="utf-8")
+
+        rel_path = str(test_file.relative_to(agent_min.ROOT))
+        result = agent_min.execute_tool("read_file", {"path": rel_path})
+
+        assert "Tool test content" in result
+
+    def test_execute_tool_write_file(self, temp_dir):
+        """Test executing write_file tool."""
+        rel_path = str((temp_dir / "tool_write.txt").relative_to(agent_min.ROOT))
+        result = agent_min.execute_tool("write_file", {"path": rel_path, "content": "New content"})
+
+        data = json.loads(result)
+        assert "wrote" in data
+
+    def test_execute_tool_list_dir(self):
+        """Test executing list_dir tool."""
+        result = agent_min.execute_tool("list_dir", {"pattern": "*.py"})
+        data = json.loads(result)
+
+        assert "files" in data
+        assert "count" in data
+
+    def test_execute_tool_get_repo_context(self):
+        """Test executing get_repo_context tool."""
+        result = agent_min.execute_tool("get_repo_context", {"commits": 5})
+        data = json.loads(result)
+
+        assert "status" in data
+        assert "log" in data
+
+    def test_execute_tool_unknown(self):
+        """Test executing unknown tool."""
+        result = agent_min.execute_tool("unknown_tool", {})
+        data = json.loads(result)
+
+        assert "error" in data
+        assert "Unknown tool" in data["error"]
+
+
+# ========== Integration Tests: Ollama ==========
+
+class TestOllamaIntegration:
+    """Test Ollama API integration (mocked)."""
+
+    @patch('agent_min.requests.post')
+    def test_ollama_chat_success(self, mock_post):
+        """Test successful Ollama chat request."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "message": {
+                "content": "Hello, I am an AI assistant.",
+                "tool_calls": []
+            }
+        }
+        mock_post.return_value = mock_response
+
+        messages = [{"role": "user", "content": "Hello"}]
+        result = agent_min.ollama_chat(messages)
+
+        assert "message" in result
+        assert "content" in result["message"]
+        assert "Hello, I am an AI assistant" in result["message"]["content"]
+
+    @patch('agent_min.requests.post')
+    def test_ollama_chat_with_tools(self, mock_post):
+        """Test Ollama chat with tool calls."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "message": {
+                "content": "Let me read that file",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "read_file",
+                            "arguments": {"path": "test.txt"}
+                        }
+                    }
+                ]
+            }
+        }
+        mock_post.return_value = mock_response
+
+        messages = [{"role": "user", "content": "Read test.txt"}]
+        result = agent_min.ollama_chat(messages, tools=agent_min.TOOLS)
+
+        assert "tool_calls" in result["message"]
+        assert len(result["message"]["tool_calls"]) == 1
+        assert result["message"]["tool_calls"][0]["function"]["name"] == "read_file"
+
+    @patch('agent_min.requests.post')
+    def test_ollama_chat_error(self, mock_post):
+        """Test Ollama chat with connection error."""
+        mock_post.side_effect = Exception("Connection refused")
+
+        messages = [{"role": "user", "content": "Hello"}]
+        result = agent_min.ollama_chat(messages)
+
+        assert "error" in result
+        assert "Connection refused" in result["error"]
+
+
+# ========== Integration Tests: Planning Mode ==========
+
+class TestPlanningMode:
+    """Test planning mode functionality."""
+
+    @patch('agent_min.ollama_chat')
+    @patch('agent_min.get_repo_context')
+    def test_planning_mode_generates_plan(self, mock_context, mock_ollama):
+        """Test that planning mode generates execution plan."""
+        # Mock repository context
+        mock_context.return_value = json.dumps({
+            "status": "clean",
+            "log": "commit 1\ncommit 2",
+            "top_level": [{"name": "agent.py", "type": "file"}]
+        })
+
+        # Mock Ollama response with valid plan
+        mock_ollama.return_value = {
+            "message": {
+                "content": json.dumps([
+                    {"description": "Review code structure", "action_type": "review"},
+                    {"description": "Add error handling", "action_type": "edit"},
+                    {"description": "Run tests", "action_type": "test"}
+                ])
+            }
+        }
+
+        plan = agent_min.planning_mode("Add error handling to API")
+
+        assert isinstance(plan, agent_min.ExecutionPlan)
+        assert len(plan.tasks) == 3
+        assert plan.tasks[0].action_type == "review"
+        assert plan.tasks[1].action_type == "edit"
+        assert plan.tasks[2].action_type == "test"
+
+    @patch('agent_min.ollama_chat')
+    @patch('agent_min.get_repo_context')
+    def test_planning_mode_handles_malformed_response(self, mock_context, mock_ollama):
+        """Test planning mode handles malformed Ollama response."""
+        mock_context.return_value = json.dumps({"status": "clean"})
+
+        # Mock malformed response
+        mock_ollama.return_value = {
+            "message": {
+                "content": "I will help you with that task..."
+            }
+        }
+
+        plan = agent_min.planning_mode("Do something")
+
+        # Should create fallback plan
+        assert isinstance(plan, agent_min.ExecutionPlan)
+        assert len(plan.tasks) == 1
+        assert plan.tasks[0].description == "Do something"
+
+
+# ========== Integration Tests: Execution Mode ==========
+
+class TestExecutionMode:
+    """Test execution mode functionality."""
+
+    @patch('agent_min.ollama_chat')
+    @patch('builtins.input', return_value='y')
+    def test_execution_mode_single_task_completion(self, mock_input, mock_ollama):
+        """Test execution mode completes a simple task."""
+        # Create simple plan
+        plan = agent_min.ExecutionPlan()
+        plan.add_task("Simple task", "general")
+
+        # Mock Ollama to return completion immediately
+        mock_ollama.return_value = {
+            "message": {
+                "content": "TASK_COMPLETE: Task finished successfully",
+                "tool_calls": []
+            }
+        }
+
+        result = agent_min.execution_mode(plan, approved=False)
+
+        # Should have completed
+        assert plan.is_complete()
+        assert plan.tasks[0].status == agent_min.TaskStatus.COMPLETED
+
+    @patch('agent_min.ollama_chat')
+    @patch('builtins.input', return_value='n')
+    def test_execution_mode_user_cancels(self, mock_input, mock_ollama):
+        """Test execution mode respects user cancellation."""
+        plan = agent_min.ExecutionPlan()
+        plan.add_task("Task 1")
+
+        result = agent_min.execution_mode(plan, approved=False)
+
+        # Should be cancelled
+        assert result is False
+        assert not plan.is_complete()
+
+    @patch('agent_min.ollama_chat')
+    def test_execution_mode_with_tool_calls(self, mock_ollama):
+        """Test execution mode executes tool calls."""
+        plan = agent_min.ExecutionPlan()
+        plan.add_task("Read a file", "review")
+
+        # First call: agent wants to use tool
+        # Second call: agent completes task
+        mock_ollama.side_effect = [
+            {
+                "message": {
+                    "content": "Let me read the file",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "get_repo_context",
+                                "arguments": json.dumps({"commits": 1})
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "message": {
+                    "content": "TASK_COMPLETE: File reviewed",
+                    "tool_calls": []
+                }
+            }
+        ]
+
+        result = agent_min.execution_mode(plan, approved=True)
+
+        assert plan.tasks[0].status == agent_min.TaskStatus.COMPLETED
+
+    @patch('agent_min.ollama_chat')
+    def test_execution_mode_handles_errors(self, mock_ollama):
+        """Test execution mode handles Ollama errors."""
+        plan = agent_min.ExecutionPlan()
+        plan.add_task("Task with error")
+
+        # Mock Ollama error
+        mock_ollama.return_value = {
+            "error": "Connection timeout"
+        }
+
+        result = agent_min.execution_mode(plan, approved=True)
+
+        # Task should be marked as failed
+        assert plan.tasks[0].status == agent_min.TaskStatus.FAILED
+        assert "Connection timeout" in plan.tasks[0].error
+
+
+# ========== End-to-End Tests ==========
+
+class TestEndToEnd:
+    """End-to-end integration tests."""
+
+    @patch('agent_min.ollama_chat')
+    @patch('agent_min.get_repo_context')
+    def test_full_workflow_file_edit(self, mock_context, mock_ollama, temp_dir):
+        """Test complete workflow: plan -> execute -> validate."""
+        # Setup
+        test_file = temp_dir / "target.txt"
+        test_file.write_text("original content", encoding="utf-8")
+        rel_path = str(test_file.relative_to(agent_min.ROOT))
+
+        # Mock context
+        mock_context.return_value = json.dumps({"status": "clean"})
+
+        # Mock planning response
+        planning_response = {
+            "message": {
+                "content": json.dumps([
+                    {"description": f"Read {rel_path}", "action_type": "review"},
+                    {"description": f"Modify {rel_path}", "action_type": "edit"}
+                ])
+            }
+        }
+
+        # Mock execution responses
+        execution_responses = [
+            # Task 1: Read file
+            {
+                "message": {
+                    "content": "Reading file",
+                    "tool_calls": [{
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps({"path": rel_path})
+                        }
+                    }]
+                }
+            },
+            {
+                "message": {
+                    "content": "TASK_COMPLETE: File read",
+                    "tool_calls": []
+                }
+            },
+            # Task 2: Modify file
+            {
+                "message": {
+                    "content": "Modifying file",
+                    "tool_calls": [{
+                        "function": {
+                            "name": "write_file",
+                            "arguments": json.dumps({
+                                "path": rel_path,
+                                "content": "modified content"
+                            })
+                        }
+                    }]
+                }
+            },
+            {
+                "message": {
+                    "content": "TASK_COMPLETE: File modified",
+                    "tool_calls": []
+                }
+            }
+        ]
+
+        mock_ollama.side_effect = [planning_response] + execution_responses
+
+        # Execute workflow
+        plan = agent_min.planning_mode("Edit the test file")
+        result = agent_min.execution_mode(plan, approved=True)
+
+        # Verify
+        assert plan.is_complete()
+        assert all(t.status == agent_min.TaskStatus.COMPLETED for t in plan.tasks)
+
+        # Verify file was actually modified
+        assert test_file.read_text() == "modified content"
+
+
+# ========== Utility Tests ==========
+
+class TestUtilities:
+    """Test utility functions."""
+
+    def test_is_text_file(self, temp_dir):
+        """Test text file detection."""
+        # Create text file
+        text_file = temp_dir / "text.txt"
+        text_file.write_text("This is text", encoding="utf-8")
+        assert agent_min._is_text_file(text_file) is True
+
+        # Create binary file
+        binary_file = temp_dir / "binary.bin"
+        binary_file.write_bytes(b"\x00\x01\x02\x03")
+        assert agent_min._is_text_file(binary_file) is False
+
+    def test_should_skip(self):
+        """Test directory exclusion."""
+        # Should skip
+        assert agent_min._should_skip(Path("node_modules/package"))
+        assert agent_min._should_skip(Path("project/.git/objects"))
+        assert agent_min._should_skip(Path("src/__pycache__/module.pyc"))
+
+        # Should not skip
+        assert not agent_min._should_skip(Path("src/main.py"))
+        assert not agent_min._should_skip(Path("tests/test_file.py"))
+
+    def test_iter_files(self, temp_dir):
+        """Test file iteration with glob."""
+        # Create test files
+        (temp_dir / "file1.py").write_text("test")
+        (temp_dir / "file2.txt").write_text("test")
+        (temp_dir / "subdir").mkdir()
+        (temp_dir / "subdir" / "file3.py").write_text("test")
+
+        # Search for Python files
+        pattern = str(temp_dir.relative_to(agent_min.ROOT)) + "/**/*.py"
+        files = agent_min._iter_files(pattern)
+
+        assert len(files) >= 2
+        filenames = [f.name for f in files]
+        assert "file1.py" in filenames
+        assert "file3.py" in filenames
+
+
+# ========== Performance Tests ==========
+
+class TestPerformance:
+    """Test performance characteristics."""
+
+    def test_search_respects_match_limit(self, temp_dir):
+        """Test that search respects max_matches limit."""
+        # Create file with many matches
+        test_file = temp_dir / "many_matches.txt"
+        content = "match\n" * 5000  # 5000 lines with "match"
+        test_file.write_text(content, encoding="utf-8")
+
+        pattern = "match"
+        include = str(temp_dir.relative_to(agent_min.ROOT)) + "/**/*"
+        result = agent_min.search_code(pattern, include=include, max_matches=100)
+        data = json.loads(result)
+
+        # Should truncate to limit
+        assert len(data["matches"]) <= 100
+        assert data.get("truncated") is True
+
+    def test_read_file_respects_size_limit(self, temp_dir):
+        """Test that read_file truncates large files."""
+        # Create file that will be truncated
+        test_file = temp_dir / "truncated.txt"
+        large_content = "x" * (agent_min.READ_RETURN_LIMIT + 10000)
+        test_file.write_text(large_content, encoding="utf-8")
+
+        rel_path = str(test_file.relative_to(agent_min.ROOT))
+        result = agent_min.read_file(rel_path)
+
+        # Should be truncated
+        assert len(result) <= agent_min.READ_RETURN_LIMIT + 100  # Allow for truncation message
+        assert "[truncated]" in result
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

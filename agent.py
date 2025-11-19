@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -29,6 +30,7 @@ import subprocess
 import tempfile
 import getpass
 import hashlib
+import difflib
 from typing import Dict, Any, List, Optional
 
 # ---------- Optional deps (soft-imports) ----------
@@ -54,6 +56,108 @@ except Exception:
 COLOR_ENABLED = True
 
 from openai import OpenAI
+
+
+# ===== Add near your imports =====
+from collections import deque
+
+global SUPPRESS_ALL_RUNTIME
+SUPPRESS_ALL_RUNTIME = False
+
+# ===== Add globals / config (top-level is fine) =====
+HARD_LOCK_DEFAULT_MAX = int(os.getenv("AGENT_MAX_TOOL_CALLS_PER_TASK", "0"))
+TOOL_REPEAT_WINDOW    = int(os.getenv("AGENT_TOOL_REPEAT_WINDOW", "3"))
+TURN_CAP_TASK         = int(os.getenv("AGENT_TURN_CAP_TASK", "0"))
+TURN_CAP_REPL         = int(os.getenv("AGENT_TURN_CAP_REPL", "0"))
+
+API_MAX_CALLS_TASK    = int(os.getenv("AGENT_API_MAX_CALLS_PER_TASK", "0"))
+API_MAX_TOKENS_TASK   = int(os.getenv("AGENT_API_MAX_TOKENS_PER_TASK", "0"))
+
+API_MAX_CALLS_GLOBAL  = int(os.getenv("AGENT_API_MAX_CALLS_GLOBAL", "0"))   # 0 = disabled
+API_MAX_TOKENS_GLOBAL = int(os.getenv("AGENT_API_MAX_TOKENS_GLOBAL", "0"))  # 0 = disabled
+RESP_MAX_TOKENS       = int(os.getenv("AGENT_MAX_TOKENS_PER_RESPONSE", "0"))
+ALLOW_TOOLS           = {t.strip() for t in os.getenv("AGENT_TOOL_ALLOWLIST", "").split(",") if t.strip()}
+HARD_LOCK_AFTER_TOOL  = os.getenv("AGENT_HARD_LOCK_AFTER_TOOL", "0") == "1"
+ASSUME_YES            = os.getenv("AGENT_ASSUME_YES", "0") == "1"
+AUTO_CONTINUE         = os.getenv("AGENT_AUTO_CONTINUE", "1") == "1"
+ALLOW_ALWAYS_REGEX    = [re.compile(p) for p in os.getenv("AGENT_ALLOW_ALWAYS_REGEX", "").split(",") if p.strip()]
+
+VERBOSE_BLOCK         = os.getenv("AGENT_VERBOSE_BLOCK", "1") == "1"
+_LAST_GATE_SNAPSHOT: Dict[str, Any] = {}
+
+def _snapshot_gate(gate, reason: Optional[str] = None):
+    try:
+        state = {
+            "locked": getattr(gate, "locked", None),
+            "calls": getattr(gate, "calls", None),
+            "max_calls": getattr(gate, "max_calls", None),
+            "recent": list(getattr(gate, "recent", [])),
+        }
+    except Exception:
+        state = {}
+    if reason:
+        state["reason"] = reason
+    globals()["_LAST_GATE_SNAPSHOT"] = state
+    if VERBOSE_BLOCK:
+        _print_status(f"[Block] {reason} | locked={state.get('locked')} calls={state.get('calls')}/{state.get('max_calls')} recent={state.get('recent')}")
+    return state
+
+_API_CALLS_GLOBAL = 0
+_API_TOKENS_GLOBAL = 0
+# Subprocess decoding guard (avoid cp1252/locale crashes on Windows)
+_SUBPROC_ENCODING = os.getenv("AGENT_SUBPROCESS_ENCODING", "utf-8")
+_SUBPROC_ERRORS = os.getenv("AGENT_SUBPROCESS_ERRORS", "replace")
+
+
+def _tok_usage_total(resp) -> int:
+    try:
+        u = getattr(resp, "usage", None)
+        if not u:
+            return 0
+        # OpenAI python: u.total_tokens ; fallback dict
+        return int(getattr(u, "total_tokens", 0) or (u.get("total_tokens", 0) if isinstance(u, dict) else 0))
+    except Exception:
+        return 0
+
+def _tool_sig(name: str, args: dict) -> str:
+    try:
+        return f"{name}:{hashlib.sha256(json.dumps(args, sort_keys=True).encode()).hexdigest()[:12]}"
+    except Exception:
+        return f"{name}:na"
+
+class _ToolGate:
+    """Per-task tool gate with harder lock + repeat de-dupe + allowlist."""
+    def __init__(self, max_calls: int, repeat_window: int):
+        self.max_calls = max_calls
+        self.calls = 0
+        self.locked = False
+        self.recent = deque(maxlen=repeat_window)
+
+    def can_attempt(self) -> bool:
+        return (not self.locked) and ((self.max_calls <= 0) or (self.calls < self.max_calls))
+ 
+ 
+    def vet(self, name: str, args: dict):
+        if self.locked:
+            return False, "locked"
+        if (self.max_calls > 0) and (self.calls >= self.max_calls):            
+            return False, "tool_budget_exhausted"
+        if ALLOW_TOOLS and name not in ALLOW_TOOLS:
+            return False, f"not_allowed:{name}"
+        sig = _tool_sig(name, args)
+        if sig in self.recent:
+            return False, "repeat_call"
+        return True, sig
+
+    def record(self, sig: str):
+        self.recent.append(sig)
+        self.calls += 1
+
+    def hard_lock(self):
+        #self.locked = True
+        pass
+
+
 
 ROOT = pathlib.Path(os.getcwd()).resolve()
 
@@ -116,8 +220,10 @@ def _save_prefs(prefs: Dict[str, Any]) -> None:
         pass
 
 PREFS = _load_prefs()
+
 def _allowed_by_prefs(sig: str) -> bool:
     return sig in set(PREFS.get("allow_always", []))
+
 def _remember_allow(sig: str) -> None:
     aa = set(PREFS.get("allow_always", []))
     aa.add(sig)
@@ -147,7 +253,16 @@ def _iter_files(include_glob: str) -> List[pathlib.Path]:
     return [p for p in files if not _should_skip(p)]
 
 def _run_shell(cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, shell=True, cwd=str(ROOT), text=True, capture_output=True, timeout=timeout)
+    return subprocess.run(
+        cmd,
+        shell=True,
+        cwd=str(ROOT),
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        encoding=_SUBPROC_ENCODING,
+        errors=_SUBPROC_ERRORS,
+    )
 
 def _hash_text(s: str) -> str:
     try:
@@ -159,33 +274,102 @@ def _is_mutating_cmd(cmd: str) -> bool:
     return any(re.search(pat, cmd) for pat in MUTATING_CMD_PATTERNS)
 
 # ---------- Interactive guard (C/A/S) ----------
-def _print_guard_header(human_desc: str) -> None:
+def _print_guard_header(human_desc: str, preview: Optional[str]=None) -> None:
     if COLOR_ENABLED and _HAS_COLOR and sys.stdout.isatty():
         print(f"\n{Style.BRIGHT}{Fore.YELLOW}[GUARD]{Style.RESET_ALL} Pending change:\n  - {human_desc}")
-        print(f"Choose: {Style.BRIGHT}[C]{Style.RESET_ALL} Continue  |  {Style.BRIGHT}[A]{Style.RESET_ALL} Continue & don’t prompt again  |  {Style.BRIGHT}[S]{Style.RESET_ALL} Stop & provide instructions")
+         
+        if preview:
+            print(f"{Style.DIM}--- Preview ---{Style.RESET_ALL}\n{_redact_text(preview)}\n{Style.DIM}--- End Preview ---{Style.RESET_ALL}")
+        print(
+            f"Choose: {Style.BRIGHT}[C]{Style.RESET_ALL} Continue  |  "
+            f"{Style.BRIGHT}[A]{Style.RESET_ALL} Continue & don’t prompt again (session-wide)  |  "
+            f"{Style.BRIGHT}[S]{Style.RESET_ALL} Stop & provide instructions  |  "
+            f"{Style.BRIGHT}[Esc]{Style.RESET_ALL} Stop (instant)"
+        )
     else:
         print("\n[GUARD] Pending change:\n  - " + human_desc)
-        print("Choose: [C] Continue  |  [A] Continue & don’t prompt again  |  [S] Stop & provide instructions")
+        if preview:
+            print("--- Preview ---\n" + _redact_text(preview) + "\n--- End Preview ---")
+        print("Choose: [C] Continue  |  [A] Continue & don’t prompt again (session-wide)  |  [S] Stop & provide instructions  |  [Esc] Stop")
 
-def _prompt_guard(action_sig: str, human_desc: str, non_interactive: bool) -> Dict[str, Any]:
+def _guard_read_choice() -> str:
+    """
+    Returns one of: 'c', 'a', 's', 'esc'
+    - On Windows, supports raw Esc without Enter using msvcrt.getwch().
+    - On POSIX, falls back to input(); users can type 'esc' or choose S.
+    """
+    # Windows: single-key read (Esc works without Enter)
+    if os.name == "nt":
+        try:
+            import msvcrt
+            print("Your choice (C/A/S or Esc): ", end="", flush=True)
+            while True:
+                ch = msvcrt.getwch()
+                if not ch:
+                    continue
+                if ch in ("c","C"): print("C"); return "c"
+                if ch in ("a","A"): print("A"); return "a"
+                if ch in ("s","S"): print("S"); return "s"
+                # Escape
+                if ch == "\x1b":
+                    print("Esc")
+                    return "esc"
+        except Exception:
+            # fall through to input() if msvcrt is unavailable
+            pass
+    # POSIX or fallback: line input
+    choice = input("Your choice (C/A/S or type 'esc'): ").strip().lower()
+    if choice == "esc":
+        return "esc"
+    return choice
+ 
+ 
+def _prompt_guard(action_sig: str, human_desc: str, non_interactive: bool, preview: Optional[str]=None) -> Dict[str, Any]:
+    global SUPPRESS_ALL_RUNTIME
+    
+    # Session-wide suppression (set by pressing A once)
+    if SUPPRESS_ALL_RUNTIME:
+        return {"decision": "allow_always"}
     if _allowed_by_prefs(action_sig):
         return {"decision": "continue"}
+    if ASSUME_YES:
+        return {"decision": "continue"}
+ 
+    # Regex auto-allow
+    try:
+        for rx in ALLOW_ALWAYS_REGEX:
+            if rx.search(action_sig):
+                return {"decision": "allow_always"}
+    except Exception:
+        pass
 
+    if ASSUME_YES:
+        return {"decision":"continue"}
     if non_interactive or not sys.stdin.isatty():
+        if ASSUME_YES:
+            return {"decision": "continue"}
         return {"decision": "stop", "reason": "Non-interactive mode; provide manual instructions."}
 
-    _print_guard_header(human_desc)
+
+    _print_guard_header(human_desc, preview)
     try:
         while True:
-            choice = input("Your choice (C/A/S): ").strip().lower()
-            if choice in ("c", "a", "s"):
+            choice = _guard_read_choice()
+            if choice in ("c", "a", "s", "esc"):
                 break
         if choice == "c":
             return {"decision": "continue"}
         if choice == "a":
             _remember_allow(action_sig)
             print(f"[GUARD] Remembered: {action_sig}")
+            # Also suppress all further prompts for this session
+            SUPPRESS_ALL_RUNTIME = True
+            print("[GUARD] Session-wide suppression enabled: further guarded actions will auto-continue.")
             return {"decision": "allow_always"}
+        if choice == "esc":
+            # Instant stop without requiring Enter
+            reason = "Interrupted via Esc"
+            return {"decision": "stop", "reason": reason}
         reason = input("Briefly describe what you want instead (optional): ").strip()
         return {"decision": "stop", "reason": (reason or "User requested instructions.")}
     except KeyboardInterrupt:
@@ -193,6 +377,54 @@ def _prompt_guard(action_sig: str, human_desc: str, non_interactive: bool) -> Di
         return {"decision": "stop", "reason": "Interrupted"}
 
 # ---------- Core local tools ----------
+
+def _print_status(msg: str) -> None:
+    if COLOR_ENABLED and _HAS_COLOR and sys.stdout.isatty():
+        print(f"{Style.DIM}{Fore.CYAN}[STATUS]{Style.RESET_ALL} {msg}")
+    else:
+        print(f"[STATUS] {msg}")
+
+def _diff_preview(old_text: str, new_text: str, path: str) -> str:
+    try:
+        diff = difflib.unified_diff(
+            (old_text or "").splitlines(),
+            (new_text or "").splitlines(),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+            lineterm=""
+        )
+        preview = "\n".join(list(diff))
+        if len(preview) > 8000:
+            preview = preview[:8000] + "\n...[truncated]..."
+        return preview
+    except Exception:
+        return "(diff preview unavailable)"
+
+def _summarize_patch(patch: str) -> str:
+    try:
+        files = []
+        for line in patch.splitlines():
+            if line.startswith("diff --git "):
+                parts = line.strip().split()
+                if len(parts) >= 4:
+                    b_path = parts[3]
+                    fp = (b_path[2:] if b_path.startswith("b/") else b_path)
+                    if fp not in files:
+                        files.append(fp)
+            elif line.startswith("+++ "):
+                fp = line[4:].strip()
+                if fp != "/dev/null":
+                    fp = fp[2:] if fp.startswith("b/") else fp
+                    if fp not in files:
+                        files.append(fp)
+        head = "Files: " + (", ".join(files[:20]) or "(unknown)")
+        body = patch
+        if len(body) > 6000:
+            body = body[:6000] + "\n...[truncated]..."
+        return head + "\n\n" + body
+    except Exception:
+        return patch[:6000]
+
 def read_file(path: str) -> str:
     p = _safe_path(path)
     if not p.exists():
@@ -209,7 +441,14 @@ def read_file(path: str) -> str:
 
 def write_file(path: str, content: str, non_interactive: bool=False) -> str:
     sig = f"write_file:{path}"
-    guard = _prompt_guard(sig, f"write_file -> {path} ({len(content)} bytes)", non_interactive)
+    # build preview of file changes
+    try:
+        p_prev = _safe_path(path)
+        old = p_prev.read_text(encoding="utf-8", errors="ignore") if p_prev.exists() and p_prev.stat().st_size <= MAX_FILE_BYTES else ""
+    except Exception:
+        old = ""
+    preview = _diff_preview(old, content, path)
+    guard = _prompt_guard(sig, f"write_file -> {path} ({len(content)} bytes)", non_interactive, preview=preview)
     if guard["decision"] == "stop":
         return json.dumps({"user_decision":"stop","action_sig":sig,"reason":guard["reason"]})
     p = _safe_path(path)
@@ -241,6 +480,7 @@ def run_cmd(cmd: str, timeout: int=300, non_interactive: bool=False) -> str:
         return json.dumps({"timeout": timeout, "cmd": cmd})
 
 # ---------- Search / Diff / Patch / Format / Tests / Context ----------
+
 def search_code(pattern: str, include: str="**/*", exclude: Optional[List[str]]=None,
                 regex: bool=True, case_sensitive: bool=False,
                 max_matches: int=SEARCH_MATCH_LIMIT) -> str:
@@ -285,7 +525,8 @@ def apply_patch(patch: str, dry_run: bool=False, three_way: bool=True, reject: b
     h = _hash_text(patch[:10000])
     sig = f"apply_patch:{h}"
     if not dry_run:
-        guard = _prompt_guard(sig, f"apply_patch (apply) sha={h}", non_interactive)
+        preview = _summarize_patch(patch)
+        guard = _prompt_guard(sig, f"apply_patch (apply) sha={h}", non_interactive, preview=preview)
         if guard["decision"] == "stop":
             return json.dumps({"user_decision":"stop","action_sig":sig,"reason":guard["reason"]})
     with tempfile.NamedTemporaryFile("w+", delete=False, encoding="utf-8") as tf:
@@ -384,6 +625,7 @@ def get_repo_context(commits: int=6) -> str:
     return json.dumps({"status": st.stdout, "log": lg.stdout, "top_level": top[:100]})
 
 # ---------- Bitwarden: vault lookups via CLI ----------
+
 def bw_get(what: str, ref: str, field: Optional[str]=None) -> str:
     """
     what: 'password' | 'item' | 'username' | 'totp'
@@ -398,14 +640,14 @@ def bw_get(what: str, ref: str, field: Optional[str]=None) -> str:
     env["BW_SESSION"] = bw_sess
 
     if what in {"password","username","totp"}:
-        proc = subprocess.run(["bw","get",what,ref], text=True, capture_output=True, env=env)
+        proc = subprocess.run(["bw","get",what,ref], text=True, capture_output=True, env=env, encoding=_SUBPROC_ENCODING, errors=_SUBPROC_ERRORS)
         if proc.returncode != 0:
             return json.dumps({"error":proc.stderr.strip() or "bw get failed"})
         secret = proc.stdout.strip()
         _register_secret(secret)
         return json.dumps({what: "********"})
     elif what == "item":
-        proc = subprocess.run(["bw","get","item",ref], text=True, capture_output=True, env=env)
+        proc = subprocess.run(["bw","get","item",ref], text=True, capture_output=True, env=env, encoding=_SUBPROC_ENCODING, errors=_SUBPROC_ERRORS)
         if proc.returncode != 0:
             return json.dumps({"error":proc.stderr.strip() or "bw get item failed"})
         try:
@@ -431,6 +673,7 @@ def bw_get(what: str, ref: str, field: Optional[str]=None) -> str:
         return json.dumps({"error":"Unsupported 'what' for bw_get"})
 
 # ---------- HTTP(S) client ----------
+
 def http_request(method: str, url: str, headers: Optional[Dict[str,str]]=None, params: Optional[Dict[str,str]]=None,
                  json_body: Optional[Dict[str, Any]]=None, data: Optional[str]=None, timeout: int=30, verify_tls: bool=True,
                  bearer_token: Optional[str]=None, basic_user: Optional[str]=None, basic_pass: Optional[str]=None) -> str:
@@ -462,6 +705,7 @@ def http_request(method: str, url: str, headers: Optional[Dict[str,str]]=None, p
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
 # ---------- SSH exec + SFTP ----------
+
 def ssh_exec(host: str, user: str, cmd: str, port: int=22, password: Optional[str]=None, key_path: Optional[str]=None,
              accept_unknown_host: bool=False, timeout: int=120, non_interactive: bool=False) -> str:
     if "paramiko" in _REQ_ERR:
@@ -529,6 +773,7 @@ def sftp_get(host: str, user: str, remote_path: str, local_path: str, port: int=
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
 # ---------- WinRM / PowerShell ----------
+
 def winrm_exec(host: Optional[str]=None, endpoint: Optional[str]=None, command: Optional[str]=None, ps_script: Optional[str]=None,
                username: Optional[str]=None, password: Optional[str]=None, use_https: bool=True, port: int=5986,
                auth: str="ntlm", verify_tls: bool=False, timeout: int=120, non_interactive: bool=False) -> str:
@@ -561,6 +806,13 @@ def winrm_exec(host: Optional[str]=None, endpoint: Optional[str]=None, command: 
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
 # ---------- OpenAI wiring ----------
+one_round_rule = ("- You may chain small tool steps back-to-back until the current subtask is complete. "
+                  "Do not pause for user confirmation unless the guard blocks or instructions are ambiguous.")
+if not AUTO_CONTINUE:
+    one_round_rule = ("- You may chain small tool steps back-to-back (plan → single tool call → reflect). "
+                      "Do not batch multiple tool calls in one assistant turn.")
+
+
 SYSTEM = f"""
 You are a precise coding + ops agent working at repo: {ROOT}.
 
@@ -571,7 +823,7 @@ You are a precise coding + ops agent working at repo: {ROOT}.
   3) APPLY the change using tools (prefer `apply_patch` with a unified diff).
   4) VALIDATE: run tests/lints minimally (e.g., `run_tests`).
   5) REPORT: summarize result and the **next** smallest step.
-- **One tool action per round** (plan → single tool call → reflect). Do not batch multiple tool calls in one assistant turn.
+{one_round_rule}
 - Prefer `search_code` → `git_diff` to inspect before editing.
 - **Whitespace & indentation are sacred**:
   - Never “cleanup formatting” unless explicitly asked.
@@ -708,19 +960,84 @@ TOOLS = [
 ]
 
 # ---------- Tool call routing ----------
+
 def _handle_tool(name: str, args: Dict[str, Any], non_interactive: bool) -> str:
+    def _tool_summary(name: str, args: Dict[str, Any]) -> str:
+        try:
+            if name == "write_file":
+                return f"write_file -> {args.get('path')} ({len(args.get('content',''))} bytes)"
+            if name == "apply_patch":
+                ph = _hash_text((args.get('patch') or '')[:10000])
+                return f"apply_patch sha={ph} dry_run={bool(args.get('dry_run', False))}"
+            if name == "run_cmd":
+                return f"run_cmd -> {args.get('cmd')}"
+            if name == "http_request":
+                return f"http_request -> {args.get('method','GET').upper()} {args.get('url')}"
+            if name == "ssh_exec":
+                return f"ssh_exec -> {args.get('user')}@{args.get('host')}:{args.get('port',22)}"
+            if name == "sftp_put":
+                return f"sftp_put -> {args.get('local_path')} => {args.get('user')}@{args.get('host')}:{args.get('remote_path')}"
+            if name == "sftp_get":
+                return f"sftp_get -> {args.get('user')}@{args.get('host')}:{args.get('remote_path')} => {args.get('local_path')}"
+            if name == "winrm_exec":
+                return f"winrm_exec -> endpoint={args.get('endpoint') or args.get('host')}"
+            if name == "format_code":
+                return f"format_code -> {args.get('tool','auto')}"
+            if name == "run_tests":
+                return f"run_tests -> {args.get('cmd','pytest -q')}"
+            if name == "search_code":
+                return f"search_code -> pattern={args.get('pattern')}"
+            if name == "git_diff":
+                return f"git_diff -> {args.get('pathspec','.')}"
+            if name == "make_patch":
+                return f"make_patch -> {args.get('paths','.')}"
+            if name == "search_replace":
+                return f"search_replace -> pattern={args.get('pattern')} include={args.get('include','**/*')}"
+            if name == "list_dir":
+                return f"list_dir -> {args.get('pattern','**/*')}"
+            if name == "read_file":
+                return f"read_file -> {args.get('path')}"
+            if name == "get_repo_context":
+                return f"get_repo_context -> commits={args.get('commits',6)}"
+            if name == "bw_get":
+                return f"bw_get -> {args.get('what')} {args.get('ref')}"
+        except Exception:
+            pass
+        return name
+    _print_status(_tool_summary(name, args))
     try:
-        if name == "read_file":         return read_file(args["path"])
+        if name == "read_file":
+            _res = read_file(args["path"])
+            try:
+                _data = json.loads(_res)
+                if "error" in _data:
+                    _print_substatus(f"Error: {_data['error']}")
+                else:
+                    _print_substatus("Read file.")
+            except Exception:
+                _print_substatus(f"Read {len(_res.splitlines())} lines")
+            return _res
         if name == "write_file":        return write_file(args["path"], args["content"], non_interactive=non_interactive)
         if name == "list_dir":          return list_dir(args.get("pattern","**/*"))
-        if name == "run_cmd":           return run_cmd(args["cmd"], int(args.get("timeout",300)), non_interactive=non_interactive)
-        if name == "search_code":       return search_code(args["pattern"], args.get("include","**/*"), args.get("exclude"), bool(args.get("regex",True)), bool(args.get("case_sensitive",False)), int(args.get("max_matches",SEARCH_MATCH_LIMIT)))
+        if name == "run_cmd":
+            _res = run_cmd(args["cmd"], int(args.get("timeout",300)), non_interactive=non_interactive)
+            try:
+                _data = json.loads(_res)
+                if "rc" in _data:
+                    _print_substatus(f"rc={_data['rc']}")
+            except Exception:
+                pass
+            return _res
+        if name == "search_code":
+            _res = search_code(args["pattern"], args.get("include","**/*"), args.get("exclude"), bool(args.get("regex",True)), bool(args.get("case_sensitive",False)), int(args.get("max_matches",SEARCH_MATCH_LIMIT)))
         if name == "git_diff":          return git_diff(args.get("pathspec","."), bool(args.get("staged",False)), int(args.get("context",3)))
         if name == "make_patch":        return make_patch(args.get("paths","."))
-        if name == "apply_patch":       return apply_patch(args["patch"], bool(args.get("dry_run",False)), bool(args.get("three_way",True)), bool(args.get("reject",True)), non_interactive=non_interactive)
+        if name == "apply_patch":
+            _res = apply_patch(args["patch"], bool(args.get("dry_run",False)), bool(args.get("three_way",True)), bool(args.get("reject",True)), non_interactive=non_interactive)
         if name == "search_replace":    return search_replace(args["pattern"], args["replacement"], args.get("include","**/*"), args.get("exclude"), bool(args.get("regex",True)), bool(args.get("case_sensitive",False)), bool(args.get("dry_run",True)), non_interactive=non_interactive)
         if name == "format_code":       return format_code(args.get("tool","auto"), non_interactive=non_interactive)
-        if name == "run_tests":         return run_tests(args.get("cmd","pytest -q"), int(args.get("timeout",600)))
+        if name == "run_tests":
+            _res = run_tests(args.get("cmd","pytest -q"), int(args.get("timeout",600)))
         if name == "get_repo_context":  return get_repo_context(int(args.get("commits",6)))
         # New
         if name == "bw_get":            return bw_get(args["what"], args["ref"], args.get("field"))
@@ -734,6 +1051,7 @@ def _handle_tool(name: str, args: Dict[str, Any], non_interactive: bool) -> str:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
 # ---------- Chat plumbing ----------
+
 def load_api_key(cli_key: Optional[str], save_key: bool) -> str:
     if cli_key:
         key = cli_key
@@ -760,44 +1078,175 @@ def load_api_key(cli_key: Optional[str], save_key: bool) -> str:
     _register_secret(key)
     return key
 
-def _chat_create(client: OpenAI, *, model: str, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], tool_choice: str, temperature: Optional[float]):
-    kwargs: Dict[str, Any] = {"model": model, "messages": messages, "tools": tools, "tool_choice": tool_choice}
+def _chat_create(client: OpenAI, *, model: str, messages: List[Dict[str, Any]],
+                 tools: List[Dict[str, Any]], tool_choice: str, temperature: Optional[float]):
+    global _API_CALLS_GLOBAL, _API_TOKENS_GLOBAL
+
+    if API_MAX_CALLS_GLOBAL and _API_CALLS_GLOBAL >= API_MAX_CALLS_GLOBAL:
+        raise RuntimeError("Global API call cap reached")
+
+    kwargs: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+        "tool_choice": tool_choice,
+    }
     if temperature is not None:
         kwargs["temperature"] = temperature
-    return client.chat.completions.create(**kwargs)
+    if RESP_MAX_TOKENS > 0:
+        kwargs["max_completion_tokens"] = RESP_MAX_TOKENS
 
-def _append_assistant_with_tool_calls(messages: List[Dict[str, Any]], msg_obj: Any) -> None:
-    tool_calls_payload = []
-    for tc in (msg_obj.tool_calls or []):
+    resp = client.chat.completions.create(**kwargs)
+    _API_CALLS_GLOBAL += 1
+    used = _tok_usage_total(resp)
+    if used:
+        _API_TOKENS_GLOBAL += used
+    if os.getenv("AGENT_VERBOSE") == "1":
+        print(f"[Budget] Global calls={_API_CALLS_GLOBAL} tokens={_API_TOKENS_GLOBAL} (+{used})")
+    return resp
+
+
+def _append_assistant_with_tool_calls(messages: List[Dict[str, Any]], msg_obj: Any, max_calls: Optional[int]=None) -> None:
+    tool_calls = list(msg_obj.tool_calls or [])
+    if max_calls is not None:
+        tool_calls = tool_calls[:max_calls]
+    payload = []
+    for tc in tool_calls:
         fn = tc.function
-        tool_calls_payload.append({
+        payload.append({
             "id": tc.id,
             "type": "function",
             "function": {"name": fn.name, "arguments": fn.arguments or "{}"}
         })
-    messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls_payload})
+    messages.append({"role": "assistant", "content": None, "tool_calls": payload})
 
-def _chat_once(prompt: str, model: str, client: OpenAI, non_interactive: bool, temperature: Optional[float], strict: bool) -> None:
+# ===== Helper for per-task budgets =====
+def _within_task_budget(task_calls: int, task_tokens: int) -> bool:
+    if API_MAX_CALLS_TASK and task_calls >= API_MAX_CALLS_TASK:
+        return False
+    if API_MAX_TOKENS_TASK and task_tokens >= API_MAX_TOKENS_TASK:
+        return False
+    return True
+
+# ===== Replace your _chat_once exactly =====
+def _chat_once(prompt: str, model: str, client: OpenAI, non_interactive: bool,
+               temperature: Optional[float], strict: bool) -> None:
     start_prompt = (STRICT_TASK_WRAPPER + prompt) if strict else prompt
-    messages: List[Dict[str, Any]] = [{"role":"system","content":SYSTEM},{"role":"user","content":start_prompt}]
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": start_prompt},
+    ]
+
+    gate = _ToolGate(HARD_LOCK_DEFAULT_MAX, TOOL_REPEAT_WINDOW)
+    turn_cap = TURN_CAP_TASK
+    turns = 0
+    task_api_calls = 0
+    task_tokens = 0
+
     while True:
-        resp = _chat_create(client, model=model, messages=messages, tools=TOOLS, tool_choice="auto", temperature=temperature)
+        turns += 1
+        if (turn_cap > 0) and (turns > turn_cap):
+            print("[Guard] Stopping: exceeded task turn cap. Provide a smaller next step.")
+            break
+        if not _within_task_budget(task_api_calls, task_tokens):
+            print("[Budget] Task cap reached (calls/tokens). Halting.")
+            break
+
+        _can = gate.can_attempt()
+        if VERBOSE_BLOCK and not _can:
+            _snapshot_gate(gate, "can_attempt=False")
+        tool_choice_mode = "auto" if _can else "none"
+        resp = _chat_create(client, model=model, messages=messages, tools=TOOLS,
+                            tool_choice=tool_choice_mode, temperature=temperature)
+        task_api_calls += 1
+        task_tokens += _tok_usage_total(resp)
+
         msg = resp.choices[0].message
-
         if getattr(msg, "tool_calls", None):
-            _append_assistant_with_tool_calls(messages, msg)
-            for tc in msg.tool_calls:
-                args = json.loads(tc.function.arguments or "{}")
-                result = _handle_tool(tc.function.name, args, non_interactive=non_interactive)
-                messages.append({"role":"tool","tool_call_id": tc.id,"content": result})
-            continue  # allow the model to read tool outputs and reply
+            # Only allow ONE tool call per cycle, ignore parallels.
+            tc = msg.tool_calls[0]
+            _append_assistant_with_tool_calls(messages, msg, max_calls=1)
 
+            name = tc.function.name
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except Exception:
+                args = {}
+
+            allowed, note = gate.vet(name, args)
+            if not allowed:
+                _snapshot_gate(gate, f"{name}:{note}")
+                # Return a synthetic tool result that blocks the call, then steer the model.
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps({"blocked": note, "hint": "Plan/validate and report. Do NOT call tools now."})
+                })
+                messages.append({"role": "system",
+                                 "content": "Tool use is blocked. Provide validation or the next smallest step WITHOUT calling tools."})
+                # Next loop will force tool_choice='none'
+                continue
+
+            # Execute the FIRST tool only.
+            result = _handle_tool(name, args, non_interactive=non_interactive)
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+            gate.record(note)
+
+            # If guard asked to STOP, hard-lock tools hereafter.
+            try:
+                parsed = json.loads(result)
+            except Exception:
+                parsed = {}
+
+            if parsed.get("user_decision") == "stop":
+                if HARD_LOCK_AFTER_TOOL:
+                    gate.hard_lock()
+                    _snapshot_gate(gate, "hard_lock_after_stop")
+                #messages.append({"role": "system",
+                #                 "content": "Mutating step was stopped. Provide step-by-step instructions; do NOT call tools."})
+            else:
+                messages.append({"role": "system",
+                                 "content": "TOOL STEP COMPLETE. If more work remains, PLAN the next smallest step and call the appropriate tool."})
+            # Continue (tool_choice will remain 'auto' if not locked)
+            continue
+
+        # Natural answer — print and finish the one-shot
         print(_redact_text(msg.content or ""))
         break
+        
+def _add_del_from_patch_text(patch: str):
+    adds = dels = 0
+    files = []
+    try:
+        for line in patch.splitlines():
+            if line.startswith("+++ ") and not line.startswith("+++ /dev/null"):
+                fp = line[4:].strip()
+                if fp.startswith("b/"):
+                    fp = fp[2:]
+                if fp not in files:
+                    files.append(fp)
+                continue
+            if not line or line.startswith(("--- ","+++ ","@@","diff --git")):
+                continue
+            if line.startswith("+"):
+                adds += 1
+            elif line.startswith("-"):
+                dels += 1
+    except Exception:
+        pass
+    return adds, dels, files
+
+def _print_substatus(msg: str) -> None:
+    if OUTPUT_STYLE == "claude":
+        print(f"  ⎿ {msg}")
+        return
+    print(f"[STATUS] {msg}")
+
 
 def repl(model: str, client: OpenAI, non_interactive: bool, temperature: Optional[float], strict: bool) -> None:
     print("Interactive dev+ops agent REPL. Type /exit to quit.")
-    messages: List[Dict[str, Any]] = [{"role":"system","content":SYSTEM}]
+    messages: List[Dict[str, Any]] = [{"role": "system", "content": SYSTEM}]
+
     while True:
         try:
             user = input("you> ").strip()
@@ -807,28 +1256,86 @@ def repl(model: str, client: OpenAI, non_interactive: bool, temperature: Optiona
         if user in {"/exit", ":q", "quit"}:
             print("Exiting REPL.")
             return
+        if user in {"/why", "/gate"}:
+            print(json.dumps(_LAST_GATE_SNAPSHOT or {"note": "no snapshot yet"}, indent=2))
+            continue
         if not user:
             continue
 
         user_content = (STRICT_TASK_WRAPPER + user) if strict else user
-        messages.append({"role":"user","content":user_content})
-        while True:
-            resp = _chat_create(client, model=model, messages=messages, tools=TOOLS, tool_choice="auto", temperature=temperature)
-            msg = resp.choices[0].message
+        messages.append({"role": "user", "content": user_content})
 
+        gate = _ToolGate(HARD_LOCK_DEFAULT_MAX, TOOL_REPEAT_WINDOW)
+        inner_turns = 0
+        task_api_calls = 0
+        task_tokens = 0
+
+        while True:
+            inner_turns += 1
+            if (TURN_CAP_REPL > 0) and (inner_turns > TURN_CAP_REPL):
+                print("[Guard] Stopping: exceeded REPL step cap for this prompt.")
+                messages.append({"role": "assistant", "content": "Halting this step due to safety cap. Provide a smaller next step."})
+                break
+            if not _within_task_budget(task_api_calls, task_tokens):
+                print("[Budget] Task cap reached (calls/tokens). Halting this prompt.")
+                messages.append({"role": "assistant", "content": "Budget reached for this step. Summarize next steps without tools."})
+                break
+                
+            _can = gate.can_attempt()
+            if VERBOSE_BLOCK and not _can:
+                _snapshot_gate(gate, "can_attempt=False")
+            tool_choice_mode = "auto" if _can else "none"
+            resp = _chat_create(client, model=model, messages=messages, tools=TOOLS,
+                                tool_choice=tool_choice_mode, temperature=temperature)
+            task_api_calls += 1
+            task_tokens += _tok_usage_total(resp)
+
+            msg = resp.choices[0].message
             if getattr(msg, "tool_calls", None):
-                _append_assistant_with_tool_calls(messages, msg)
-                for tc in msg.tool_calls:
+                tc = msg.tool_calls[0]
+                _append_assistant_with_tool_calls(messages, msg, max_calls=1)
+
+                name = tc.function.name
+                try:
                     args = json.loads(tc.function.arguments or "{}")
-                    result = _handle_tool(tc.function.name, args, non_interactive=non_interactive)
-                    messages.append({"role":"tool","tool_call_id": tc.id,"content": result})
-                continue  # inner loop to generate the assistant's natural reply
+                except Exception:
+                    args = {}
+
+                allowed, note = gate.vet(name, args)
+                if not allowed:
+                    _snapshot_gate(gate, f"{name}:{note}")
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": json.dumps({"blocked": note, "hint": "Plan/validate and report. Do NOT call tools now."})
+                    })
+                    messages.append({"role": "system",
+                                     "content": "Tool use is blocked. Provide validation or the next smallest step WITHOUT calling tools."})
+                    continue
+
+                result = _handle_tool(name, args, non_interactive=non_interactive)
+                messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+                gate.record(note)
+
+                try:
+                    parsed = json.loads(result)
+                except Exception:
+                    parsed = {}
+                if parsed.get("user_decision") == "stop":
+                    gate.hard_lock() if HARD_LOCK_AFTER_TOOL else None
+                    messages.append({"role": "system",
+                                     "content": "Mutating step was stopped. Provide instructions only; do NOT call tools."})
+                else:
+                    messages.append({"role": "system",
+                                     "content": "TOOL STEP COMPLETE. If more work remains, PLAN the next smallest step and call the appropriate tool."})
+                continue
 
             print(_redact_text(msg.content or ""))
-            messages.append({"role":"assistant","content": msg.content or ""})
+            messages.append({"role": "assistant", "content": msg.content or ""})
             break
 
 # ---------- CLI ----------
+
 def main():
     ap = argparse.ArgumentParser(description="Local dev+ops agent (SSH/WinRM/HTTP/Bitwarden) with guard + REPL.")
     ap.add_argument("task", nargs="*", help="One-shot task. Omit to use --repl.")
