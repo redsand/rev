@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-import agent
+import rev as agent
 
 
 def test_safe_path_blocks_escape():
