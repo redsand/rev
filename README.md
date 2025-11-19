@@ -264,7 +264,7 @@ For each task, the agent:
 
 ### Available Tools
 
-The agent has access to **24 powerful tools** across multiple categories:
+The agent has access to **29 powerful tools** across multiple categories:
 
 #### Core File Operations
 | Tool | Description |
@@ -273,10 +273,14 @@ The agent has access to **24 powerful tools** across multiple categories:
 | `write_file` | Create or overwrite files |
 | `delete_file` | Delete a file |
 | `move_file` | Move or rename files |
+| `copy_file` | Copy a file to a new location |
 | `append_to_file` | Append content to a file |
 | `replace_in_file` | Find and replace text within a file (supports regex) |
 | `create_directory` | Create directories |
 | `get_file_info` | Get file metadata (size, modified time, etc.) |
+| `file_exists` | Check if a file or directory exists |
+| `read_file_lines` | Read specific line range from a file |
+| `tree_view` | Generate a tree view of directory structure |
 
 #### Code Discovery & Search
 | Tool | Description |
@@ -291,6 +295,7 @@ The agent has access to **24 powerful tools** across multiple categories:
 | `git_status` | Get detailed git status |
 | `git_log` | Get git commit history |
 | `git_commit` | Commit changes with a message |
+| `git_branch` | Git branch operations (list, create, switch, current) |
 | `apply_patch` | Apply unified diff patches |
 | `get_repo_context` | Get git status and repo structure |
 
@@ -385,17 +390,20 @@ python rev.py --model deepseek-coder:33b "Your task"
 
 ## Testing & Coverage
 
-**Test Coverage: 85%** - Production Ready ✅
+**Test Coverage: 80%** - Production Ready ✅
 
-- **75 tests passing** (100% pass rate)
-- **478 statements** in rev.py
-- **404 covered** through comprehensive test suite
+- **114 tests passing** (100% pass rate)
+- **759 statements** in rev.py
+- **609 covered** through comprehensive test suite
 - **99% test code coverage** (tests are well-tested themselves)
 
 ### What's Tested
-- ✅ File operations (read, write, list, search)
-- ✅ Git operations (diff, patch, context)
+- ✅ File operations (read, write, delete, move, copy, append, replace)
+- ✅ Advanced file operations (file_exists, read_file_lines, tree_view)
+- ✅ Git operations (diff, patch, commit, status, log, branch)
 - ✅ Command execution and validation
+- ✅ Utility tools (install_package, web_fetch, execute_python)
+- ✅ MCP (Model Context Protocol) integration
 - ✅ Task management (Task, ExecutionPlan)
 - ✅ Tool execution routing
 - ✅ Ollama integration (mocked)
