@@ -787,6 +787,8 @@ Otherwise, describe a task and the agent will plan and execute it.
 # ========== Main Entry Point ==========
 
 def main():
+    global OLLAMA_MODEL, OLLAMA_BASE_URL
+
     parser = argparse.ArgumentParser(
         description="agent.min - Autonomous CI/CD agent powered by Ollama"
     )
@@ -818,8 +820,7 @@ def main():
 
     args = parser.parse_args()
 
-    # Update globals
-    global OLLAMA_MODEL, OLLAMA_BASE_URL
+    # Update module globals for ollama_chat function
     OLLAMA_MODEL = args.model
     OLLAMA_BASE_URL = args.base_url
 
