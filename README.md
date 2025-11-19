@@ -81,6 +81,19 @@ ollama pull codellama:latest        # ⚠️ No tool support
 ollama pull deepseek-coder:latest   # ⚠️ Check version for tool support
 ```
 
+**🌐 Ollama Cloud Models (NEW!):**
+```bash
+# Use powerful cloud-hosted models (requires authentication)
+python rev.py --model qwen3-coder:480b-cloud "Your task"
+python rev.py --model llama3.3:90b-cloud "Complex refactoring task"
+```
+
+On first use, you'll be prompted to authenticate:
+1. A browser URL will be displayed
+2. Visit the URL and sign in with your Ollama account
+3. Authorize your device
+4. Press Enter to continue
+
 **Verify tool support:**
 ```bash
 # List models
@@ -364,6 +377,45 @@ Pull the model first:
 
 ```bash
 ollama pull codellama:latest
+```
+
+### "401 Unauthorized" for Cloud Models
+
+Cloud models (ending with `-cloud`) require authentication. The agent will:
+1. Detect the 401 error automatically
+2. Display a signin URL
+3. Wait for you to authenticate
+
+**Steps to authenticate:**
+```bash
+# When you see the authentication prompt:
+# 1. Visit the displayed URL in your browser
+# 2. Sign in with your Ollama account
+# 3. Authorize the device
+# 4. Press Enter to continue
+
+# The authentication persists, so you only need to do this once per device
+```
+
+**Example:**
+```bash
+python rev.py --model qwen3-coder:480b-cloud "Review code"
+
+# Output:
+# ============================================================
+# OLLAMA CLOUD AUTHENTICATION REQUIRED
+# ============================================================
+# Model 'qwen3-coder:480b-cloud' requires authentication.
+#
+# To authenticate:
+# 1. Visit this URL in your browser:
+#    https://ollama.com/connect?name=YOUR-DEVICE&key=...
+#
+# 2. Sign in with your Ollama account
+# 3. Authorize this device
+# ============================================================
+#
+# Press Enter after completing authentication...
 ```
 
 ### "400 Bad Request" or "Model not using tools"
