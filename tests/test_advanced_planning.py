@@ -74,6 +74,39 @@ class TestRiskLevel:
         assert agent_min.RiskLevel.HIGH
         assert agent_min.RiskLevel.CRITICAL
 
+    def test_risk_level_values_are_lowercase(self):
+        """Test that RiskLevel enum values are lowercase.
+
+        This is critical for sorting and display logic that depends on
+        matching these values against lowercase strings.
+        """
+        assert agent_min.RiskLevel.LOW.value == "low"
+        assert agent_min.RiskLevel.MEDIUM.value == "medium"
+        assert agent_min.RiskLevel.HIGH.value == "high"
+        assert agent_min.RiskLevel.CRITICAL.value == "critical"
+
+    def test_risk_level_sorting(self):
+        """Test that risk levels can be sorted correctly.
+
+        This test ensures that the sorting logic used in planning_mode
+        works correctly with the actual enum values.
+        """
+        risk_levels = [
+            agent_min.RiskLevel.HIGH,
+            agent_min.RiskLevel.LOW,
+            agent_min.RiskLevel.CRITICAL,
+            agent_min.RiskLevel.MEDIUM
+        ]
+
+        # This is the sorting logic used in planning_mode
+        sorted_levels = sorted(risk_levels, key=lambda x: ["low", "medium", "high", "critical"].index(x.value))
+
+        # Verify they're in the correct order
+        assert sorted_levels[0] == agent_min.RiskLevel.LOW
+        assert sorted_levels[1] == agent_min.RiskLevel.MEDIUM
+        assert sorted_levels[2] == agent_min.RiskLevel.HIGH
+        assert sorted_levels[3] == agent_min.RiskLevel.CRITICAL
+
 
 # ========== Test Task Enhanced Features ==========
 

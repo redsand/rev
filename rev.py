@@ -3903,7 +3903,7 @@ Generate a comprehensive execution plan."""}
 
         print(f"Total tasks: {len(plan.tasks)}")
         print(f"Risk distribution:")
-        for level, count in sorted(risk_counts.items(), key=lambda x: ["LOW", "MEDIUM", "HIGH", "CRITICAL"].index(x[0].value)):
+        for level, count in sorted(risk_counts.items(), key=lambda x: ["low", "medium", "high", "critical"].index(x[0].value)):
             emoji = {"low": "🟢", "medium": "🟡", "high": "🟠", "critical": "🔴"}[level.value]
             print(f"  {emoji} {level.value.upper()}: {count}")
 
