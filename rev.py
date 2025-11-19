@@ -1964,7 +1964,7 @@ Shell Type: {sys_info['shell_type']}
 {EXECUTION_SYSTEM}"""
 
     messages = [{"role": "system", "content": system_context}]
-    max_iterations = 100
+    max_iterations = 10000  # Very high limit to effectively remove restriction
     iteration = 0
 
     while not plan.is_complete() and iteration < max_iterations:
@@ -1987,7 +1987,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
 
         # Execute task with tool calls
         task_iterations = 0
-        max_task_iterations = 20
+        max_task_iterations = 10000  # Very high limit to effectively remove restriction
         task_complete = False
 
         while task_iterations < max_task_iterations and not task_complete:
