@@ -1607,3 +1607,58 @@ class TestExecuteToolIntegration:
 
 
 print("\n✅ All new tool tests added successfully!")
+
+
+# ========== Tests for get_system_info ==========
+
+class TestSystemInfo:
+    """Test system information detection."""
+
+    def test_get_system_info_basic(self):
+        """Test basic system info retrieval."""
+        result = agent_min.get_system_info()
+        data = json.loads(result)
+
+        assert "os" in data
+        assert "os_version" in data
+        assert "platform" in data
+        assert "architecture" in data
+        assert "python_version" in data
+        assert "shell_type" in data
+
+    def test_get_system_info_os_flags(self):
+        """Test OS detection flags."""
+        result = agent_min.get_system_info()
+        data = json.loads(result)
+
+        assert "is_windows" in data
+        assert "is_linux" in data
+        assert "is_macos" in data
+        assert isinstance(data["is_windows"], bool)
+        assert isinstance(data["is_linux"], bool)
+        assert isinstance(data["is_macos"], bool)
+
+    def test_get_system_info_shell_type(self):
+        """Test shell type detection."""
+        result = agent_min.get_system_info()
+        data = json.loads(result)
+
+        assert data["shell_type"] in ["bash", "powershell"]
+
+    def test_get_system_info_cached(self):
+        """Test that system info is properly cached."""
+        result1 = json.loads(agent_min.get_system_info())
+        result2 = json.loads(agent_min.get_system_info())
+
+        assert result1 == result2
+
+    def test_execute_tool_get_system_info(self):
+        """Test execute_tool with get_system_info."""
+        result = agent_min.execute_tool("get_system_info", {})
+        data = json.loads(result)
+
+        assert "os" in data
+        assert "platform" in data
+
+
+print("\n✅ System info tests added successfully!")

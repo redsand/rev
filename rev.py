@@ -29,6 +29,7 @@ import subprocess
 import tempfile
 import hashlib
 import difflib
+import platform
 from typing import Dict, Any, List, Optional
 from enum import Enum
 
@@ -58,6 +59,28 @@ ALLOW_CMDS = {
     "python", "pip", "pytest", "ruff", "black", "isort", "mypy",
     "node", "npm", "npx", "pnpm", "prettier", "eslint", "git", "make"
 }
+
+# System information (cached)
+_SYSTEM_INFO = None
+
+
+def _get_system_info_cached() -> Dict[str, Any]:
+    """Get cached system information."""
+    global _SYSTEM_INFO
+    if _SYSTEM_INFO is None:
+        _SYSTEM_INFO = {
+            "os": platform.system(),
+            "os_version": platform.version(),
+            "os_release": platform.release(),
+            "architecture": platform.machine(),
+            "python_version": platform.python_version(),
+            "platform": platform.platform(),
+            "is_windows": platform.system() == "Windows",
+            "is_linux": platform.system() == "Linux",
+            "is_macos": platform.system() == "Darwin",
+            "shell_type": "powershell" if platform.system() == "Windows" else "bash"
+        }
+    return _SYSTEM_INFO
 
 
 class TaskStatus(Enum):
@@ -674,6 +697,15 @@ def execute_python(code: str) -> str:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
 
+def get_system_info() -> str:
+    """Get system information (OS, version, architecture, shell type)."""
+    try:
+        info = _get_system_info_cached()
+        return json.dumps(info)
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
 # ========== MCP (Model Context Protocol) Support ==========
 
 class MCPClient:
@@ -1208,6 +1240,17 @@ TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_system_info",
+            "description": "Get system information (OS, version, architecture, shell type)",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
     # MCP tools
     {
         "type": "function",
@@ -1321,6 +1364,8 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
             return web_fetch(args["url"])
         elif name == "execute_python":
             return execute_python(args["code"])
+        elif name == "get_system_info":
+            return get_system_info()
 
         # MCP tools
         elif name == "mcp_add_server":
@@ -1344,6 +1389,13 @@ Your job is to:
 1. Understand the user's request
 2. Analyze the repository structure
 3. Create a comprehensive, ordered checklist of tasks
+
+IMPORTANT - System Context:
+You will be provided with the operating system information. Use this to:
+- Choose appropriate shell commands (bash for Linux/Mac, PowerShell for Windows)
+- Select platform-specific tools and utilities
+- Use correct path separators and file conventions
+- Adapt commands to the target environment
 
 Break down the work into atomic tasks:
 - Review: Analyze existing code
@@ -1370,13 +1422,20 @@ def planning_mode(user_request: str) -> ExecutionPlan:
     print("PLANNING MODE")
     print("=" * 60)
 
-    # Get repository context
-    print("→ Analyzing repository...")
+    # Get system and repository context
+    print("→ Analyzing system and repository...")
+    sys_info = _get_system_info_cached()
     context = get_repo_context()
 
     messages = [
         {"role": "system", "content": PLANNING_SYSTEM},
-        {"role": "user", "content": f"""Repository context:
+        {"role": "user", "content": f"""System Information:
+OS: {sys_info['os']} {sys_info['os_release']}
+Platform: {sys_info['platform']}
+Architecture: {sys_info['architecture']}
+Shell Type: {sys_info['shell_type']}
+
+Repository context:
 {context}
 
 User request:
@@ -1427,6 +1486,13 @@ Generate a comprehensive execution plan."""}
 
 EXECUTION_SYSTEM = """You are an autonomous CI/CD agent executing tasks.
 
+IMPORTANT - System Context:
+You will be provided with OS information. Use this to:
+- Choose correct shell commands (bash for Linux/Mac, PowerShell/cmd for Windows)
+- Select platform-specific tools and file paths
+- Use appropriate path separators (/ for Unix, \\ for Windows)
+- Adapt commands to the target environment
+
 You have these tools available:
 - read_file: Read file contents
 - write_file: Create or modify files
@@ -1434,9 +1500,10 @@ You have these tools available:
 - search_code: Search code with regex
 - git_diff: View current changes
 - apply_patch: Apply unified diff patches
-- run_cmd: Execute shell commands
+- run_cmd: Execute shell commands (use shell-appropriate syntax)
 - run_tests: Run test suite
 - get_repo_context: Get repo status
+- get_system_info: Get OS, version, architecture, and shell type
 
 Work methodically:
 1. Understand the current task
@@ -1539,7 +1606,17 @@ def execution_mode(plan: ExecutionPlan, approved: bool = False, auto_approve: bo
     if auto_approve:
         print("  ℹ️  Running in autonomous mode. Destructive operations will prompt for confirmation.\n")
 
-    messages = [{"role": "system", "content": EXECUTION_SYSTEM}]
+    # Get system info for context
+    sys_info = _get_system_info_cached()
+    system_context = f"""System Information:
+OS: {sys_info['os']} {sys_info['os_release']}
+Platform: {sys_info['platform']}
+Architecture: {sys_info['architecture']}
+Shell Type: {sys_info['shell_type']}
+
+{EXECUTION_SYSTEM}"""
+
+    messages = [{"role": "system", "content": system_context}]
     max_iterations = 100
     iteration = 0
 
