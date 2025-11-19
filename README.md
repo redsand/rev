@@ -264,7 +264,9 @@ For each task, the agent:
 
 ### Available Tools
 
-The agent has access to **29 powerful tools** across multiple categories:
+The agent has access to **30 powerful tools** across multiple categories:
+
+**New in v2.6:** Cross-platform OS detection! The agent automatically detects your operating system (Windows, Linux, macOS) and adapts tool usage accordingly - choosing bash vs PowerShell, correct path separators, and platform-specific commands.
 
 #### Core File Operations
 | Tool | Description |
@@ -311,6 +313,7 @@ The agent has access to **29 powerful tools** across multiple categories:
 | `install_package` | Install Python packages using pip |
 | `web_fetch` | Fetch content from URLs |
 | `execute_python` | Execute Python code snippets |
+| `get_system_info` | Get system info (OS, version, architecture, shell type) |
 
 #### MCP (Model Context Protocol) Support
 | Tool | Description |
@@ -392,9 +395,9 @@ python rev.py --model deepseek-coder:33b "Your task"
 
 **Test Coverage: 80%** - Production Ready ✅
 
-- **114 tests passing** (100% pass rate)
-- **759 statements** in rev.py
-- **609 covered** through comprehensive test suite
+- **119 tests passing** (100% pass rate)
+- **770+ statements** in rev.py
+- **Cross-platform tested** (Linux, macOS, Windows detection)
 - **99% test code coverage** (tests are well-tested themselves)
 
 ### What's Tested
@@ -402,7 +405,8 @@ python rev.py --model deepseek-coder:33b "Your task"
 - ✅ Advanced file operations (file_exists, read_file_lines, tree_view)
 - ✅ Git operations (diff, patch, commit, status, log, branch)
 - ✅ Command execution and validation
-- ✅ Utility tools (install_package, web_fetch, execute_python)
+- ✅ Utility tools (install_package, web_fetch, execute_python, get_system_info)
+- ✅ System information detection (OS, version, shell type, caching)
 - ✅ MCP (Model Context Protocol) integration
 - ✅ Task management (Task, ExecutionPlan)
 - ✅ Tool execution routing
