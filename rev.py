@@ -354,38 +354,57 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
         if tools:
             print(f"[DEBUG] Tools: {len(tools)} tools provided")
 
-    try:
-        resp = requests.post(url, json=payload, timeout=600)
+    # Retry with increasing timeouts: 10m, 20m, 30m
+    max_retries = 3
+    base_timeout = 600  # 10 minutes
 
-        if OLLAMA_DEBUG:
-            print(f"[DEBUG] Response status: {resp.status_code}")
-            print(f"[DEBUG] Response: {resp.text[:500]}")
+    for attempt in range(max_retries):
+        timeout = base_timeout * (attempt + 1)  # 600, 1200, 1800
 
-        # If we get a 400 and we sent tools, try again without tools
-        if resp.status_code == 400 and tools:
-            if OLLAMA_DEBUG:
-                print("[DEBUG] Got 400 with tools, retrying without tools...")
+        if OLLAMA_DEBUG and attempt > 0:
+            print(f"[DEBUG] Retry attempt {attempt + 1}/{max_retries} with timeout {timeout}s ({timeout // 60}m)")
 
-            # Retry without tools
-            payload_no_tools = {
-                "model": OLLAMA_MODEL,
-                "messages": messages,
-                "stream": False
-            }
-            resp = requests.post(url, json=payload_no_tools, timeout=600)
-
-        resp.raise_for_status()
-        return resp.json()
-
-    except requests.exceptions.HTTPError as e:
-        error_detail = ""
         try:
-            error_detail = f" - {resp.text}"
-        except:
-            pass
-        return {"error": f"Ollama API error: {e}{error_detail}"}
-    except Exception as e:
-        return {"error": f"Ollama API error: {e}"}
+            resp = requests.post(url, json=payload, timeout=timeout)
+
+            if OLLAMA_DEBUG:
+                print(f"[DEBUG] Response status: {resp.status_code}")
+                print(f"[DEBUG] Response: {resp.text[:500]}")
+
+            # If we get a 400 and we sent tools, try again without tools
+            if resp.status_code == 400 and tools:
+                if OLLAMA_DEBUG:
+                    print("[DEBUG] Got 400 with tools, retrying without tools...")
+
+                # Retry without tools
+                payload_no_tools = {
+                    "model": OLLAMA_MODEL,
+                    "messages": messages,
+                    "stream": False
+                }
+                resp = requests.post(url, json=payload_no_tools, timeout=timeout)
+
+            resp.raise_for_status()
+            return resp.json()
+
+        except requests.exceptions.Timeout as e:
+            if attempt < max_retries - 1:
+                if OLLAMA_DEBUG:
+                    print(f"[DEBUG] Request timed out after {timeout}s, will retry with longer timeout...")
+                continue  # Retry with longer timeout
+            else:
+                return {"error": f"Ollama API timeout after {max_retries} attempts (final timeout: {timeout}s)"}
+
+        except requests.exceptions.HTTPError as e:
+            error_detail = ""
+            try:
+                error_detail = f" - {resp.text}"
+            except:
+                pass
+            return {"error": f"Ollama API error: {e}{error_detail}"}
+
+        except Exception as e:
+            return {"error": f"Ollama API error: {e}"}
 
 
 # ========== Tool Definitions ==========
