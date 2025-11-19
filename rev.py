@@ -355,7 +355,7 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
             print(f"[DEBUG] Tools: {len(tools)} tools provided")
 
     try:
-        resp = requests.post(url, json=payload, timeout=300)
+        resp = requests.post(url, json=payload, timeout=600)
 
         if OLLAMA_DEBUG:
             print(f"[DEBUG] Response status: {resp.status_code}")
@@ -372,7 +372,7 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
                 "messages": messages,
                 "stream": False
             }
-            resp = requests.post(url, json=payload_no_tools, timeout=300)
+            resp = requests.post(url, json=payload_no_tools, timeout=600)
 
         resp.raise_for_status()
         return resp.json()
