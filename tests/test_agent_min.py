@@ -1332,9 +1332,10 @@ class TestNewFileOperations:
         result = agent_min.read_file_lines(rel_path, start=2, end=4)
         data = json.loads(result)
 
-        assert len(data["lines"]) == 2
+        assert len(data["lines"]) == 3  # end parameter is inclusive, so 2-4 = 3 lines
         assert data["lines"][0] == "line2"
         assert data["lines"][1] == "line3"
+        assert data["lines"][2] == "line4"
 
     def test_tree_view_basic(self, temp_dir):
         """Test basic tree view generation."""
