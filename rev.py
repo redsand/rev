@@ -4446,6 +4446,7 @@ def repl_mode():
 
     while True:
         try:
+            sys.stdout.flush()  # Ensure prompt is displayed immediately
             user_input = input("\nagent> ").strip()
         except (KeyboardInterrupt, EOFError):
             print("\nExiting REPL")
