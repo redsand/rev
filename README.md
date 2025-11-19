@@ -12,7 +12,8 @@ A minimal, autonomous CI/CD agent powered by [Ollama](https://ollama.ai) for loc
 - **🔧 Full Code Operations** — Review, edit, add, delete, rename files
 - **🏠 Local LLM** — Uses Ollama (no API keys, fully private)
 - **📦 Minimal Dependencies** — Just `requests` library
-- **🎯 Advanced Planning** — Dependency analysis, impact assessment, risk evaluation, rollback planning (NEW!)
+- **🎯 Advanced Planning** — Dependency analysis, impact assessment, risk evaluation, rollback planning
+- **🛠️ Built-in Utilities** — File conversion, code refactoring, dependency management, security scanning (NEW!)
 
 ## Architecture
 
@@ -630,6 +631,75 @@ Risk distribution:
    - Review rollback plans before proceeding
    - Test high-risk operations in safe environment first
    - Ensure backups are current for critical operations
+
+## Built-in Utilities
+
+rev.py includes powerful utility functions for common development tasks:
+
+### File Format Conversion
+
+Convert between common file formats without external tools:
+
+```python
+# JSON ↔ YAML
+python rev.py "Convert config.json to YAML format"
+python rev.py "Convert docker-compose.yaml to JSON"
+
+# CSV ↔ JSON
+python rev.py "Convert users.csv to JSON array"
+python rev.py "Convert data.json to CSV format"
+
+# .env to JSON
+python rev.py "Convert .env to JSON configuration"
+```
+
+### Code Refactoring
+
+Automated code analysis and improvement:
+
+```python
+# Remove unused imports
+python rev.py "Remove unused imports from src/app.py"
+
+# Extract magic numbers to constants
+python rev.py "Find magic numbers in config.py that should be constants"
+
+# Simplify complex conditionals
+python rev.py "Analyze validator.py for overly complex if statements"
+```
+
+### Dependency Management
+
+Multi-language dependency analysis and updates:
+
+```python
+# Analyze dependencies (auto-detects Python/JavaScript/Rust/Go)
+python rev.py "Analyze project dependencies and check for issues"
+
+# Check for outdated packages
+python rev.py "Check for outdated dependencies"
+python rev.py "Find outdated packages including major version updates"
+```
+
+### Security Scanning
+
+Comprehensive security analysis:
+
+```python
+# Scan for vulnerabilities
+python rev.py "Scan dependencies for known security vulnerabilities"
+
+# Static code security analysis
+python rev.py "Run security scan on src/ directory"
+
+# Detect secrets
+python rev.py "Scan repository for accidentally committed secrets"
+
+# Check license compliance
+python rev.py "Check dependency licenses for GPL and restrictive licenses"
+```
+
+**See [UTILITIES.md](UTILITIES.md) for complete documentation, API reference, and integration examples.**
 
 ## Advanced Usage
 

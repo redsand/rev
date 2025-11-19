@@ -1274,6 +1274,827 @@ def ssh_list_connections() -> str:
     return json.dumps(result)
 
 
+# ========== File Format Conversion Tools ==========
+
+def convert_json_to_yaml(json_path: str, yaml_path: str = None) -> str:
+    """Convert JSON file to YAML format.
+
+    Args:
+        json_path: Path to JSON file
+        yaml_path: Output YAML path (optional, defaults to .yaml extension)
+
+    Returns:
+        JSON string with conversion result
+    """
+    try:
+        import yaml
+    except ImportError:
+        return json.dumps({"error": "PyYAML not installed. Run: pip install pyyaml"})
+
+    try:
+        json_file = _safe_path(json_path)
+        if not json_file.exists():
+            return json.dumps({"error": f"File not found: {json_path}"})
+
+        # Read JSON
+        with open(json_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        # Determine output path
+        if yaml_path is None:
+            yaml_path = json_path.rsplit('.', 1)[0] + '.yaml'
+        yaml_file = _safe_path(yaml_path)
+
+        # Write YAML
+        yaml_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(yaml_file, 'w', encoding='utf-8') as f:
+            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+
+        return json.dumps({
+            "converted": str(json_file.relative_to(ROOT)),
+            "to": str(yaml_file.relative_to(ROOT)),
+            "format": "YAML"
+        })
+    except Exception as e:
+        return json.dumps({"error": f"Conversion failed: {type(e).__name__}: {e}"})
+
+
+def convert_yaml_to_json(yaml_path: str, json_path: str = None) -> str:
+    """Convert YAML file to JSON format.
+
+    Args:
+        yaml_path: Path to YAML file
+        json_path: Output JSON path (optional, defaults to .json extension)
+
+    Returns:
+        JSON string with conversion result
+    """
+    try:
+        import yaml
+    except ImportError:
+        return json.dumps({"error": "PyYAML not installed. Run: pip install pyyaml"})
+
+    try:
+        yaml_file = _safe_path(yaml_path)
+        if not yaml_file.exists():
+            return json.dumps({"error": f"File not found: {yaml_path}"})
+
+        # Read YAML
+        with open(yaml_file, 'r', encoding='utf-8') as f:
+            data = yaml.safe_load(f)
+
+        # Determine output path
+        if json_path is None:
+            json_path = yaml_path.rsplit('.', 1)[0] + '.json'
+        json_file = _safe_path(json_path)
+
+        # Write JSON
+        json_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(json_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+
+        return json.dumps({
+            "converted": str(yaml_file.relative_to(ROOT)),
+            "to": str(json_file.relative_to(ROOT)),
+            "format": "JSON"
+        })
+    except Exception as e:
+        return json.dumps({"error": f"Conversion failed: {type(e).__name__}: {e}"})
+
+
+def convert_csv_to_json(csv_path: str, json_path: str = None) -> str:
+    """Convert CSV file to JSON format.
+
+    Args:
+        csv_path: Path to CSV file
+        json_path: Output JSON path (optional)
+
+    Returns:
+        JSON string with conversion result
+    """
+    try:
+        import csv
+
+        csv_file = _safe_path(csv_path)
+        if not csv_file.exists():
+            return json.dumps({"error": f"File not found: {csv_path}"})
+
+        # Read CSV
+        with open(csv_file, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            data = list(reader)
+
+        # Determine output path
+        if json_path is None:
+            json_path = csv_path.rsplit('.', 1)[0] + '.json'
+        json_file = _safe_path(json_path)
+
+        # Write JSON
+        json_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(json_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+
+        return json.dumps({
+            "converted": str(csv_file.relative_to(ROOT)),
+            "to": str(json_file.relative_to(ROOT)),
+            "rows": len(data),
+            "format": "JSON"
+        })
+    except Exception as e:
+        return json.dumps({"error": f"Conversion failed: {type(e).__name__}: {e}"})
+
+
+def convert_json_to_csv(json_path: str, csv_path: str = None) -> str:
+    """Convert JSON file (array of objects) to CSV format.
+
+    Args:
+        json_path: Path to JSON file (must contain array of objects)
+        csv_path: Output CSV path (optional)
+
+    Returns:
+        JSON string with conversion result
+    """
+    try:
+        import csv
+
+        json_file = _safe_path(json_path)
+        if not json_file.exists():
+            return json.dumps({"error": f"File not found: {json_path}"})
+
+        # Read JSON
+        with open(json_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        if not isinstance(data, list) or not data:
+            return json.dumps({"error": "JSON must contain a non-empty array of objects"})
+
+        # Determine output path
+        if csv_path is None:
+            csv_path = json_path.rsplit('.', 1)[0] + '.csv'
+        csv_file = _safe_path(csv_path)
+
+        # Write CSV
+        csv_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(csv_file, 'w', encoding='utf-8', newline='') as f:
+            if data:
+                fieldnames = list(data[0].keys())
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(data)
+
+        return json.dumps({
+            "converted": str(json_file.relative_to(ROOT)),
+            "to": str(csv_file.relative_to(ROOT)),
+            "rows": len(data),
+            "format": "CSV"
+        })
+    except Exception as e:
+        return json.dumps({"error": f"Conversion failed: {type(e).__name__}: {e}"})
+
+
+def convert_env_to_json(env_path: str, json_path: str = None) -> str:
+    """Convert .env file to JSON format.
+
+    Args:
+        env_path: Path to .env file
+        json_path: Output JSON path (optional)
+
+    Returns:
+        JSON string with conversion result
+    """
+    try:
+        env_file = _safe_path(env_path)
+        if not env_file.exists():
+            return json.dumps({"error": f"File not found: {env_path}"})
+
+        # Parse .env file
+        data = {}
+        with open(env_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    if '=' in line:
+                        key, value = line.split('=', 1)
+                        # Remove quotes if present
+                        value = value.strip().strip('"').strip("'")
+                        data[key.strip()] = value
+
+        # Determine output path
+        if json_path is None:
+            json_path = env_path + '.json'
+        json_file = _safe_path(json_path)
+
+        # Write JSON
+        json_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(json_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+
+        return json.dumps({
+            "converted": str(env_file.relative_to(ROOT)),
+            "to": str(json_file.relative_to(ROOT)),
+            "variables": len(data),
+            "format": "JSON"
+        })
+    except Exception as e:
+        return json.dumps({"error": f"Conversion failed: {type(e).__name__}: {e}"})
+
+
+# ========== Code Refactoring Utilities ==========
+
+def remove_unused_imports(file_path: str, language: str = "python") -> str:
+    """Remove unused imports from a code file.
+
+    Args:
+        file_path: Path to code file
+        language: Programming language (python, javascript, typescript)
+
+    Returns:
+        JSON string with result
+    """
+    try:
+        file = _safe_path(file_path)
+        if not file.exists():
+            return json.dumps({"error": f"File not found: {file_path}"})
+
+        if language.lower() == "python":
+            # Use autoflake if available
+            try:
+                result = _run_shell(f"autoflake --remove-all-unused-imports --in-place {shlex.quote(str(file))}")
+                if result.returncode == 0:
+                    return json.dumps({
+                        "refactored": str(file.relative_to(ROOT)),
+                        "removed": "unused imports",
+                        "language": "Python"
+                    })
+                else:
+                    return json.dumps({"error": "autoflake not installed or failed. Run: pip install autoflake"})
+            except Exception:
+                return json.dumps({"error": "autoflake not installed. Run: pip install autoflake"})
+
+        else:
+            return json.dumps({"error": f"Language '{language}' not supported yet"})
+
+    except Exception as e:
+        return json.dumps({"error": f"Refactoring failed: {type(e).__name__}: {e}"})
+
+
+def extract_constants(file_path: str, threshold: int = 3) -> str:
+    """Identify magic numbers/strings that should be constants.
+
+    Args:
+        file_path: Path to code file
+        threshold: Minimum occurrences to suggest extraction
+
+    Returns:
+        JSON string with suggestions
+    """
+    try:
+        file = _safe_path(file_path)
+        if not file.exists():
+            return json.dumps({"error": f"File not found: {file_path}"})
+
+        content = file.read_text(encoding='utf-8', errors='ignore')
+
+        # Find magic numbers (excluding 0, 1, common values)
+        magic_numbers = re.findall(r'\b\d{2,}\b', content)
+        number_counts = {}
+        for num in magic_numbers:
+            if num not in ['00', '01', '10', '100']:
+                number_counts[num] = number_counts.get(num, 0) + 1
+
+        # Find magic strings (quoted strings used multiple times)
+        magic_strings = re.findall(r'["\']([^"\']{4,})["\']', content)
+        string_counts = {}
+        for s in magic_strings:
+            if not s.startswith('import ') and not s.startswith('from '):
+                string_counts[s] = string_counts.get(s, 0) + 1
+
+        suggestions = []
+
+        # Suggest constants for repeated numbers
+        for num, count in number_counts.items():
+            if count >= threshold:
+                const_name = f"CONSTANT_{num}"
+                suggestions.append({
+                    "type": "number",
+                    "value": num,
+                    "occurrences": count,
+                    "suggested_name": const_name
+                })
+
+        # Suggest constants for repeated strings
+        for string, count in string_counts.items():
+            if count >= threshold:
+                const_name = string.upper().replace(' ', '_')[:30]
+                suggestions.append({
+                    "type": "string",
+                    "value": string,
+                    "occurrences": count,
+                    "suggested_name": const_name
+                })
+
+        return json.dumps({
+            "file": str(file.relative_to(ROOT)),
+            "suggestions": suggestions,
+            "count": len(suggestions)
+        })
+
+    except Exception as e:
+        return json.dumps({"error": f"Analysis failed: {type(e).__name__}: {e}"})
+
+
+def simplify_conditionals(file_path: str) -> str:
+    """Identify complex conditionals that could be simplified.
+
+    Args:
+        file_path: Path to code file
+
+    Returns:
+        JSON string with suggestions
+    """
+    try:
+        file = _safe_path(file_path)
+        if not file.exists():
+            return json.dumps({"error": f"File not found: {file_path}"})
+
+        content = file.read_text(encoding='utf-8', errors='ignore')
+        lines = content.split('\n')
+
+        suggestions = []
+
+        # Find complex if statements
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+
+            # Check for multiple conditions
+            if stripped.startswith('if ') or stripped.startswith('elif '):
+                and_count = line.count(' and ')
+                or_count = line.count(' or ')
+                paren_depth = line.count('(') - line.count(')')
+
+                if and_count + or_count >= 3 or paren_depth >= 2:
+                    suggestions.append({
+                        "line": i,
+                        "issue": "Complex conditional",
+                        "complexity": and_count + or_count,
+                        "suggestion": "Consider extracting to a boolean variable or method"
+                    })
+
+            # Check for nested ternary
+            if line.count('if') >= 2 and line.count('else') >= 2:
+                suggestions.append({
+                    "line": i,
+                    "issue": "Nested ternary operator",
+                    "suggestion": "Consider using if-else statements for clarity"
+                })
+
+        return json.dumps({
+            "file": str(file.relative_to(ROOT)),
+            "complex_conditionals": suggestions,
+            "count": len(suggestions)
+        })
+
+    except Exception as e:
+        return json.dumps({"error": f"Analysis failed: {type(e).__name__}: {e}"})
+
+
+# ========== Dependency Management ==========
+
+def analyze_dependencies(language: str = "auto") -> str:
+    """Analyze project dependencies and check for issues.
+
+    Args:
+        language: Language/ecosystem (python, javascript, auto)
+
+    Returns:
+        JSON string with dependency analysis
+    """
+    try:
+        if language == "auto":
+            # Auto-detect from project files
+            if (ROOT / "requirements.txt").exists() or (ROOT / "pyproject.toml").exists():
+                language = "python"
+            elif (ROOT / "package.json").exists():
+                language = "javascript"
+            elif (ROOT / "Cargo.toml").exists():
+                language = "rust"
+            elif (ROOT / "go.mod").exists():
+                language = "go"
+
+        result = {
+            "language": language,
+            "dependencies": [],
+            "issues": []
+        }
+
+        if language == "python":
+            # Check requirements.txt
+            req_file = ROOT / "requirements.txt"
+            if req_file.exists():
+                content = req_file.read_text(encoding='utf-8')
+                deps = [line.strip() for line in content.split('\n') if line.strip() and not line.startswith('#')]
+                result["dependencies"] = deps
+                result["count"] = len(deps)
+                result["file"] = "requirements.txt"
+
+                # Check for unpinned versions
+                unpinned = [d for d in deps if '==' not in d and '>=' not in d]
+                if unpinned:
+                    result["issues"].append({
+                        "type": "unpinned_versions",
+                        "count": len(unpinned),
+                        "packages": unpinned[:10]
+                    })
+
+            # Check for virtual environment
+            if not (ROOT / "venv").exists() and not (ROOT / ".venv").exists():
+                result["issues"].append({
+                    "type": "no_virtual_environment",
+                    "message": "No virtual environment detected"
+                })
+
+        elif language == "javascript":
+            pkg_file = ROOT / "package.json"
+            if pkg_file.exists():
+                pkg_data = json.loads(pkg_file.read_text(encoding='utf-8'))
+                deps = pkg_data.get("dependencies", {})
+                dev_deps = pkg_data.get("devDependencies", {})
+
+                result["dependencies"] = list(deps.keys())
+                result["dev_dependencies"] = list(dev_deps.keys())
+                result["count"] = len(deps) + len(dev_deps)
+                result["file"] = "package.json"
+
+                # Check for caret/tilde versions
+                risky_versions = []
+                for pkg, ver in {**deps, **dev_deps}.items():
+                    if ver.startswith('^') or ver.startswith('~'):
+                        risky_versions.append(f"{pkg}@{ver}")
+
+                if risky_versions:
+                    result["issues"].append({
+                        "type": "flexible_versions",
+                        "count": len(risky_versions),
+                        "message": "Using ^ or ~ version ranges",
+                        "packages": risky_versions[:10]
+                    })
+
+        return json.dumps(result)
+
+    except Exception as e:
+        return json.dumps({"error": f"Analysis failed: {type(e).__name__}: {e}"})
+
+
+def update_dependencies(language: str = "auto", major: bool = False) -> str:
+    """Update project dependencies to latest versions.
+
+    Args:
+        language: Language/ecosystem (python, javascript, auto)
+        major: Allow major version updates (default: False)
+
+    Returns:
+        JSON string with update results
+    """
+    try:
+        if language == "auto":
+            if (ROOT / "requirements.txt").exists():
+                language = "python"
+            elif (ROOT / "package.json").exists():
+                language = "javascript"
+
+        if language == "python":
+            # Update using pip-upgrader or similar
+            cmd = "pip list --outdated --format=json"
+            result = _run_shell(cmd)
+
+            if result.returncode == 0:
+                outdated = json.loads(result.stdout) if result.stdout else []
+                return json.dumps({
+                    "language": "python",
+                    "outdated": outdated,
+                    "count": len(outdated),
+                    "message": "Use 'pip install --upgrade <package>' to update"
+                })
+            else:
+                return json.dumps({"error": "Failed to check outdated packages"})
+
+        elif language == "javascript":
+            # Check for npm updates
+            cmd = "npm outdated --json"
+            result = _run_shell(cmd, timeout=60)
+
+            try:
+                outdated = json.loads(result.stdout) if result.stdout else {}
+                return json.dumps({
+                    "language": "javascript",
+                    "outdated": outdated,
+                    "count": len(outdated),
+                    "message": "Use 'npm update' to update dependencies"
+                })
+            except:
+                return json.dumps({
+                    "language": "javascript",
+                    "message": "No outdated packages found or npm not available"
+                })
+
+        return json.dumps({"error": f"Language '{language}' not supported"})
+
+    except Exception as e:
+        return json.dumps({"error": f"Update check failed: {type(e).__name__}: {e}"})
+
+
+# ========== Security Scanning ==========
+
+def scan_dependencies_vulnerabilities(language: str = "auto") -> str:
+    """Scan dependencies for known vulnerabilities.
+
+    Args:
+        language: Language/ecosystem (python, javascript, auto)
+
+    Returns:
+        JSON string with vulnerability report
+    """
+    try:
+        if language == "auto":
+            if (ROOT / "requirements.txt").exists():
+                language = "python"
+            elif (ROOT / "package.json").exists():
+                language = "javascript"
+
+        result = {
+            "language": language,
+            "vulnerabilities": [],
+            "tool": ""
+        }
+
+        if language == "python":
+            # Try safety first
+            cmd = "safety check --json --file requirements.txt"
+            proc = _run_shell(cmd, timeout=60)
+
+            if proc.returncode == 0 or proc.stdout:
+                try:
+                    safety_data = json.loads(proc.stdout) if proc.stdout else []
+                    result["tool"] = "safety"
+                    result["vulnerabilities"] = safety_data
+                    result["count"] = len(safety_data)
+                    return json.dumps(result)
+                except:
+                    pass
+
+            # Try pip-audit as fallback
+            cmd = "pip-audit --format json"
+            proc = _run_shell(cmd, timeout=60)
+
+            if proc.returncode == 0 or proc.stdout:
+                try:
+                    audit_data = json.loads(proc.stdout) if proc.stdout else {"dependencies": []}
+                    result["tool"] = "pip-audit"
+                    result["vulnerabilities"] = audit_data.get("dependencies", [])
+                    result["count"] = len(audit_data.get("dependencies", []))
+                    return json.dumps(result)
+                except:
+                    pass
+
+            return json.dumps({
+                "error": "No security scanning tool available",
+                "message": "Install safety or pip-audit: pip install safety pip-audit"
+            })
+
+        elif language == "javascript":
+            # Use npm audit
+            cmd = "npm audit --json"
+            proc = _run_shell(cmd, timeout=60)
+
+            try:
+                audit_data = json.loads(proc.stdout) if proc.stdout else {}
+                vulnerabilities = audit_data.get("vulnerabilities", {})
+
+                result["tool"] = "npm audit"
+                result["vulnerabilities"] = vulnerabilities
+                result["count"] = len(vulnerabilities)
+                result["summary"] = audit_data.get("metadata", {})
+
+                return json.dumps(result)
+            except:
+                return json.dumps({
+                    "language": "javascript",
+                    "message": "npm audit not available or no vulnerabilities found"
+                })
+
+        return json.dumps({"error": f"Language '{language}' not supported"})
+
+    except Exception as e:
+        return json.dumps({"error": f"Vulnerability scan failed: {type(e).__name__}: {e}"})
+
+
+def scan_code_security(path: str = ".", tool: str = "auto") -> str:
+    """Perform static security analysis on code.
+
+    Args:
+        path: Path to scan (file or directory)
+        tool: Security tool to use (bandit, semgrep, auto)
+
+    Returns:
+        JSON string with security findings
+    """
+    try:
+        scan_path = _safe_path(path)
+        if not scan_path.exists():
+            return json.dumps({"error": f"Path not found: {path}"})
+
+        findings = []
+        tools_used = []
+
+        # Python: Use bandit
+        if tool in ["auto", "bandit"]:
+            cmd = f"bandit -r {shlex.quote(str(scan_path))} -f json"
+            proc = _run_shell(cmd, timeout=120)
+
+            if proc.returncode != 127:  # Command exists
+                try:
+                    bandit_data = json.loads(proc.stdout) if proc.stdout else {}
+                    results = bandit_data.get("results", [])
+                    findings.extend(results)
+                    tools_used.append("bandit")
+                except:
+                    pass
+
+        # Multi-language: Use semgrep
+        if tool in ["auto", "semgrep"]:
+            cmd = f"semgrep --config=auto --json {shlex.quote(str(scan_path))}"
+            proc = _run_shell(cmd, timeout=120)
+
+            if proc.returncode != 127:
+                try:
+                    semgrep_data = json.loads(proc.stdout) if proc.stdout else {}
+                    results = semgrep_data.get("results", [])
+                    findings.extend(results)
+                    tools_used.append("semgrep")
+                except:
+                    pass
+
+        if not tools_used:
+            return json.dumps({
+                "error": "No security scanning tools available",
+                "message": "Install bandit (Python) or semgrep: pip install bandit semgrep"
+            })
+
+        # Categorize by severity
+        by_severity = {}
+        for finding in findings:
+            severity = finding.get("severity", "MEDIUM").upper()
+            if severity not in by_severity:
+                by_severity[severity] = []
+            by_severity[severity].append(finding)
+
+        return json.dumps({
+            "scanned": str(scan_path.relative_to(ROOT)),
+            "tools": tools_used,
+            "findings": findings,
+            "count": len(findings),
+            "by_severity": {k: len(v) for k, v in by_severity.items()}
+        })
+
+    except Exception as e:
+        return json.dumps({"error": f"Security scan failed: {type(e).__name__}: {e}"})
+
+
+def detect_secrets(path: str = ".") -> str:
+    """Scan for accidentally committed secrets and credentials.
+
+    Args:
+        path: Path to scan
+
+    Returns:
+        JSON string with detected secrets
+    """
+    try:
+        scan_path = _safe_path(path)
+        if not scan_path.exists():
+            return json.dumps({"error": f"Path not found: {path}"})
+
+        # Try detect-secrets tool
+        cmd = f"detect-secrets scan {shlex.quote(str(scan_path))}"
+        proc = _run_shell(cmd, timeout=60)
+
+        if proc.returncode == 127:
+            return json.dumps({
+                "error": "detect-secrets not installed",
+                "message": "Install with: pip install detect-secrets"
+            })
+
+        try:
+            secrets_data = json.loads(proc.stdout) if proc.stdout else {}
+            results = secrets_data.get("results", {})
+
+            # Count total secrets
+            total_secrets = sum(len(secrets) for secrets in results.values())
+
+            # Get summary by file
+            by_file = {}
+            for file_path, secrets in results.items():
+                by_file[file_path] = len(secrets)
+
+            return json.dumps({
+                "scanned": str(scan_path.relative_to(ROOT)),
+                "tool": "detect-secrets",
+                "secrets_found": total_secrets,
+                "files_with_secrets": len(results),
+                "by_file": by_file
+            })
+        except:
+            return json.dumps({
+                "scanned": str(scan_path.relative_to(ROOT)),
+                "message": "No secrets detected or scan completed successfully"
+            })
+
+    except Exception as e:
+        return json.dumps({"error": f"Secret detection failed: {type(e).__name__}: {e}"})
+
+
+def check_license_compliance(path: str = ".") -> str:
+    """Check dependency licenses for compliance issues.
+
+    Args:
+        path: Project path
+
+    Returns:
+        JSON string with license information
+    """
+    try:
+        # Python: Use pip-licenses
+        if (ROOT / "requirements.txt").exists():
+            cmd = "pip-licenses --format=json"
+            proc = _run_shell(cmd, timeout=60)
+
+            if proc.returncode != 127:
+                try:
+                    licenses = json.loads(proc.stdout) if proc.stdout else []
+
+                    # Flag potentially problematic licenses
+                    restricted = ["GPL-3.0", "AGPL-3.0", "GPL-2.0"]
+                    issues = []
+
+                    for pkg in licenses:
+                        license_name = pkg.get("License", "")
+                        if any(r in license_name for r in restricted):
+                            issues.append({
+                                "package": pkg.get("Name"),
+                                "license": license_name,
+                                "issue": "Restrictive license"
+                            })
+
+                    return json.dumps({
+                        "language": "python",
+                        "tool": "pip-licenses",
+                        "total_packages": len(licenses),
+                        "licenses": licenses,
+                        "compliance_issues": issues,
+                        "issue_count": len(issues)
+                    })
+                except:
+                    pass
+
+        # JavaScript: Use license-checker
+        if (ROOT / "package.json").exists():
+            cmd = "npx license-checker --json"
+            proc = _run_shell(cmd, timeout=60)
+
+            try:
+                licenses = json.loads(proc.stdout) if proc.stdout else {}
+
+                restricted = ["GPL-3.0", "AGPL-3.0", "GPL-2.0"]
+                issues = []
+
+                for pkg_name, pkg_info in licenses.items():
+                    license_name = pkg_info.get("licenses", "")
+                    if any(r in str(license_name) for r in restricted):
+                        issues.append({
+                            "package": pkg_name,
+                            "license": license_name,
+                            "issue": "Restrictive license"
+                        })
+
+                return json.dumps({
+                    "language": "javascript",
+                    "tool": "license-checker",
+                    "total_packages": len(licenses),
+                    "compliance_issues": issues,
+                    "issue_count": len(issues)
+                })
+            except:
+                pass
+
+        return json.dumps({
+            "message": "No license checking tool available",
+            "install": "pip install pip-licenses (Python) or npm install license-checker (JavaScript)"
+        })
+
+    except Exception as e:
+        return json.dumps({"error": f"License check failed: {type(e).__name__}: {e}"})
+
+
 # ========== MCP (Model Context Protocol) Support ==========
 
 class MCPClient:
@@ -1992,6 +2813,209 @@ TOOLS = [
                     "arguments": {"type": "string", "description": "JSON-encoded arguments"}
                 },
                 "required": ["server", "tool"]
+            }
+        }
+    },
+    # File conversion utilities
+    {
+        "type": "function",
+        "function": {
+            "name": "convert_json_to_yaml",
+            "description": "Convert JSON file to YAML format",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "json_path": {"type": "string", "description": "Path to JSON file"},
+                    "yaml_path": {"type": "string", "description": "Output YAML path (optional)"}
+                },
+                "required": ["json_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "convert_yaml_to_json",
+            "description": "Convert YAML file to JSON format",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "yaml_path": {"type": "string", "description": "Path to YAML file"},
+                    "json_path": {"type": "string", "description": "Output JSON path (optional)"}
+                },
+                "required": ["yaml_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "convert_csv_to_json",
+            "description": "Convert CSV file to JSON array",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "csv_path": {"type": "string", "description": "Path to CSV file"},
+                    "json_path": {"type": "string", "description": "Output JSON path (optional)"}
+                },
+                "required": ["csv_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "convert_json_to_csv",
+            "description": "Convert JSON array to CSV file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "json_path": {"type": "string", "description": "Path to JSON file"},
+                    "csv_path": {"type": "string", "description": "Output CSV path (optional)"}
+                },
+                "required": ["json_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "convert_env_to_json",
+            "description": "Convert .env file to JSON format",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "env_path": {"type": "string", "description": "Path to .env file"},
+                    "json_path": {"type": "string", "description": "Output JSON path (optional)"}
+                },
+                "required": ["env_path"]
+            }
+        }
+    },
+    # Code refactoring utilities
+    {
+        "type": "function",
+        "function": {
+            "name": "remove_unused_imports",
+            "description": "Remove unused imports from Python files (requires autoflake)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to file"},
+                    "language": {"type": "string", "description": "Language (default: python)"}
+                },
+                "required": ["file_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "extract_constants",
+            "description": "Identify magic numbers and strings that should be constants",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to file"},
+                    "threshold": {"type": "integer", "description": "Minimum occurrences (default: 3)"}
+                },
+                "required": ["file_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "simplify_conditionals",
+            "description": "Find overly complex conditional statements",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to file"}
+                },
+                "required": ["file_path"]
+            }
+        }
+    },
+    # Dependency management
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_dependencies",
+            "description": "Analyze project dependencies and check for issues",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "language": {"type": "string", "description": "Language (auto/python/javascript)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_dependencies",
+            "description": "Check for outdated dependencies",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "language": {"type": "string", "description": "Language (auto/python/javascript)"},
+                    "major": {"type": "boolean", "description": "Include major version updates"}
+                }
+            }
+        }
+    },
+    # Security scanning
+    {
+        "type": "function",
+        "function": {
+            "name": "scan_dependencies_vulnerabilities",
+            "description": "Scan dependencies for known vulnerabilities (requires safety/pip-audit/npm)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "language": {"type": "string", "description": "Language (auto/python/javascript)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scan_code_security",
+            "description": "Perform static code security analysis (requires bandit/semgrep)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to scan (default: .)"},
+                    "tool": {"type": "string", "description": "Tool to use (auto/bandit/semgrep)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "detect_secrets",
+            "description": "Scan for accidentally committed secrets (requires detect-secrets)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to scan (default: .)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_license_compliance",
+            "description": "Check dependency licenses for compliance issues",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to scan (default: .)"}
+                }
             }
         }
     }
