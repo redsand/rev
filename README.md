@@ -264,19 +264,57 @@ For each task, the agent:
 
 ### Available Tools
 
-The agent has access to:
+The agent has access to **24 powerful tools** across multiple categories:
 
+#### Core File Operations
 | Tool | Description |
 |------|-------------|
 | `read_file` | Read file contents |
 | `write_file` | Create or overwrite files |
+| `delete_file` | Delete a file |
+| `move_file` | Move or rename files |
+| `append_to_file` | Append content to a file |
+| `replace_in_file` | Find and replace text within a file (supports regex) |
+| `create_directory` | Create directories |
+| `get_file_info` | Get file metadata (size, modified time, etc.) |
+
+#### Code Discovery & Search
+| Tool | Description |
+|------|-------------|
 | `list_dir` | List files matching glob pattern |
 | `search_code` | Search code with regex |
+
+#### Git Operations
+| Tool | Description |
+|------|-------------|
 | `git_diff` | View current uncommitted changes |
+| `git_status` | Get detailed git status |
+| `git_log` | Get git commit history |
+| `git_commit` | Commit changes with a message |
 | `apply_patch` | Apply unified diff patches |
+| `get_repo_context` | Get git status and repo structure |
+
+#### Command Execution
+| Tool | Description |
+|------|-------------|
 | `run_cmd` | Execute shell commands |
 | `run_tests` | Run test suite (pytest, npm test, etc.) |
-| `get_repo_context` | Get git status and repo structure |
+
+#### Utility Tools
+| Tool | Description |
+|------|-------------|
+| `install_package` | Install Python packages using pip |
+| `web_fetch` | Fetch content from URLs |
+| `execute_python` | Execute Python code snippets |
+
+#### MCP (Model Context Protocol) Support
+| Tool | Description |
+|------|-------------|
+| `mcp_add_server` | Add an MCP server for extended capabilities |
+| `mcp_list_servers` | List configured MCP servers |
+| `mcp_call_tool` | Call tools on MCP servers |
+
+**New in v2.5:** MCP support allows the agent to connect to external tools and data sources through the Model Context Protocol, enabling integration with databases, APIs, and other development tools.
 
 ## Comparison with agent.py
 

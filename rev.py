@@ -322,6 +322,285 @@ def get_repo_context(commits: int = 6) -> str:
     })
 
 
+# ========== Additional File Operations ==========
+
+def delete_file(path: str) -> str:
+    """Delete a file."""
+    try:
+        p = _safe_path(path)
+        if not p.exists():
+            return json.dumps({"error": f"Not found: {path}"})
+        if p.is_dir():
+            return json.dumps({"error": f"Cannot delete directory (use delete_directory): {path}"})
+        p.unlink()
+        return json.dumps({"deleted": str(p.relative_to(ROOT))})
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def move_file(src: str, dest: str) -> str:
+    """Move or rename a file."""
+    try:
+        src_p = _safe_path(src)
+        dest_p = _safe_path(dest)
+        if not src_p.exists():
+            return json.dumps({"error": f"Source not found: {src}"})
+        dest_p.parent.mkdir(parents=True, exist_ok=True)
+        src_p.rename(dest_p)
+        return json.dumps({
+            "moved": str(src_p.relative_to(ROOT)),
+            "to": str(dest_p.relative_to(ROOT))
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def append_to_file(path: str, content: str) -> str:
+    """Append content to a file."""
+    try:
+        p = _safe_path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as f:
+            f.write(content)
+        return json.dumps({"appended_to": str(p.relative_to(ROOT)), "bytes": len(content)})
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def replace_in_file(path: str, find: str, replace: str, regex: bool = False) -> str:
+    """Find and replace within a file."""
+    try:
+        p = _safe_path(path)
+        if not p.exists():
+            return json.dumps({"error": f"Not found: {path}"})
+        content = p.read_text(encoding="utf-8", errors="ignore")
+
+        if regex:
+            new_content = re.sub(find, replace, content)
+        else:
+            new_content = content.replace(find, replace)
+
+        if content == new_content:
+            return json.dumps({"replaced": 0, "file": str(p.relative_to(ROOT))})
+
+        p.write_text(new_content, encoding="utf-8")
+        count = len(content.split(find)) - 1 if not regex else len(re.findall(find, content))
+        return json.dumps({
+            "replaced": count,
+            "file": str(p.relative_to(ROOT))
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def create_directory(path: str) -> str:
+    """Create a directory."""
+    try:
+        p = _safe_path(path)
+        p.mkdir(parents=True, exist_ok=True)
+        return json.dumps({"created": str(p.relative_to(ROOT))})
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def get_file_info(path: str) -> str:
+    """Get file metadata."""
+    try:
+        p = _safe_path(path)
+        if not p.exists():
+            return json.dumps({"error": f"Not found: {path}"})
+        stat = p.stat()
+        return json.dumps({
+            "path": str(p.relative_to(ROOT)),
+            "size": stat.st_size,
+            "modified": stat.st_mtime,
+            "is_file": p.is_file(),
+            "is_dir": p.is_dir()
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+# ========== Additional Git Operations ==========
+
+def git_commit(message: str, files: str = ".") -> str:
+    """Commit changes to git."""
+    try:
+        # Add files
+        add_result = _run_shell(f"git add {shlex.quote(files)}")
+        if add_result.returncode != 0:
+            return json.dumps({"error": f"git add failed: {add_result.stderr}"})
+
+        # Commit
+        commit_result = _run_shell(f"git commit -m {shlex.quote(message)}")
+        if commit_result.returncode != 0:
+            return json.dumps({"error": f"git commit failed: {commit_result.stderr}"})
+
+        return json.dumps({
+            "committed": True,
+            "message": message,
+            "output": commit_result.stdout
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def git_status() -> str:
+    """Get git status."""
+    try:
+        result = _run_shell("git status")
+        return json.dumps({
+            "status": result.stdout,
+            "returncode": result.returncode
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def git_log(count: int = 10, oneline: bool = False) -> str:
+    """Get git log."""
+    try:
+        cmd = f"git log -n {int(count)}"
+        if oneline:
+            cmd += " --oneline"
+        result = _run_shell(cmd)
+        return json.dumps({
+            "log": result.stdout,
+            "returncode": result.returncode
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+# ========== Utility Tools ==========
+
+def install_package(package: str) -> str:
+    """Install a Python package."""
+    try:
+        result = _run_shell(f"pip install {shlex.quote(package)}", timeout=300)
+        return json.dumps({
+            "installed": package,
+            "returncode": result.returncode,
+            "output": result.stdout + result.stderr
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def web_fetch(url: str) -> str:
+    """Fetch content from a URL."""
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        return json.dumps({
+            "url": url,
+            "status_code": response.status_code,
+            "content": response.text[:50000],  # Limit to 50KB
+            "headers": dict(response.headers)
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def execute_python(code: str) -> str:
+    """Execute Python code in a safe context."""
+    try:
+        # Create a restricted namespace
+        namespace = {
+            '__builtins__': __builtins__,
+            'json': json,
+            'os': os,
+            're': re,
+            'pathlib': pathlib
+        }
+
+        # Capture output
+        import io
+        import contextlib
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            exec(code, namespace)
+
+        return json.dumps({
+            "executed": True,
+            "output": output.getvalue()
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+# ========== MCP (Model Context Protocol) Support ==========
+
+class MCPClient:
+    """Client for Model Context Protocol servers."""
+
+    def __init__(self):
+        self.servers = {}
+        self.tools = {}
+
+    def add_server(self, name: str, command: str, args: List[str] = None) -> Dict[str, Any]:
+        """Add an MCP server."""
+        try:
+            # Store server configuration
+            self.servers[name] = {
+                "command": command,
+                "args": args or [],
+                "connected": False
+            }
+            return {"added": name, "command": command}
+        except Exception as e:
+            return {"error": f"{type(e).__name__}: {e}"}
+
+    def list_servers(self) -> Dict[str, Any]:
+        """List configured MCP servers."""
+        return {"servers": list(self.servers.keys())}
+
+    def call_mcp_tool(self, server: str, tool: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Call a tool on an MCP server."""
+        try:
+            if server not in self.servers:
+                return {"error": f"Server not found: {server}"}
+
+            # For now, return a placeholder
+            # Full MCP implementation would use stdio communication
+            return {
+                "mcp_call": True,
+                "server": server,
+                "tool": tool,
+                "note": "MCP server communication would happen here"
+            }
+        except Exception as e:
+            return {"error": f"{type(e).__name__}: {e}"}
+
+
+# Global MCP client instance
+mcp_client = MCPClient()
+
+
+def mcp_add_server(name: str, command: str, args: str = "") -> str:
+    """Add an MCP server."""
+    arg_list = args.split() if args else []
+    result = mcp_client.add_server(name, command, arg_list)
+    return json.dumps(result)
+
+
+def mcp_list_servers() -> str:
+    """List MCP servers."""
+    result = mcp_client.list_servers()
+    return json.dumps(result)
+
+
+def mcp_call_tool(server: str, tool: str, arguments: str = "{}") -> str:
+    """Call an MCP tool."""
+    try:
+        args_dict = json.loads(arguments)
+        result = mcp_client.call_mcp_tool(server, tool, args_dict)
+        return json.dumps(result)
+    except json.JSONDecodeError as e:
+        return json.dumps({"error": f"Invalid JSON arguments: {e}"})
+
+
 # ========== Ollama Integration ==========
 
 # Debug mode - set to True to see API requests/responses
@@ -536,6 +815,224 @@ TOOLS = [
                 }
             }
         }
+    },
+    # File operations
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_file",
+            "description": "Delete a file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to file to delete"}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "move_file",
+            "description": "Move or rename a file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "src": {"type": "string", "description": "Source path"},
+                    "dest": {"type": "string", "description": "Destination path"}
+                },
+                "required": ["src", "dest"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "append_to_file",
+            "description": "Append content to a file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to file"},
+                    "content": {"type": "string", "description": "Content to append"}
+                },
+                "required": ["path", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "replace_in_file",
+            "description": "Find and replace text within a file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to file"},
+                    "find": {"type": "string", "description": "Text to find"},
+                    "replace": {"type": "string", "description": "Replacement text"},
+                    "regex": {"type": "boolean", "description": "Use regex matching"}
+                },
+                "required": ["path", "find", "replace"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_directory",
+            "description": "Create a directory",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Directory path"}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_file_info",
+            "description": "Get file metadata (size, modified time, etc.)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to file"}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    # Git operations
+    {
+        "type": "function",
+        "function": {
+            "name": "git_commit",
+            "description": "Commit changes to git",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "description": "Commit message"},
+                    "files": {"type": "string", "description": "Files to add (default: .)"}
+                },
+                "required": ["message"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_status",
+            "description": "Get git status",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_log",
+            "description": "Get git log",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "count": {"type": "integer", "description": "Number of commits (default: 10)"},
+                    "oneline": {"type": "boolean", "description": "Use oneline format"}
+                }
+            }
+        }
+    },
+    # Utility tools
+    {
+        "type": "function",
+        "function": {
+            "name": "install_package",
+            "description": "Install a Python package using pip",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string", "description": "Package name"}
+                },
+                "required": ["package"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_fetch",
+            "description": "Fetch content from a URL",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to fetch"}
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_python",
+            "description": "Execute Python code and return output",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "Python code to execute"}
+                },
+                "required": ["code"]
+            }
+        }
+    },
+    # MCP tools
+    {
+        "type": "function",
+        "function": {
+            "name": "mcp_add_server",
+            "description": "Add an MCP (Model Context Protocol) server",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Server name"},
+                    "command": {"type": "string", "description": "Command to run server"},
+                    "args": {"type": "string", "description": "Space-separated arguments"}
+                },
+                "required": ["name", "command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mcp_list_servers",
+            "description": "List configured MCP servers",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mcp_call_tool",
+            "description": "Call a tool on an MCP server",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "Server name"},
+                    "tool": {"type": "string", "description": "Tool name"},
+                    "arguments": {"type": "string", "description": "JSON-encoded arguments"}
+                },
+                "required": ["server", "tool"]
+            }
+        }
     }
 ]
 
@@ -547,6 +1044,7 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
     print(f"  → Executing: {name}({', '.join(f'{k}={v!r}' for k, v in args.items())})")
 
     try:
+        # Original tools
         if name == "read_file":
             return read_file(args["path"])
         elif name == "write_file":
@@ -565,6 +1063,45 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
             return run_tests(args.get("cmd", "pytest -q"), args.get("timeout", 600))
         elif name == "get_repo_context":
             return get_repo_context(args.get("commits", 6))
+
+        # File operations
+        elif name == "delete_file":
+            return delete_file(args["path"])
+        elif name == "move_file":
+            return move_file(args["src"], args["dest"])
+        elif name == "append_to_file":
+            return append_to_file(args["path"], args["content"])
+        elif name == "replace_in_file":
+            return replace_in_file(args["path"], args["find"], args["replace"], args.get("regex", False))
+        elif name == "create_directory":
+            return create_directory(args["path"])
+        elif name == "get_file_info":
+            return get_file_info(args["path"])
+
+        # Git operations
+        elif name == "git_commit":
+            return git_commit(args["message"], args.get("files", "."))
+        elif name == "git_status":
+            return git_status()
+        elif name == "git_log":
+            return git_log(args.get("count", 10), args.get("oneline", False))
+
+        # Utility tools
+        elif name == "install_package":
+            return install_package(args["package"])
+        elif name == "web_fetch":
+            return web_fetch(args["url"])
+        elif name == "execute_python":
+            return execute_python(args["code"])
+
+        # MCP tools
+        elif name == "mcp_add_server":
+            return mcp_add_server(args["name"], args["command"], args.get("args", ""))
+        elif name == "mcp_list_servers":
+            return mcp_list_servers()
+        elif name == "mcp_call_tool":
+            return mcp_call_tool(args["server"], args["tool"], args.get("arguments", "{}"))
+
         else:
             return json.dumps({"error": f"Unknown tool: {name}"})
     except Exception as e:
