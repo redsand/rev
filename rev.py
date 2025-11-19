@@ -40,6 +40,14 @@ except ImportError:
     print("Error: requests library required. Install with: pip install requests")
     sys.exit(1)
 
+# SSH support (optional)
+try:
+    import paramiko
+    SSH_AVAILABLE = True
+except ImportError:
+    SSH_AVAILABLE = False
+    paramiko = None
+
 # Configuration
 ROOT = pathlib.Path(os.getcwd()).resolve()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
@@ -706,6 +714,240 @@ def get_system_info() -> str:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
 
+# ========== SSH Remote Execution Support ==========
+
+class SSHConnectionManager:
+    """Manage SSH connections to remote hosts."""
+
+    def __init__(self):
+        self.connections = {}  # {connection_id: {"client": SSHClient, "host": str, "user": str}}
+
+    def connect(self, host: str, username: str, password: str = None, key_file: str = None,
+                port: int = 22) -> Dict[str, Any]:
+        """Connect to a remote host via SSH."""
+        if not SSH_AVAILABLE:
+            return {"error": "SSH not available. Install with: pip install paramiko"}
+
+        connection_id = f"{username}@{host}:{port}"
+
+        try:
+            # Close existing connection if any
+            if connection_id in self.connections:
+                self.disconnect(connection_id)
+
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+            # Connect with password or key
+            if key_file:
+                client.connect(host, port=port, username=username, key_filename=key_file, timeout=10)
+            elif password:
+                client.connect(host, port=port, username=username, password=password, timeout=10)
+            else:
+                # Try default SSH keys
+                client.connect(host, port=port, username=username, timeout=10)
+
+            self.connections[connection_id] = {
+                "client": client,
+                "host": host,
+                "username": username,
+                "port": port,
+                "connected_at": json.dumps({"timestamp": "now"})  # Placeholder
+            }
+
+            return {
+                "connected": True,
+                "connection_id": connection_id,
+                "host": host,
+                "username": username,
+                "port": port
+            }
+
+        except Exception as e:
+            return {"error": f"SSH connection failed: {type(e).__name__}: {e}"}
+
+    def execute(self, connection_id: str, command: str, timeout: int = 30) -> Dict[str, Any]:
+        """Execute a command on a remote host."""
+        if connection_id not in self.connections:
+            return {"error": f"Connection not found: {connection_id}"}
+
+        try:
+            client = self.connections[connection_id]["client"]
+            stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+
+            exit_status = stdout.channel.recv_exit_status()
+            stdout_text = stdout.read().decode('utf-8', errors='ignore')
+            stderr_text = stderr.read().decode('utf-8', errors='ignore')
+
+            return {
+                "connection_id": connection_id,
+                "command": command,
+                "exit_code": exit_status,
+                "stdout": stdout_text,
+                "stderr": stderr_text,
+                "success": exit_status == 0
+            }
+
+        except Exception as e:
+            return {"error": f"Command execution failed: {type(e).__name__}: {e}"}
+
+    def copy_file_to_remote(self, connection_id: str, local_path: str, remote_path: str) -> Dict[str, Any]:
+        """Copy a file to the remote host."""
+        if connection_id not in self.connections:
+            return {"error": f"Connection not found: {connection_id}"}
+
+        try:
+            client = self.connections[connection_id]["client"]
+            sftp = client.open_sftp()
+            sftp.put(local_path, remote_path)
+            sftp.close()
+
+            return {
+                "copied": True,
+                "local_path": local_path,
+                "remote_path": remote_path,
+                "connection_id": connection_id
+            }
+
+        except Exception as e:
+            return {"error": f"File copy failed: {type(e).__name__}: {e}"}
+
+    def copy_file_from_remote(self, connection_id: str, remote_path: str, local_path: str) -> Dict[str, Any]:
+        """Copy a file from the remote host."""
+        if connection_id not in self.connections:
+            return {"error": f"Connection not found: {connection_id}"}
+
+        try:
+            client = self.connections[connection_id]["client"]
+            sftp = client.open_sftp()
+            sftp.get(remote_path, local_path)
+            sftp.close()
+
+            return {
+                "copied": True,
+                "remote_path": remote_path,
+                "local_path": local_path,
+                "connection_id": connection_id
+            }
+
+        except Exception as e:
+            return {"error": f"File copy failed: {type(e).__name__}: {e}"}
+
+    def disconnect(self, connection_id: str) -> Dict[str, Any]:
+        """Disconnect from a remote host."""
+        if connection_id not in self.connections:
+            return {"error": f"Connection not found: {connection_id}"}
+
+        try:
+            client = self.connections[connection_id]["client"]
+            client.close()
+            del self.connections[connection_id]
+
+            return {
+                "disconnected": True,
+                "connection_id": connection_id
+            }
+
+        except Exception as e:
+            return {"error": f"Disconnect failed: {type(e).__name__}: {e}"}
+
+    def list_connections(self) -> Dict[str, Any]:
+        """List all active SSH connections."""
+        return {
+            "connections": [
+                {
+                    "connection_id": conn_id,
+                    "host": info["host"],
+                    "username": info["username"],
+                    "port": info["port"]
+                }
+                for conn_id, info in self.connections.items()
+            ]
+        }
+
+
+# Global SSH connection manager
+ssh_manager = SSHConnectionManager()
+
+
+def ssh_connect(host: str, username: str, password: str = None, key_file: str = None, port: int = 22) -> str:
+    """Connect to a remote host via SSH."""
+    result = ssh_manager.connect(host, username, password, key_file, port)
+    return json.dumps(result)
+
+
+def ssh_exec(connection_id: str, command: str, timeout: int = 30) -> str:
+    """Execute a command on a remote host."""
+    result = ssh_manager.execute(connection_id, command, timeout)
+    return json.dumps(result)
+
+
+def ssh_copy_to(connection_id: str, local_path: str, remote_path: str) -> str:
+    """Copy a file to the remote host."""
+    result = ssh_manager.copy_file_to_remote(connection_id, local_path, remote_path)
+    return json.dumps(result)
+
+
+def ssh_copy_from(connection_id: str, remote_path: str, local_path: str) -> str:
+    """Copy a file from the remote host."""
+    result = ssh_manager.copy_file_from_remote(connection_id, remote_path, local_path)
+    return json.dumps(result)
+
+
+def ssh_disconnect(connection_id: str) -> str:
+    """Disconnect from a remote host."""
+    result = ssh_manager.disconnect(connection_id)
+    return json.dumps(result)
+
+
+def ssh_list_connections() -> str:
+    """List all active SSH connections."""
+    result = ssh_manager.list_connections()
+    return json.dumps(result)
+
+
+# ========== GitLab CI/CD Helpers ==========
+
+def setup_gitlab_runner(connection_id: str, gitlab_url: str, registration_token: str,
+                        tags: str = "docker", executor: str = "docker") -> str:
+    """Set up a GitLab Runner on a remote host."""
+    if not SSH_AVAILABLE:
+        return json.dumps({"error": "SSH not available. Install with: pip install paramiko"})
+
+    commands = [
+        # Install GitLab Runner
+        "curl -L https://packages.gitlab.com/install/repositories/runner/gitlab-runner/script.deb.sh | sudo bash",
+        "sudo apt-get install gitlab-runner -y",
+
+        # Register runner
+        f"sudo gitlab-runner register --non-interactive --url '{gitlab_url}' --registration-token '{registration_token}' --executor '{executor}' --description 'Auto-registered runner' --tag-list '{tags}'",
+
+        # Start runner
+        "sudo gitlab-runner start",
+
+        # Check status
+        "sudo gitlab-runner status"
+    ]
+
+    results = []
+    for cmd in commands:
+        result = ssh_manager.execute(connection_id, cmd, timeout=120)
+        results.append(result)
+
+        if "error" in result or (result.get("exit_code", 1) != 0 and "status" not in cmd):
+            return json.dumps({
+                "error": "GitLab Runner setup failed",
+                "failed_command": cmd,
+                "details": result
+            })
+
+    return json.dumps({
+        "success": True,
+        "message": "GitLab Runner installed and registered successfully",
+        "results": results
+    })
+
+
 # ========== MCP (Model Context Protocol) Support ==========
 
 class MCPClient:
@@ -1251,6 +1493,116 @@ TOOLS = [
             }
         }
     },
+    # SSH remote execution tools
+    {
+        "type": "function",
+        "function": {
+            "name": "ssh_connect",
+            "description": "Connect to a remote host via SSH",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "host": {"type": "string", "description": "Remote host address"},
+                    "username": {"type": "string", "description": "SSH username"},
+                    "password": {"type": "string", "description": "SSH password (optional)"},
+                    "key_file": {"type": "string", "description": "Path to SSH key file (optional)"},
+                    "port": {"type": "integer", "description": "SSH port (default: 22)"}
+                },
+                "required": ["host", "username"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ssh_exec",
+            "description": "Execute a command on a remote host via SSH",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "connection_id": {"type": "string", "description": "SSH connection ID (username@host:port)"},
+                    "command": {"type": "string", "description": "Command to execute"},
+                    "timeout": {"type": "integer", "description": "Command timeout in seconds (default: 30)"}
+                },
+                "required": ["connection_id", "command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ssh_copy_to",
+            "description": "Copy a file to the remote host via SFTP",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "connection_id": {"type": "string", "description": "SSH connection ID"},
+                    "local_path": {"type": "string", "description": "Local file path"},
+                    "remote_path": {"type": "string", "description": "Remote file path"}
+                },
+                "required": ["connection_id", "local_path", "remote_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ssh_copy_from",
+            "description": "Copy a file from the remote host via SFTP",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "connection_id": {"type": "string", "description": "SSH connection ID"},
+                    "remote_path": {"type": "string", "description": "Remote file path"},
+                    "local_path": {"type": "string", "description": "Local file path"}
+                },
+                "required": ["connection_id", "remote_path", "local_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ssh_disconnect",
+            "description": "Disconnect from a remote host",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "connection_id": {"type": "string", "description": "SSH connection ID"}
+                },
+                "required": ["connection_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ssh_list_connections",
+            "description": "List all active SSH connections",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "setup_gitlab_runner",
+            "description": "Set up and register a GitLab Runner on a remote host",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "connection_id": {"type": "string", "description": "SSH connection ID"},
+                    "gitlab_url": {"type": "string", "description": "GitLab instance URL"},
+                    "registration_token": {"type": "string", "description": "Runner registration token"},
+                    "tags": {"type": "string", "description": "Runner tags (default: docker)"},
+                    "executor": {"type": "string", "description": "Executor type (default: docker)"}
+                },
+                "required": ["connection_id", "gitlab_url", "registration_token"]
+            }
+        }
+    },
     # MCP tools
     {
         "type": "function",
@@ -1366,6 +1718,25 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
             return execute_python(args["code"])
         elif name == "get_system_info":
             return get_system_info()
+
+        # SSH remote execution tools
+        elif name == "ssh_connect":
+            return ssh_connect(args["host"], args["username"], args.get("password"),
+                             args.get("key_file"), args.get("port", 22))
+        elif name == "ssh_exec":
+            return ssh_exec(args["connection_id"], args["command"], args.get("timeout", 30))
+        elif name == "ssh_copy_to":
+            return ssh_copy_to(args["connection_id"], args["local_path"], args["remote_path"])
+        elif name == "ssh_copy_from":
+            return ssh_copy_from(args["connection_id"], args["remote_path"], args["local_path"])
+        elif name == "ssh_disconnect":
+            return ssh_disconnect(args["connection_id"])
+        elif name == "ssh_list_connections":
+            return ssh_list_connections()
+        elif name == "setup_gitlab_runner":
+            return setup_gitlab_runner(args["connection_id"], args["gitlab_url"],
+                                      args["registration_token"], args.get("tags", "docker"),
+                                      args.get("executor", "docker"))
 
         # MCP tools
         elif name == "mcp_add_server":

@@ -1661,4 +1661,383 @@ class TestSystemInfo:
         assert "platform" in data
 
 
+class TestSSHFunctionality:
+    """Test SSH remote execution functionality."""
+
+    @patch('agent_min.SSH_AVAILABLE', True)
+    @patch('agent_min.paramiko')
+    def test_ssh_connection_manager_connect(self, mock_paramiko):
+        """Test SSH connection establishment."""
+        mock_client = MagicMock()
+        mock_paramiko.SSHClient.return_value = mock_client
+
+        manager = agent_min.SSHConnectionManager()
+        result = manager.connect("testhost", "testuser", password="testpass", port=22)
+
+        assert result["connected"] is True
+        assert result["connection_id"] == "testuser@testhost:22"
+        assert "testuser@testhost:22" in manager.connections
+        mock_client.set_missing_host_key_policy.assert_called_once()
+        mock_client.connect.assert_called_once()
+
+    @patch('agent_min.SSH_AVAILABLE', True)
+    @patch('agent_min.paramiko')
+    def test_ssh_connection_manager_execute(self, mock_paramiko):
+        """Test SSH command execution."""
+        mock_client = MagicMock()
+        mock_stdin = MagicMock()
+        mock_stdout = MagicMock()
+        mock_stderr = MagicMock()
+
+        mock_stdout.read.return_value = b"command output"
+        mock_stderr.read.return_value = b""
+        mock_stdout.channel.recv_exit_status.return_value = 0
+
+        mock_client.exec_command.return_value = (mock_stdin, mock_stdout, mock_stderr)
+        mock_paramiko.SSHClient.return_value = mock_client
+
+        manager = agent_min.SSHConnectionManager()
+        conn_result = manager.connect("testhost", "testuser", password="testpass")
+        conn_id = conn_result["connection_id"]
+        result = manager.execute(conn_id, "ls -la")
+
+        assert result["success"] is True
+        assert result["stdout"] == "command output"
+        assert result["exit_code"] == 0
+
+    @patch('agent_min.SSH_AVAILABLE', True)
+    @patch('agent_min.paramiko')
+    def test_ssh_connection_manager_copy_to_remote(self, mock_paramiko):
+        """Test copying file to remote host."""
+        mock_client = MagicMock()
+        mock_sftp = MagicMock()
+        mock_client.open_sftp.return_value = mock_sftp
+        mock_paramiko.SSHClient.return_value = mock_client
+
+        manager = agent_min.SSHConnectionManager()
+        conn_result = manager.connect("testhost", "testuser", password="testpass")
+        conn_id = conn_result["connection_id"]
+
+        with patch('os.path.exists', return_value=True):
+            result = manager.copy_file_to_remote(conn_id, "/local/file.txt", "/remote/file.txt")
+
+        assert result["copied"] is True
+        assert result["local_path"] == "/local/file.txt"
+        assert result["remote_path"] == "/remote/file.txt"
+        mock_sftp.put.assert_called_once_with("/local/file.txt", "/remote/file.txt")
+
+    @patch('agent_min.SSH_AVAILABLE', True)
+    @patch('agent_min.paramiko')
+    def test_ssh_connection_manager_copy_from_remote(self, mock_paramiko):
+        """Test copying file from remote host."""
+        mock_client = MagicMock()
+        mock_sftp = MagicMock()
+        mock_client.open_sftp.return_value = mock_sftp
+        mock_paramiko.SSHClient.return_value = mock_client
+
+        manager = agent_min.SSHConnectionManager()
+        conn_result = manager.connect("testhost", "testuser", password="testpass")
+        conn_id = conn_result["connection_id"]
+        result = manager.copy_file_from_remote(conn_id, "/remote/file.txt", "/local/file.txt")
+
+        assert result["copied"] is True
+        assert result["remote_path"] == "/remote/file.txt"
+        assert result["local_path"] == "/local/file.txt"
+        mock_sftp.get.assert_called_once_with("/remote/file.txt", "/local/file.txt")
+
+    @patch('agent_min.SSH_AVAILABLE', True)
+    @patch('agent_min.paramiko')
+    def test_ssh_connection_manager_disconnect(self, mock_paramiko):
+        """Test SSH connection disconnection."""
+        mock_client = MagicMock()
+        mock_paramiko.SSHClient.return_value = mock_client
+
+        manager = agent_min.SSHConnectionManager()
+        conn_result = manager.connect("testhost", "testuser", password="testpass")
+        conn_id = conn_result["connection_id"]
+        result = manager.disconnect(conn_id)
+
+        assert result["disconnected"] is True
+        assert result["connection_id"] == conn_id
+        assert conn_id not in manager.connections
+        mock_client.close.assert_called_once()
+
+    @patch('agent_min.SSH_AVAILABLE', True)
+    @patch('agent_min.paramiko')
+    def test_ssh_connection_manager_list_connections(self, mock_paramiko):
+        """Test listing active SSH connections."""
+        mock_client = MagicMock()
+        mock_paramiko.SSHClient.return_value = mock_client
+
+        manager = agent_min.SSHConnectionManager()
+        manager.connect("host1", "user1", password="pass1")
+        manager.connect("host2", "user2", password="pass2", port=2222)
+
+        result = manager.list_connections()
+        assert len(result["connections"]) == 2
+        conn_ids = [c["connection_id"] for c in result["connections"]]
+        assert "user1@host1:22" in conn_ids
+        assert "user2@host2:2222" in conn_ids
+
+    @patch('agent_min.SSH_AVAILABLE', True)
+    @patch('agent_min.ssh_manager')
+    def test_ssh_connect_tool(self, mock_manager):
+        """Test ssh_connect tool function."""
+        mock_manager.connect.return_value = {
+            "connected": True,
+            "connection_id": "testuser@testhost:22",
+            "host": "testhost",
+            "username": "testuser",
+            "port": 22
+        }
+
+        result = agent_min.ssh_connect(
+            host="testhost",
+            username="testuser",
+            password="testpass",
+            port=22
+        )
+        data = json.loads(result)
+
+        assert data["connection_id"] == "testuser@testhost:22"
+        mock_manager.connect.assert_called_once()
+
+    def test_ssh_connect_tool_no_paramiko(self):
+        """Test ssh_connect when paramiko is not available."""
+        with patch('agent_min.SSH_AVAILABLE', False):
+            result = agent_min.ssh_connect(
+                host="testhost",
+                username="testuser",
+                password="testpass"
+            )
+            data = json.loads(result)
+
+            assert "error" in data
+            assert "paramiko" in data["error"].lower()
+
+    @patch('agent_min.SSH_AVAILABLE', True)
+    @patch('agent_min.ssh_manager')
+    def test_ssh_exec_tool(self, mock_manager):
+        """Test ssh_exec tool function."""
+        mock_manager.execute.return_value = {
+            "success": True,
+            "stdout": "command output",
+            "stderr": "",
+            "exit_code": 0
+        }
+
+        result = agent_min.ssh_exec(
+            connection_id="user@host:22",
+            command="ls -la"
+        )
+        data = json.loads(result)
+
+        assert data["success"] is True
+        assert data["stdout"] == "command output"
+
+    @patch('agent_min.SSH_AVAILABLE', True)
+    @patch('agent_min.ssh_manager')
+    def test_ssh_copy_to_tool(self, mock_manager):
+        """Test ssh_copy_to tool function."""
+        mock_manager.copy_file_to_remote.return_value = {
+            "success": True,
+            "local_path": "/local/file.txt",
+            "remote_path": "/remote/file.txt"
+        }
+
+        result = agent_min.ssh_copy_to(
+            connection_id="user@host:22",
+            local_path="/local/file.txt",
+            remote_path="/remote/file.txt"
+        )
+        data = json.loads(result)
+
+        assert data["success"] is True
+
+    @patch('agent_min.SSH_AVAILABLE', True)
+    @patch('agent_min.ssh_manager')
+    def test_ssh_copy_from_tool(self, mock_manager):
+        """Test ssh_copy_from tool function."""
+        mock_manager.copy_file_from_remote.return_value = {
+            "success": True,
+            "remote_path": "/remote/file.txt",
+            "local_path": "/local/file.txt"
+        }
+
+        result = agent_min.ssh_copy_from(
+            connection_id="user@host:22",
+            remote_path="/remote/file.txt",
+            local_path="/local/file.txt"
+        )
+        data = json.loads(result)
+
+        assert data["success"] is True
+
+    @patch('agent_min.SSH_AVAILABLE', True)
+    @patch('agent_min.ssh_manager')
+    def test_ssh_disconnect_tool(self, mock_manager):
+        """Test ssh_disconnect tool function."""
+        mock_manager.disconnect.return_value = {
+            "success": True,
+            "connection_id": "user@host:22"
+        }
+
+        result = agent_min.ssh_disconnect(connection_id="user@host:22")
+        data = json.loads(result)
+
+        assert data["success"] is True
+
+    @patch('agent_min.SSH_AVAILABLE', True)
+    @patch('agent_min.ssh_manager')
+    def test_ssh_list_connections_tool(self, mock_manager):
+        """Test ssh_list_connections tool function."""
+        mock_manager.list_connections.return_value = {
+            "connections": [
+                {"connection_id": "user@host1:22", "host": "host1", "username": "user", "port": 22},
+                {"connection_id": "user@host2:22", "host": "host2", "username": "user", "port": 22}
+            ]
+        }
+
+        result = agent_min.ssh_list_connections()
+        data = json.loads(result)
+
+        assert len(data["connections"]) == 2
+
+    @patch('agent_min.SSH_AVAILABLE', True)
+    @patch('agent_min.ssh_manager')
+    def test_setup_gitlab_runner(self, mock_manager):
+        """Test GitLab runner setup function."""
+        mock_manager.execute.return_value = {
+            "success": True,
+            "stdout": "Runner registered successfully",
+            "stderr": "",
+            "exit_code": 0
+        }
+
+        result = agent_min.setup_gitlab_runner(
+            connection_id="user@host:22",
+            gitlab_url="https://gitlab.com",
+            registration_token="test-token",
+            tags="docker",
+            executor="docker"
+        )
+        data = json.loads(result)
+
+        assert data["success"] is True
+        # Verify all setup commands were executed
+        assert mock_manager.execute.call_count >= 5
+
+    @patch('agent_min.SSH_AVAILABLE', True)
+    @patch('agent_min.ssh_manager')
+    def test_setup_gitlab_runner_failure(self, mock_manager):
+        """Test GitLab runner setup with command failure."""
+        mock_manager.execute.return_value = {
+            "stdout": "",
+            "stderr": "Installation failed",
+            "exit_code": 1
+        }
+
+        result = agent_min.setup_gitlab_runner(
+            connection_id="user@host:22",
+            gitlab_url="https://gitlab.com",
+            registration_token="test-token"
+        )
+        data = json.loads(result)
+
+        assert "error" in data
+        assert data["error"] == "GitLab Runner setup failed"
+
+    @patch('agent_min.SSH_AVAILABLE', True)
+    @patch('agent_min.ssh_manager')
+    def test_execute_tool_ssh_connect(self, mock_manager):
+        """Test execute_tool with ssh_connect."""
+        mock_manager.connect.return_value = {
+            "connected": True,
+            "connection_id": "testuser@testhost:22",
+            "host": "testhost",
+            "username": "testuser",
+            "port": 22
+        }
+
+        result = agent_min.execute_tool("ssh_connect", {
+            "host": "testhost",
+            "username": "testuser",
+            "password": "testpass"
+        })
+        data = json.loads(result)
+
+        assert "connection_id" in data
+        assert data["connection_id"] == "testuser@testhost:22"
+
+    @patch('agent_min.SSH_AVAILABLE', True)
+    @patch('agent_min.ssh_manager')
+    def test_execute_tool_ssh_exec(self, mock_manager):
+        """Test execute_tool with ssh_exec."""
+        mock_manager.execute.return_value = {
+            "success": True,
+            "stdout": "output"
+        }
+
+        result = agent_min.execute_tool("ssh_exec", {
+            "connection_id": "user@host:22",
+            "command": "uptime"
+        })
+        data = json.loads(result)
+
+        assert data["success"] is True
+
+    @patch('agent_min.SSH_AVAILABLE', True)
+    @patch('agent_min.ssh_manager')
+    def test_execute_tool_setup_gitlab_runner(self, mock_manager):
+        """Test execute_tool with setup_gitlab_runner."""
+        mock_manager.execute.return_value = {
+            "success": True,
+            "stdout": "Success",
+            "stderr": "",
+            "exit_code": 0
+        }
+
+        result = agent_min.execute_tool("setup_gitlab_runner", {
+            "connection_id": "user@host:22",
+            "gitlab_url": "https://gitlab.com",
+            "registration_token": "token"
+        })
+        data = json.loads(result)
+
+        assert data["success"] is True
+
+    @patch('agent_min.SSH_AVAILABLE', True)
+    @patch('agent_min.paramiko')
+    def test_ssh_connection_error_handling(self, mock_paramiko):
+        """Test SSH connection error handling."""
+        mock_client = MagicMock()
+        mock_client.connect.side_effect = Exception("Connection refused")
+        mock_paramiko.SSHClient.return_value = mock_client
+
+        manager = agent_min.SSHConnectionManager()
+
+        # Should not raise exception, should return error in result
+        result = manager.connect("badhost", "user", password="pass")
+        assert "error" in result
+        assert "Connection refused" in result["error"]
+
+    @patch('agent_min.SSH_AVAILABLE', True)
+    @patch('agent_min.ssh_manager')
+    def test_ssh_exec_invalid_connection(self, mock_manager):
+        """Test ssh_exec with invalid connection ID."""
+        mock_manager.execute.return_value = {
+            "success": False,
+            "error": "Connection not found"
+        }
+
+        result = agent_min.ssh_exec(
+            connection_id="invalid@host:22",
+            command="ls"
+        )
+        data = json.loads(result)
+
+        assert data["success"] is False
+
+
+print("\n✅ SSH functionality tests added successfully!")
 print("\n✅ System info tests added successfully!")
