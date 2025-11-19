@@ -1,5 +1,5 @@
 """
-Comprehensive test suite for agent.min - Autonomous CI/CD Agent
+Comprehensive test suite for rev - Autonomous CI/CD Agent
 
 Tests cover:
 - File operations
@@ -20,22 +20,22 @@ from unittest.mock import Mock, patch, MagicMock
 
 import pytest
 
-# Import agent.min module
+# Import rev module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Load agent.min file (without .py extension) using direct file execution
-agent_min_path = Path(__file__).parent.parent / "agent.min"
-if not agent_min_path.exists():
-    raise ImportError(f"agent.min not found at {agent_min_path}")
+# Load rev.py file using direct file execution
+rev_path = Path(__file__).parent.parent / "rev.py"
+if not rev_path.exists():
+    raise ImportError(f"rev.py not found at {rev_path}")
 
 # Create a module to load code into
 import types
 agent_min = types.ModuleType("agent_min")
-agent_min.__file__ = str(agent_min_path)
+agent_min.__file__ = str(rev_path)
 
 # Execute the file in the module's namespace
-with open(agent_min_path, 'r', encoding='utf-8') as f:
-    code = compile(f.read(), str(agent_min_path), 'exec')
+with open(rev_path, 'r', encoding='utf-8') as f:
+    code = compile(f.read(), str(rev_path), 'exec')
     exec(code, agent_min.__dict__)
 
 # Add to sys.modules so imports work
@@ -792,6 +792,390 @@ class TestPerformance:
         # Should be truncated
         assert len(result) <= agent_min.READ_RETURN_LIMIT + 100  # Allow for truncation message
         assert "[truncated]" in result
+
+
+# ========== REPL Mode Tests ==========
+
+class TestREPLMode:
+    """Test REPL mode functionality."""
+
+    @patch('agent_min.planning_mode')
+    @patch('agent_min.execution_mode')
+    @patch('builtins.input')
+    def test_repl_exit_command(self, mock_input, mock_exec, mock_plan):
+        """Test REPL exits on /exit command."""
+        mock_input.side_effect = ['/exit']
+
+        # Should exit cleanly
+        agent_min.repl_mode()
+
+        # Planning should not be called
+        mock_plan.assert_not_called()
+
+    @patch('agent_min.planning_mode')
+    @patch('agent_min.execution_mode')
+    @patch('builtins.input')
+    def test_repl_help_command(self, mock_input, mock_exec, mock_plan):
+        """Test REPL help command."""
+        mock_input.side_effect = ['/help', '/exit']
+
+        agent_min.repl_mode()
+
+        # Planning should not be called for /help
+        mock_plan.assert_not_called()
+
+    @patch('agent_min.planning_mode')
+    @patch('agent_min.execution_mode')
+    @patch('builtins.input')
+    def test_repl_status_command(self, mock_input, mock_exec, mock_plan):
+        """Test REPL status command."""
+        mock_input.side_effect = ['/status', '/exit']
+
+        agent_min.repl_mode()
+
+        mock_plan.assert_not_called()
+
+    @patch('agent_min.planning_mode')
+    @patch('agent_min.execution_mode')
+    @patch('builtins.input')
+    def test_repl_clear_command(self, mock_input, mock_exec, mock_plan):
+        """Test REPL clear command."""
+        mock_input.side_effect = ['/clear', '/exit']
+
+        agent_min.repl_mode()
+
+        mock_plan.assert_not_called()
+
+    @patch('agent_min.planning_mode')
+    @patch('agent_min.execution_mode')
+    @patch('builtins.input')
+    def test_repl_executes_task(self, mock_input, mock_exec, mock_plan):
+        """Test REPL executes tasks."""
+        # Create mock plan
+        mock_plan_obj = agent_min.ExecutionPlan()
+        mock_plan_obj.add_task("Test task", "review")
+        mock_plan_obj.tasks[0].status = agent_min.TaskStatus.COMPLETED
+        mock_plan.return_value = mock_plan_obj
+        mock_exec.return_value = True
+
+        mock_input.side_effect = ['do something', '/exit']
+
+        agent_min.repl_mode()
+
+        # Should call planning and execution
+        mock_plan.assert_called_once_with('do something')
+        mock_exec.assert_called_once()
+
+    @patch('agent_min.planning_mode')
+    @patch('agent_min.execution_mode')
+    @patch('builtins.input')
+    def test_repl_handles_keyboard_interrupt(self, mock_input, mock_exec, mock_plan):
+        """Test REPL handles Ctrl+C gracefully."""
+        mock_input.side_effect = KeyboardInterrupt()
+
+        # Should exit cleanly without error
+        agent_min.repl_mode()
+
+    @patch('agent_min.planning_mode')
+    @patch('agent_min.execution_mode')
+    @patch('builtins.input')
+    def test_repl_session_tracking(self, mock_input, mock_exec, mock_plan):
+        """Test REPL tracks session state."""
+        # Create mock plans with file operations
+        plan1 = agent_min.ExecutionPlan()
+        plan1.add_task("Review test.py", "review")
+        plan1.tasks[0].status = agent_min.TaskStatus.COMPLETED
+
+        plan2 = agent_min.ExecutionPlan()
+        plan2.add_task("Edit main.py", "edit")
+        plan2.tasks[0].status = agent_min.TaskStatus.COMPLETED
+
+        mock_plan.side_effect = [plan1, plan2]
+        mock_exec.return_value = True
+
+        mock_input.side_effect = ['task 1', 'task 2', '/exit']
+
+        agent_min.repl_mode()
+
+        # Should track multiple tasks
+        assert mock_plan.call_count == 2
+
+
+# ========== CLI and Main Function Tests ==========
+
+class TestCLIAndMain:
+    """Test CLI argument parsing and main function."""
+
+    @patch('agent_min.repl_mode')
+    @patch('sys.argv', ['agent.min.py', '--repl'])
+    def test_main_repl_mode(self, mock_repl):
+        """Test main function with --repl flag."""
+        agent_min.main()
+        mock_repl.assert_called_once()
+
+    @patch('agent_min.planning_mode')
+    @patch('agent_min.execution_mode')
+    @patch('sys.argv', ['agent.min.py', 'test', 'task'])
+    def test_main_oneshot_mode(self, mock_exec, mock_plan):
+        """Test main function in one-shot mode."""
+        mock_plan_obj = agent_min.ExecutionPlan()
+        mock_plan.return_value = mock_plan_obj
+        mock_exec.return_value = True
+
+        agent_min.main()
+
+        mock_plan.assert_called_once_with('test task')
+        mock_exec.assert_called_once()
+
+    @patch('agent_min.planning_mode')
+    @patch('agent_min.execution_mode')
+    @patch('sys.argv', ['agent.min.py', '--model', 'llama3.1', 'do something'])
+    def test_main_with_model_flag(self, mock_exec, mock_plan):
+        """Test main function with --model flag."""
+        mock_plan_obj = agent_min.ExecutionPlan()
+        mock_plan.return_value = mock_plan_obj
+        mock_exec.return_value = True
+
+        # Save original
+        original_model = agent_min.OLLAMA_MODEL
+
+        agent_min.main()
+
+        mock_plan.assert_called_once()
+
+    @patch('agent_min.planning_mode')
+    @patch('agent_min.execution_mode')
+    @patch('sys.argv', ['agent.min.py', '--prompt', 'fix bugs'])
+    def test_main_with_prompt_flag(self, mock_exec, mock_plan):
+        """Test main function with --prompt flag (manual approval)."""
+        mock_plan_obj = agent_min.ExecutionPlan()
+        mock_plan.return_value = mock_plan_obj
+        mock_exec.return_value = True
+
+        agent_min.main()
+
+        # Should call execution_mode with auto_approve=False
+        mock_exec.assert_called_once()
+        call_kwargs = mock_exec.call_args[1]
+        assert call_kwargs.get('auto_approve') is False
+
+
+# ========== Scary Operation Tests ==========
+
+class TestScaryOperations:
+    """Test scary operation detection and prompting."""
+
+    def test_is_scary_operation_delete_action(self):
+        """Test detection of delete action type."""
+        is_scary, reason = agent_min.is_scary_operation(
+            "run_cmd",
+            {"cmd": "ls"},
+            action_type="delete"
+        )
+        assert is_scary is True
+        assert "delete" in reason.lower()
+
+    def test_is_scary_operation_git_force_push(self):
+        """Test detection of git force push."""
+        is_scary, reason = agent_min.is_scary_operation(
+            "run_cmd",
+            {"cmd": "git push --force origin main"}
+        )
+        assert is_scary is True
+        assert "force" in reason.lower() or "push" in reason.lower()
+
+    def test_is_scary_operation_git_reset_hard(self):
+        """Test detection of git reset --hard."""
+        is_scary, reason = agent_min.is_scary_operation(
+            "run_cmd",
+            {"cmd": "git reset --hard HEAD"}
+        )
+        assert is_scary is True
+
+    def test_is_scary_operation_rm_command(self):
+        """Test detection of rm command."""
+        is_scary, reason = agent_min.is_scary_operation(
+            "run_cmd",
+            {"cmd": "rm -rf important_dir"}
+        )
+        assert is_scary is True
+        assert "rm" in reason.lower() or "delete" in reason.lower()
+
+    def test_is_scary_operation_patch_without_dry_run(self):
+        """Test detection of patch without dry-run."""
+        is_scary, reason = agent_min.is_scary_operation(
+            "apply_patch",
+            {"patch": "some diff", "dry_run": False}
+        )
+        assert is_scary is True
+
+    def test_is_scary_operation_patch_with_dry_run(self):
+        """Test patch with dry-run is not scary."""
+        is_scary, reason = agent_min.is_scary_operation(
+            "apply_patch",
+            {"patch": "some diff", "dry_run": True}
+        )
+        assert is_scary is False
+
+    def test_is_scary_operation_safe_commands(self):
+        """Test safe commands are not flagged."""
+        # Read file
+        is_scary, _ = agent_min.is_scary_operation(
+            "read_file",
+            {"path": "test.py"}
+        )
+        assert is_scary is False
+
+        # Git diff
+        is_scary, _ = agent_min.is_scary_operation(
+            "run_cmd",
+            {"cmd": "git diff"}
+        )
+        assert is_scary is False
+
+        # Pytest
+        is_scary, _ = agent_min.is_scary_operation(
+            "run_cmd",
+            {"cmd": "pytest tests/"}
+        )
+        assert is_scary is False
+
+    @patch('builtins.input', return_value='y')
+    def test_prompt_scary_operation_approve(self, mock_input):
+        """Test user approves scary operation."""
+        result = agent_min.prompt_scary_operation("rm file.txt", "delete command")
+        assert result is True
+
+    @patch('builtins.input', return_value='n')
+    def test_prompt_scary_operation_deny(self, mock_input):
+        """Test user denies scary operation."""
+        result = agent_min.prompt_scary_operation("rm file.txt", "delete command")
+        assert result is False
+
+    @patch('builtins.input', return_value='yes')
+    def test_prompt_scary_operation_yes_string(self, mock_input):
+        """Test user types 'yes' to approve."""
+        result = agent_min.prompt_scary_operation("rm file.txt", "delete command")
+        assert result is True
+
+    @patch('builtins.input', side_effect=KeyboardInterrupt())
+    def test_prompt_scary_operation_keyboard_interrupt(self, mock_input):
+        """Test Ctrl+C during scary operation prompt."""
+        result = agent_min.prompt_scary_operation("rm file.txt", "delete command")
+        assert result is False
+
+
+# ========== Edge Case and Error Handling Tests ==========
+
+class TestEdgeCases:
+    """Test edge cases and error handling."""
+
+    def test_read_file_with_unicode_errors(self, temp_dir):
+        """Test reading file with encoding issues."""
+        # Create file with problematic bytes
+        test_file = temp_dir / "bad_encoding.txt"
+        test_file.write_bytes(b"Good text \xff\xfe bad bytes")
+
+        rel_path = str(test_file.relative_to(agent_min.ROOT))
+        result = agent_min.read_file(rel_path)
+
+        # Should handle gracefully (errors='ignore')
+        assert "Good text" in result
+
+    def test_write_file_creates_nested_directories(self, temp_dir):
+        """Test write_file creates nested parent directories."""
+        deep_path = temp_dir / "a" / "b" / "c" / "file.txt"
+        rel_path = str(deep_path.relative_to(agent_min.ROOT))
+
+        result = agent_min.write_file(rel_path, "content")
+        data = json.loads(result)
+
+        assert "wrote" in data
+        assert deep_path.exists()
+        assert deep_path.read_text() == "content"
+
+    def test_search_code_with_invalid_regex(self):
+        """Test search_code handles invalid regex."""
+        result = agent_min.search_code("[invalid(regex", regex=True)
+        data = json.loads(result)
+
+        assert "error" in data
+        assert "regex" in data["error"].lower()
+
+    def test_execute_tool_unknown_tool(self):
+        """Test execute_tool with unknown tool name."""
+        result = agent_min.execute_tool("nonexistent_tool", {})
+        data = json.loads(result)
+
+        assert "error" in data
+        assert "Unknown tool" in data["error"]
+
+    def test_run_cmd_with_timeout(self):
+        """Test run_cmd respects timeout parameter."""
+        # Very short timeout - but using a safe command
+        result = agent_min.run_cmd("python --version", timeout=300)
+        data = json.loads(result)
+
+        # Should complete successfully
+        assert "rc" in data or "timeout" in data
+
+    @patch('agent_min.ollama_chat')
+    def test_planning_mode_with_error_response(self, mock_ollama):
+        """Test planning mode handles error from Ollama."""
+        mock_ollama.return_value = {"error": "Connection failed"}
+
+        # Should exit or raise error
+        with pytest.raises(SystemExit):
+            agent_min.planning_mode("test task")
+
+    @patch('agent_min.ollama_chat')
+    def test_execution_mode_task_iteration_limit(self, mock_ollama):
+        """Test execution mode respects task iteration limit."""
+        # Create plan
+        plan = agent_min.ExecutionPlan()
+        plan.add_task("Test task", "review")
+
+        # Mock Ollama to never complete task
+        mock_ollama.return_value = {
+            "message": {
+                "content": "Still working...",
+                "tool_calls": []
+            }
+        }
+
+        # Execute with auto-approve
+        result = agent_min.execution_mode(plan, auto_approve=True)
+
+        # Should eventually fail (either iteration limit or tool calling error)
+        assert plan.tasks[0].status == agent_min.TaskStatus.FAILED
+        assert plan.tasks[0].error is not None
+
+    def test_ollama_chat_retry_on_400_with_tools(self):
+        """Test Ollama chat retries without tools on 400 error."""
+        with patch('agent_min.requests.post') as mock_post:
+            # First call fails with 400
+            mock_response_400 = Mock()
+            mock_response_400.status_code = 400
+            mock_response_400.text = "Model does not support tools"
+            mock_response_400.raise_for_status.side_effect = Exception("400 Error")
+
+            # Second call succeeds
+            mock_response_200 = Mock()
+            mock_response_200.status_code = 200
+            mock_response_200.json.return_value = {
+                "message": {"content": "Success"}
+            }
+
+            mock_post.side_effect = [mock_response_400, mock_response_200]
+
+            result = agent_min.ollama_chat(
+                [{"role": "user", "content": "test"}],
+                tools=agent_min.TOOLS
+            )
+
+            # Should retry and succeed
+            assert "message" in result
+            assert mock_post.call_count == 2
 
 
 if __name__ == "__main__":

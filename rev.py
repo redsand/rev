@@ -808,25 +808,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             # Add assistant response to conversation
             messages.append(msg)
 
-            # Check if task is complete
-            if "TASK_COMPLETE" in content or "task complete" in content.lower():
-                print(f"  ✓ Task completed")
-                plan.mark_completed(content)
-                task_complete = True
-                break
-
-            # If model responds but doesn't use tools and doesn't complete task
-            if not tool_calls and content:
-                # Model is thinking/responding without tool calls
-                print(f"  → {content[:200]}")
-
-                # If model keeps responding without tools or completion, it might not support them
-                if task_iterations >= 3:
-                    print(f"  ⚠ Model not using tools. Marking task as needs manual intervention.")
-                    plan.mark_failed("Model does not support tool calling. Consider using a model with tool support.")
-                    break
-
-            # Execute tool calls
+            # Execute tool calls FIRST before checking completion
             if tool_calls:
                 for tool_call in tool_calls:
                     func = tool_call.get("function", {})
@@ -870,9 +852,24 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                                 print(f"  ⚠ Tests failed (rc={result_data['rc']})")
                         except:
                             pass
-            elif content:
-                # Agent is thinking/responding without tool calls
+
+            # Check if task is complete AFTER executing tool calls
+            if "TASK_COMPLETE" in content or "task complete" in content.lower():
+                print(f"  ✓ Task completed")
+                plan.mark_completed(content)
+                task_complete = True
+                break
+
+            # If model responds but doesn't use tools and doesn't complete task
+            if not tool_calls and content:
+                # Model is thinking/responding without tool calls
                 print(f"  → {content[:200]}")
+
+                # If model keeps responding without tools or completion, it might not support them
+                if task_iterations >= 3:
+                    print(f"  ⚠ Model not using tools. Marking task as needs manual intervention.")
+                    plan.mark_failed("Model does not support tool calling. Consider using a model with tool support.")
+                    break
 
         if not task_complete and task_iterations >= max_task_iterations:
             print(f"  ✗ Task exceeded iteration limit")

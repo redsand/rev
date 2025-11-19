@@ -1,6 +1,2 @@
-openai 
-requests 
-paramiko 
-pywinrm
-playwright
-colorama
+# Minimal requirements for agent.min
+requests>=2.31.0
