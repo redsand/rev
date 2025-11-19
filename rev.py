@@ -421,6 +421,111 @@ def get_file_info(path: str) -> str:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
 
+def copy_file(src: str, dest: str) -> str:
+    """Copy a file."""
+    try:
+        src_p = _safe_path(src)
+        dest_p = _safe_path(dest)
+        if not src_p.exists():
+            return json.dumps({"error": f"Source not found: {src}"})
+        if src_p.is_dir():
+            return json.dumps({"error": f"Cannot copy directory: {src}"})
+        dest_p.parent.mkdir(parents=True, exist_ok=True)
+        import shutil
+        shutil.copy2(src_p, dest_p)
+        return json.dumps({
+            "copied": str(src_p.relative_to(ROOT)),
+            "to": str(dest_p.relative_to(ROOT))
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def file_exists(path: str) -> str:
+    """Check if a file or directory exists."""
+    try:
+        p = _safe_path(path)
+        return json.dumps({
+            "path": path,
+            "exists": p.exists(),
+            "is_file": p.is_file() if p.exists() else False,
+            "is_dir": p.is_dir() if p.exists() else False
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def read_file_lines(path: str, start: int = 1, end: int = None) -> str:
+    """Read specific lines from a file."""
+    try:
+        p = _safe_path(path)
+        if not p.exists():
+            return json.dumps({"error": f"Not found: {path}"})
+        if p.stat().st_size > MAX_FILE_BYTES:
+            return json.dumps({"error": f"Too large (> {MAX_FILE_BYTES} bytes): {path}"})
+
+        lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
+        start_idx = max(0, start - 1)  # Convert to 0-based index
+        end_idx = len(lines) if end is None else min(len(lines), end)
+
+        selected_lines = lines[start_idx:end_idx]
+        return json.dumps({
+            "path": str(p.relative_to(ROOT)),
+            "start": start,
+            "end": end_idx,
+            "total_lines": len(lines),
+            "lines": selected_lines
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def tree_view(path: str = ".", max_depth: int = 3, max_files: int = 100) -> str:
+    """Generate a tree view of directory structure."""
+    try:
+        p = _safe_path(path)
+        if not p.exists():
+            return json.dumps({"error": f"Not found: {path}"})
+        if not p.is_dir():
+            return json.dumps({"error": f"Not a directory: {path}"})
+
+        tree = []
+        count = 0
+
+        def build_tree(dir_path, prefix="", depth=0):
+            nonlocal count
+            if depth > max_depth or count >= max_files:
+                return
+
+            try:
+                items = sorted(dir_path.iterdir(), key=lambda x: (not x.is_dir(), x.name))
+                for idx, item in enumerate(items):
+                    if count >= max_files:
+                        break
+
+                    is_last = idx == len(items) - 1
+                    current_prefix = "└── " if is_last else "├── "
+                    tree.append(prefix + current_prefix + item.name)
+                    count += 1
+
+                    if item.is_dir() and item.name not in EXCLUDE_DIRS:
+                        extension = "    " if is_last else "│   "
+                        build_tree(item, prefix + extension, depth + 1)
+            except PermissionError:
+                pass
+
+        tree.append(p.name if p != ROOT else ".")
+        build_tree(p)
+
+        return json.dumps({
+            "path": str(p.relative_to(ROOT)) if p != ROOT else ".",
+            "tree": "\n".join(tree),
+            "files_shown": count
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
 # ========== Additional Git Operations ==========
 
 def git_commit(message: str, files: str = ".") -> str:
@@ -468,6 +573,45 @@ def git_log(count: int = 10, oneline: bool = False) -> str:
             "log": result.stdout,
             "returncode": result.returncode
         })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def git_branch(action: str = "list", branch_name: str = None) -> str:
+    """Git branch operations (list, create, switch, current)."""
+    try:
+        if action == "list":
+            result = _run_shell("git branch -a")
+            return json.dumps({
+                "action": "list",
+                "branches": result.stdout,
+                "returncode": result.returncode
+            })
+        elif action == "current":
+            result = _run_shell("git branch --show-current")
+            return json.dumps({
+                "action": "current",
+                "branch": result.stdout.strip(),
+                "returncode": result.returncode
+            })
+        elif action == "create" and branch_name:
+            result = _run_shell(f"git branch {shlex.quote(branch_name)}")
+            return json.dumps({
+                "action": "create",
+                "branch": branch_name,
+                "returncode": result.returncode,
+                "output": result.stdout
+            })
+        elif action == "switch" and branch_name:
+            result = _run_shell(f"git checkout {shlex.quote(branch_name)}")
+            return json.dumps({
+                "action": "switch",
+                "branch": branch_name,
+                "returncode": result.returncode,
+                "output": result.stdout
+            })
+        else:
+            return json.dumps({"error": f"Invalid action or missing branch_name: {action}"})
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
@@ -906,6 +1050,66 @@ TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "copy_file",
+            "description": "Copy a file to a new location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "src": {"type": "string", "description": "Source path"},
+                    "dest": {"type": "string", "description": "Destination path"}
+                },
+                "required": ["src", "dest"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "file_exists",
+            "description": "Check if a file or directory exists",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to check"}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file_lines",
+            "description": "Read specific line range from a file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to file"},
+                    "start": {"type": "integer", "description": "Start line number (1-indexed)"},
+                    "end": {"type": "integer", "description": "End line number (inclusive)"}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tree_view",
+            "description": "Generate a tree view of directory structure",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Directory path (default: .)"},
+                    "max_depth": {"type": "integer", "description": "Maximum depth (default: 3)"},
+                    "max_files": {"type": "integer", "description": "Maximum files to show (default: 100)"}
+                }
+            }
+        }
+    },
     # Git operations
     {
         "type": "function",
@@ -943,6 +1147,20 @@ TOOLS = [
                 "properties": {
                     "count": {"type": "integer", "description": "Number of commits (default: 10)"},
                     "oneline": {"type": "boolean", "description": "Use oneline format"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_branch",
+            "description": "Git branch operations (list, create, switch, current)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "description": "Action: list, current, create, or switch"},
+                    "branch_name": {"type": "string", "description": "Branch name (for create/switch)"}
                 }
             }
         }
@@ -1077,6 +1295,14 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
             return create_directory(args["path"])
         elif name == "get_file_info":
             return get_file_info(args["path"])
+        elif name == "copy_file":
+            return copy_file(args["src"], args["dest"])
+        elif name == "file_exists":
+            return file_exists(args["path"])
+        elif name == "read_file_lines":
+            return read_file_lines(args["path"], args.get("start", 1), args.get("end"))
+        elif name == "tree_view":
+            return tree_view(args.get("path", "."), args.get("max_depth", 3), args.get("max_files", 100))
 
         # Git operations
         elif name == "git_commit":
@@ -1085,6 +1311,8 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
             return git_status()
         elif name == "git_log":
             return git_log(args.get("count", 10), args.get("oneline", False))
+        elif name == "git_branch":
+            return git_branch(args.get("action", "list"), args.get("branch_name"))
 
         # Utility tools
         elif name == "install_package":

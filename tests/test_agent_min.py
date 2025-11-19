@@ -1180,3 +1180,429 @@ class TestEdgeCases:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ========== Tests for New File Operations ==========
+
+class TestNewFileOperations:
+    """Test new file operation tools."""
+
+    def test_delete_file_success(self, temp_dir):
+        """Test successful file deletion."""
+        test_file = temp_dir / "to_delete.txt"
+        test_file.write_text("delete me", encoding="utf-8")
+
+        rel_path = str(test_file.relative_to(agent_min.ROOT))
+        result = agent_min.delete_file(rel_path)
+        data = json.loads(result)
+
+        assert "deleted" in data
+        assert not test_file.exists()
+
+    def test_delete_file_not_found(self):
+        """Test deleting non-existent file."""
+        result = agent_min.delete_file("nonexistent.txt")
+        data = json.loads(result)
+        assert "error" in data
+
+    def test_move_file_success(self, temp_dir):
+        """Test successful file move."""
+        src_file = temp_dir / "source.txt"
+        src_file.write_text("move me", encoding="utf-8")
+
+        src_rel = str(src_file.relative_to(agent_min.ROOT))
+        dest_rel = str((temp_dir / "dest.txt").relative_to(agent_min.ROOT))
+        result = agent_min.move_file(src_rel, dest_rel)
+        data = json.loads(result)
+
+        assert "moved" in data
+        assert not src_file.exists()
+        assert (temp_dir / "dest.txt").exists()
+
+    def test_append_to_file(self, temp_dir):
+        """Test appending to a file."""
+        test_file = temp_dir / "append.txt"
+        test_file.write_text("line1\n", encoding="utf-8")
+
+        rel_path = str(test_file.relative_to(agent_min.ROOT))
+        result = agent_min.append_to_file(rel_path, "line2\n")
+        data = json.loads(result)
+
+        assert "appended_to" in data
+        assert test_file.read_text() == "line1\nline2\n"
+
+    def test_replace_in_file_basic(self, temp_dir):
+        """Test basic find and replace."""
+        test_file = temp_dir / "replace.txt"
+        test_file.write_text("Hello World", encoding="utf-8")
+
+        rel_path = str(test_file.relative_to(agent_min.ROOT))
+        result = agent_min.replace_in_file(rel_path, "World", "Python")
+        data = json.loads(result)
+
+        assert data["replaced"] == 1
+        assert test_file.read_text() == "Hello Python"
+
+    def test_replace_in_file_regex(self, temp_dir):
+        """Test regex find and replace."""
+        test_file = temp_dir / "replace_regex.txt"
+        test_file.write_text("test123 test456", encoding="utf-8")
+
+        rel_path = str(test_file.relative_to(agent_min.ROOT))
+        result = agent_min.replace_in_file(rel_path, r"test\d+", "replaced", regex=True)
+        data = json.loads(result)
+
+        assert data["replaced"] == 2
+        assert test_file.read_text() == "replaced replaced"
+
+    def test_create_directory(self, temp_dir):
+        """Test directory creation."""
+        new_dir_path = str((temp_dir / "new_dir").relative_to(agent_min.ROOT))
+        result = agent_min.create_directory(new_dir_path)
+        data = json.loads(result)
+
+        assert "created" in data
+        assert (temp_dir / "new_dir").is_dir()
+
+    def test_get_file_info(self, temp_dir):
+        """Test getting file metadata."""
+        test_file = temp_dir / "info.txt"
+        test_file.write_text("test content", encoding="utf-8")
+
+        rel_path = str(test_file.relative_to(agent_min.ROOT))
+        result = agent_min.get_file_info(rel_path)
+        data = json.loads(result)
+
+        assert "size" in data
+        assert data["size"] == 12
+        assert data["is_file"] is True
+
+    def test_copy_file_success(self, temp_dir):
+        """Test successful file copy."""
+        src_file = temp_dir / "source.txt"
+        src_file.write_text("copy me", encoding="utf-8")
+
+        src_rel = str(src_file.relative_to(agent_min.ROOT))
+        dest_rel = str((temp_dir / "copy.txt").relative_to(agent_min.ROOT))
+        result = agent_min.copy_file(src_rel, dest_rel)
+        data = json.loads(result)
+
+        assert "copied" in data
+        assert src_file.exists()
+        assert (temp_dir / "copy.txt").exists()
+        assert (temp_dir / "copy.txt").read_text() == "copy me"
+
+    def test_file_exists_true(self, temp_dir):
+        """Test file_exists for existing file."""
+        test_file = temp_dir / "exists.txt"
+        test_file.write_text("I exist", encoding="utf-8")
+
+        rel_path = str(test_file.relative_to(agent_min.ROOT))
+        result = agent_min.file_exists(rel_path)
+        data = json.loads(result)
+
+        assert data["exists"] is True
+        assert data["is_file"] is True
+
+    def test_file_exists_false(self):
+        """Test file_exists for non-existent file."""
+        result = agent_min.file_exists("does_not_exist.txt")
+        data = json.loads(result)
+
+        assert data["exists"] is False
+
+    def test_read_file_lines_full(self, temp_dir):
+        """Test reading full file as lines."""
+        test_file = temp_dir / "lines.txt"
+        test_file.write_text("line1\nline2\nline3\nline4\nline5", encoding="utf-8")
+
+        rel_path = str(test_file.relative_to(agent_min.ROOT))
+        result = agent_min.read_file_lines(rel_path)
+        data = json.loads(result)
+
+        assert data["total_lines"] == 5
+        assert len(data["lines"]) == 5
+
+    def test_read_file_lines_range(self, temp_dir):
+        """Test reading specific line range."""
+        test_file = temp_dir / "lines_range.txt"
+        test_file.write_text("line1\nline2\nline3\nline4\nline5", encoding="utf-8")
+
+        rel_path = str(test_file.relative_to(agent_min.ROOT))
+        result = agent_min.read_file_lines(rel_path, start=2, end=4)
+        data = json.loads(result)
+
+        assert len(data["lines"]) == 2
+        assert data["lines"][0] == "line2"
+        assert data["lines"][1] == "line3"
+
+    def test_tree_view_basic(self, temp_dir):
+        """Test basic tree view generation."""
+        # Create a simple directory structure
+        (temp_dir / "dir1").mkdir()
+        (temp_dir / "dir2").mkdir()
+        (temp_dir / "file1.txt").write_text("test", encoding="utf-8")
+
+        rel_path = str(temp_dir.relative_to(agent_min.ROOT))
+        result = agent_min.tree_view(rel_path, max_depth=2)
+        data = json.loads(result)
+
+        assert "tree" in data
+        assert "files_shown" in data
+        assert data["files_shown"] >= 3
+
+
+# ========== Tests for New Git Operations ==========
+
+class TestNewGitOperations:
+    """Test new git operation tools."""
+
+    def test_git_commit_basic(self, temp_dir):
+        """Test basic git commit."""
+        # This test requires a git repo, so we'll just test the function signature
+        result = agent_min.git_commit("test commit")
+        data = json.loads(result)
+        # May succeed or fail depending on repo state
+        assert "error" in data or "committed" in data
+
+    def test_git_status(self):
+        """Test git status command."""
+        result = agent_min.git_status()
+        data = json.loads(result)
+
+        assert "status" in data
+        assert "returncode" in data
+
+    def test_git_log_basic(self):
+        """Test git log command."""
+        result = agent_min.git_log(count=5)
+        data = json.loads(result)
+
+        assert "log" in data
+        assert "returncode" in data
+
+    def test_git_log_oneline(self):
+        """Test git log with oneline format."""
+        result = agent_min.git_log(count=3, oneline=True)
+        data = json.loads(result)
+
+        assert "log" in data
+
+    def test_git_branch_current(self):
+        """Test getting current branch."""
+        result = agent_min.git_branch(action="current")
+        data = json.loads(result)
+
+        assert "branch" in data or "error" in data
+        assert data["action"] == "current"
+
+    def test_git_branch_list(self):
+        """Test listing branches."""
+        result = agent_min.git_branch(action="list")
+        data = json.loads(result)
+
+        assert "branches" in data
+        assert data["action"] == "list"
+
+
+# ========== Tests for Utility Tools ==========
+
+class TestUtilityTools:
+    """Test utility tools."""
+
+    def test_install_package_mock(self):
+        """Test install_package function signature."""
+        # We won't actually install a package in tests
+        # Just verify the function exists and handles errors
+        result = agent_min.install_package("nonexistent-package-xyz123")
+        data = json.loads(result)
+        assert "installed" in data or "error" in data
+
+    @patch('agent_min.requests.get')
+    def test_web_fetch_success(self, mock_get):
+        """Test successful web fetch."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.text = "test content"
+        mock_response.headers = {"Content-Type": "text/html"}
+        mock_get.return_value = mock_response
+
+        result = agent_min.web_fetch("http://example.com")
+        data = json.loads(result)
+
+        assert data["status_code"] == 200
+        assert data["content"] == "test content"
+
+    @patch('agent_min.requests.get')
+    def test_web_fetch_error(self, mock_get):
+        """Test web fetch error handling."""
+        mock_get.side_effect = Exception("Network error")
+
+        result = agent_min.web_fetch("http://example.com")
+        data = json.loads(result)
+
+        assert "error" in data
+
+    def test_execute_python_basic(self):
+        """Test basic Python code execution."""
+        result = agent_min.execute_python("print('hello')")
+        data = json.loads(result)
+
+        assert data["executed"] is True
+        assert "hello" in data["output"]
+
+    def test_execute_python_with_vars(self):
+        """Test Python execution with variables."""
+        code = "x = 5\ny = 10\nprint(x + y)"
+        result = agent_min.execute_python(code)
+        data = json.loads(result)
+
+        assert "15" in data["output"]
+
+    def test_execute_python_error(self):
+        """Test Python execution error handling."""
+        result = agent_min.execute_python("invalid syntax here !!!")
+        data = json.loads(result)
+
+        assert "error" in data
+
+
+# ========== Tests for MCP Support ==========
+
+class TestMCPSupport:
+    """Test MCP (Model Context Protocol) support."""
+
+    def test_mcp_add_server(self):
+        """Test adding an MCP server."""
+        result = agent_min.mcp_add_server("test_server", "echo", "hello world")
+        data = json.loads(result)
+
+        assert data["added"] == "test_server"
+        assert data["command"] == "echo"
+
+    def test_mcp_list_servers(self):
+        """Test listing MCP servers."""
+        # Add a server first
+        agent_min.mcp_add_server("test_server_2", "cat")
+
+        result = agent_min.mcp_list_servers()
+        data = json.loads(result)
+
+        assert "servers" in data
+        assert isinstance(data["servers"], list)
+
+    def test_mcp_call_tool_basic(self):
+        """Test calling an MCP tool."""
+        # Add a server first
+        agent_min.mcp_add_server("test_server_3", "echo")
+
+        result = agent_min.mcp_call_tool("test_server_3", "test_tool", '{"arg": "value"}')
+        data = json.loads(result)
+
+        # Should have basic response structure
+        assert "server" in data or "error" in data
+
+    def test_mcp_call_tool_invalid_json(self):
+        """Test MCP tool call with invalid JSON."""
+        result = agent_min.mcp_call_tool("server", "tool", "invalid json{}")
+        data = json.loads(result)
+
+        assert "error" in data
+
+
+# ========== Tests for execute_tool Integration ==========
+
+class TestExecuteToolIntegration:
+    """Test execute_tool with all new tools."""
+
+    def test_execute_delete_file(self, temp_dir):
+        """Test execute_tool with delete_file."""
+        test_file = temp_dir / "delete.txt"
+        test_file.write_text("delete", encoding="utf-8")
+
+        rel_path = str(test_file.relative_to(agent_min.ROOT))
+        result = agent_min.execute_tool("delete_file", {"path": rel_path})
+        data = json.loads(result)
+
+        assert "deleted" in data
+
+    def test_execute_copy_file(self, temp_dir):
+        """Test execute_tool with copy_file."""
+        src = temp_dir / "src.txt"
+        src.write_text("content", encoding="utf-8")
+
+        src_rel = str(src.relative_to(agent_min.ROOT))
+        dest_rel = str((temp_dir / "dest.txt").relative_to(agent_min.ROOT))
+
+        result = agent_min.execute_tool("copy_file", {"src": src_rel, "dest": dest_rel})
+        data = json.loads(result)
+
+        assert "copied" in data
+
+    def test_execute_file_exists(self, temp_dir):
+        """Test execute_tool with file_exists."""
+        test_file = temp_dir / "exists.txt"
+        test_file.write_text("exists", encoding="utf-8")
+
+        rel_path = str(test_file.relative_to(agent_min.ROOT))
+        result = agent_min.execute_tool("file_exists", {"path": rel_path})
+        data = json.loads(result)
+
+        assert data["exists"] is True
+
+    def test_execute_read_file_lines(self, temp_dir):
+        """Test execute_tool with read_file_lines."""
+        test_file = temp_dir / "lines.txt"
+        test_file.write_text("line1\nline2\nline3", encoding="utf-8")
+
+        rel_path = str(test_file.relative_to(agent_min.ROOT))
+        result = agent_min.execute_tool("read_file_lines", {"path": rel_path, "start": 1, "end": 2})
+        data = json.loads(result)
+
+        assert len(data["lines"]) == 2
+
+    def test_execute_tree_view(self, temp_dir):
+        """Test execute_tool with tree_view."""
+        rel_path = str(temp_dir.relative_to(agent_min.ROOT))
+        result = agent_min.execute_tool("tree_view", {"path": rel_path})
+        data = json.loads(result)
+
+        assert "tree" in data
+
+    def test_execute_git_branch(self):
+        """Test execute_tool with git_branch."""
+        result = agent_min.execute_tool("git_branch", {"action": "current"})
+        data = json.loads(result)
+
+        assert "branch" in data or "error" in data
+
+    def test_execute_web_fetch(self):
+        """Test execute_tool with web_fetch."""
+        with patch('agent_min.requests.get') as mock_get:
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.text = "test"
+            mock_response.headers = {}
+            mock_get.return_value = mock_response
+
+            result = agent_min.execute_tool("web_fetch", {"url": "http://example.com"})
+            data = json.loads(result)
+
+            assert "status_code" in data
+
+    def test_execute_execute_python(self):
+        """Test execute_tool with execute_python."""
+        result = agent_min.execute_tool("execute_python", {"code": "print('test')"})
+        data = json.loads(result)
+
+        assert "executed" in data
+
+    def test_execute_mcp_add_server(self):
+        """Test execute_tool with mcp_add_server."""
+        result = agent_min.execute_tool("mcp_add_server", {"name": "test", "command": "echo"})
+        data = json.loads(result)
+
+        assert "added" in data
+
+
+print("\n✅ All new tool tests added successfully!")
