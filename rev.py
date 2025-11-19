@@ -906,48 +906,6 @@ def ssh_list_connections() -> str:
     return json.dumps(result)
 
 
-# ========== GitLab CI/CD Helpers ==========
-
-def setup_gitlab_runner(connection_id: str, gitlab_url: str, registration_token: str,
-                        tags: str = "docker", executor: str = "docker") -> str:
-    """Set up a GitLab Runner on a remote host."""
-    if not SSH_AVAILABLE:
-        return json.dumps({"error": "SSH not available. Install with: pip install paramiko"})
-
-    commands = [
-        # Install GitLab Runner
-        "curl -L https://packages.gitlab.com/install/repositories/runner/gitlab-runner/script.deb.sh | sudo bash",
-        "sudo apt-get install gitlab-runner -y",
-
-        # Register runner
-        f"sudo gitlab-runner register --non-interactive --url '{gitlab_url}' --registration-token '{registration_token}' --executor '{executor}' --description 'Auto-registered runner' --tag-list '{tags}'",
-
-        # Start runner
-        "sudo gitlab-runner start",
-
-        # Check status
-        "sudo gitlab-runner status"
-    ]
-
-    results = []
-    for cmd in commands:
-        result = ssh_manager.execute(connection_id, cmd, timeout=120)
-        results.append(result)
-
-        if "error" in result or (result.get("exit_code", 1) != 0 and "status" not in cmd):
-            return json.dumps({
-                "error": "GitLab Runner setup failed",
-                "failed_command": cmd,
-                "details": result
-            })
-
-    return json.dumps({
-        "success": True,
-        "message": "GitLab Runner installed and registered successfully",
-        "results": results
-    })
-
-
 # ========== MCP (Model Context Protocol) Support ==========
 
 class MCPClient:
@@ -1585,24 +1543,6 @@ TOOLS = [
             }
         }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "setup_gitlab_runner",
-            "description": "Set up and register a GitLab Runner on a remote host",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "connection_id": {"type": "string", "description": "SSH connection ID"},
-                    "gitlab_url": {"type": "string", "description": "GitLab instance URL"},
-                    "registration_token": {"type": "string", "description": "Runner registration token"},
-                    "tags": {"type": "string", "description": "Runner tags (default: docker)"},
-                    "executor": {"type": "string", "description": "Executor type (default: docker)"}
-                },
-                "required": ["connection_id", "gitlab_url", "registration_token"]
-            }
-        }
-    },
     # MCP tools
     {
         "type": "function",
@@ -1733,10 +1673,6 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
             return ssh_disconnect(args["connection_id"])
         elif name == "ssh_list_connections":
             return ssh_list_connections()
-        elif name == "setup_gitlab_runner":
-            return setup_gitlab_runner(args["connection_id"], args["gitlab_url"],
-                                      args["registration_token"], args.get("tags", "docker"),
-                                      args.get("executor", "docker"))
 
         # MCP tools
         elif name == "mcp_add_server":

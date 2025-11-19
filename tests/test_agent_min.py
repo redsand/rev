@@ -1905,50 +1905,6 @@ class TestSSHFunctionality:
 
     @patch('agent_min.SSH_AVAILABLE', True)
     @patch('agent_min.ssh_manager')
-    def test_setup_gitlab_runner(self, mock_manager):
-        """Test GitLab runner setup function."""
-        mock_manager.execute.return_value = {
-            "success": True,
-            "stdout": "Runner registered successfully",
-            "stderr": "",
-            "exit_code": 0
-        }
-
-        result = agent_min.setup_gitlab_runner(
-            connection_id="user@host:22",
-            gitlab_url="https://gitlab.com",
-            registration_token="test-token",
-            tags="docker",
-            executor="docker"
-        )
-        data = json.loads(result)
-
-        assert data["success"] is True
-        # Verify all setup commands were executed
-        assert mock_manager.execute.call_count >= 5
-
-    @patch('agent_min.SSH_AVAILABLE', True)
-    @patch('agent_min.ssh_manager')
-    def test_setup_gitlab_runner_failure(self, mock_manager):
-        """Test GitLab runner setup with command failure."""
-        mock_manager.execute.return_value = {
-            "stdout": "",
-            "stderr": "Installation failed",
-            "exit_code": 1
-        }
-
-        result = agent_min.setup_gitlab_runner(
-            connection_id="user@host:22",
-            gitlab_url="https://gitlab.com",
-            registration_token="test-token"
-        )
-        data = json.loads(result)
-
-        assert "error" in data
-        assert data["error"] == "GitLab Runner setup failed"
-
-    @patch('agent_min.SSH_AVAILABLE', True)
-    @patch('agent_min.ssh_manager')
     def test_execute_tool_ssh_connect(self, mock_manager):
         """Test execute_tool with ssh_connect."""
         mock_manager.connect.return_value = {
@@ -1981,26 +1937,6 @@ class TestSSHFunctionality:
         result = agent_min.execute_tool("ssh_exec", {
             "connection_id": "user@host:22",
             "command": "uptime"
-        })
-        data = json.loads(result)
-
-        assert data["success"] is True
-
-    @patch('agent_min.SSH_AVAILABLE', True)
-    @patch('agent_min.ssh_manager')
-    def test_execute_tool_setup_gitlab_runner(self, mock_manager):
-        """Test execute_tool with setup_gitlab_runner."""
-        mock_manager.execute.return_value = {
-            "success": True,
-            "stdout": "Success",
-            "stderr": "",
-            "exit_code": 0
-        }
-
-        result = agent_min.execute_tool("setup_gitlab_runner", {
-            "connection_id": "user@host:22",
-            "gitlab_url": "https://gitlab.com",
-            "registration_token": "token"
         })
         data = json.loads(result)
 

@@ -264,7 +264,9 @@ For each task, the agent:
 
 ### Available Tools
 
-The agent has access to **30 powerful tools** across multiple categories:
+The agent has access to **36 powerful tools** across multiple categories:
+
+**New in v2.7:** SSH remote execution! Connect to remote hosts, execute commands, and transfer files for managing your infrastructure.
 
 **New in v2.6:** Cross-platform OS detection! The agent automatically detects your operating system (Windows, Linux, macOS) and adapts tool usage accordingly - choosing bash vs PowerShell, correct path separators, and platform-specific commands.
 
@@ -314,6 +316,16 @@ The agent has access to **30 powerful tools** across multiple categories:
 | `web_fetch` | Fetch content from URLs |
 | `execute_python` | Execute Python code snippets |
 | `get_system_info` | Get system info (OS, version, architecture, shell type) |
+
+#### SSH Remote Execution
+| Tool | Description |
+|------|-------------|
+| `ssh_connect` | Connect to a remote host via SSH |
+| `ssh_exec` | Execute commands on a remote host |
+| `ssh_copy_to` | Copy a file to a remote host |
+| `ssh_copy_from` | Copy a file from a remote host |
+| `ssh_disconnect` | Disconnect from a remote host |
+| `ssh_list_connections` | List all active SSH connections |
 
 #### MCP (Model Context Protocol) Support
 | Tool | Description |
@@ -395,9 +407,10 @@ python rev.py --model deepseek-coder:33b "Your task"
 
 **Test Coverage: 80%** - Production Ready ✅
 
-- **119 tests passing** (100% pass rate)
-- **770+ statements** in rev.py
+- **136 tests passing** (100% pass rate)
+- **800+ statements** in rev.py
 - **Cross-platform tested** (Linux, macOS, Windows detection)
+- **SSH remote execution tested** (connection management, file transfer)
 - **99% test code coverage** (tests are well-tested themselves)
 
 ### What's Tested
@@ -407,6 +420,7 @@ python rev.py --model deepseek-coder:33b "Your task"
 - ✅ Command execution and validation
 - ✅ Utility tools (install_package, web_fetch, execute_python, get_system_info)
 - ✅ System information detection (OS, version, shell type, caching)
+- ✅ SSH remote execution (connect, execute, file transfer, disconnect)
 - ✅ MCP (Model Context Protocol) integration
 - ✅ Task management (Task, ExecutionPlan)
 - ✅ Tool execution routing
