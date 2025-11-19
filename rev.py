@@ -100,6 +100,14 @@ class TaskStatus(Enum):
     FAILED = "failed"
 
 
+class RiskLevel(Enum):
+    """Risk levels for tasks."""
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
 class Task:
     """Represents a single task in the execution plan."""
     def __init__(self, description: str, action_type: str = "general", dependencies: List[int] = None):
@@ -111,6 +119,15 @@ class Task:
         self.dependencies = dependencies or []  # List of task indices this task depends on
         self.task_id = None  # Will be set when added to plan
 
+        # Advanced planning features
+        self.risk_level = RiskLevel.LOW  # Risk assessment
+        self.risk_reasons = []  # List of reasons for risk level
+        self.impact_scope = []  # List of files/modules affected
+        self.estimated_changes = 0  # Estimated number of lines/files changed
+        self.breaking_change = False  # Whether this might break existing functionality
+        self.rollback_plan = None  # Rollback instructions if things go wrong
+        self.validation_steps = []  # Steps to validate task completion
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "description": self.description,
@@ -119,7 +136,14 @@ class Task:
             "result": self.result,
             "error": self.error,
             "dependencies": self.dependencies,
-            "task_id": self.task_id
+            "task_id": self.task_id,
+            "risk_level": self.risk_level.value,
+            "risk_reasons": self.risk_reasons,
+            "impact_scope": self.impact_scope,
+            "estimated_changes": self.estimated_changes,
+            "breaking_change": self.breaking_change,
+            "rollback_plan": self.rollback_plan,
+            "validation_steps": self.validation_steps
         }
 
 
@@ -213,6 +237,287 @@ class ExecutionPlan:
         in_progress = sum(1 for t in self.tasks if t.status == TaskStatus.IN_PROGRESS)
         total = len(self.tasks)
         return f"Progress: {completed}/{total} completed, {failed} failed, {in_progress} in progress"
+
+    def analyze_dependencies(self) -> Dict[str, Any]:
+        """Analyze task dependencies and create optimal ordering.
+
+        Returns:
+            Dict with dependency graph, execution order, and parallel opportunities
+        """
+        dependency_graph = {}
+        reverse_deps = {}  # Which tasks depend on each task
+
+        for task in self.tasks:
+            task_id = task.task_id
+            dependency_graph[task_id] = task.dependencies.copy()
+
+            # Build reverse dependency map
+            for dep_id in task.dependencies:
+                if dep_id not in reverse_deps:
+                    reverse_deps[dep_id] = []
+                reverse_deps[dep_id].append(task_id)
+
+        # Find tasks with no dependencies (can start immediately)
+        root_tasks = [t.task_id for t in self.tasks if not t.dependencies]
+
+        # Find critical path (longest chain of dependencies)
+        def get_depth(task_id, visited=None):
+            if visited is None:
+                visited = set()
+            if task_id in visited:
+                return 0
+            visited.add(task_id)
+
+            if task_id >= len(self.tasks):
+                return 0
+
+            deps = self.tasks[task_id].dependencies
+            if not deps:
+                return 1
+            return 1 + max(get_depth(dep_id, visited.copy()) for dep_id in deps)
+
+        critical_path = []
+        max_depth = 0
+        for task in self.tasks:
+            depth = get_depth(task.task_id)
+            if depth > max_depth:
+                max_depth = depth
+                critical_path = [task.task_id]
+
+        # Find parallelizable tasks (tasks at same depth level with no interdependencies)
+        parallel_groups = []
+        processed = set()
+
+        for depth in range(max_depth):
+            group = []
+            for task in self.tasks:
+                if task.task_id in processed:
+                    continue
+                task_depth = get_depth(task.task_id)
+                if task_depth == depth + 1:
+                    group.append(task.task_id)
+                    processed.add(task.task_id)
+            if group:
+                parallel_groups.append(group)
+
+        return {
+            "dependency_graph": dependency_graph,
+            "reverse_dependencies": reverse_deps,
+            "root_tasks": root_tasks,
+            "critical_path_length": max_depth,
+            "parallel_groups": parallel_groups,
+            "total_tasks": len(self.tasks),
+            "parallelization_potential": sum(len(g) for g in parallel_groups if len(g) > 1)
+        }
+
+    def assess_impact(self, task: Task) -> Dict[str, Any]:
+        """Assess the potential impact of a task.
+
+        Args:
+            task: The task to assess
+
+        Returns:
+            Dict with impact analysis including affected files, dependencies, etc.
+        """
+        impact = {
+            "task_id": task.task_id,
+            "description": task.description,
+            "action_type": task.action_type,
+            "affected_files": [],
+            "affected_modules": [],
+            "dependent_tasks": [],
+            "estimated_scope": "unknown"
+        }
+
+        # Analyze based on action type
+        if task.action_type == "delete":
+            impact["estimated_scope"] = "high"
+            impact["warning"] = "Destructive operation - data loss possible"
+        elif task.action_type in ["edit", "add"]:
+            impact["estimated_scope"] = "medium"
+        elif task.action_type in ["review", "test"]:
+            impact["estimated_scope"] = "low"
+
+        # Find dependent tasks
+        for other_task in self.tasks:
+            if task.task_id in other_task.dependencies:
+                impact["dependent_tasks"].append({
+                    "task_id": other_task.task_id,
+                    "description": other_task.description
+                })
+
+        # Extract file patterns from description
+        file_patterns = re.findall(r'(?:in |to |for |file |module )[\w/.-]+\.[a-z]+', task.description.lower())
+        impact["affected_files"] = list(set(file_patterns))
+
+        # Estimate affected modules from description
+        module_patterns = re.findall(r'(?:in |to |for )(\w+)(?:\s+module| package| service)', task.description.lower())
+        impact["affected_modules"] = list(set(module_patterns))
+
+        return impact
+
+    def evaluate_risk(self, task: Task) -> RiskLevel:
+        """Evaluate the risk level of a task.
+
+        Args:
+            task: The task to evaluate
+
+        Returns:
+            RiskLevel enum value
+        """
+        risk_score = 0
+        task.risk_reasons = []
+
+        # Risk factors
+
+        # 1. Action type risk
+        action_risks = {
+            "delete": 3,
+            "edit": 2,
+            "add": 1,
+            "rename": 2,
+            "test": 0,
+            "review": 0
+        }
+        action_risk = action_risks.get(task.action_type, 1)
+        risk_score += action_risk
+
+        if action_risk >= 2:
+            task.risk_reasons.append(f"Destructive/modifying action: {task.action_type}")
+
+        # 2. Keywords indicating risk
+        high_risk_keywords = [
+            "database", "schema", "migration", "production", "deploy",
+            "auth", "security", "password", "token", "api key",
+            "config", "configuration", "settings"
+        ]
+
+        desc_lower = task.description.lower()
+        for keyword in high_risk_keywords:
+            if keyword in desc_lower:
+                risk_score += 1
+                task.risk_reasons.append(f"High-risk component: {keyword}")
+                break
+
+        # 3. Scope of changes
+        if any(word in desc_lower for word in ["all", "entire", "whole", "every"]):
+            risk_score += 1
+            task.risk_reasons.append("Wide scope of changes")
+
+        # 4. Breaking changes indicators
+        breaking_indicators = ["breaking", "incompatible", "remove support", "deprecate"]
+        if any(indicator in desc_lower for indicator in breaking_indicators):
+            risk_score += 2
+            task.breaking_change = True
+            task.risk_reasons.append("Potentially breaking change")
+
+        # 5. Dependencies
+        if len(task.dependencies) > 3:
+            risk_score += 1
+            task.risk_reasons.append(f"Many dependencies ({len(task.dependencies)})")
+
+        # Map score to risk level
+        if risk_score >= 5:
+            return RiskLevel.CRITICAL
+        elif risk_score >= 3:
+            return RiskLevel.HIGH
+        elif risk_score >= 1:
+            return RiskLevel.MEDIUM
+        else:
+            return RiskLevel.LOW
+
+    def create_rollback_plan(self, task: Task) -> str:
+        """Create a rollback plan for a task.
+
+        Args:
+            task: The task to create rollback plan for
+
+        Returns:
+            String describing rollback procedure
+        """
+        rollback_steps = []
+
+        # Action-specific rollback
+        if task.action_type == "add":
+            rollback_steps.append("Delete the newly created files")
+            rollback_steps.append("Run: git clean -fd (after review)")
+
+        elif task.action_type == "edit":
+            rollback_steps.append("Revert changes using: git checkout -- <files>")
+            rollback_steps.append("Or apply inverse patch")
+
+        elif task.action_type == "delete":
+            rollback_steps.append("⚠️  CRITICAL: Deleted files cannot be recovered without backup")
+            rollback_steps.append("Restore from git history: git checkout HEAD~1 -- <files>")
+            rollback_steps.append("Or restore from backup if available")
+
+        elif task.action_type == "rename":
+            rollback_steps.append("Rename files back to original names")
+            rollback_steps.append("Update imports and references")
+
+        # General rollback steps
+        rollback_steps.append("")
+        rollback_steps.append("General rollback procedure:")
+        rollback_steps.append("1. Stop any running services")
+        rollback_steps.append("2. Revert code changes: git reset --hard HEAD")
+        rollback_steps.append("3. If changes were committed: git revert <commit-hash>")
+        rollback_steps.append("4. Run tests to verify rollback: pytest / npm test")
+        rollback_steps.append("5. Review logs for any issues")
+
+        # Database rollback
+        if "database" in task.description.lower() or "migration" in task.description.lower():
+            rollback_steps.append("")
+            rollback_steps.append("Database rollback:")
+            rollback_steps.append("1. Run down migration: alembic downgrade -1")
+            rollback_steps.append("2. Or restore from database backup")
+            rollback_steps.append("3. Verify data integrity")
+
+        return "\n".join(rollback_steps)
+
+    def generate_validation_steps(self, task: Task) -> List[str]:
+        """Generate validation steps for a task.
+
+        Args:
+            task: The task to generate validation for
+
+        Returns:
+            List of validation steps
+        """
+        steps = []
+
+        # Common validation
+        steps.append("Check for syntax errors")
+
+        if task.action_type in ["add", "edit"]:
+            steps.append("Run linter to check code quality")
+            steps.append("Verify imports and dependencies")
+
+        if task.action_type in ["add", "edit", "delete", "rename"]:
+            steps.append("Run test suite: pytest / npm test")
+            steps.append("Check for failing tests")
+
+        # Specific validations
+        if "api" in task.description.lower():
+            steps.append("Test API endpoints manually or with integration tests")
+            steps.append("Verify response formats and status codes")
+
+        if "database" in task.description.lower():
+            steps.append("Run database migrations")
+            steps.append("Verify schema changes")
+            steps.append("Check data integrity")
+
+        if "security" in task.description.lower():
+            steps.append("Run security scanner: bandit / npm audit")
+            steps.append("Check for exposed secrets")
+
+        if task.action_type == "delete":
+            steps.append("Verify no references to deleted code remain")
+            steps.append("Check import statements")
+            steps.append("Run full test suite")
+
+        steps.append("Review git diff for unintended changes")
+
+        return steps
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1826,8 +2131,16 @@ Return ONLY a JSON array of tasks in this format:
 Be thorough but concise. Each task should be independently executable."""
 
 
-def planning_mode(user_request: str) -> ExecutionPlan:
-    """Generate execution plan from user request."""
+def planning_mode(user_request: str, enable_advanced_analysis: bool = True) -> ExecutionPlan:
+    """Generate execution plan from user request with advanced analysis.
+
+    Args:
+        user_request: The user's task request
+        enable_advanced_analysis: Enable dependency, impact, and risk analysis
+
+    Returns:
+        ExecutionPlan with comprehensive task breakdown and analysis
+    """
     print("=" * 60)
     print("PLANNING MODE")
     print("=" * 60)
@@ -1881,13 +2194,109 @@ Generate a comprehensive execution plan."""}
         print(f"Warning: Error parsing plan: {e}")
         plan.add_task(user_request, "general")
 
+    # Advanced planning analysis
+    if enable_advanced_analysis and len(plan.tasks) > 0:
+        print("\n→ Performing advanced planning analysis...")
+
+        # 1. Dependency Analysis
+        print("  ├─ Analyzing task dependencies...")
+        dep_analysis = plan.analyze_dependencies()
+
+        # 2. Risk Evaluation for each task
+        print("  ├─ Evaluating risks...")
+        high_risk_tasks = []
+        for task in plan.tasks:
+            task.risk_level = plan.evaluate_risk(task)
+            if task.risk_level in [RiskLevel.HIGH, RiskLevel.CRITICAL]:
+                high_risk_tasks.append(task)
+
+        # 3. Impact Assessment
+        print("  ├─ Assessing impact scope...")
+        for task in plan.tasks:
+            impact = plan.assess_impact(task)
+            task.impact_scope = impact.get("affected_files", []) + impact.get("affected_modules", [])
+            task.estimated_changes = len(task.impact_scope)
+
+        # 4. Generate Rollback Plans for risky tasks
+        print("  ├─ Creating rollback plans...")
+        for task in plan.tasks:
+            if task.risk_level in [RiskLevel.MEDIUM, RiskLevel.HIGH, RiskLevel.CRITICAL]:
+                task.rollback_plan = plan.create_rollback_plan(task)
+
+        # 5. Generate Validation Steps
+        print("  └─ Generating validation steps...")
+        for task in plan.tasks:
+            task.validation_steps = plan.generate_validation_steps(task)
+
     # Display plan
     print("\n" + "=" * 60)
     print("EXECUTION PLAN")
     print("=" * 60)
     for i, task in enumerate(plan.tasks, 1):
+        risk_emoji = {
+            RiskLevel.LOW: "🟢",
+            RiskLevel.MEDIUM: "🟡",
+            RiskLevel.HIGH: "🟠",
+            RiskLevel.CRITICAL: "🔴"
+        }.get(task.risk_level, "⚪")
+
         print(f"{i}. [{task.action_type.upper()}] {task.description}")
+
+        if enable_advanced_analysis:
+            print(f"   Risk: {risk_emoji} {task.risk_level.value.upper()}", end="")
+            if task.risk_reasons:
+                print(f" ({task.risk_reasons[0]})")
+            else:
+                print()
+
+            if task.dependencies:
+                dep_desc = [f"#{d+1}" for d in task.dependencies]
+                print(f"   Depends on: {', '.join(dep_desc)}")
+
+            if task.breaking_change:
+                print("   ⚠️  Warning: Potentially breaking change")
+
     print("=" * 60)
+
+    # Display analysis summary
+    if enable_advanced_analysis:
+        print("\n" + "=" * 60)
+        print("PLANNING ANALYSIS SUMMARY")
+        print("=" * 60)
+
+        # Risk summary
+        risk_counts = {}
+        for level in RiskLevel:
+            count = sum(1 for t in plan.tasks if t.risk_level == level)
+            if count > 0:
+                risk_counts[level] = count
+
+        print(f"Total tasks: {len(plan.tasks)}")
+        print(f"Risk distribution:")
+        for level, count in sorted(risk_counts.items(), key=lambda x: ["LOW", "MEDIUM", "HIGH", "CRITICAL"].index(x[0].value)):
+            emoji = {"low": "🟢", "medium": "🟡", "high": "🟠", "critical": "🔴"}[level.value]
+            print(f"  {emoji} {level.value.upper()}: {count}")
+
+        # Dependency insights
+        if dep_analysis["parallelization_potential"] > 0:
+            print(f"\n⚡ Parallelization potential: {dep_analysis['parallelization_potential']} tasks can run concurrently")
+            print(f"   Critical path length: {dep_analysis['critical_path_length']} steps")
+
+        # High-risk warnings
+        critical_tasks = [t for t in plan.tasks if t.risk_level == RiskLevel.CRITICAL]
+        high_risk_tasks = [t for t in plan.tasks if t.risk_level == RiskLevel.HIGH]
+
+        if critical_tasks:
+            print(f"\n🔴 CRITICAL: {len(critical_tasks)} high-risk task(s) require extra caution")
+            for task in critical_tasks:
+                print(f"   - Task #{task.task_id + 1}: {task.description[:60]}...")
+                if task.rollback_plan:
+                    print(f"     Rollback plan available")
+
+        if high_risk_tasks:
+            print(f"\n🟠 WARNING: {len(high_risk_tasks)} task(s) have elevated risk")
+
+        print("=" * 60)
 
     return plan
 

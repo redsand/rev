@@ -7,11 +7,12 @@ A minimal, autonomous CI/CD agent powered by [Ollama](https://ollama.ai) for loc
 - **🔓 Single-Gate Approval** — One approval at start, then runs autonomously (no repeated prompts)
 - **📋 Planning Mode** — Analyzes your request and generates comprehensive task checklist
 - **⚡ Execution Mode** — Iteratively completes all tasks until done
-- **🚀 Parallel Execution** — Run 2+ tasks concurrently for 2-4x faster completion (NEW!)
+- **🚀 Parallel Execution** — Run 2+ tasks concurrently for 2-4x faster completion
 - **🧪 Automatic Testing** — Runs tests after each change to validate correctness
 - **🔧 Full Code Operations** — Review, edit, add, delete, rename files
 - **🏠 Local LLM** — Uses Ollama (no API keys, fully private)
 - **📦 Minimal Dependencies** — Just `requests` library
+- **🎯 Advanced Planning** — Dependency analysis, impact assessment, risk evaluation, rollback planning (NEW!)
 
 ## Architecture
 
@@ -536,6 +537,69 @@ For detailed coverage information, see [COVERAGE.md](COVERAGE.md).
 
 For future testing and quality improvements, see [RECOMMENDATIONS.md](RECOMMENDATIONS.md).
 
+## Advanced Planning
+
+rev.py includes sophisticated planning capabilities that analyze your tasks before execution:
+
+### Features
+
+**🔍 Dependency Analysis**
+- Automatically determines optimal task ordering
+- Identifies parallelization opportunities
+- Calculates critical path through task dependencies
+
+**📊 Impact Assessment**
+- Predicts scope of changes before making them
+- Identifies affected files and modules
+- Estimates change magnitude
+
+**⚠️ Risk Evaluation**
+- Evaluates risk level for each task (🟢 LOW, 🟡 MEDIUM, 🟠 HIGH, 🔴 CRITICAL)
+- Identifies potentially breaking changes
+- Flags dangerous operations (database, security, delete, etc.)
+
+**🔄 Rollback Planning**
+- Automatically generates recovery procedures
+- Action-specific rollback steps
+- Database and production rollback guidance
+
+**Example Output:**
+```
+============================================================
+EXECUTION PLAN
+============================================================
+1. [REVIEW] Analyze current authentication module
+   Risk: 🟢 LOW
+
+2. [EDIT] Refactor auth to use dependency injection
+   Risk: 🟡 MEDIUM (Destructive/modifying action: edit)
+   Depends on: #1
+
+3. [DELETE] Remove deprecated auth helpers
+   Risk: 🔴 CRITICAL (Destructive/modifying action: delete)
+   Depends on: #2
+   ⚠️  Warning: Potentially breaking change
+
+============================================================
+PLANNING ANALYSIS SUMMARY
+============================================================
+Total tasks: 5
+Risk distribution:
+  🟢 LOW: 2
+  🟡 MEDIUM: 2
+  🔴 CRITICAL: 1
+
+⚡ Parallelization potential: 3 tasks can run concurrently
+   Critical path length: 4 steps
+
+🔴 CRITICAL: 1 high-risk task(s) require extra caution
+   - Task #3: Remove deprecated auth helpers...
+     Rollback plan available
+============================================================
+```
+
+**Learn More:** See [ADVANCED_PLANNING.md](ADVANCED_PLANNING.md) for complete documentation.
+
 ## Best Practices
 
 1. **Be Specific** — Clearer requests generate better plans
@@ -561,6 +625,11 @@ For future testing and quality improvements, see [RECOMMENDATIONS.md](RECOMMENDA
    ```bash
    python rev.py --repl
    ```
+
+6. **Check Risk Warnings** — Pay attention to high-risk task warnings
+   - Review rollback plans before proceeding
+   - Test high-risk operations in safe environment first
+   - Ensure backups are current for critical operations
 
 ## Advanced Usage
 
