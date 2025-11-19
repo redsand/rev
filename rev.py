@@ -28,6 +28,8 @@ import pathlib
 import subprocess
 import tempfile
 import hashlib
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import difflib
 import platform
 from typing import Dict, Any, List, Optional
@@ -100,12 +102,14 @@ class TaskStatus(Enum):
 
 class Task:
     """Represents a single task in the execution plan."""
-    def __init__(self, description: str, action_type: str = "general"):
+    def __init__(self, description: str, action_type: str = "general", dependencies: List[int] = None):
         self.description = description
         self.action_type = action_type  # edit, add, delete, rename, test, review
         self.status = TaskStatus.PENDING
         self.result = None
         self.error = None
+        self.dependencies = dependencies or []  # List of task indices this task depends on
+        self.task_id = None  # Will be set when added to plan
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -113,43 +117,102 @@ class Task:
             "action_type": self.action_type,
             "status": self.status.value,
             "result": self.result,
-            "error": self.error
+            "error": self.error,
+            "dependencies": self.dependencies,
+            "task_id": self.task_id
         }
 
 
 class ExecutionPlan:
-    """Manages the task checklist for iterative execution."""
+    """Manages the task checklist for iterative execution with dependency tracking."""
     def __init__(self):
         self.tasks: List[Task] = []
         self.current_index = 0
+        self.lock = threading.Lock()  # Thread-safe operations
 
-    def add_task(self, description: str, action_type: str = "general"):
-        self.tasks.append(Task(description, action_type))
+    def add_task(self, description: str, action_type: str = "general", dependencies: List[int] = None):
+        task = Task(description, action_type, dependencies)
+        task.task_id = len(self.tasks)
+        self.tasks.append(task)
 
     def get_current_task(self) -> Optional[Task]:
+        """Get the next task (for sequential execution compatibility)."""
         if self.current_index < len(self.tasks):
             return self.tasks[self.current_index]
         return None
 
+    def get_executable_tasks(self, max_count: int = 1) -> List[Task]:
+        """Get tasks that are ready to execute (all dependencies met)."""
+        with self.lock:
+            executable = []
+            for task in self.tasks:
+                if task.status != TaskStatus.PENDING:
+                    continue
+
+                # Check if all dependencies are completed
+                deps_met = all(
+                    self.tasks[dep_id].status == TaskStatus.COMPLETED
+                    for dep_id in task.dependencies
+                    if dep_id < len(self.tasks)
+                )
+
+                if deps_met:
+                    executable.append(task)
+                    if len(executable) >= max_count:
+                        break
+
+            return executable
+
+    def mark_task_in_progress(self, task: Task):
+        """Mark a task as in progress."""
+        with self.lock:
+            task.status = TaskStatus.IN_PROGRESS
+
+    def mark_task_completed(self, task: Task, result: str = None):
+        """Mark a specific task as completed."""
+        with self.lock:
+            task.status = TaskStatus.COMPLETED
+            task.result = result
+
+    def mark_task_failed(self, task: Task, error: str):
+        """Mark a specific task as failed."""
+        with self.lock:
+            task.status = TaskStatus.FAILED
+            task.error = error
+
     def mark_completed(self, result: str = None):
+        """Legacy method for sequential execution compatibility."""
         if self.current_index < len(self.tasks):
             self.tasks[self.current_index].status = TaskStatus.COMPLETED
             self.tasks[self.current_index].result = result
             self.current_index += 1
 
     def mark_failed(self, error: str):
+        """Legacy method for sequential execution compatibility."""
         if self.current_index < len(self.tasks):
             self.tasks[self.current_index].status = TaskStatus.FAILED
             self.tasks[self.current_index].error = error
 
     def is_complete(self) -> bool:
-        return self.current_index >= len(self.tasks)
+        """Check if all tasks are done (completed or failed)."""
+        return all(
+            task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED]
+            for task in self.tasks
+        )
+
+    def has_pending_tasks(self) -> bool:
+        """Check if there are any pending or in-progress tasks."""
+        return any(
+            task.status in [TaskStatus.PENDING, TaskStatus.IN_PROGRESS]
+            for task in self.tasks
+        )
 
     def get_summary(self) -> str:
         completed = sum(1 for t in self.tasks if t.status == TaskStatus.COMPLETED)
         failed = sum(1 for t in self.tasks if t.status == TaskStatus.FAILED)
+        in_progress = sum(1 for t in self.tasks if t.status == TaskStatus.IN_PROGRESS)
         total = len(self.tasks)
-        return f"Progress: {completed}/{total} completed, {failed} failed"
+        return f"Progress: {completed}/{total} completed, {failed} failed, {in_progress} in progress"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -2107,6 +2170,226 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
     return all(t.status == TaskStatus.COMPLETED for t in plan.tasks)
 
 
+def execute_single_task(task: Task, plan: ExecutionPlan, sys_info: Dict[str, Any], auto_approve: bool = True) -> bool:
+    """Execute a single task (for concurrent execution).
+
+    Returns:
+        True if task completed successfully, False otherwise
+    """
+    print(f"\n[Task {task.task_id + 1}/{len(plan.tasks)}] {task.description}")
+    print(f"[Type: {task.action_type}]")
+
+    plan.mark_task_in_progress(task)
+
+    system_context = f"""System Information:
+OS: {sys_info['os']} {sys_info['os_release']}
+Platform: {sys_info['platform']}
+Architecture: {sys_info['architecture']}
+Shell Type: {sys_info['shell_type']}
+
+{EXECUTION_SYSTEM}"""
+
+    messages = [{"role": "system", "content": system_context}]
+
+    # Add task to conversation
+    messages.append({
+        "role": "user",
+        "content": f"""Task: {task.description}
+Action type: {task.action_type}
+
+Execute this task completely. When done, respond with TASK_COMPLETE."""
+    })
+
+    # Execute task with tool calls
+    task_iterations = 0
+    max_task_iterations = 10000
+    task_complete = False
+
+    while task_iterations < max_task_iterations and not task_complete:
+        task_iterations += 1
+
+        # Try with tools, fall back to no-tools if needed
+        response = ollama_chat(messages, tools=TOOLS)
+
+        if "error" in response:
+            error_msg = response['error']
+            print(f"  ✗ Error: {error_msg}")
+
+            # If we keep getting errors, try without tools
+            if "400" in error_msg and task_iterations < 3:
+                print(f"  → Retrying without tool support...")
+                response = ollama_chat(messages, tools=None)
+
+            if "error" in response:
+                plan.mark_task_failed(task, error_msg)
+                return False
+
+        msg = response.get("message", {})
+        content = msg.get("content", "")
+        tool_calls = msg.get("tool_calls", [])
+
+        # Add assistant response to conversation
+        messages.append(msg)
+
+        # Execute tool calls FIRST before checking completion
+        if tool_calls:
+            for tool_call in tool_calls:
+                func = tool_call.get("function", {})
+                tool_name = func.get("name")
+                tool_args = func.get("arguments", {})
+
+                if isinstance(tool_args, str):
+                    try:
+                        tool_args = json.loads(tool_args)
+                    except:
+                        tool_args = {}
+
+                # Check if this is a scary operation
+                is_scary, scary_reason = is_scary_operation(
+                    tool_name,
+                    tool_args,
+                    task.action_type
+                )
+
+                if is_scary:
+                    operation_desc = f"{tool_name}({', '.join(f'{k}={v!r}' for k, v in list(tool_args.items())[:3])})"
+                    if not prompt_scary_operation(operation_desc, scary_reason):
+                        print(f"  ✗ Operation cancelled by user")
+                        plan.mark_task_failed(task, "User cancelled destructive operation")
+                        return False
+
+                result = execute_tool(tool_name, tool_args)
+
+                # Add tool result to conversation
+                messages.append({
+                    "role": "tool",
+                    "content": result
+                })
+
+                # Check for test failures
+                if tool_name == "run_tests":
+                    try:
+                        result_data = json.loads(result)
+                        if result_data.get("rc", 0) != 0:
+                            print(f"  ⚠ Tests failed (rc={result_data['rc']})")
+                    except:
+                        pass
+
+        # Check if task is complete AFTER executing tool calls
+        if "TASK_COMPLETE" in content or "task complete" in content.lower():
+            print(f"  ✓ Task completed")
+            plan.mark_task_completed(task, content)
+            return True
+
+        # If model responds but doesn't use tools and doesn't complete task
+        if not tool_calls and content:
+            # Model is thinking/responding without tool calls
+            print(f"  → {content[:200]}")
+
+            # If model keeps responding without tools or completion, it might not support them
+            if task_iterations >= 3:
+                print(f"  ⚠ Model not using tools. Marking task as needs manual intervention.")
+                plan.mark_task_failed(task, "Model does not support tool calling. Consider using a model with tool support.")
+                return False
+
+    if not task_complete:
+        print(f"  ✗ Task exceeded iteration limit")
+        plan.mark_task_failed(task, "Exceeded iteration limit")
+        return False
+
+    return True
+
+
+def concurrent_execution_mode(plan: ExecutionPlan, max_workers: int = 2, auto_approve: bool = True) -> bool:
+    """Execute tasks in the plan concurrently with dependency tracking.
+
+    Args:
+        plan: ExecutionPlan with tasks to execute
+        max_workers: Maximum number of concurrent tasks (default: 2)
+        auto_approve: If True (default), runs autonomously without initial approval
+
+    Returns:
+        True if all tasks completed successfully, False otherwise
+    """
+    print("\n" + "=" * 60)
+    print("CONCURRENT EXECUTION MODE")
+    print("=" * 60)
+    print(f"  ℹ️  Max concurrent tasks: {max_workers}")
+
+    if not auto_approve:
+        print("\nThis will execute tasks in parallel with full autonomy.")
+        print("⚠️  Note: Destructive operations will still require confirmation.")
+        response = input("Start execution? [y/N]: ").strip().lower()
+        if response not in ["y", "yes"]:
+            print("Execution cancelled.")
+            return False
+
+    print("\n✓ Starting concurrent autonomous execution...\n")
+    if auto_approve:
+        print("  ℹ️  Running in autonomous mode. Destructive operations will prompt for confirmation.\n")
+
+    # Get system info for context
+    sys_info = _get_system_info_cached()
+
+    # Use ThreadPoolExecutor for concurrent execution
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {}
+
+        while plan.has_pending_tasks():
+            # Get tasks that are ready to execute (dependencies met)
+            available_slots = max_workers - len(futures)
+            if available_slots > 0:
+                executable_tasks = plan.get_executable_tasks(max_count=available_slots)
+
+                # Submit new tasks
+                for task in executable_tasks:
+                    future = executor.submit(execute_single_task, task, plan, sys_info, auto_approve)
+                    futures[future] = task
+
+            # Wait for at least one task to complete
+            if futures:
+                done, _ = as_completed(futures.keys()), None
+                for future in list(done):
+                    task = futures.pop(future)
+                    try:
+                        success = future.result()
+                        if not success:
+                            print(f"  ⚠ Task {task.task_id + 1} failed: {task.error}")
+                    except Exception as e:
+                        print(f"  ✗ Task {task.task_id + 1} crashed: {e}")
+                        plan.mark_task_failed(task, str(e))
+                    break  # Process one completion at a time
+            else:
+                # No tasks running and no tasks ready - check if we're stuck
+                if plan.has_pending_tasks():
+                    print("  ⚠ Warning: Tasks have unmet dependencies. Possible deadlock.")
+                    break
+
+    # Final summary
+    print("\n" + "=" * 60)
+    print("EXECUTION SUMMARY")
+    print("=" * 60)
+    print(plan.get_summary())
+    print()
+
+    for i, task in enumerate(plan.tasks, 1):
+        status_icon = {
+            TaskStatus.COMPLETED: "✓",
+            TaskStatus.FAILED: "✗",
+            TaskStatus.IN_PROGRESS: "→",
+            TaskStatus.PENDING: "○"
+        }.get(task.status, "?")
+
+        deps_str = f" (depends on: {task.dependencies})" if task.dependencies else ""
+        print(f"{status_icon} {i}. {task.description} [{task.status.value}]{deps_str}")
+        if task.error:
+            print(f"    Error: {task.error}")
+
+    print("=" * 60)
+
+    return all(t.status == TaskStatus.COMPLETED for t in plan.tasks)
+
+
 # ========== REPL Mode ==========
 
 def repl_mode():
@@ -2228,6 +2511,13 @@ def main():
         action="store_true",
         help="Prompt for approval before execution (default: auto-approve)"
     )
+    parser.add_argument(
+        "-j", "--parallel",
+        type=int,
+        default=2,
+        metavar="N",
+        help="Number of concurrent tasks to run in parallel (default: 2, use 1 for sequential)"
+    )
 
     args = parser.parse_args()
 
@@ -2239,6 +2529,8 @@ def main():
     print(f"Model: {OLLAMA_MODEL}")
     print(f"Ollama: {OLLAMA_BASE_URL}")
     print(f"Repository: {ROOT}")
+    if args.parallel > 1:
+        print(f"Parallel execution: {args.parallel} concurrent tasks")
     if not args.prompt:
         print("  ℹ️  Autonomous mode: destructive operations will prompt for confirmation")
     print()
@@ -2249,8 +2541,11 @@ def main():
         else:
             task_description = " ".join(args.task)
             plan = planning_mode(task_description)
-            # Default to auto-approve (no initial prompt), unless --prompt flag is used
-            execution_mode(plan, auto_approve=not args.prompt)
+            # Use concurrent execution if parallel > 1, otherwise sequential
+            if args.parallel > 1:
+                concurrent_execution_mode(plan, max_workers=args.parallel, auto_approve=not args.prompt)
+            else:
+                execution_mode(plan, auto_approve=not args.prompt)
     except KeyboardInterrupt:
         print("\n\nAborted by user")
         sys.exit(1)
