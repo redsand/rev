@@ -4592,6 +4592,7 @@ def repl_mode():
             # If escape was pressed, show indicator and submit immediately
             if escape_pressed:
                 print("  [ESC pressed - submitting immediately]")
+
         except (KeyboardInterrupt, EOFError):
             print("\nExiting REPL")
             break
