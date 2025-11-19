@@ -2,7 +2,7 @@
 
 ## Overview
 
-Test coverage is available and configured for both `agent.py` and `agent.min` to ensure code quality and reliability.
+Test coverage for the rev autonomous CI/CD agent to ensure code quality and reliability.
 
 ## Current Coverage
 
@@ -10,16 +10,14 @@ Test coverage is available and configured for both `agent.py` and `agent.min` to
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Module                  Statements    Covered    Coverage    Missing
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-agent.min.py                 478        404        85%         74
-agent.py                     924        249        27%        675
-tests/test_agent.py           79         78        99%          1
+rev.py                       478        404        85%         74
 tests/test_agent_min.py      629        622        99%          7
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TOTAL                       2110       1353        64%        757
+TOTAL                       1107        1026       93%         81
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-## agent.min Coverage Details
+## rev.py Coverage Details
 
 **Coverage: 85%** - Production Ready ✅
 
@@ -47,22 +45,12 @@ The uncovered lines are primarily:
 
 **Note:** The uncovered code is mostly interactive features and edge cases that are difficult to test in an automated environment but have been manually validated.
 
-## agent.py Coverage Details
-
-**Coverage: 27%** - Expected for Legacy Code
-
-The lower coverage for agent.py is expected because:
-- It's the original implementation with more features
-- Many features (SSH, WinRM, Bitwarden) require external services
-- Interactive guard prompts are hard to test automatically
-- Basic functionality is tested (12 passing tests)
-
 ## Running Coverage Reports
 
 ### Quick Coverage Check
 
 ```bash
-# Run tests with coverage for agent.min only
+# Run tests with coverage for rev.py only
 pytest tests/test_agent_min.py --cov=agent_min --cov-report=term-missing
 
 # Run tests with coverage for all code
@@ -118,10 +106,10 @@ To enable coverage by default, uncomment these lines in `pytest.ini`:
 ## Coverage Targets
 
 ### Current Goals
-- **agent.min**: Target 75%+ (✅ Achieved: 85%)
+- **rev.py**: Target 75%+ (✅ Achieved: 85%)
 - **Test suites**: Target 95%+ (✅ Achieved: 99%)
 
-### Why 85% is Excellent for agent.min
+### Why 85% is Excellent for rev.py
 
 1. **Core Logic**: 100% of critical paths covered
 2. **Edge Cases**: Comprehensive error handling tested
@@ -149,7 +137,7 @@ def test_repl_mode():
 
 ### 2. Test Main Function
 ```python
-@patch('sys.argv', ['agent.min', 'test task'])
+@patch('sys.argv', ['rev.py', 'test task'])
 def test_main_function():
     main()
 ```
@@ -212,7 +200,7 @@ pytest tests/ --cov=. --cov-report=xml --cov-report=term
 ✅ **Test coverage is fully available and functional**
 
 - **75 tests passing** (100% pass rate) - Added 30 new tests!
-- **85% code coverage** for agent.min.py (exceeds 75% target by 10%)
+- **85% code coverage** for rev.py (exceeds 75% target by 10%)
 - **99% test code coverage** (tests are well-tested themselves)
 - HTML reports generated for detailed analysis
 - Coverage configuration in place

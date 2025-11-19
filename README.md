@@ -1,4 +1,4 @@
-# agent.min — Autonomous CI/CD Agent
+# rev.py — Autonomous CI/CD Agent
 
 A minimal, autonomous CI/CD agent powered by [Ollama](https://ollama.ai) for local LLM inference. Designed for iterative code development with single-gate approval and comprehensive testing.
 
@@ -67,7 +67,7 @@ curl -fsSL https://ollama.ai/install.sh | sh
 
 ### 2. Pull a Code Model
 
-**⚠️ Important:** agent.min requires a model with **function/tool calling support** for full functionality.
+**⚠️ Important:** rev.py requires a model with **function/tool calling support** for full functionality.
 
 **Recommended models with tool support:**
 ```bash
@@ -103,7 +103,7 @@ pip install -r requirements.txt
 Execute a single task with **fully autonomous** operation:
 
 ```bash
-python agent.min "Add error handling to all API endpoints"
+python rev.py "Add error handling to all API endpoints"
 ```
 
 The agent will:
@@ -120,7 +120,7 @@ The agent will:
 For iterative development with **session memory**:
 
 ```bash
-python agent.min --repl
+python rev.py --repl
 ```
 
 The REPL now maintains context across multiple prompts:
@@ -151,7 +151,7 @@ Session Summary:
 If you want to manually approve the execution plan (old behavior):
 
 ```bash
-python agent.min --prompt "Run all tests and fix any failures"
+python rev.py --prompt "Run all tests and fix any failures"
 ```
 
 With `--prompt`, the agent will ask for approval before starting execution.
@@ -186,13 +186,13 @@ export OLLAMA_BASE_URL="http://localhost:11434"  # Default
 export OLLAMA_MODEL="codellama:latest"           # Default
 
 # Then run agent
-python agent.min "Your task here"
+python rev.py "Your task here"
 ```
 
 ### Command-Line Options
 
 ```bash
-python agent.min [OPTIONS] "task description"
+python rev.py [OPTIONS] "task description"
 
 Options:
   --repl              Interactive REPL mode
@@ -207,7 +207,7 @@ Options:
 ### Example 1: Add Feature
 
 ```bash
-python agent.min "Add rate limiting middleware to Express app"
+python rev.py "Add rate limiting middleware to Express app"
 ```
 
 **Generated Plan:**
@@ -220,7 +220,7 @@ python agent.min "Add rate limiting middleware to Express app"
 ### Example 2: Fix Bugs
 
 ```bash
-python agent.min "Fix all ESLint errors in src/ directory"
+python rev.py "Fix all ESLint errors in src/ directory"
 ```
 
 **Generated Plan:**
@@ -233,7 +233,7 @@ python agent.min "Fix all ESLint errors in src/ directory"
 ### Example 3: Refactoring
 
 ```bash
-python agent.min "Refactor authentication logic into separate service"
+python rev.py "Refactor authentication logic into separate service"
 ```
 
 **Generated Plan:**
@@ -280,7 +280,7 @@ The agent has access to:
 
 ## Comparison with agent.py
 
-| Feature | agent.py | agent.min |
+| Feature | agent.py | rev.py |
 |---------|----------|-----------|
 | **LLM** | OpenAI API | Ollama (local) |
 | **Approval** | Multiple prompts | Single approval |
@@ -323,26 +323,26 @@ Some Ollama models don't support function/tool calling. This is normal for older
 1. Use a model with tool support:
    ```bash
    ollama pull llama3.1:latest
-   python agent.min --model llama3.1:latest "Your task"
+   python rev.py --model llama3.1:latest "Your task"
    ```
 
 2. Or enable debug mode to see what's happening:
    ```bash
-   OLLAMA_DEBUG=1 python agent.min "Your task"
+   OLLAMA_DEBUG=1 python rev.py "Your task"
    ```
 
 The agent will automatically retry without tools if it detects the model doesn't support them, but tool support is highly recommended for best results.
 
 ### "Path escapes repo"
 
-agent.min only operates within the current repository for safety. Use relative paths.
+rev.py only operates within the current repository for safety. Use relative paths.
 
 ### Tasks not completing
 
 Try a more specific request or use a larger model:
 
 ```bash
-python agent.min --model deepseek-coder:33b "Your task"
+python rev.py --model deepseek-coder:33b "Your task"
 ```
 
 ## Testing & Coverage
@@ -350,7 +350,7 @@ python agent.min --model deepseek-coder:33b "Your task"
 **Test Coverage: 85%** - Production Ready ✅
 
 - **75 tests passing** (100% pass rate)
-- **478 statements** in agent.min.py
+- **478 statements** in rev.py
 - **404 covered** through comprehensive test suite
 - **99% test code coverage** (tests are well-tested themselves)
 
@@ -399,14 +399,14 @@ For detailed coverage information, see [COVERAGE.md](COVERAGE.md).
 
 4. **Review Changes** — Use `git diff` before committing
    ```bash
-   python agent.min "Add feature X"
+   python rev.py "Add feature X"
    git diff  # Review changes
    git commit -am "Add feature X"
    ```
 
 5. **Iterative Development** — Use REPL for interactive work
    ```bash
-   python agent.min --repl
+   python rev.py --repl
    ```
 
 ## Advanced Usage
@@ -417,16 +417,16 @@ The agent detects test frameworks automatically, but you can customize:
 
 ```bash
 # For Python projects
-python agent.min "Fix failing tests" --model codellama:latest
+python rev.py "Fix failing tests" --model codellama:latest
 
 # For Node.js projects
-python agent.min "Add tests for new API endpoints"
+python rev.py "Add tests for new API endpoints"
 ```
 
 ### Chain Multiple Tasks
 
 ```bash
-python agent.min "Add logging, then refactor error handling, then update tests"
+python rev.py "Add logging, then refactor error handling, then update tests"
 ```
 
 The agent will create a plan that sequences these correctly.
@@ -435,7 +435,7 @@ The agent will create a plan that sequences these correctly.
 
 ```bash
 # In your CI pipeline
-python agent.min --yes "Run tests and fix any linting errors"
+python rev.py --yes "Run tests and fix any linting errors"
 if [ $? -eq 0 ]; then
   git commit -am "Auto-fix linting issues"
   git push
@@ -455,7 +455,7 @@ For security, only these commands are permitted:
 
 ```
 .
-├── agent.min.py           # Main agent script
+├── rev.py           # Main agent script
 ├── requirements.txt       # Minimal dependencies (just requests)
 ├── tests/                 # Comprehensive test suite
 │   └── test_agent_min.py  # 99% coverage tests

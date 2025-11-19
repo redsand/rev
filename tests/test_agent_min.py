@@ -1,5 +1,5 @@
 """
-Comprehensive test suite for agent.min - Autonomous CI/CD Agent
+Comprehensive test suite for rev - Autonomous CI/CD Agent
 
 Tests cover:
 - File operations
@@ -20,22 +20,22 @@ from unittest.mock import Mock, patch, MagicMock
 
 import pytest
 
-# Import agent.min module
+# Import rev module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Load agent.min.py file using direct file execution
-agent_min_path = Path(__file__).parent.parent / "agent.min.py"
-if not agent_min_path.exists():
-    raise ImportError(f"agent.min.py not found at {agent_min_path}")
+# Load rev.py file using direct file execution
+rev_path = Path(__file__).parent.parent / "rev.py"
+if not rev_path.exists():
+    raise ImportError(f"rev.py not found at {rev_path}")
 
 # Create a module to load code into
 import types
 agent_min = types.ModuleType("agent_min")
-agent_min.__file__ = str(agent_min_path)
+agent_min.__file__ = str(rev_path)
 
 # Execute the file in the module's namespace
-with open(agent_min_path, 'r', encoding='utf-8') as f:
-    code = compile(f.read(), str(agent_min_path), 'exec')
+with open(rev_path, 'r', encoding='utf-8') as f:
+    code = compile(f.read(), str(rev_path), 'exec')
     exec(code, agent_min.__dict__)
 
 # Add to sys.modules so imports work
