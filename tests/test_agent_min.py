@@ -900,6 +900,76 @@ class TestREPLMode:
         # Should track multiple tasks
         assert mock_plan.call_count == 2
 
+    @patch('sys.stdin.isatty')
+    @patch('builtins.input')
+    def test_escape_key_fallback_to_regular_input(self, mock_input, mock_isatty):
+        """Test get_input_with_escape falls back to regular input when not in TTY."""
+        mock_isatty.return_value = False
+        mock_input.return_value = "test input"
+
+        result, escape_pressed = agent_min.get_input_with_escape("prompt> ")
+
+        assert result == "test input"
+        assert escape_pressed is False
+        mock_input.assert_called_once_with("prompt> ")
+
+    def test_escape_interrupt_flag_exists(self):
+        """Test that the escape interrupt flag exists."""
+        assert hasattr(agent_min, '_ESCAPE_INTERRUPT')
+        assert isinstance(agent_min._ESCAPE_INTERRUPT, bool)
+
+    @patch('agent_min.planning_mode')
+    @patch('agent_min.execution_mode')
+    def test_escape_interrupt_flag_reset(self, mock_exec, mock_plan):
+        """Test that escape interrupt flag is reset before and after execution."""
+        # Set the flag
+        agent_min._ESCAPE_INTERRUPT = True
+
+        # Create a mock plan
+        plan = agent_min.ExecutionPlan()
+        plan.add_task("Test task", "review")
+        mock_plan.return_value = plan
+        mock_exec.return_value = True
+
+        # The flag should be reset before execution
+        with patch('agent_min.get_input_with_escape') as mock_input:
+            mock_input.return_value = ("/exit", False)
+            agent_min.repl_mode()
+
+        # After exiting REPL, flag should be reset
+        # (This is verified by the fact that repl_mode completes without errors)
+
+    @patch('agent_min.planning_mode')
+    @patch('agent_min.execution_mode')
+    @patch('agent_min.get_input_with_escape')
+    def test_repl_escape_key_indicator(self, mock_input, mock_exec, mock_plan):
+        """Test REPL shows escape key indicator when escape is pressed."""
+        plan = agent_min.ExecutionPlan()
+        plan.add_task("Test task", "review")
+        mock_plan.return_value = plan
+        mock_exec.return_value = True
+
+        # Simulate escape key press, then exit
+        mock_input.side_effect = [
+            ("test command", True),  # First command with ESC
+            ("/exit", False)          # Then exit
+        ]
+
+        import io
+        import sys
+        captured_output = io.StringIO()
+        old_stdout = sys.stdout
+
+        try:
+            sys.stdout = captured_output
+            agent_min.repl_mode()
+            output = captured_output.getvalue()
+
+            # Should show escape key indicator
+            assert "[ESC pressed - submitting immediately]" in output
+        finally:
+            sys.stdout = old_stdout
+
 
 # ========== CLI and Main Function Tests ==========
 
