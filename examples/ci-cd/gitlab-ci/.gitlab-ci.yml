@@ -1,0 +1,241 @@
+# GitLab CI/CD Pipeline with rev.py Integration
+
+stages:
+  - test
+  - quality
+  - security
+  - fix
+  - deploy
+
+variables:
+  OLLAMA_BASE_URL: "http://ollama:11434"
+  OLLAMA_MODEL: "llama3.1:latest"
+
+# Ollama service for AI-powered tasks
+.ollama_service:
+  services:
+    - name: ollama/ollama:latest
+      alias: ollama
+  before_script:
+    - |
+      # Wait for Ollama to be ready
+      until curl -s http://ollama:11434/api/tags > /dev/null; do
+        echo "Waiting for Ollama..."
+        sleep 2
+      done
+      # Pull model
+      curl -X POST http://ollama:11434/api/pull -d '{"name": "llama3.1:latest"}'
+      sleep 10
+    - pip install -r requirements.txt
+
+# Run tests
+test:unit:
+  stage: test
+  image: python:3.11
+  script:
+    - pip install -r requirements.txt requirements-dev.txt
+    - pytest tests/ --cov=. --cov-report=xml --cov-report=term
+  coverage: '/^TOTAL.*\s+(\d+\%)$/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+    paths:
+      - htmlcov/
+    expire_in: 1 week
+
+# Code quality checks
+quality:lint:
+  stage: quality
+  image: python:3.11
+  script:
+    - pip install flake8 black pylint
+    - flake8 . --exit-zero --format=json --output-file=flake8-report.json
+    - black --check . || true
+    - pylint **/*.py --exit-zero --output-format=json > pylint-report.json
+  artifacts:
+    paths:
+      - flake8-report.json
+      - pylint-report.json
+    expire_in: 1 week
+  allow_failure: true
+
+# Security scanning
+security:scan:
+  stage: security
+  image: python:3.11
+  script:
+    - pip install bandit safety pip-audit
+    - bandit -r . -f json -o bandit-report.json || true
+    - safety check --json > safety-report.json || true
+    - pip-audit --desc > pip-audit-report.txt || true
+  artifacts:
+    paths:
+      - bandit-report.json
+      - safety-report.json
+      - pip-audit-report.txt
+    expire_in: 1 month
+  allow_failure: true
+
+# Auto-fix linting issues
+fix:lint:
+  stage: fix
+  image: python:3.11
+  extends: .ollama_service
+  script:
+    - |
+      # Check if linting failed
+      if [ -f "flake8-report.json" ]; then
+        echo "Attempting to auto-fix linting issues..."
+        python rev.py "Fix all linting errors in the codebase"
+
+        # Commit fixes
+        git config user.name "rev-bot"
+        git config user.email "bot@rev.ai"
+        git checkout -b "fix/auto-lint-$CI_PIPELINE_ID"
+        git add .
+        git commit -m "Auto-fix: Resolve linting issues [skip ci]" || exit 0
+
+        # Push changes
+        git push -o merge_request.create \
+                 -o merge_request.target=$CI_COMMIT_REF_NAME \
+                 -o merge_request.title="Auto-fix: Linting issues" \
+                 https://oauth2:$CI_JOB_TOKEN@$CI_SERVER_HOST/$CI_PROJECT_PATH.git \
+                 "fix/auto-lint-$CI_PIPELINE_ID"
+      fi
+  when: on_failure
+  needs:
+    - quality:lint
+  only:
+    - main
+    - develop
+
+# Auto-fix security vulnerabilities
+fix:security:
+  stage: fix
+  image: python:3.11
+  extends: .ollama_service
+  script:
+    - |
+      if [ -f "bandit-report.json" ]; then
+        echo "Attempting to fix security vulnerabilities..."
+        python rev.py "Fix security vulnerabilities found in the codebase"
+
+        # Commit fixes
+        git config user.name "rev-bot"
+        git config user.email "bot@rev.ai"
+        git checkout -b "security/auto-fix-$CI_PIPELINE_ID"
+        git add .
+        git commit -m "Security: Auto-fix vulnerabilities [skip ci]" || exit 0
+
+        # Push with merge request
+        git push -o merge_request.create \
+                 -o merge_request.target=$CI_COMMIT_REF_NAME \
+                 -o merge_request.title="🔒 Security: Auto-fix vulnerabilities" \
+                 -o merge_request.label="security" \
+                 https://oauth2:$CI_JOB_TOKEN@$CI_SERVER_HOST/$CI_PROJECT_PATH.git \
+                 "security/auto-fix-$CI_PIPELINE_ID"
+      fi
+  when: on_failure
+  needs:
+    - security:scan
+  only:
+    - main
+    - develop
+
+# Improve test coverage
+fix:coverage:
+  stage: fix
+  image: python:3.11
+  extends: .ollama_service
+  script:
+    - |
+      # Run coverage
+      pip install pytest pytest-cov
+      pytest --cov=. --cov-report=json
+
+      COVERAGE=$(python -c "import json; print(json.load(open('coverage.json'))['totals']['percent_covered'])")
+      echo "Current coverage: $COVERAGE%"
+
+      if (( $(echo "$COVERAGE < 80" | bc -l) )); then
+        echo "Coverage below 80%, adding tests..."
+        python rev.py "Add tests to improve coverage to 80% (currently at $COVERAGE%)"
+
+        # Commit new tests
+        git config user.name "rev-bot"
+        git config user.email "bot@rev.ai"
+        git checkout -b "test/coverage-improvement-$CI_PIPELINE_ID"
+        git add .
+        git commit -m "test: Improve coverage to 80%" || exit 0
+
+        # Push with merge request
+        git push -o merge_request.create \
+                 -o merge_request.target=$CI_COMMIT_REF_NAME \
+                 -o merge_request.title="📊 Improve test coverage: $COVERAGE% → 80%" \
+                 https://oauth2:$CI_JOB_TOKEN@$CI_SERVER_HOST/$CI_PROJECT_PATH.git \
+                 "test/coverage-improvement-$CI_PIPELINE_ID"
+      fi
+  when: manual
+  needs:
+    - test:unit
+
+# Update documentation
+docs:update:
+  stage: fix
+  image: python:3.11
+  extends: .ollama_service
+  script:
+    - python rev.py "Update all documentation to reflect current codebase"
+    - python rev.py "Add docstrings to undocumented functions"
+
+    # Commit documentation updates
+    - git config user.name "rev-docs-bot"
+    - git config user.email "docs@rev.ai"
+    - git add docs/ **/*.py **/*.md
+    - git commit -m "docs: Auto-update documentation [skip ci]" || exit 0
+    - git push https://oauth2:$CI_JOB_TOKEN@$CI_SERVER_HOST/$CI_PROJECT_PATH.git HEAD:$CI_COMMIT_REF_NAME
+  only:
+    - main
+  when: manual
+
+# Code review for merge requests
+review:mr:
+  stage: quality
+  image: python:3.11
+  extends: .ollama_service
+  script:
+    - |
+      # Get changed files
+      git fetch origin $CI_MERGE_REQUEST_TARGET_BRANCH_NAME
+      CHANGED_FILES=$(git diff --name-only origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME...HEAD)
+
+      echo "Reviewing changes..."
+      python rev.py "Review the merge request changes and provide feedback" > review.md
+
+      # Post review as MR comment
+      curl --request POST \
+           --header "PRIVATE-TOKEN: $CI_JOB_TOKEN" \
+           --header "Content-Type: application/json" \
+           --data "{\"body\": \"$(cat review.md | jq -Rs .)\"}" \
+           "$CI_API_V4_URL/projects/$CI_PROJECT_ID/merge_requests/$CI_MERGE_REQUEST_IID/notes"
+  only:
+    - merge_requests
+  artifacts:
+    paths:
+      - review.md
+    expire_in: 1 week
+
+# Deploy (example)
+deploy:production:
+  stage: deploy
+  image: alpine:latest
+  script:
+    - echo "Deploying to production..."
+    # Add your deployment script here
+  only:
+    - main
+  when: manual
+  environment:
+    name: production
+    url: https://production.example.com

@@ -34,6 +34,9 @@ coverage.xml
 .dev_agent_prefs.json
 tests_tmp_*/
 
+# Cache directory
+.rev_cache/
+
 # OS
 .DS_Store
 Thumbs.db

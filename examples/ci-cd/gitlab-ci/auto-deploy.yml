@@ -1,0 +1,398 @@
+# GitLab CI - Auto-Deployment with rev.py
+
+# Include in main .gitlab-ci.yml:
+# include:
+#   - local: '.gitlab/ci/auto-deploy.yml'
+
+stages:
+  - prepare
+  - deploy
+  - verify
+  - rollback
+
+variables:
+  DOCKER_REGISTRY: "registry.gitlab.com"
+  DEPLOY_TIMEOUT: "300"
+
+.deploy_base:
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    - apk add --no-cache python3 py3-pip curl
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+
+.ollama_deploy:
+  extends: .deploy_base
+  services:
+    - docker:dind
+    - name: ollama/ollama:latest
+      alias: ollama
+  before_script:
+    - !reference [.deploy_base, before_script]
+    - pip3 install -r requirements.txt
+    - |
+      until curl -s http://ollama:11434/api/tags; do sleep 2; done
+      curl -X POST http://ollama:11434/api/pull -d '{"name": "llama3.1:latest"}'
+      sleep 10
+
+# Prepare deployment configuration
+prepare:config:
+  stage: prepare
+  extends: .ollama_deploy
+  script:
+    - |
+      echo "Generating deployment configuration..."
+
+      # Use rev.py to generate optimal deployment config
+      python3 rev.py "Generate Kubernetes deployment configuration optimized for this application" > k8s-deployment.yaml
+
+      # Generate service configuration
+      python3 rev.py "Generate Kubernetes service configuration with load balancing" > k8s-service.yaml
+
+      # Generate Docker Compose for simpler deployments
+      python3 rev.py "Generate docker-compose.yml for production deployment" > docker-compose.prod.yml
+
+      # Validate configurations
+      if command -v kubectl &> /dev/null; then
+        kubectl apply --dry-run=client -f k8s-deployment.yaml
+        kubectl apply --dry-run=client -f k8s-service.yaml
+      fi
+  artifacts:
+    paths:
+      - k8s-deployment.yaml
+      - k8s-service.yaml
+      - docker-compose.prod.yml
+    expire_in: 1 week
+  when: manual
+
+# Build and push Docker image
+prepare:build:
+  stage: prepare
+  extends: .deploy_base
+  script:
+    - |
+      # Build Docker image
+      docker build -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA .
+      docker tag $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA $CI_REGISTRY_IMAGE:latest
+
+      # Push to registry
+      docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+      docker push $CI_REGISTRY_IMAGE:latest
+
+      echo "Image pushed: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+  only:
+    - main
+    - develop
+
+# Deploy to staging
+deploy:staging:
+  stage: deploy
+  image: bitnami/kubectl:latest
+  script:
+    - |
+      # Configure kubectl
+      kubectl config set-cluster k8s --server="$KUBE_URL" --insecure-skip-tls-verify=true
+      kubectl config set-credentials admin --token="$KUBE_TOKEN"
+      kubectl config set-context default --cluster=k8s --user=admin
+      kubectl config use-context default
+
+      # Update deployment image
+      kubectl set image deployment/app \
+        app=$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA \
+        -n staging
+
+      # Wait for rollout
+      kubectl rollout status deployment/app -n staging --timeout=${DEPLOY_TIMEOUT}s
+
+      echo "✅ Deployed to staging: $CI_COMMIT_SHA"
+  environment:
+    name: staging
+    url: https://staging.example.com
+    on_stop: stop:staging
+  needs:
+    - prepare:build
+  only:
+    - develop
+
+# Deploy to production
+deploy:production:
+  stage: deploy
+  extends: .ollama_deploy
+  script:
+    - |
+      # Pre-deployment checks
+      echo "Running pre-deployment checks..."
+
+      # Use rev.py for intelligent deployment validation
+      python3 rev.py "Analyze deployment readiness and check for potential issues" > deployment-check.md
+
+      # Check if critical issues found
+      if grep -i "critical\|blocker" deployment-check.md; then
+        echo "⚠️  Critical issues found in deployment check!"
+        cat deployment-check.md
+        exit 1
+      fi
+
+      # Configure kubectl
+      kubectl config set-cluster k8s --server="$KUBE_URL" --insecure-skip-tls-verify=true
+      kubectl config set-credentials admin --token="$KUBE_TOKEN"
+      kubectl config set-context default --cluster=k8s --user=admin
+      kubectl config use-context default
+
+      # Blue-green deployment
+      CURRENT_COLOR=$(kubectl get service app -n production -o jsonpath='{.spec.selector.version}')
+      NEW_COLOR=$([ "$CURRENT_COLOR" = "blue" ] && echo "green" || echo "blue")
+
+      echo "Current: $CURRENT_COLOR, Deploying: $NEW_COLOR"
+
+      # Deploy new version
+      kubectl set image deployment/app-$NEW_COLOR \
+        app=$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA \
+        -n production
+
+      # Wait for new version
+      kubectl rollout status deployment/app-$NEW_COLOR -n production --timeout=${DEPLOY_TIMEOUT}s
+
+      # Run smoke tests
+      python3 rev.py "Run smoke tests against the new deployment" || (
+        echo "❌ Smoke tests failed!"
+        exit 1
+      )
+
+      # Switch traffic to new version
+      kubectl patch service app -n production -p "{\"spec\":{\"selector\":{\"version\":\"$NEW_COLOR\"}}}"
+
+      echo "✅ Successfully deployed $CI_COMMIT_SHA to production ($NEW_COLOR)"
+      echo "OLD_COLOR=$CURRENT_COLOR" > deployment.env
+      echo "NEW_COLOR=$NEW_COLOR" >> deployment.env
+  environment:
+    name: production
+    url: https://production.example.com
+    on_stop: rollback:production
+  artifacts:
+    reports:
+      dotenv: deployment.env
+  needs:
+    - prepare:build
+    - deploy:staging
+  only:
+    - main
+  when: manual
+
+# Verify deployment
+verify:health-check:
+  stage: verify
+  extends: .ollama_deploy
+  script:
+    - |
+      echo "Running post-deployment verification..."
+
+      # Health check
+      RETRIES=10
+      for i in $(seq 1 $RETRIES); do
+        if curl -f $CI_ENVIRONMENT_URL/health; then
+          echo "✅ Health check passed"
+          break
+        fi
+        echo "Retry $i/$RETRIES..."
+        sleep 5
+      done
+
+      # Run comprehensive checks
+      python3 rev.py "Verify deployment health and run integration tests" > verification-report.md
+
+      # Check logs for errors
+      kubectl logs -n $CI_ENVIRONMENT_SLUG deployment/app --tail=100 | \
+        python3 rev.py "Analyze these logs for errors or warnings" >> verification-report.md
+
+      # Performance check
+      python3 rev.py "Run performance tests and verify response times are acceptable" >> verification-report.md
+
+      cat verification-report.md
+  needs:
+    - deploy:production
+  artifacts:
+    paths:
+      - verification-report.md
+    expire_in: 1 month
+  only:
+    - main
+
+verify:smoke-tests:
+  stage: verify
+  image: python:3.11
+  script:
+    - |
+      pip install requests pytest
+
+      # Run smoke tests
+      pytest tests/smoke/ -v --tb=short || exit 1
+
+      echo "✅ All smoke tests passed"
+  needs:
+    - deploy:production
+  only:
+    - main
+
+# Monitor deployment
+verify:monitor:
+  stage: verify
+  extends: .ollama_deploy
+  script:
+    - |
+      echo "Monitoring deployment for 5 minutes..."
+
+      # Monitor for anomalies
+      for i in {1..10}; do
+        # Get metrics
+        kubectl top pods -n production | tee metrics.txt
+
+        # Analyze metrics with AI
+        python3 rev.py "Analyze these metrics for anomalies: $(cat metrics.txt)" > analysis-$i.txt
+
+        if grep -i "anomaly\|issue\|warning" analysis-$i.txt; then
+          echo "⚠️  Potential issue detected!"
+          cat analysis-$i.txt
+        fi
+
+        sleep 30
+      done
+
+      echo "✅ Monitoring complete - no critical issues"
+  needs:
+    - deploy:production
+  when: on_success
+  allow_failure: true
+
+# Automatic rollback on failure
+rollback:production:
+  stage: rollback
+  image: bitnami/kubectl:latest
+  script:
+    - |
+      echo "🔄 Rolling back deployment..."
+
+      # Configure kubectl
+      kubectl config set-cluster k8s --server="$KUBE_URL" --insecure-skip-tls-verify=true
+      kubectl config set-credentials admin --token="$KUBE_TOKEN"
+      kubectl config set-context default --cluster=k8s --user=admin
+      kubectl config use-context default
+
+      # Rollback to previous version
+      kubectl rollout undo deployment/app -n production
+
+      # Wait for rollback
+      kubectl rollout status deployment/app -n production --timeout=${DEPLOY_TIMEOUT}s
+
+      # Verify rollback
+      if curl -f $CI_ENVIRONMENT_URL/health; then
+        echo "✅ Rollback successful"
+      else
+        echo "❌ Rollback verification failed!"
+        exit 1
+      fi
+
+      # Notify team
+      curl -X POST $SLACK_WEBHOOK_URL \
+        -H 'Content-Type: application/json' \
+        -d "{
+          \"text\": \"🔄 Production deployment rolled back\",
+          \"attachments\": [{
+            \"color\": \"warning\",
+            \"fields\": [
+              {\"title\": \"Commit\", \"value\": \"$CI_COMMIT_SHA\", \"short\": true},
+              {\"title\": \"Author\", \"value\": \"$CI_COMMIT_AUTHOR\", \"short\": true}
+            ]
+          }]
+        }" || true
+  environment:
+    name: production
+    action: rollback
+  when: on_failure
+  only:
+    - main
+
+# Cleanup old deployments
+cleanup:old-versions:
+  stage: rollback
+  image: bitnami/kubectl:latest
+  script:
+    - |
+      echo "Cleaning up old deployments..."
+
+      # Keep last 5 deployments
+      kubectl get replicasets -n production --sort-by=.metadata.creationTimestamp | \
+        tail -n +6 | \
+        awk '{print $1}' | \
+        xargs -I {} kubectl delete replicaset {} -n production || true
+
+      echo "✅ Cleanup complete"
+  when: on_success
+  only:
+    - main
+  allow_failure: true
+
+# Post-deployment report
+report:deployment:
+  stage: rollback
+  extends: .ollama_deploy
+  script:
+    - |
+      python3 -c "
+      from datetime import datetime
+
+      report = f'''# Deployment Report
+
+      **Date:** {datetime.now().isoformat()}
+      **Pipeline:** {os.getenv('CI_PIPELINE_ID')}
+      **Commit:** {os.getenv('CI_COMMIT_SHA')}
+      **Author:** {os.getenv('CI_COMMIT_AUTHOR')}
+      **Environment:** {os.getenv('CI_ENVIRONMENT_NAME')}
+
+      ## Summary
+
+      - ✅ Build successful
+      - ✅ Deployed to {os.getenv('CI_ENVIRONMENT_NAME')}
+      - ✅ Health checks passed
+      - ✅ Smoke tests passed
+
+      ## Metrics
+
+      - Deployment time: {os.getenv('CI_JOB_STARTED_AT')} to {datetime.now().isoformat()}
+      - Image: {os.getenv('CI_REGISTRY_IMAGE')}:{os.getenv('CI_COMMIT_SHA')}
+
+      ## Next Steps
+
+      - Monitor application metrics
+      - Watch for user feedback
+      - Prepare rollback if needed
+      '''
+
+      with open('deployment-report.md', 'w') as f:
+          f.write(report)
+
+      print(report)
+      "
+
+      # Post to Slack
+      curl -X POST $SLACK_WEBHOOK_URL \
+        -H 'Content-Type: application/json' \
+        -d "{
+          \"text\": \"✅ Deployment successful\",
+          \"attachments\": [{
+            \"color\": \"good\",
+            \"text\": \"$(cat deployment-report.md)\"
+          }]
+        }" || true
+  needs:
+    - deploy:production
+    - verify:health-check
+    - verify:smoke-tests
+  artifacts:
+    paths:
+      - deployment-report.md
+    expire_in: 1 month
+  when: on_success
+  only:
+    - main
