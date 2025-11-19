@@ -34,6 +34,9 @@ import difflib
 import platform
 from typing import Dict, Any, List, Optional
 from enum import Enum
+import termios
+import tty
+import select
 
 # Ollama integration
 try:
@@ -72,6 +75,9 @@ ALLOW_CMDS = {
 
 # System information (cached)
 _SYSTEM_INFO = None
+
+# Global interrupt flag for escape key handling
+_ESCAPE_INTERRUPT = False
 
 
 def _get_system_info_cached() -> Dict[str, Any]:
@@ -4070,6 +4076,13 @@ Shell Type: {sys_info['shell_type']}
     iteration = 0
 
     while not plan.is_complete() and iteration < max_iterations:
+        # Check for escape key interrupt
+        global _ESCAPE_INTERRUPT
+        if _ESCAPE_INTERRUPT:
+            print("\n⚠️  Execution interrupted by ESC key")
+            _ESCAPE_INTERRUPT = False
+            return False
+
         iteration += 1
         current_task = plan.get_current_task()
 
@@ -4093,6 +4106,13 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
         task_complete = False
 
         while task_iterations < max_task_iterations and not task_complete:
+            # Check for escape key interrupt during task execution
+            if _ESCAPE_INTERRUPT:
+                print("\n⚠️  Task execution interrupted by ESC key")
+                _ESCAPE_INTERRUPT = False
+                plan.mark_failed("Interrupted by user (ESC key)")
+                return False
+
             task_iterations += 1
 
             # Try with tools, fall back to no-tools if needed
@@ -4121,6 +4141,14 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             # Execute tool calls FIRST before checking completion
             if tool_calls:
                 for tool_call in tool_calls:
+                    # Check for escape key interrupt before each tool execution
+                    if _ESCAPE_INTERRUPT:
+                        print("\n⚠️  Tool execution interrupted by ESC key")
+                        _ESCAPE_INTERRUPT = False
+                        plan.mark_failed("Interrupted by user (ESC key)")
+                        task_complete = True
+                        break
+
                     func = tool_call.get("function", {})
                     tool_name = func.get("name")
                     tool_args = func.get("arguments", {})
@@ -4429,12 +4457,123 @@ def concurrent_execution_mode(plan: ExecutionPlan, max_workers: int = 2, auto_ap
     return all(t.status == TaskStatus.COMPLETED for t in plan.tasks)
 
 
+# ========== Escape Key Input Handler ==========
+
+def get_input_with_escape(prompt: str = "") -> tuple[str, bool]:
+    """
+    Get user input with escape key detection.
+
+    Returns:
+        tuple: (input_string, escape_pressed)
+            - input_string: The text entered by user
+            - escape_pressed: True if ESC was pressed to submit, False if Enter was pressed
+    """
+    global _ESCAPE_INTERRUPT
+
+    # Check if we're in a TTY (terminal)
+    if not sys.stdin.isatty():
+        # Fallback to regular input if not in a TTY
+        return input(prompt), False
+
+    # Display prompt
+    if prompt:
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+
+    # Save terminal settings
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+
+    buffer = []
+    cursor_pos = 0
+    escape_pressed = False
+
+    try:
+        # Set terminal to raw mode
+        tty.setraw(fd)
+
+        while True:
+            # Read one character
+            char = sys.stdin.read(1)
+
+            # Check for ESC key
+            if char == '\x1b':  # ESC key
+                # Check if it's an escape sequence (arrow keys, etc.) or just ESC
+                if select.select([sys.stdin], [], [], 0.1)[0]:
+                    # It's an escape sequence, read the rest
+                    next_chars = sys.stdin.read(2)
+
+                    if next_chars == '[D':  # Left arrow
+                        if cursor_pos > 0:
+                            cursor_pos -= 1
+                            sys.stdout.write('\x1b[D')
+                            sys.stdout.flush()
+                    elif next_chars == '[C':  # Right arrow
+                        if cursor_pos < len(buffer):
+                            cursor_pos += 1
+                            sys.stdout.write('\x1b[C')
+                            sys.stdout.flush()
+                    elif next_chars == '[A' or next_chars == '[B':  # Up/Down arrows
+                        # Ignore for now
+                        pass
+                else:
+                    # Just ESC key pressed alone - submit input immediately
+                    escape_pressed = True
+                    _ESCAPE_INTERRUPT = True
+                    sys.stdout.write('\n')
+                    sys.stdout.flush()
+                    break
+
+            elif char == '\r' or char == '\n':  # Enter key
+                sys.stdout.write('\n')
+                sys.stdout.flush()
+                break
+
+            elif char == '\x7f' or char == '\x08':  # Backspace/Delete
+                if cursor_pos > 0:
+                    # Remove character at cursor position
+                    buffer.pop(cursor_pos - 1)
+                    cursor_pos -= 1
+
+                    # Redraw line
+                    sys.stdout.write('\x1b[D')  # Move cursor left
+                    sys.stdout.write(''.join(buffer[cursor_pos:]) + ' ')  # Redraw rest of line
+                    sys.stdout.write('\x1b[' + str(len(buffer) - cursor_pos + 1) + 'D')  # Move cursor back
+                    sys.stdout.flush()
+
+            elif char == '\x03':  # Ctrl+C
+                raise KeyboardInterrupt
+
+            elif char == '\x04':  # Ctrl+D (EOF)
+                if not buffer:
+                    raise EOFError
+
+            elif ord(char) >= 32:  # Printable characters
+                # Insert character at cursor position
+                buffer.insert(cursor_pos, char)
+                cursor_pos += 1
+
+                # Redraw from cursor position
+                sys.stdout.write(''.join(buffer[cursor_pos-1:]))
+                if cursor_pos < len(buffer):
+                    # Move cursor back to correct position
+                    sys.stdout.write('\x1b[' + str(len(buffer) - cursor_pos) + 'D')
+                sys.stdout.flush()
+
+    finally:
+        # Restore terminal settings
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    return ''.join(buffer), escape_pressed
+
+
 # ========== REPL Mode ==========
 
 def repl_mode():
     """Interactive REPL for iterative development with session memory."""
     print("agent.min REPL - Type /exit to quit, /help for commands")
     print("  ℹ️  Running in autonomous mode - destructive operations will prompt")
+    print("  ⚡ Press ESC to immediately submit input and stop current operation")
 
     # Session context to maintain memory across prompts
     session_context = {
@@ -4447,8 +4586,13 @@ def repl_mode():
     while True:
         try:
             sys.stdout.flush()  # Ensure prompt is displayed immediately
-            print()  # Print newline separately to avoid confusing readline
-            user_input = input("agent> ").strip()
+            user_input, escape_pressed = get_input_with_escape("\nagent> ")
+            user_input = user_input.strip()
+
+            # If escape was pressed, show indicator and submit immediately
+            if escape_pressed:
+                print("  [ESC pressed - submitting immediately]")
+
         except (KeyboardInterrupt, EOFError):
             print("\nExiting REPL")
             break
@@ -4472,6 +4616,10 @@ Commands:
   /help             - Show this help
   /status           - Show session summary
   /clear            - Clear session memory
+
+Input shortcuts:
+  ESC               - Immediately submit input and stop current operation
+  Ctrl+C            - Exit REPL
 
 Otherwise, describe a task and the agent will plan and execute it.
 Autonomous mode: destructive operations require confirmation, others run automatically.
@@ -4499,8 +4647,15 @@ Autonomous mode: destructive operations require confirmation, others run automat
             continue
 
         # Execute task with auto-approve (no initial prompt, scary ops still prompt)
+        # Reset interrupt flag before execution
+        global _ESCAPE_INTERRUPT
+        _ESCAPE_INTERRUPT = False
+
         plan = planning_mode(user_input)
         success = execution_mode(plan, auto_approve=True)
+
+        # Reset interrupt flag after execution (in case it was set)
+        _ESCAPE_INTERRUPT = False
 
         # Update session context
         for task in plan.tasks:
