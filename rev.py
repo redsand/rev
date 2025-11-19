@@ -93,6 +93,452 @@ def _get_system_info_cached() -> Dict[str, Any]:
     return _SYSTEM_INFO
 
 
+# ========== Intelligent Caching System ==========
+
+import time
+import pickle
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from typing import Tuple
+
+
+@dataclass
+class CacheEntry:
+    """A cache entry with metadata."""
+    value: Any
+    timestamp: float
+    size: int = 0
+    access_count: int = 0
+    last_access: float = field(default_factory=time.time)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class IntelligentCache:
+    """
+    Intelligent cache with TTL, LRU eviction, and size limits.
+
+    Features:
+    - Time-to-live (TTL) based expiration
+    - LRU (Least Recently Used) eviction
+    - Size-based limits
+    - Hit/miss statistics
+    - Optional disk persistence
+    """
+
+    def __init__(
+        self,
+        name: str = "cache",
+        ttl: float = 300,  # 5 minutes default
+        max_entries: int = 1000,
+        max_size_bytes: int = 100 * 1024 * 1024,  # 100MB
+        persist_path: Optional[pathlib.Path] = None
+    ):
+        self.name = name
+        self.ttl = ttl
+        self.max_entries = max_entries
+        self.max_size_bytes = max_size_bytes
+        self.persist_path = persist_path
+
+        # OrderedDict for LRU tracking
+        self._cache: OrderedDict[str, CacheEntry] = OrderedDict()
+        self._lock = threading.Lock()
+
+        # Statistics
+        self.stats = {
+            "hits": 0,
+            "misses": 0,
+            "evictions": 0,
+            "expirations": 0,
+            "total_size": 0
+        }
+
+        # Load from disk if persistence enabled
+        if self.persist_path and self.persist_path.exists():
+            self._load_from_disk()
+
+    def _compute_size(self, value: Any) -> int:
+        """Estimate size of value in bytes."""
+        try:
+            if isinstance(value, str):
+                return len(value.encode('utf-8'))
+            elif isinstance(value, (int, float)):
+                return 8
+            elif isinstance(value, (list, dict)):
+                return len(json.dumps(value).encode('utf-8'))
+            else:
+                return len(pickle.dumps(value))
+        except:
+            return 0
+
+    def _is_expired(self, entry: CacheEntry) -> bool:
+        """Check if cache entry is expired."""
+        if self.ttl <= 0:  # TTL of 0 or negative means never expire
+            return False
+        return (time.time() - entry.timestamp) > self.ttl
+
+    def _evict_lru(self):
+        """Evict least recently used entry."""
+        if not self._cache:
+            return
+
+        # OrderedDict maintains insertion order, so first item is LRU
+        key, entry = self._cache.popitem(last=False)
+        self.stats["total_size"] -= entry.size
+        self.stats["evictions"] += 1
+
+    def _cleanup_expired(self):
+        """Remove all expired entries."""
+        expired_keys = [
+            k for k, v in self._cache.items()
+            if self._is_expired(v)
+        ]
+
+        for key in expired_keys:
+            entry = self._cache.pop(key)
+            self.stats["total_size"] -= entry.size
+            self.stats["expirations"] += 1
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Get value from cache."""
+        with self._lock:
+            if key not in self._cache:
+                self.stats["misses"] += 1
+                return default
+
+            entry = self._cache[key]
+
+            # Check if expired
+            if self._is_expired(entry):
+                self._cache.pop(key)
+                self.stats["total_size"] -= entry.size
+                self.stats["expirations"] += 1
+                self.stats["misses"] += 1
+                return default
+
+            # Update access metadata and move to end (most recently used)
+            entry.access_count += 1
+            entry.last_access = time.time()
+            self._cache.move_to_end(key)
+
+            self.stats["hits"] += 1
+            return entry.value
+
+    def set(self, key: str, value: Any, metadata: Optional[Dict[str, Any]] = None):
+        """Set value in cache."""
+        with self._lock:
+            # Compute size
+            size = self._compute_size(value)
+
+            # Remove existing entry if present
+            if key in self._cache:
+                old_entry = self._cache.pop(key)
+                self.stats["total_size"] -= old_entry.size
+
+            # Evict entries if we're over limits
+            while (len(self._cache) >= self.max_entries or
+                   self.stats["total_size"] + size > self.max_size_bytes):
+                if not self._cache:
+                    break
+                self._evict_lru()
+
+            # Create new entry
+            entry = CacheEntry(
+                value=value,
+                timestamp=time.time(),
+                size=size,
+                access_count=0,
+                last_access=time.time(),
+                metadata=metadata or {}
+            )
+
+            self._cache[key] = entry
+            self.stats["total_size"] += size
+
+            # Periodic cleanup of expired entries
+            if len(self._cache) % 100 == 0:
+                self._cleanup_expired()
+
+    def invalidate(self, key: str) -> bool:
+        """Invalidate a specific cache entry."""
+        with self._lock:
+            if key in self._cache:
+                entry = self._cache.pop(key)
+                self.stats["total_size"] -= entry.size
+                return True
+            return False
+
+    def clear(self):
+        """Clear entire cache."""
+        with self._lock:
+            self._cache.clear()
+            self.stats["total_size"] = 0
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        with self._lock:
+            total_requests = self.stats["hits"] + self.stats["misses"]
+            hit_rate = (
+                self.stats["hits"] / total_requests
+                if total_requests > 0 else 0
+            )
+
+            return {
+                "name": self.name,
+                "entries": len(self._cache),
+                "total_size_bytes": self.stats["total_size"],
+                "total_size_mb": round(self.stats["total_size"] / (1024 * 1024), 2),
+                "hits": self.stats["hits"],
+                "misses": self.stats["misses"],
+                "hit_rate": round(hit_rate * 100, 2),
+                "evictions": self.stats["evictions"],
+                "expirations": self.stats["expirations"],
+                "ttl_seconds": self.ttl,
+                "max_entries": self.max_entries,
+                "max_size_mb": round(self.max_size_bytes / (1024 * 1024), 2)
+            }
+
+    def _save_to_disk(self):
+        """Persist cache to disk."""
+        if not self.persist_path:
+            return
+
+        try:
+            with self._lock:
+                data = {
+                    "cache": dict(self._cache),
+                    "stats": self.stats
+                }
+                self.persist_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self.persist_path, 'wb') as f:
+                    pickle.dump(data, f)
+        except Exception as e:
+            # Don't fail if persistence fails
+            pass
+
+    def _load_from_disk(self):
+        """Load cache from disk."""
+        if not self.persist_path or not self.persist_path.exists():
+            return
+
+        try:
+            with open(self.persist_path, 'rb') as f:
+                data = pickle.load(f)
+                self._cache = OrderedDict(data.get("cache", {}))
+                self.stats = data.get("stats", self.stats)
+
+                # Clean up expired entries after loading
+                self._cleanup_expired()
+        except Exception as e:
+            # If loading fails, start fresh
+            self._cache.clear()
+            self.stats = {
+                "hits": 0,
+                "misses": 0,
+                "evictions": 0,
+                "expirations": 0,
+                "total_size": 0
+            }
+
+
+class FileContentCache(IntelligentCache):
+    """Cache for file contents with modification time tracking."""
+
+    def __init__(self, **kwargs):
+        super().__init__(name="file_content", ttl=60, **kwargs)
+
+    def get_file(self, file_path: pathlib.Path) -> Optional[str]:
+        """Get file content from cache, checking modification time."""
+        if not file_path.exists():
+            return None
+
+        # Use file path + mtime as cache key
+        mtime = file_path.stat().st_mtime
+        cache_key = f"{file_path}:{mtime}"
+
+        # Check if we have cached version
+        cached = self.get(cache_key)
+        if cached is not None:
+            return cached
+
+        # Invalidate any old versions of this file
+        old_prefix = f"{file_path}:"
+        to_invalidate = [k for k in self._cache.keys() if k.startswith(old_prefix)]
+        for key in to_invalidate:
+            self.invalidate(key)
+
+        return None
+
+    def set_file(self, file_path: pathlib.Path, content: str):
+        """Cache file content with modification time."""
+        if not file_path.exists():
+            return
+
+        mtime = file_path.stat().st_mtime
+        cache_key = f"{file_path}:{mtime}"
+        self.set(cache_key, content, metadata={"file_path": str(file_path), "mtime": mtime})
+
+
+class LLMResponseCache(IntelligentCache):
+    """Cache for LLM responses based on message hash."""
+
+    def __init__(self, **kwargs):
+        super().__init__(name="llm_response", ttl=3600, **kwargs)  # 1 hour TTL
+
+    def _hash_messages(self, messages: List[Dict[str, str]], tools: Optional[List[Dict]] = None) -> str:
+        """Create hash of messages for cache key."""
+        # Create deterministic string representation
+        key_data = json.dumps(messages, sort_keys=True)
+        if tools:
+            key_data += json.dumps(tools, sort_keys=True)
+
+        # Hash it
+        return hashlib.sha256(key_data.encode()).hexdigest()
+
+    def get_response(self, messages: List[Dict[str, str]], tools: Optional[List[Dict]] = None) -> Optional[Dict[str, Any]]:
+        """Get cached LLM response."""
+        cache_key = self._hash_messages(messages, tools)
+        return self.get(cache_key)
+
+    def set_response(self, messages: List[Dict[str, str]], response: Dict[str, Any], tools: Optional[List[Dict]] = None):
+        """Cache LLM response."""
+        cache_key = self._hash_messages(messages, tools)
+        self.set(cache_key, response, metadata={"messages_count": len(messages)})
+
+
+class RepoContextCache(IntelligentCache):
+    """Cache for repository context (git status, log, file tree)."""
+
+    def __init__(self, **kwargs):
+        super().__init__(name="repo_context", ttl=30, **kwargs)  # 30 seconds TTL
+
+    def get_context(self) -> Optional[str]:
+        """Get cached repository context."""
+        # Use current git HEAD commit as part of cache key
+        try:
+            proc = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=ROOT
+            )
+            head_commit = proc.stdout.strip() if proc.returncode == 0 else "no-git"
+        except:
+            head_commit = "no-git"
+
+        cache_key = f"context:{head_commit}"
+        return self.get(cache_key)
+
+    def set_context(self, context: str):
+        """Cache repository context."""
+        try:
+            proc = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=ROOT
+            )
+            head_commit = proc.stdout.strip() if proc.returncode == 0 else "no-git"
+        except:
+            head_commit = "no-git"
+
+        cache_key = f"context:{head_commit}"
+        self.set(cache_key, context, metadata={"commit": head_commit})
+
+
+class DependencyTreeCache(IntelligentCache):
+    """Cache for dependency analysis results."""
+
+    def __init__(self, **kwargs):
+        super().__init__(name="dependency_tree", ttl=600, **kwargs)  # 10 minutes TTL
+
+    def get_dependencies(self, language: str) -> Optional[str]:
+        """Get cached dependency analysis."""
+        # Check if dependency file has changed
+        dep_file_path = None
+
+        if language == "python":
+            if (ROOT / "requirements.txt").exists():
+                dep_file_path = ROOT / "requirements.txt"
+            elif (ROOT / "pyproject.toml").exists():
+                dep_file_path = ROOT / "pyproject.toml"
+        elif language == "javascript":
+            if (ROOT / "package.json").exists():
+                dep_file_path = ROOT / "package.json"
+        elif language == "rust":
+            if (ROOT / "Cargo.toml").exists():
+                dep_file_path = ROOT / "Cargo.toml"
+        elif language == "go":
+            if (ROOT / "go.mod").exists():
+                dep_file_path = ROOT / "go.mod"
+
+        if dep_file_path and dep_file_path.exists():
+            mtime = dep_file_path.stat().st_mtime
+            cache_key = f"{language}:{dep_file_path}:{mtime}"
+            return self.get(cache_key)
+
+        return None
+
+    def set_dependencies(self, language: str, result: str):
+        """Cache dependency analysis."""
+        dep_file_path = None
+
+        if language == "python":
+            if (ROOT / "requirements.txt").exists():
+                dep_file_path = ROOT / "requirements.txt"
+            elif (ROOT / "pyproject.toml").exists():
+                dep_file_path = ROOT / "pyproject.toml"
+        elif language == "javascript":
+            if (ROOT / "package.json").exists():
+                dep_file_path = ROOT / "package.json"
+        elif language == "rust":
+            if (ROOT / "Cargo.toml").exists():
+                dep_file_path = ROOT / "Cargo.toml"
+        elif language == "go":
+            if (ROOT / "go.mod").exists():
+                dep_file_path = ROOT / "go.mod"
+
+        if dep_file_path and dep_file_path.exists():
+            mtime = dep_file_path.stat().st_mtime
+            cache_key = f"{language}:{dep_file_path}:{mtime}"
+            self.set(cache_key, result, metadata={"language": language, "file": str(dep_file_path)})
+
+
+# Global cache instances
+_CACHE_DIR = ROOT / ".rev_cache"
+_FILE_CACHE = FileContentCache(persist_path=_CACHE_DIR / "file_cache.pkl")
+_LLM_CACHE = LLMResponseCache(persist_path=_CACHE_DIR / "llm_cache.pkl")
+_REPO_CACHE = RepoContextCache(persist_path=_CACHE_DIR / "repo_cache.pkl")
+_DEP_CACHE = DependencyTreeCache(persist_path=_CACHE_DIR / "dep_cache.pkl")
+
+
+def get_all_cache_stats() -> Dict[str, Any]:
+    """Get statistics for all caches."""
+    return {
+        "file_content": _FILE_CACHE.get_stats(),
+        "llm_response": _LLM_CACHE.get_stats(),
+        "repo_context": _REPO_CACHE.get_stats(),
+        "dependency_tree": _DEP_CACHE.get_stats()
+    }
+
+
+def clear_all_caches():
+    """Clear all caches."""
+    _FILE_CACHE.clear()
+    _LLM_CACHE.clear()
+    _REPO_CACHE.clear()
+    _DEP_CACHE.clear()
+
+
+def save_all_caches():
+    """Persist all caches to disk."""
+    _FILE_CACHE._save_to_disk()
+    _LLM_CACHE._save_to_disk()
+    _REPO_CACHE._save_to_disk()
+    _DEP_CACHE._save_to_disk()
+
+
 class TaskStatus(Enum):
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
@@ -581,10 +1027,20 @@ def read_file(path: str) -> str:
         return json.dumps({"error": f"Not found: {path}"})
     if p.stat().st_size > MAX_FILE_BYTES:
         return json.dumps({"error": f"Too large (> {MAX_FILE_BYTES} bytes): {path}"})
+
+    # Try to get from cache first
+    cached_content = _FILE_CACHE.get_file(p)
+    if cached_content is not None:
+        return cached_content
+
     try:
         txt = p.read_text(encoding="utf-8", errors="ignore")
         if len(txt) > READ_RETURN_LIMIT:
             txt = txt[:READ_RETURN_LIMIT] + "\n...[truncated]..."
+
+        # Cache the content
+        _FILE_CACHE.set_file(p, txt)
+
         return txt
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
@@ -707,6 +1163,12 @@ def run_tests(cmd: str = "pytest -q", timeout: int = 600) -> str:
 
 def get_repo_context(commits: int = 6) -> str:
     """Get repository context."""
+    # Try to get from cache first
+    cached_context = _REPO_CACHE.get_context()
+    if cached_context is not None:
+        return cached_context
+
+    # Generate context
     st = _run_shell("git status -s")
     lg = _run_shell(f"git log -n {int(commits)} --oneline")
     top = []
@@ -714,11 +1176,17 @@ def get_repo_context(commits: int = 6) -> str:
         if p.name in EXCLUDE_DIRS:
             continue
         top.append({"name": p.name, "type": ("dir" if p.is_dir() else "file")})
-    return json.dumps({
+
+    context = json.dumps({
         "status": st.stdout,
         "log": lg.stdout,
         "top_level": top[:100]
     })
+
+    # Cache it
+    _REPO_CACHE.set_context(context)
+
+    return context
 
 
 # ========== Additional File Operations ==========
@@ -1681,6 +2149,11 @@ def analyze_dependencies(language: str = "auto") -> str:
             elif (ROOT / "go.mod").exists():
                 language = "go"
 
+        # Try to get from cache first
+        cached_result = _DEP_CACHE.get_dependencies(language)
+        if cached_result is not None:
+            return cached_result
+
         result = {
             "language": language,
             "dependencies": [],
@@ -1739,7 +2212,11 @@ def analyze_dependencies(language: str = "auto") -> str:
                         "packages": risky_versions[:10]
                     })
 
-        return json.dumps(result)
+        # Cache the result
+        result_json = json.dumps(result)
+        _DEP_CACHE.set_dependencies(language, result_json)
+
+        return result_json
 
     except Exception as e:
         return json.dumps({"error": f"Analysis failed: {type(e).__name__}: {e}"})
@@ -2095,6 +2572,87 @@ def check_license_compliance(path: str = ".") -> str:
         return json.dumps({"error": f"License check failed: {type(e).__name__}: {e}"})
 
 
+# ========== Cache Management ==========
+
+def get_cache_stats() -> str:
+    """Get statistics for all caches.
+
+    Returns:
+        JSON string with cache statistics including hit rates, sizes, and performance metrics
+    """
+    try:
+        stats = get_all_cache_stats()
+        return json.dumps(stats, indent=2)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to get cache stats: {type(e).__name__}: {e}"})
+
+
+def clear_caches(cache_name: str = "all") -> str:
+    """Clear one or all caches.
+
+    Args:
+        cache_name: Name of cache to clear (file_content, llm_response, repo_context, dependency_tree, or all)
+
+    Returns:
+        JSON string with result
+    """
+    try:
+        if cache_name == "all":
+            clear_all_caches()
+            return json.dumps({
+                "cleared": "all",
+                "message": "All caches cleared successfully"
+            })
+        elif cache_name == "file_content":
+            _FILE_CACHE.clear()
+            return json.dumps({
+                "cleared": "file_content",
+                "message": "File content cache cleared"
+            })
+        elif cache_name == "llm_response":
+            _LLM_CACHE.clear()
+            return json.dumps({
+                "cleared": "llm_response",
+                "message": "LLM response cache cleared"
+            })
+        elif cache_name == "repo_context":
+            _REPO_CACHE.clear()
+            return json.dumps({
+                "cleared": "repo_context",
+                "message": "Repository context cache cleared"
+            })
+        elif cache_name == "dependency_tree":
+            _DEP_CACHE.clear()
+            return json.dumps({
+                "cleared": "dependency_tree",
+                "message": "Dependency tree cache cleared"
+            })
+        else:
+            return json.dumps({
+                "error": f"Unknown cache: {cache_name}",
+                "valid_caches": ["file_content", "llm_response", "repo_context", "dependency_tree", "all"]
+            })
+    except Exception as e:
+        return json.dumps({"error": f"Failed to clear cache: {type(e).__name__}: {e}"})
+
+
+def persist_caches() -> str:
+    """Save all caches to disk for persistence across sessions.
+
+    Returns:
+        JSON string with result
+    """
+    try:
+        save_all_caches()
+        return json.dumps({
+            "persisted": True,
+            "message": "All caches saved to disk successfully",
+            "cache_dir": str(_CACHE_DIR)
+        })
+    except Exception as e:
+        return json.dumps({"error": f"Failed to persist caches: {type(e).__name__}: {e}"})
+
+
 # ========== MCP (Model Context Protocol) Support ==========
 
 class MCPClient:
@@ -2180,6 +2738,13 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
 
     For cloud models (ending with -cloud), this handles authentication flow.
     """
+    # Try to get cached response first
+    cached_response = _LLM_CACHE.get_response(messages, tools)
+    if cached_response is not None:
+        if OLLAMA_DEBUG:
+            print("[DEBUG] Using cached LLM response")
+        return cached_response
+
     url = f"{OLLAMA_BASE_URL}/api/chat"
 
     # Build base payload
@@ -2269,7 +2834,12 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
                 resp = requests.post(url, json=payload_no_tools, timeout=timeout)
 
             resp.raise_for_status()
-            return resp.json()
+            response = resp.json()
+
+            # Cache the successful response
+            _LLM_CACHE.set_response(messages, response, tools)
+
+            return response
 
         except requests.exceptions.Timeout as e:
             if attempt < max_retries - 1:
@@ -3016,6 +3586,42 @@ TOOLS = [
                 "properties": {
                     "path": {"type": "string", "description": "Path to scan (default: .)"}
                 }
+            }
+        }
+    },
+    # Cache management
+    {
+        "type": "function",
+        "function": {
+            "name": "get_cache_stats",
+            "description": "Get statistics for all caches including hit rates and sizes",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clear_caches",
+            "description": "Clear one or all caches to free memory",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "cache_name": {"type": "string", "description": "Cache to clear (file_content, llm_response, repo_context, dependency_tree, or all)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "persist_caches",
+            "description": "Save all caches to disk for persistence across sessions",
+            "parameters": {
+                "type": "object",
+                "properties": {}
             }
         }
     }
