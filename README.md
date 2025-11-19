@@ -534,6 +534,8 @@ python -m pytest tests/test_agent_min.py --cov=agent_min --cov-report=html
 
 For detailed coverage information, see [COVERAGE.md](COVERAGE.md).
 
+For future testing and quality improvements, see [RECOMMENDATIONS.md](RECOMMENDATIONS.md).
+
 ## Best Practices
 
 1. **Be Specific** — Clearer requests generate better plans
@@ -611,6 +613,7 @@ For security, only these commands are permitted:
 ├── tests/                 # Comprehensive test suite
 │   └── test_agent_min.py  # 99% coverage tests
 ├── COVERAGE.md            # Detailed coverage report
+├── RECOMMENDATIONS.md     # Future improvement suggestions
 └── README.md              # This file
 ```
 
