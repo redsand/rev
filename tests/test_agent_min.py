@@ -23,10 +23,10 @@ import pytest
 # Import agent.min module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Load agent.min file (without .py extension) using direct file execution
-agent_min_path = Path(__file__).parent.parent / "agent.min"
+# Load agent.min.py file using direct file execution
+agent_min_path = Path(__file__).parent.parent / "agent.min.py"
 if not agent_min_path.exists():
-    raise ImportError(f"agent.min not found at {agent_min_path}")
+    raise ImportError(f"agent.min.py not found at {agent_min_path}")
 
 # Create a module to load code into
 import types
