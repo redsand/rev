@@ -519,6 +519,15 @@ python rev.py --model deepseek-coder:33b "Your task"
 - ✅ Scary operation detection and prompting
 - ✅ Edge cases and error handling
 
+### Code Quality Initiatives
+- ✅ Static code analysis with automated linting
+- ✅ Type hinting for improved code clarity
+- ✅ Comprehensive documentation coverage
+- ✅ Security scanning and vulnerability assessment
+- ✅ Performance benchmarking and optimization
+- ✅ Cross-platform compatibility verification
+- ✅ Dependency security scanning
+
 ### Running Tests
 
 ```bash
@@ -534,7 +543,7 @@ python -m pytest tests/test_agent_min.py --cov=agent_min --cov-report=html
 
 For detailed coverage information, see [COVERAGE.md](COVERAGE.md).
 
-For future testing and quality improvements, see [RECOMMENDATIONS.md](RECOMMENDATIONS.md).
+For future testing, quality, documentation, and security improvements, see [RECOMMENDATIONS.md](RECOMMENDATIONS.md).
 
 ## Best Practices
 
@@ -561,6 +570,19 @@ For future testing and quality improvements, see [RECOMMENDATIONS.md](RECOMMENDA
    ```bash
    python rev.py --repl
    ```
+
+6. **Documentation First** — Review documentation before making changes
+   - Use `rev.py "Review all documentation files"` to understand the codebase
+   - Keep documentation updated alongside code changes
+   - Add docstrings and inline comments for complex logic
+   - See [RECOMMENDATIONS.md](RECOMMENDATIONS.md) for documentation improvement ideas
+
+7. **Security Conscious Development** — Follow security best practices
+   - Review security recommendations in [RECOMMENDATIONS.md](RECOMMENDATIONS.md)
+   - Validate all inputs and sanitize file paths
+   - Keep dependencies updated and scan for vulnerabilities
+   - Implement least privilege principles for file operations
+   - Use secure communication channels for remote execution
 
 ## Advanced Usage
 
