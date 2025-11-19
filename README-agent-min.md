@@ -67,13 +67,27 @@ curl -fsSL https://ollama.ai/install.sh | sh
 
 ### 2. Pull a Code Model
 
-```bash
-# CodeLlama (recommended for code tasks)
-ollama pull codellama:latest
+**⚠️ Important:** agent.min requires a model with **function/tool calling support** for full functionality.
 
-# Or use other models:
-# ollama pull deepseek-coder:latest
-# ollama pull llama3.1:latest
+**Recommended models with tool support:**
+```bash
+# Best for code tasks
+ollama pull llama3.1:latest        # Best overall (tool support)
+ollama pull qwen2.5:7b              # Good for code (tool support)
+ollama pull mistral-nemo:latest     # Fast with tools
+
+# Legacy (no tool support - limited functionality)
+ollama pull codellama:latest        # ⚠️ No tool support
+ollama pull deepseek-coder:latest   # ⚠️ Check version for tool support
+```
+
+**Verify tool support:**
+```bash
+# List models
+ollama list
+
+# Check model info
+ollama show llama3.1:latest
 ```
 
 ### 3. Install Dependencies
@@ -254,6 +268,31 @@ Pull the model first:
 ```bash
 ollama pull codellama:latest
 ```
+
+### "400 Bad Request" or "Model not using tools"
+
+Some Ollama models don't support function/tool calling. This is normal for older or smaller models.
+
+**Models with tool support (recommended):**
+- `llama3.1` (8B, 70B, 405B)
+- `mistral-nemo`
+- `mistral-large`
+- `qwen2.5` (7B and up)
+- `phi3.5`
+
+**How to fix:**
+1. Use a model with tool support:
+   ```bash
+   ollama pull llama3.1:latest
+   python agent.min --model llama3.1:latest "Your task"
+   ```
+
+2. Or enable debug mode to see what's happening:
+   ```bash
+   OLLAMA_DEBUG=1 python agent.min "Your task"
+   ```
+
+The agent will automatically retry without tools if it detects the model doesn't support them, but tool support is highly recommended for best results.
 
 ### "Path escapes repo"
 

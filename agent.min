@@ -324,21 +324,66 @@ def get_repo_context(commits: int = 6) -> str:
 
 # ========== Ollama Integration ==========
 
+# Debug mode - set to True to see API requests/responses
+OLLAMA_DEBUG = os.getenv("OLLAMA_DEBUG", "0") == "1"
+
 def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dict[str, Any]:
-    """Send chat request to Ollama."""
+    """Send chat request to Ollama.
+
+    Note: Ollama's tool/function calling support varies by model and version.
+    This implementation sends tools in OpenAI format but gracefully falls back
+    if the model doesn't support them.
+    """
     url = f"{OLLAMA_BASE_URL}/api/chat"
+
+    # Build base payload
     payload = {
         "model": OLLAMA_MODEL,
         "messages": messages,
         "stream": False
     }
+
+    # Try with tools first if provided
     if tools:
         payload["tools"] = tools
 
+    if OLLAMA_DEBUG:
+        print(f"[DEBUG] Ollama request to {url}")
+        print(f"[DEBUG] Model: {OLLAMA_MODEL}")
+        print(f"[DEBUG] Messages: {json.dumps(messages, indent=2)}")
+        if tools:
+            print(f"[DEBUG] Tools: {len(tools)} tools provided")
+
     try:
         resp = requests.post(url, json=payload, timeout=300)
+
+        if OLLAMA_DEBUG:
+            print(f"[DEBUG] Response status: {resp.status_code}")
+            print(f"[DEBUG] Response: {resp.text[:500]}")
+
+        # If we get a 400 and we sent tools, try again without tools
+        if resp.status_code == 400 and tools:
+            if OLLAMA_DEBUG:
+                print("[DEBUG] Got 400 with tools, retrying without tools...")
+
+            # Retry without tools
+            payload_no_tools = {
+                "model": OLLAMA_MODEL,
+                "messages": messages,
+                "stream": False
+            }
+            resp = requests.post(url, json=payload_no_tools, timeout=300)
+
         resp.raise_for_status()
         return resp.json()
+
+    except requests.exceptions.HTTPError as e:
+        error_detail = ""
+        try:
+            error_detail = f" - {resp.text}"
+        except:
+            pass
+        return {"error": f"Ollama API error: {e}{error_detail}"}
     except Exception as e:
         return {"error": f"Ollama API error: {e}"}
 
@@ -667,12 +712,21 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
         while task_iterations < max_task_iterations and not task_complete:
             task_iterations += 1
 
+            # Try with tools, fall back to no-tools if needed
             response = ollama_chat(messages, tools=TOOLS)
 
             if "error" in response:
-                print(f"  ✗ Error: {response['error']}")
-                plan.mark_failed(response['error'])
-                break
+                error_msg = response['error']
+                print(f"  ✗ Error: {error_msg}")
+
+                # If we keep getting errors, try without tools
+                if "400" in error_msg and task_iterations < 3:
+                    print(f"  → Retrying without tool support...")
+                    response = ollama_chat(messages, tools=None)
+
+                if "error" in response:
+                    plan.mark_failed(error_msg)
+                    break
 
             msg = response.get("message", {})
             content = msg.get("content", "")
@@ -687,6 +741,17 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                 plan.mark_completed(content)
                 task_complete = True
                 break
+
+            # If model responds but doesn't use tools and doesn't complete task
+            if not tool_calls and content:
+                # Model is thinking/responding without tool calls
+                print(f"  → {content[:200]}")
+
+                # If model keeps responding without tools or completion, it might not support them
+                if task_iterations >= 3:
+                    print(f"  ⚠ Model not using tools. Marking task as needs manual intervention.")
+                    plan.mark_failed("Model does not support tool calling. Consider using a model with tool support.")
+                    break
 
             # Execute tool calls
             if tool_calls:
