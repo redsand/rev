@@ -34,9 +34,16 @@ import difflib
 import platform
 from typing import Dict, Any, List, Optional
 from enum import Enum
-import termios
-import tty
-import select
+
+# Platform-specific imports for terminal handling
+if platform.system() != "Windows":
+    # Unix/Linux/macOS terminal handling
+    import termios
+    import tty
+    import select
+else:
+    # Windows terminal handling
+    import msvcrt
 
 # Ollama integration
 try:
@@ -4459,21 +4466,9 @@ def concurrent_execution_mode(plan: ExecutionPlan, max_workers: int = 2, auto_ap
 
 # ========== Escape Key Input Handler ==========
 
-def get_input_with_escape(prompt: str = "") -> tuple[str, bool]:
-    """
-    Get user input with escape key detection.
-
-    Returns:
-        tuple: (input_string, escape_pressed)
-            - input_string: The text entered by user
-            - escape_pressed: True if ESC was pressed to submit, False if Enter was pressed
-    """
+def _get_input_unix(prompt: str) -> tuple[str, bool]:
+    """Unix/Linux/macOS implementation of input with escape key detection."""
     global _ESCAPE_INTERRUPT
-
-    # Check if we're in a TTY (terminal)
-    if not sys.stdin.isatty():
-        # Fallback to regular input if not in a TTY
-        return input(prompt), False
 
     # Display prompt
     if prompt:
@@ -4565,6 +4560,130 @@ def get_input_with_escape(prompt: str = "") -> tuple[str, bool]:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
     return ''.join(buffer), escape_pressed
+
+
+def _get_input_windows(prompt: str) -> tuple[str, bool]:
+    """Windows implementation of input with escape key detection."""
+    global _ESCAPE_INTERRUPT
+
+    # Display prompt
+    if prompt:
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+
+    buffer = []
+    cursor_pos = 0
+    escape_pressed = False
+
+    try:
+        while True:
+            # Read one character (blocking)
+            char = msvcrt.getch()
+
+            # Handle extended keys (arrow keys, etc.)
+            if char in (b'\x00', b'\xe0'):
+                # Extended key - read the next byte
+                extended = msvcrt.getch()
+
+                if extended == b'K':  # Left arrow
+                    if cursor_pos > 0:
+                        cursor_pos -= 1
+                        sys.stdout.write('\x1b[D')
+                        sys.stdout.flush()
+                elif extended == b'M':  # Right arrow
+                    if cursor_pos < len(buffer):
+                        cursor_pos += 1
+                        sys.stdout.write('\x1b[C')
+                        sys.stdout.flush()
+                elif extended in (b'H', b'P'):  # Up/Down arrows
+                    # Ignore for now
+                    pass
+                continue
+
+            # Check for ESC key
+            if char == b'\x1b':
+                # Just ESC key pressed - submit input immediately
+                escape_pressed = True
+                _ESCAPE_INTERRUPT = True
+                sys.stdout.write('\n')
+                sys.stdout.flush()
+                break
+
+            # Enter key
+            elif char == b'\r':
+                sys.stdout.write('\n')
+                sys.stdout.flush()
+                break
+
+            # Backspace
+            elif char == b'\x08':
+                if cursor_pos > 0:
+                    # Remove character at cursor position
+                    buffer.pop(cursor_pos - 1)
+                    cursor_pos -= 1
+
+                    # Redraw line
+                    sys.stdout.write('\x1b[D')  # Move cursor left
+                    sys.stdout.write(''.join(buffer[cursor_pos:]) + ' ')  # Redraw rest of line
+                    sys.stdout.write('\x1b[' + str(len(buffer) - cursor_pos + 1) + 'D')  # Move cursor back
+                    sys.stdout.flush()
+
+            # Ctrl+C
+            elif char == b'\x03':
+                raise KeyboardInterrupt
+
+            # Ctrl+D (EOF)
+            elif char == b'\x04':
+                if not buffer:
+                    raise EOFError
+
+            # Printable characters
+            else:
+                try:
+                    # Decode the character
+                    char_str = char.decode('utf-8', errors='ignore')
+                    if char_str and ord(char_str) >= 32:
+                        # Insert character at cursor position
+                        buffer.insert(cursor_pos, char_str)
+                        cursor_pos += 1
+
+                        # Redraw from cursor position
+                        sys.stdout.write(''.join(buffer[cursor_pos-1:]))
+                        if cursor_pos < len(buffer):
+                            # Move cursor back to correct position
+                            sys.stdout.write('\x1b[' + str(len(buffer) - cursor_pos) + 'D')
+                        sys.stdout.flush()
+                except (UnicodeDecodeError, ValueError):
+                    # Skip characters that can't be decoded
+                    pass
+
+    except Exception:
+        raise
+
+    return ''.join(buffer), escape_pressed
+
+
+def get_input_with_escape(prompt: str = "") -> tuple[str, bool]:
+    """
+    Get user input with escape key detection.
+
+    Cross-platform implementation supporting both Unix/Linux/macOS and Windows.
+
+    Returns:
+        tuple: (input_string, escape_pressed)
+            - input_string: The text entered by user
+            - escape_pressed: True if ESC was pressed to submit, False if Enter was pressed
+    """
+    # Check if we're in a TTY (terminal)
+    if not sys.stdin.isatty():
+        # Fallback to regular input if not in a TTY
+        return input(prompt), False
+
+    # Use platform-specific implementation
+    if platform.system() == "Windows":
+        return _get_input_windows(prompt)
+    else:
+        return _get_input_unix(prompt)
 
 
 # ========== REPL Mode ==========
