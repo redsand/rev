@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Setup script for rev - CI/CD Agent powered by Ollama."""
 
-from setuptools import setup
+from setuptools import setup, find_packages
 from pathlib import Path
 
 # Read the README file
@@ -27,10 +27,10 @@ setup(
     author="Rev Team",
     python_requires=">=3.8",
     install_requires=requirements,
-    py_modules=["rev"],
+    packages=find_packages(exclude=["tests", "tests.*", "examples", "examples.*"]),
     entry_points={
         "console_scripts": [
-            "rev=rev:main",
+            "rev=rev.main:main",
         ],
     },
     classifiers=[
