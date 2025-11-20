@@ -198,9 +198,10 @@ def get_repo_context(commits: int = 6) -> str:
 
     # Try to get from cache first
     repo_cache = get_repo_cache()
-    cached_context = repo_cache.get_context()
-    if cached_context is not None:
-        return cached_context
+    if repo_cache is not None:
+        cached_context = repo_cache.get_context()
+        if cached_context is not None:
+            return cached_context
 
     # Generate context
     st = _run_shell("git status -s")
@@ -220,6 +221,7 @@ def get_repo_context(commits: int = 6) -> str:
     })
 
     # Cache it
-    repo_cache.set_context(context)
+    if repo_cache is not None:
+        repo_cache.set_context(context)
 
     return context
