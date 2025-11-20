@@ -3,3 +3,8 @@ requests>=2.31.0
 
 # Optional: For SSH remote execution
 # paramiko>=3.0.0
+openai 
+pywinrm
+playwright
+colorama
+setuptools
