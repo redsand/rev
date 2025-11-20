@@ -15,6 +15,16 @@ from rev.models import (
     ExecutionPlan,
 )
 
+# Cache classes
+from rev.cache import (
+    IntelligentCache,
+    FileContentCache,
+    LLMResponseCache,
+    RepoContextCache,
+    DependencyTreeCache,
+    initialize_caches,
+)
+
 # Terminal utilities
 from rev.terminal import (
     get_input_with_escape,
@@ -88,6 +98,13 @@ from rev.tools import (
     get_available_tools,
 )
 
+# MCP operations
+from rev.mcp import (
+    mcp_add_server,
+    mcp_list_servers,
+    mcp_call_tool,
+)
+
 # Internal functions (for testing)
 from rev.tools.file_ops import _safe_path
 
@@ -101,6 +118,13 @@ __all__ = [
     "TaskStatus",
     "RiskLevel",
     "ExecutionPlan",
+    # Cache classes
+    "IntelligentCache",
+    "FileContentCache",
+    "LLMResponseCache",
+    "RepoContextCache",
+    "DependencyTreeCache",
+    "initialize_caches",
     # Terminal
     "get_input_with_escape",
     "repl_mode",
@@ -167,6 +191,10 @@ __all__ = [
     # Registry
     "execute_tool",
     "get_available_tools",
+    # MCP operations
+    "mcp_add_server",
+    "mcp_list_servers",
+    "mcp_call_tool",
     # Internal (for testing)
     "_safe_path",
 ]
