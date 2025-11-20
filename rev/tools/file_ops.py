@@ -73,9 +73,10 @@ def read_file(path: str) -> str:
 
     # Try to get from cache first
     file_cache = get_file_cache()
-    cached_content = file_cache.get_file(p)
-    if cached_content is not None:
-        return cached_content
+    if file_cache is not None:
+        cached_content = file_cache.get_file(p)
+        if cached_content is not None:
+            return cached_content
 
     try:
         txt = p.read_text(encoding="utf-8", errors="ignore")
@@ -83,7 +84,8 @@ def read_file(path: str) -> str:
             txt = txt[:READ_RETURN_LIMIT] + "\n...[truncated]..."
 
         # Cache the content
-        file_cache.set_file(p, txt)
+        if file_cache is not None:
+            file_cache.set_file(p, txt)
 
         return txt
     except Exception as e:
