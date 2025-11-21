@@ -131,10 +131,15 @@ ollama pull deepseek-coder:latest   # ⚠️ Check version for tool support
 
 **🌐 Ollama Cloud Models (NEW!):**
 ```bash
+# Ensure Ollama is running (cloud models proxy through local Ollama)
+ollama serve
+
 # Use powerful cloud-hosted models (requires authentication)
 python rev.py --model qwen3-coder:480b-cloud "Your task"
 python rev.py --model llama3.3:90b-cloud "Complex refactoring task"
 ```
+
+**Important:** Cloud models require your local Ollama instance to be running. The local instance automatically proxies requests to Ollama's cloud service.
 
 On first use, you'll be prompted to authenticate:
 1. A browser URL will be displayed
