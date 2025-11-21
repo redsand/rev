@@ -107,6 +107,20 @@ Shell Type: {sys_info['shell_type']}
         if get_escape_interrupt():
             print("\n⚠️  Execution interrupted by ESC key")
             set_escape_interrupt(False)
+
+            # Mark current task as stopped if it's in progress
+            current_task = plan.get_current_task()
+            if current_task and current_task.status == TaskStatus.IN_PROGRESS:
+                plan.mark_task_stopped(current_task)
+
+            # Save checkpoint for resume
+            try:
+                checkpoint_path = plan.save_checkpoint()
+                print(f"✓ Checkpoint saved to: {checkpoint_path}")
+                print(f"  Use 'rev resume {checkpoint_path}' to continue")
+            except Exception as e:
+                print(f"✗ Failed to save checkpoint: {e}")
+
             return False
 
         iteration += 1
@@ -136,7 +150,18 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             if get_escape_interrupt():
                 print("\n⚠️  Task execution interrupted by ESC key")
                 set_escape_interrupt(False)
-                plan.mark_failed("Interrupted by user (ESC key)")
+
+                # Mark current task as stopped
+                plan.mark_task_stopped(current_task)
+
+                # Save checkpoint for resume
+                try:
+                    checkpoint_path = plan.save_checkpoint()
+                    print(f"✓ Checkpoint saved to: {checkpoint_path}")
+                    print(f"  Use 'rev resume {checkpoint_path}' to continue")
+                except Exception as e:
+                    print(f"✗ Failed to save checkpoint: {e}")
+
                 return False
 
             task_iterations += 1
@@ -168,10 +193,21 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             if tool_calls:
                 for tool_call in tool_calls:
                     # Check for escape key interrupt before each tool execution
-                    if _ESCAPE_INTERRUPT:
+                    if get_escape_interrupt():
                         print("\n⚠️  Tool execution interrupted by ESC key")
-                        _ESCAPE_INTERRUPT = False
-                        plan.mark_failed("Interrupted by user (ESC key)")
+                        set_escape_interrupt(False)
+
+                        # Mark current task as stopped
+                        plan.mark_task_stopped(current_task)
+
+                        # Save checkpoint for resume
+                        try:
+                            checkpoint_path = plan.save_checkpoint()
+                            print(f"✓ Checkpoint saved to: {checkpoint_path}")
+                            print(f"  Use 'rev resume {checkpoint_path}' to continue")
+                        except Exception as e:
+                            print(f"✗ Failed to save checkpoint: {e}")
+
                         task_complete = True
                         break
 
@@ -271,7 +307,8 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             TaskStatus.COMPLETED: "✓",
             TaskStatus.FAILED: "✗",
             TaskStatus.IN_PROGRESS: "→",
-            TaskStatus.PENDING: "○"
+            TaskStatus.PENDING: "○",
+            TaskStatus.STOPPED: "⏸"
         }.get(task.status, "?")
 
         print(f"{status_icon} {i}. {task.description} [{task.status.value}]")
@@ -526,7 +563,8 @@ def concurrent_execution_mode(plan: ExecutionPlan, max_workers: int = 2, auto_ap
             TaskStatus.COMPLETED: "✓",
             TaskStatus.FAILED: "✗",
             TaskStatus.IN_PROGRESS: "→",
-            TaskStatus.PENDING: "○"
+            TaskStatus.PENDING: "○",
+            TaskStatus.STOPPED: "⏸"
         }.get(task.status, "?")
 
         deps_str = f" (depends on: {task.dependencies})" if task.dependencies else ""

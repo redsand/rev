@@ -13,6 +13,7 @@ class TaskStatus(Enum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
+    STOPPED = "stopped"
 
 
 class RiskLevel(Enum):
@@ -65,6 +66,29 @@ class Task:
             "subtasks": self.subtasks
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'Task':
+        """Create a Task from a dictionary."""
+        task = cls(
+            description=data["description"],
+            action_type=data.get("action_type", "general"),
+            dependencies=data.get("dependencies", [])
+        )
+        task.status = TaskStatus(data["status"])
+        task.result = data.get("result")
+        task.error = data.get("error")
+        task.task_id = data.get("task_id")
+        task.risk_level = RiskLevel(data.get("risk_level", "low"))
+        task.risk_reasons = data.get("risk_reasons", [])
+        task.impact_scope = data.get("impact_scope", [])
+        task.estimated_changes = data.get("estimated_changes", 0)
+        task.breaking_change = data.get("breaking_change", False)
+        task.rollback_plan = data.get("rollback_plan")
+        task.validation_steps = data.get("validation_steps", [])
+        task.complexity = data.get("complexity", "low")
+        task.subtasks = data.get("subtasks", [])
+        return task
+
 
 class ExecutionPlan:
     """Manages the task checklist for iterative execution with dependency tracking."""
@@ -85,11 +109,15 @@ class ExecutionPlan:
         return None
 
     def get_executable_tasks(self, max_count: int = 1) -> List[Task]:
-        """Get tasks that are ready to execute (all dependencies met)."""
+        """Get tasks that are ready to execute (all dependencies met).
+
+        This includes both PENDING and STOPPED tasks for resume functionality.
+        """
         with self.lock:
             executable = []
             for task in self.tasks:
-                if task.status != TaskStatus.PENDING:
+                # Include both PENDING and STOPPED tasks
+                if task.status not in [TaskStatus.PENDING, TaskStatus.STOPPED]:
                     continue
 
                 # Check if all dependencies are completed
@@ -144,9 +172,9 @@ class ExecutionPlan:
         )
 
     def has_pending_tasks(self) -> bool:
-        """Check if there are any pending or in-progress tasks."""
+        """Check if there are any pending, in-progress, or stopped tasks."""
         return any(
-            task.status in [TaskStatus.PENDING, TaskStatus.IN_PROGRESS]
+            task.status in [TaskStatus.PENDING, TaskStatus.IN_PROGRESS, TaskStatus.STOPPED]
             for task in self.tasks
         )
 
@@ -154,8 +182,18 @@ class ExecutionPlan:
         completed = sum(1 for t in self.tasks if t.status == TaskStatus.COMPLETED)
         failed = sum(1 for t in self.tasks if t.status == TaskStatus.FAILED)
         in_progress = sum(1 for t in self.tasks if t.status == TaskStatus.IN_PROGRESS)
+        stopped = sum(1 for t in self.tasks if t.status == TaskStatus.STOPPED)
         total = len(self.tasks)
-        return f"Progress: {completed}/{total} completed, {failed} failed, {in_progress} in progress"
+
+        parts = [f"{completed}/{total} completed"]
+        if failed > 0:
+            parts.append(f"{failed} failed")
+        if in_progress > 0:
+            parts.append(f"{in_progress} in progress")
+        if stopped > 0:
+            parts.append(f"{stopped} stopped")
+
+        return f"Progress: {', '.join(parts)}"
 
     def analyze_dependencies(self) -> Dict[str, Any]:
         """Analyze task dependencies and create optimal ordering.
@@ -444,3 +482,98 @@ class ExecutionPlan:
             "current_index": self.current_index,
             "summary": self.get_summary()
         }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'ExecutionPlan':
+        """Create an ExecutionPlan from a dictionary."""
+        plan = cls()
+        plan.tasks = [Task.from_dict(t) for t in data["tasks"]]
+        plan.current_index = data.get("current_index", 0)
+        return plan
+
+    def mark_task_stopped(self, task: Task):
+        """Mark a specific task as stopped (for resume functionality)."""
+        with self.lock:
+            task.status = TaskStatus.STOPPED
+
+    def save_checkpoint(self, filepath: str = None):
+        """Save the current execution state to a checkpoint file.
+
+        Args:
+            filepath: Path to save checkpoint. If None, uses default location.
+        """
+        import json
+        import os
+        from datetime import datetime
+
+        if filepath is None:
+            checkpoint_dir = ".rev_checkpoints"
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filepath = os.path.join(checkpoint_dir, f"checkpoint_{timestamp}.json")
+
+        checkpoint_data = {
+            "version": "1.0",
+            "timestamp": datetime.now().isoformat(),
+            "plan": self.to_dict()
+        }
+
+        with open(filepath, "w") as f:
+            json.dump(checkpoint_data, f, indent=2)
+
+        return filepath
+
+    @classmethod
+    def load_checkpoint(cls, filepath: str) -> 'ExecutionPlan':
+        """Load an execution plan from a checkpoint file.
+
+        Args:
+            filepath: Path to the checkpoint file
+
+        Returns:
+            ExecutionPlan restored from checkpoint
+        """
+        import json
+
+        with open(filepath, "r") as f:
+            checkpoint_data = json.load(f)
+
+        plan = cls.from_dict(checkpoint_data["plan"])
+        return plan
+
+    @classmethod
+    def list_checkpoints(cls, checkpoint_dir: str = ".rev_checkpoints") -> List[Dict[str, Any]]:
+        """List all available checkpoints.
+
+        Args:
+            checkpoint_dir: Directory containing checkpoints
+
+        Returns:
+            List of checkpoint info dicts
+        """
+        import os
+        import json
+        from datetime import datetime
+
+        if not os.path.exists(checkpoint_dir):
+            return []
+
+        checkpoints = []
+        for filename in sorted(os.listdir(checkpoint_dir), reverse=True):
+            if filename.endswith(".json"):
+                filepath = os.path.join(checkpoint_dir, filename)
+                try:
+                    with open(filepath, "r") as f:
+                        data = json.load(f)
+
+                    checkpoints.append({
+                        "filename": filename,
+                        "filepath": filepath,
+                        "timestamp": data.get("timestamp"),
+                        "tasks_total": len(data["plan"]["tasks"]),
+                        "summary": data["plan"].get("summary", "")
+                    })
+                except:
+                    pass
+
+        return checkpoints
