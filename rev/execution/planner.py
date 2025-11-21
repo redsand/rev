@@ -9,7 +9,7 @@ assessment, and validation steps.
 import re
 import json
 import sys
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from rev.models.task import ExecutionPlan, RiskLevel, TaskStatus
 from rev.llm.client import ollama_chat
@@ -39,18 +39,112 @@ Break down the work into atomic tasks:
 - Rename: Move/rename files
 - Test: Run tests to validate changes
 
+For COMPLEX requests (e.g., "Add authentication system", "Build payment integration"):
+- Break down into HIGH-LEVEL phases first (e.g., "Design", "Implement core", "Add tests", "Documentation")
+- Then break each phase into SPECIFIC atomic tasks
+- Mark complex tasks with "complexity": "high" to enable recursive breakdown
+
 Return ONLY a JSON array of tasks in this format:
 [
-  {"description": "Review current API endpoint structure", "action_type": "review"},
-  {"description": "Add error handling to /api/users endpoint", "action_type": "edit"},
-  {"description": "Create tests for error cases", "action_type": "add"},
-  {"description": "Run test suite to validate changes", "action_type": "test"}
+  {"description": "Review current API endpoint structure", "action_type": "review", "complexity": "low"},
+  {"description": "Add error handling to /api/users endpoint", "action_type": "edit", "complexity": "medium"},
+  {"description": "Create tests for error cases", "action_type": "add", "complexity": "low"},
+  {"description": "Run test suite to validate changes", "action_type": "test", "complexity": "low"}
 ]
+
+Complexity levels:
+- low: Simple, single-file changes
+- medium: Multi-file changes or moderate logic
+- high: Major features requiring multiple steps (will be recursively broken down)
 
 Be thorough but concise. Each task should be independently executable."""
 
 
-def planning_mode(user_request: str, enable_advanced_analysis: bool = True) -> ExecutionPlan:
+BREAKDOWN_SYSTEM = """You are an expert at breaking down complex tasks into smaller, actionable subtasks.
+
+Given a high-level task, break it down into specific, atomic subtasks that can be executed independently.
+
+Consider:
+1. What files need to be created or modified?
+2. What are the logical steps to implement this?
+3. What dependencies exist between steps?
+4. What testing is needed?
+
+Return ONLY a JSON array of subtasks:
+[
+  {"description": "Create authentication middleware file", "action_type": "add", "complexity": "low"},
+  {"description": "Implement JWT token validation logic", "action_type": "edit", "complexity": "medium"},
+  {"description": "Add authentication tests", "action_type": "add", "complexity": "low"}
+]
+
+Keep subtasks focused and executable. Each should accomplish one clear goal."""
+
+
+def _recursive_breakdown(task_description: str, action_type: str, context: str, max_depth: int = 2, current_depth: int = 0) -> List[Dict[str, Any]]:
+    """Recursively break down a complex task into subtasks.
+
+    Args:
+        task_description: Description of the complex task
+        action_type: Type of action
+        context: Repository and system context
+        max_depth: Maximum recursion depth
+        current_depth: Current recursion level
+
+    Returns:
+        List of subtask dictionaries
+    """
+    if current_depth >= max_depth:
+        # Max depth reached, return original task
+        return [{"description": task_description, "action_type": action_type, "complexity": "medium"}]
+
+    messages = [
+        {"role": "system", "content": BREAKDOWN_SYSTEM},
+        {"role": "user", "content": f"""Break down this complex task into smaller subtasks:
+
+Task: {task_description}
+Action Type: {action_type}
+
+Context:
+{context}
+
+Provide detailed subtasks."""}
+    ]
+
+    response = ollama_chat(messages)
+
+    if "error" in response:
+        # Fallback to original task if breakdown fails
+        return [{"description": task_description, "action_type": action_type, "complexity": "medium"}]
+
+    try:
+        content = response.get("message", {}).get("content", "")
+        json_match = re.search(r'\[.*\]', content, re.DOTALL)
+        if json_match:
+            subtasks = json.loads(json_match.group(0))
+            # Recursively break down any high-complexity subtasks
+            expanded_subtasks = []
+            for subtask in subtasks:
+                if subtask.get("complexity") == "high":
+                    # Recursively break down
+                    nested = _recursive_breakdown(
+                        subtask["description"],
+                        subtask["action_type"],
+                        context,
+                        max_depth,
+                        current_depth + 1
+                    )
+                    expanded_subtasks.extend(nested)
+                else:
+                    expanded_subtasks.append(subtask)
+            return expanded_subtasks
+        else:
+            return [{"description": task_description, "action_type": action_type, "complexity": "medium"}]
+    except Exception as e:
+        print(f"  Warning: Could not break down task: {e}")
+        return [{"description": task_description, "action_type": action_type, "complexity": "medium"}]
+
+
+def planning_mode(user_request: str, enable_advanced_analysis: bool = True, enable_recursive_breakdown: bool = True) -> ExecutionPlan:
     """Generate execution plan from user request with advanced analysis.
 
     This function analyzes the user's request and repository context to create
@@ -105,11 +199,37 @@ Generate a comprehensive execution plan."""}
         json_match = re.search(r'\[.*\]', content, re.DOTALL)
         if json_match:
             tasks_data = json.loads(json_match.group(0))
+
+            # Check if recursive breakdown is needed
+            if enable_recursive_breakdown:
+                print("→ Checking for complex tasks...")
+                expanded_tasks = []
+                for task_data in tasks_data:
+                    complexity = task_data.get("complexity", "low")
+                    if complexity == "high":
+                        print(f"  ├─ Breaking down complex task: {task_data['description'][:60]}...")
+                        subtasks = _recursive_breakdown(
+                            task_data["description"],
+                            task_data.get("action_type", "general"),
+                            context,
+                            max_depth=2,
+                            current_depth=0
+                        )
+                        print(f"     └─ Expanded into {len(subtasks)} subtasks")
+                        expanded_tasks.extend(subtasks)
+                    else:
+                        expanded_tasks.append(task_data)
+                tasks_data = expanded_tasks
+
+            # Add all tasks to plan
             for task_data in tasks_data:
                 plan.add_task(
                     task_data.get("description", "Unknown task"),
                     task_data.get("action_type", "general")
                 )
+                # Set complexity on the task
+                if len(plan.tasks) > 0:
+                    plan.tasks[-1].complexity = task_data.get("complexity", "low")
         else:
             print("Warning: Could not parse JSON plan, using fallback")
             plan.add_task(user_request, "general")

@@ -16,6 +16,7 @@ from rev.tools.registry import execute_tool
 from rev.llm.client import ollama_chat
 from rev.config import get_system_info_cached, get_escape_interrupt, set_escape_interrupt
 from rev.execution.safety import is_scary_operation, prompt_scary_operation
+from rev.execution.reviewer import review_action, display_action_review
 
 EXECUTION_SYSTEM = """You are an autonomous CI/CD agent executing tasks.
 
@@ -51,7 +52,7 @@ After making changes, run tests to ensure nothing broke.
 Be concise. Execute the task and report success or failure."""
 
 
-def execution_mode(plan: ExecutionPlan, approved: bool = False, auto_approve: bool = True, tools: list = None) -> bool:
+def execution_mode(plan: ExecutionPlan, approved: bool = False, auto_approve: bool = True, tools: list = None, enable_action_review: bool = False) -> bool:
     """Execute all tasks in the plan iteratively.
 
     This function executes tasks sequentially, maintaining a conversation with
@@ -64,6 +65,7 @@ def execution_mode(plan: ExecutionPlan, approved: bool = False, auto_approve: bo
         auto_approve: If True (default), runs autonomously without initial approval.
                       Scary operations still require confirmation regardless.
         tools: List of available tools for LLM function calling (optional)
+        enable_action_review: If True, review each action before execution (default: False)
 
     Returns:
         True if all tasks completed successfully, False otherwise
@@ -198,6 +200,26 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                             task_complete = True
                             break
 
+                    # Action review (if enabled)
+                    if enable_action_review:
+                        action_desc = f"{tool_name} with {len(tool_args)} arguments"
+                        action_review = review_action(
+                            action_type=current_task.action_type,
+                            action_description=action_desc,
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                            context=current_task.description
+                        )
+
+                        if not action_review.approved:
+                            display_action_review(action_review, action_desc)
+                            print(f"  ✗ Action blocked by review agent")
+                            plan.mark_failed("Action blocked by review agent")
+                            task_complete = True
+                            break
+                        elif action_review.security_warnings or action_review.concerns:
+                            display_action_review(action_review, action_desc)
+
                     result = execute_tool(tool_name, tool_args)
 
                     # Add tool result to conversation
@@ -261,7 +283,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
     return all(t.status == TaskStatus.COMPLETED for t in plan.tasks)
 
 
-def execute_single_task(task: Task, plan: ExecutionPlan, sys_info: Dict[str, Any], auto_approve: bool = True, tools: list = None) -> bool:
+def execute_single_task(task: Task, plan: ExecutionPlan, sys_info: Dict[str, Any], auto_approve: bool = True, tools: list = None, enable_action_review: bool = False) -> bool:
     """Execute a single task (for concurrent execution).
 
     This function is designed to be run in a thread pool and executes a single
@@ -273,6 +295,7 @@ def execute_single_task(task: Task, plan: ExecutionPlan, sys_info: Dict[str, Any
         sys_info: System information for context
         auto_approve: If True, skip initial approval prompt
         tools: List of available tools for LLM function calling (optional)
+        enable_action_review: If True, review each action before execution (default: False)
 
     Returns:
         True if task completed successfully, False otherwise
@@ -359,6 +382,25 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         plan.mark_task_failed(task, "User cancelled destructive operation")
                         return False
 
+                # Action review (if enabled)
+                if enable_action_review:
+                    action_desc = f"{tool_name} with {len(tool_args)} arguments"
+                    action_review = review_action(
+                        action_type=task.action_type,
+                        action_description=action_desc,
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        context=task.description
+                    )
+
+                    if not action_review.approved:
+                        display_action_review(action_review, action_desc)
+                        print(f"  ✗ Action blocked by review agent")
+                        plan.mark_task_failed(task, "Action blocked by review agent")
+                        return False
+                    elif action_review.security_warnings or action_review.concerns:
+                        display_action_review(action_review, action_desc)
+
                 result = execute_tool(tool_name, tool_args)
 
                 # Add tool result to conversation
@@ -401,7 +443,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
     return True
 
 
-def concurrent_execution_mode(plan: ExecutionPlan, max_workers: int = 2, auto_approve: bool = True, tools: list = None) -> bool:
+def concurrent_execution_mode(plan: ExecutionPlan, max_workers: int = 2, auto_approve: bool = True, tools: list = None, enable_action_review: bool = False) -> bool:
     """Execute tasks in the plan concurrently with dependency tracking.
 
     This function executes tasks in parallel while respecting task dependencies.
@@ -413,6 +455,7 @@ def concurrent_execution_mode(plan: ExecutionPlan, max_workers: int = 2, auto_ap
         max_workers: Maximum number of concurrent tasks (default: 2)
         auto_approve: If True (default), runs autonomously without initial approval
         tools: List of available tools for LLM function calling (optional)
+        enable_action_review: If True, review each action before execution (default: False)
 
     Returns:
         True if all tasks completed successfully, False otherwise
@@ -449,7 +492,7 @@ def concurrent_execution_mode(plan: ExecutionPlan, max_workers: int = 2, auto_ap
 
                 # Submit new tasks
                 for task in executable_tasks:
-                    future = executor.submit(execute_single_task, task, plan, sys_info, auto_approve, tools)
+                    future = executor.submit(execute_single_task, task, plan, sys_info, auto_approve, tools, enable_action_review)
                     futures[future] = task
 
             # Wait for at least one task to complete

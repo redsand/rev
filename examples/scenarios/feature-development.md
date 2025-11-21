@@ -1,15 +1,40 @@
 # Feature Development with rev.py
 
-Learn how to develop new features iteratively using rev.py's autonomous workflow.
+Learn how to develop new features iteratively using rev.py's **6-agent autonomous system**.
+
+## Agent-Assisted Development
+
+rev.py v5.0 uses 6 specialized agents that work together:
+
+| Phase | Agent | What It Does |
+|-------|-------|--------------|
+| 1 | **Learning** | Recalls similar past tasks, suggests approaches |
+| 2 | **Research** | Explores codebase for context |
+| 3 | **Planning** | Breaks down into atomic tasks |
+| 4 | **Review** | Validates plan, checks security |
+| 5 | **Execution** | Runs tasks in parallel or sequentially |
+| 6 | **Validation** | Runs tests, linting, semantic checks |
 
 ## Scenario 1: Add Simple Feature
 
 ### Task
 Add rate limiting to API endpoints.
 
-### Command
+### Command (Standard)
 ```bash
 python rev.py "Add rate limiting middleware to API with 100 requests per minute limit"
+```
+
+### Command (With Research Agent)
+```bash
+# Research agent finds existing middleware patterns first
+python rev.py --research "Add rate limiting middleware to API with 100 requests per minute limit"
+```
+
+### Command (Full Orchestration)
+```bash
+# All 6 agents coordinate for maximum autonomy
+python rev.py --orchestrate --learn --research "Add rate limiting middleware"
 ```
 
 ### Generated Plan
@@ -74,12 +99,81 @@ describe('Rate Limiter', () => {
 });
 ```
 
-## Scenario 2: Multi-Step Feature
+## Scenario 2: Multi-Step Feature with Orchestrator
 
 ### Task
 Add user authentication system with JWT.
 
-### Command
+### Command (Recommended: Full Orchestration)
+```bash
+python rev.py --orchestrate --learn --research "Implement JWT authentication with login, register, and protected routes"
+```
+
+### What Each Agent Does
+
+**1. Learning Agent:**
+```
+============================================================
+LEARNING AGENT - INSIGHTS
+============================================================
+Similar past tasks: authentication, feature_add
+Estimated time: 12.5 minutes
+Likely files: auth.py, models/user.py, middleware/
+Warnings from past experience:
+   - Ensure JWT secrets use environment variables
+============================================================
+```
+
+**2. Research Agent:**
+```
+============================================================
+RESEARCH AGENT - CODEBASE EXPLORATION
+============================================================
+Searching for: authentication, jwt, login, user
+Relevant Files (8):
+   - src/middleware/auth.py
+   - src/models/user.py
+   - src/routes/api.py
+Similar Implementations:
+   - src/middleware/rate_limiter.py: Middleware pattern
+Suggested Approach:
+   Follow existing middleware pattern in rate_limiter.py
+Estimated Complexity: HIGH
+============================================================
+```
+
+**3. Review Agent:**
+```
+============================================================
+REVIEW AGENT - PLAN REVIEW
+============================================================
+Decision: APPROVED WITH SUGGESTIONS
+Confidence: 85%
+
+Suggestions (3):
+  - Add rate limiting to prevent brute force attacks
+  - Include password reset functionality
+  - Add integration tests for authentication flow
+
+Security Concerns (1):
+  - Ensure JWT secrets are stored in environment variables
+============================================================
+```
+
+**4. Validation Agent (after execution):**
+```
+============================================================
+VALIDATION AGENT - RESULTS
+============================================================
+Syntax Check: PASSED
+Test Suite: PASSED (24/24 tests)
+Linter: PASSED_WITH_WARNINGS (2 minor issues)
+Semantic Check: PASSED - changes match request
+Auto-fixed: 2 linting issues
+============================================================
+```
+
+### Alternative: Standard Mode
 ```bash
 python rev.py "Implement JWT authentication with login, register, and protected routes"
 ```
@@ -380,19 +474,68 @@ def refund_payment(payment_intent_id):
 
 ## Best Practices
 
-### 1. Break Down Large Features
+### 1. Use Orchestrator for Complex Features
+```bash
+# Let the orchestrator coordinate all agents
+python rev.py --orchestrate --learn --research "Build payment processing system"
+
+# This automatically:
+# - Checks past patterns (Learning Agent)
+# - Explores codebase (Research Agent)
+# - Creates detailed plan (Planning Agent)
+# - Validates security (Review Agent)
+# - Executes in parallel (Execution Agent)
+# - Verifies results (Validation Agent)
+```
+
+### 2. Enable Learning for Repeated Tasks
+```bash
+# First time: Agent learns from execution
+python rev.py --learn "Add API endpoint for user preferences"
+
+# Next time: Agent recalls patterns and suggests faster approach
+python rev.py --learn "Add API endpoint for notifications"
+```
+
+### 3. Use Research for Unfamiliar Codebases
+```bash
+# Deep research for complex tasks
+python rev.py --research --research-depth deep "Refactor authentication module"
+
+# Quick research for simple context
+python rev.py --research --research-depth shallow "Fix login bug"
+```
+
+### 4. Adjust Review Strictness by Risk
+```bash
+# Strict for sensitive operations
+python rev.py --review-strictness strict "Database migration"
+python rev.py --review-strictness strict --action-review "Payment processing"
+
+# Lenient for low-risk changes
+python rev.py --review-strictness lenient "Update documentation"
+```
+
+### 5. Enable Auto-Fix for Validation
+```bash
+# Auto-fix linting/formatting issues
+python rev.py --auto-fix "Add new feature with tests"
+
+# This automatically fixes minor validation issues
+```
+
+### 6. Break Down Large Features
 ```bash
 # Instead of one huge task:
 python rev.py "Build entire e-commerce platform"
 
-# Break into smaller features:
-python rev.py "Add product catalog with CRUD operations"
-python rev.py "Add shopping cart functionality"
-python rev.py "Add checkout and payment"
-python rev.py "Add order history"
+# Break into smaller features (or let orchestrator handle):
+python rev.py --orchestrate "Add product catalog with CRUD operations"
+python rev.py --orchestrate "Add shopping cart functionality"
+python rev.py --orchestrate "Add checkout and payment"
 ```
 
-### 2. Use REPL for Iterative Development
+### 7. Use REPL for Iterative Development
 ```bash
 python rev.py --repl
 
@@ -404,13 +547,7 @@ agent> Run all tests
 agent> /exit
 ```
 
-### 3. Include Tests in Feature Request
-```bash
-# Always request tests
-python rev.py "Add user preferences API with comprehensive tests"
-```
-
-### 4. Specify Requirements Clearly
+### 8. Specify Requirements Clearly
 ```bash
 # Good: Clear requirements
 python rev.py "Add pagination to /api/posts with page size 20, include total count"

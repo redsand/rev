@@ -56,6 +56,35 @@ Integrate rev.py into your CI/CD pipelines:
 
 ## Usage Examples
 
+### 6-Agent System (v5.0)
+
+rev.py now features a **6-agent autonomous system**:
+
+| Agent | Purpose | Flag |
+|-------|---------|------|
+| Learning | Project memory across sessions | `--learn` |
+| Research | Pre-planning codebase exploration | `--research` |
+| Planning | Task breakdown | (always enabled) |
+| Review | Plan/action validation | `--review` (default) |
+| Execution | Task execution | (always enabled) |
+| Validation | Post-execution checks | `--validate` (default) |
+
+### Orchestrator Mode (Full Autonomy)
+
+```bash
+# Enable orchestrator to coordinate all agents
+python rev.py --orchestrate --learn --research "Implement user authentication"
+
+# The orchestrator runs agents in sequence:
+# 1. Learning → recalls similar past tasks
+# 2. Research → explores codebase for context
+# 3. Planning → creates execution plan
+# 4. Review → validates plan
+# 5. Execution → runs tasks
+# 6. Validation → verifies results
+# 7. Learning → stores patterns for future
+```
+
 ### Interactive REPL Mode
 
 ```bash
@@ -75,14 +104,40 @@ agent> /exit
 # Quick fixes
 python rev.py "Fix all ESLint errors"
 
-# Feature development
-python rev.py "Add rate limiting to API endpoints"
+# Feature development with research
+python rev.py --research "Add rate limiting to API endpoints"
 
-# Refactoring
-python rev.py "Extract database logic into repository pattern"
+# Complex feature with full orchestration
+python rev.py --orchestrate "Build payment processing system"
 
-# Testing
-python rev.py "Add unit tests for the user service"
+# Refactoring with strict review
+python rev.py --review-strictness strict "Extract database logic into repository pattern"
+
+# Testing with auto-fix
+python rev.py --auto-fix "Add unit tests for the user service"
+```
+
+### Agent-Specific Options
+
+```bash
+# Research agent options
+python rev.py --research "Find authentication code"
+python rev.py --research --research-depth deep "Analyze system architecture"
+python rev.py --research --research-depth shallow "Quick file search"
+
+# Review agent options
+python rev.py --review-strictness strict "Database migration"
+python rev.py --review-strictness lenient "Update README"
+python rev.py --action-review "Sensitive security changes"
+python rev.py --no-review "Trivial typo fix"
+
+# Validation agent options
+python rev.py --validate "Add new feature"  # default
+python rev.py --no-validate "Quick docs update"
+python rev.py --auto-fix "Add linting configuration"
+
+# Learning agent
+python rev.py --learn "Add user preferences"
 ```
 
 ### Parallel Execution
@@ -93,6 +148,9 @@ python rev.py -j 4 "Review all API endpoints and add tests"
 
 # Sequential for dependencies
 python rev.py -j 1 "Refactor auth, update tests, then update docs"
+
+# Parallel with orchestration
+python rev.py --orchestrate -j 4 "Implement multiple features"
 ```
 
 ## Best Practices

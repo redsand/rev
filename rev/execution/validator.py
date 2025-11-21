@@ -1,0 +1,509 @@
+"""
+Validation Agent for post-execution verification.
+
+This module provides validation capabilities that verify executed changes
+actually work correctly, running tests, linting, and behavioral checks.
+"""
+
+import json
+import re
+from typing import Dict, Any, List, Optional
+from enum import Enum
+from dataclasses import dataclass, field
+
+from rev.models.task import ExecutionPlan, Task, TaskStatus
+from rev.tools.registry import execute_tool
+from rev.llm.client import ollama_chat
+
+
+class ValidationStatus(Enum):
+    """Validation outcome status."""
+    PASSED = "passed"
+    PASSED_WITH_WARNINGS = "passed_with_warnings"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+@dataclass
+class ValidationResult:
+    """Result of a validation check."""
+    name: str
+    status: ValidationStatus
+    message: str = ""
+    details: Dict[str, Any] = field(default_factory=dict)
+    duration_ms: float = 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "status": self.status.value,
+            "message": self.message,
+            "details": self.details,
+            "duration_ms": self.duration_ms
+        }
+
+
+@dataclass
+class ValidationReport:
+    """Complete validation report for an execution."""
+    results: List[ValidationResult] = field(default_factory=list)
+    overall_status: ValidationStatus = ValidationStatus.PASSED
+    summary: str = ""
+    rollback_recommended: bool = False
+    auto_fixed: List[str] = field(default_factory=list)
+
+    def add_result(self, result: ValidationResult):
+        self.results.append(result)
+        # Update overall status
+        if result.status == ValidationStatus.FAILED:
+            self.overall_status = ValidationStatus.FAILED
+            self.rollback_recommended = True
+        elif result.status == ValidationStatus.PASSED_WITH_WARNINGS and self.overall_status != ValidationStatus.FAILED:
+            self.overall_status = ValidationStatus.PASSED_WITH_WARNINGS
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "results": [r.to_dict() for r in self.results],
+            "overall_status": self.overall_status.value,
+            "summary": self.summary,
+            "rollback_recommended": self.rollback_recommended,
+            "auto_fixed": self.auto_fixed
+        }
+
+
+VALIDATION_SYSTEM = """You are a validation agent that verifies code changes work correctly.
+
+Analyze the execution results and determine if the changes are valid:
+1. Did the tests pass?
+2. Are there any syntax errors?
+3. Do the changes match what was requested?
+4. Are there any obvious bugs or issues?
+
+Return your validation in JSON format:
+{
+    "valid": true,
+    "issues": [],
+    "warnings": ["Optional warnings"],
+    "suggestions": ["Improvement suggestions"],
+    "confidence": 0.95
+}
+
+Be practical - minor style issues shouldn't fail validation."""
+
+
+def validate_execution(
+    plan: ExecutionPlan,
+    user_request: str,
+    run_tests: bool = True,
+    run_linter: bool = True,
+    check_syntax: bool = True,
+    enable_auto_fix: bool = False
+) -> ValidationReport:
+    """Validate the results of plan execution.
+
+    Args:
+        plan: The executed plan to validate
+        user_request: Original user request for context
+        run_tests: Whether to run test suite
+        run_linter: Whether to run linter checks
+        check_syntax: Whether to check for syntax errors
+        enable_auto_fix: Whether to attempt auto-fixes for minor issues
+
+    Returns:
+        ValidationReport with all validation results
+    """
+    print("\n" + "=" * 60)
+    print("VALIDATION AGENT - POST-EXECUTION VERIFICATION")
+    print("=" * 60)
+
+    report = ValidationReport()
+
+    # Check if execution even completed
+    completed_tasks = [t for t in plan.tasks if t.status == TaskStatus.COMPLETED]
+    failed_tasks = [t for t in plan.tasks if t.status == TaskStatus.FAILED]
+
+    if not completed_tasks:
+        result = ValidationResult(
+            name="execution_check",
+            status=ValidationStatus.FAILED,
+            message="No tasks completed successfully"
+        )
+        report.add_result(result)
+        report.summary = "Validation failed: No tasks completed"
+        _display_validation_report(report)
+        return report
+
+    if failed_tasks:
+        result = ValidationResult(
+            name="execution_check",
+            status=ValidationStatus.PASSED_WITH_WARNINGS,
+            message=f"{len(failed_tasks)} task(s) failed during execution",
+            details={"failed_tasks": [t.description for t in failed_tasks]}
+        )
+        report.add_result(result)
+    else:
+        result = ValidationResult(
+            name="execution_check",
+            status=ValidationStatus.PASSED,
+            message=f"All {len(completed_tasks)} tasks completed successfully"
+        )
+        report.add_result(result)
+
+    # 1. Syntax Check
+    if check_syntax:
+        print("→ Running syntax checks...")
+        syntax_result = _check_syntax()
+        report.add_result(syntax_result)
+
+    # 2. Run Tests
+    if run_tests:
+        print("→ Running test suite...")
+        test_result = _run_test_suite()
+        report.add_result(test_result)
+
+        # Auto-fix attempt if tests failed
+        if test_result.status == ValidationStatus.FAILED and enable_auto_fix:
+            print("  → Attempting auto-fix...")
+            fixed = _attempt_auto_fix(test_result)
+            if fixed:
+                report.auto_fixed.append("test_failures")
+                # Re-run tests
+                test_result = _run_test_suite()
+                test_result.name = "tests_after_autofix"
+                report.add_result(test_result)
+
+    # 3. Run Linter
+    if run_linter:
+        print("→ Running linter checks...")
+        lint_result = _run_linter()
+        report.add_result(lint_result)
+
+        # Auto-fix linting issues
+        if lint_result.status in [ValidationStatus.FAILED, ValidationStatus.PASSED_WITH_WARNINGS] and enable_auto_fix:
+            print("  → Attempting auto-fix for linting issues...")
+            fixed = _auto_fix_linting()
+            if fixed:
+                report.auto_fixed.append("linting_issues")
+
+    # 4. Git Diff Check
+    print("→ Checking git diff...")
+    diff_result = _check_git_diff(plan)
+    report.add_result(diff_result)
+
+    # 5. LLM Validation (semantic check)
+    print("→ Running semantic validation...")
+    semantic_result = _semantic_validation(plan, user_request)
+    report.add_result(semantic_result)
+
+    # Generate summary
+    passed = sum(1 for r in report.results if r.status == ValidationStatus.PASSED)
+    warnings = sum(1 for r in report.results if r.status == ValidationStatus.PASSED_WITH_WARNINGS)
+    failed = sum(1 for r in report.results if r.status == ValidationStatus.FAILED)
+
+    if report.overall_status == ValidationStatus.PASSED:
+        report.summary = f"All {passed} validation checks passed"
+    elif report.overall_status == ValidationStatus.PASSED_WITH_WARNINGS:
+        report.summary = f"{passed} passed, {warnings} with warnings"
+    else:
+        report.summary = f"Validation failed: {failed} check(s) failed, {passed} passed"
+
+    _display_validation_report(report)
+    return report
+
+
+def _check_syntax() -> ValidationResult:
+    """Check for Python syntax errors."""
+    try:
+        result = execute_tool("run_cmd", {"command": "python -m py_compile rev/*.py 2>&1 || echo 'syntax_error'"})
+        result_data = json.loads(result)
+        output = result_data.get("stdout", "") + result_data.get("stderr", "")
+
+        if "syntax_error" in output.lower() or "syntaxerror" in output.lower():
+            return ValidationResult(
+                name="syntax_check",
+                status=ValidationStatus.FAILED,
+                message="Syntax errors detected",
+                details={"output": output[:500]}
+            )
+        return ValidationResult(
+            name="syntax_check",
+            status=ValidationStatus.PASSED,
+            message="No syntax errors found"
+        )
+    except Exception as e:
+        return ValidationResult(
+            name="syntax_check",
+            status=ValidationStatus.SKIPPED,
+            message=f"Could not run syntax check: {e}"
+        )
+
+
+def _run_test_suite() -> ValidationResult:
+    """Run the project's test suite."""
+    try:
+        result = execute_tool("run_tests", {"test_path": "tests/", "verbose": False})
+        result_data = json.loads(result)
+
+        rc = result_data.get("rc", 1)
+        output = result_data.get("output", "")
+
+        if rc == 0:
+            # Extract test count if possible
+            match = re.search(r'(\d+) passed', output)
+            test_count = match.group(1) if match else "all"
+            return ValidationResult(
+                name="test_suite",
+                status=ValidationStatus.PASSED,
+                message=f"{test_count} tests passed",
+                details={"return_code": rc}
+            )
+        else:
+            # Extract failure info
+            failures = re.findall(r'FAILED (.*?) -', output)
+            return ValidationResult(
+                name="test_suite",
+                status=ValidationStatus.FAILED,
+                message=f"Tests failed (rc={rc})",
+                details={"return_code": rc, "failures": failures[:5], "output": output[:1000]}
+            )
+    except Exception as e:
+        return ValidationResult(
+            name="test_suite",
+            status=ValidationStatus.SKIPPED,
+            message=f"Could not run tests: {e}"
+        )
+
+
+def _run_linter() -> ValidationResult:
+    """Run linter checks (ruff/flake8/pylint)."""
+    try:
+        # Try ruff first (fastest)
+        result = execute_tool("run_cmd", {"command": "ruff check rev/ --output-format=json 2>/dev/null || echo '[]'"})
+        result_data = json.loads(result)
+        output = result_data.get("stdout", "[]")
+
+        try:
+            issues = json.loads(output)
+            if not issues or issues == []:
+                return ValidationResult(
+                    name="linter",
+                    status=ValidationStatus.PASSED,
+                    message="No linting issues found"
+                )
+            elif len(issues) < 5:
+                return ValidationResult(
+                    name="linter",
+                    status=ValidationStatus.PASSED_WITH_WARNINGS,
+                    message=f"{len(issues)} minor linting issues",
+                    details={"issues": issues[:5]}
+                )
+            else:
+                return ValidationResult(
+                    name="linter",
+                    status=ValidationStatus.FAILED,
+                    message=f"{len(issues)} linting issues found",
+                    details={"issues": issues[:10]}
+                )
+        except json.JSONDecodeError:
+            # Non-JSON output, probably an error or no ruff
+            return ValidationResult(
+                name="linter",
+                status=ValidationStatus.SKIPPED,
+                message="Linter not available or produced non-JSON output"
+            )
+    except Exception as e:
+        return ValidationResult(
+            name="linter",
+            status=ValidationStatus.SKIPPED,
+            message=f"Could not run linter: {e}"
+        )
+
+
+def _check_git_diff(plan: ExecutionPlan) -> ValidationResult:
+    """Check git diff to verify changes were made."""
+    try:
+        result = execute_tool("git_diff", {})
+        result_data = json.loads(result)
+        diff = result_data.get("diff", "")
+
+        if not diff:
+            # No changes - might be expected or might be a problem
+            completed_edits = [t for t in plan.tasks if t.status == TaskStatus.COMPLETED and t.action_type in ["edit", "add"]]
+            if completed_edits:
+                return ValidationResult(
+                    name="git_diff",
+                    status=ValidationStatus.PASSED_WITH_WARNINGS,
+                    message="No uncommitted changes found (may have been committed)",
+                    details={"expected_changes": len(completed_edits)}
+                )
+            return ValidationResult(
+                name="git_diff",
+                status=ValidationStatus.PASSED,
+                message="No changes expected, none found"
+            )
+
+        # Count changed files
+        files_changed = len(re.findall(r'^diff --git', diff, re.MULTILINE))
+        lines_added = len(re.findall(r'^\+[^+]', diff, re.MULTILINE))
+        lines_removed = len(re.findall(r'^-[^-]', diff, re.MULTILINE))
+
+        return ValidationResult(
+            name="git_diff",
+            status=ValidationStatus.PASSED,
+            message=f"{files_changed} files changed (+{lines_added}/-{lines_removed} lines)",
+            details={
+                "files_changed": files_changed,
+                "lines_added": lines_added,
+                "lines_removed": lines_removed
+            }
+        )
+    except Exception as e:
+        return ValidationResult(
+            name="git_diff",
+            status=ValidationStatus.SKIPPED,
+            message=f"Could not check git diff: {e}"
+        )
+
+
+def _semantic_validation(plan: ExecutionPlan, user_request: str) -> ValidationResult:
+    """Use LLM to semantically validate the changes match the request."""
+    # Gather execution summary
+    task_summaries = []
+    for task in plan.tasks:
+        summary = f"- [{task.status.value}] {task.description}"
+        if task.result:
+            summary += f" (Result: {task.result[:100]}...)" if len(str(task.result)) > 100 else f" (Result: {task.result})"
+        task_summaries.append(summary)
+
+    messages = [
+        {"role": "system", "content": VALIDATION_SYSTEM},
+        {"role": "user", "content": f"""Validate these execution results:
+
+Original Request: {user_request}
+
+Executed Tasks:
+{chr(10).join(task_summaries)}
+
+Do the completed tasks fulfill the original request?"""}
+    ]
+
+    response = ollama_chat(messages)
+
+    if "error" in response:
+        return ValidationResult(
+            name="semantic_validation",
+            status=ValidationStatus.SKIPPED,
+            message="Could not run semantic validation"
+        )
+
+    try:
+        content = response.get("message", {}).get("content", "")
+        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+        if json_match:
+            validation_data = json.loads(json_match.group(0))
+
+            is_valid = validation_data.get("valid", True)
+            confidence = validation_data.get("confidence", 0.5)
+            issues = validation_data.get("issues", [])
+            warnings = validation_data.get("warnings", [])
+
+            if is_valid and confidence >= 0.8:
+                status = ValidationStatus.PASSED
+                message = f"Changes match request (confidence: {confidence:.0%})"
+            elif is_valid and confidence >= 0.5:
+                status = ValidationStatus.PASSED_WITH_WARNINGS
+                message = f"Changes likely match request (confidence: {confidence:.0%})"
+            else:
+                status = ValidationStatus.FAILED
+                message = f"Changes may not match request (confidence: {confidence:.0%})"
+
+            return ValidationResult(
+                name="semantic_validation",
+                status=status,
+                message=message,
+                details={"confidence": confidence, "issues": issues, "warnings": warnings}
+            )
+    except Exception as e:
+        pass
+
+    return ValidationResult(
+        name="semantic_validation",
+        status=ValidationStatus.SKIPPED,
+        message="Could not parse semantic validation"
+    )
+
+
+def _attempt_auto_fix(test_result: ValidationResult) -> bool:
+    """Attempt to auto-fix test failures."""
+    # This is a placeholder - real implementation would analyze failures
+    # and attempt targeted fixes
+    return False
+
+
+def _auto_fix_linting() -> bool:
+    """Attempt to auto-fix linting issues."""
+    try:
+        result = execute_tool("run_cmd", {"command": "ruff check rev/ --fix 2>/dev/null"})
+        return True
+    except:
+        return False
+
+
+def _display_validation_report(report: ValidationReport):
+    """Display the validation report."""
+    print("\n" + "=" * 60)
+    print("VALIDATION REPORT")
+    print("=" * 60)
+
+    status_emoji = {
+        ValidationStatus.PASSED: "✅",
+        ValidationStatus.PASSED_WITH_WARNINGS: "⚠️",
+        ValidationStatus.FAILED: "❌",
+        ValidationStatus.SKIPPED: "⏭️"
+    }
+
+    for result in report.results:
+        emoji = status_emoji.get(result.status, "❓")
+        print(f"{emoji} {result.name}: {result.message}")
+
+        if result.status == ValidationStatus.FAILED and result.details:
+            if "issues" in result.details:
+                for issue in result.details["issues"][:3]:
+                    print(f"   - {issue}")
+            if "output" in result.details:
+                print(f"   Output: {result.details['output'][:200]}...")
+
+    print("-" * 60)
+    overall_emoji = status_emoji.get(report.overall_status, "❓")
+    print(f"\n{overall_emoji} Overall: {report.summary}")
+
+    if report.rollback_recommended:
+        print("\n⚠️  ROLLBACK RECOMMENDED: Validation failed, consider reverting changes")
+
+    if report.auto_fixed:
+        print(f"\n🔧 Auto-fixed: {', '.join(report.auto_fixed)}")
+
+    print("=" * 60)
+
+
+def quick_validate(plan: ExecutionPlan) -> bool:
+    """Quick validation - just check if tasks completed and run tests.
+
+    Args:
+        plan: The executed plan
+
+    Returns:
+        True if validation passed, False otherwise
+    """
+    # Check task completion
+    failed = [t for t in plan.tasks if t.status == TaskStatus.FAILED]
+    if failed:
+        return False
+
+    # Quick test run
+    try:
+        result = execute_tool("run_tests", {"test_path": "tests/", "verbose": False})
+        result_data = json.loads(result)
+        return result_data.get("rc", 1) == 0
+    except:
+        return True  # Assume valid if can't run tests

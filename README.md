@@ -4,9 +4,16 @@ A minimal, autonomous CI/CD agent powered by [Ollama](https://ollama.ai) for loc
 
 ## Key Features
 
-- **🔓 Single-Gate Approval** — One approval at start, then runs autonomously (no repeated prompts)
-- **📋 Planning Mode** — Analyzes your request and generates comprehensive task checklist
-- **⚡ Execution Mode** — Iteratively completes all tasks until done
+- **🤖 6-Agent System** — Planning, Research, Review, Execution, Validation, and Learning agents work together (NEW v5.0!)
+- **🎭 Orchestrator Mode** — Optional meta-agent coordinates all agents for maximum autonomy (NEW!)
+- **🔍 Research Agent** — Pre-planning codebase exploration to gather context (NEW!)
+- **📚 Learning Agent** — Project memory that learns from past executions (NEW!)
+- **✅ Validation Agent** — Post-execution verification with tests, linting, and semantic checks (NEW!)
+- **🛡️ Intelligent Review** — Automatic validation of plans and actions with security vulnerability detection
+- **📚 Complex Task Handling** — Recursive breakdown of large features into manageable subtasks
+- **🔓 Smart Automation** — Autonomous execution with review-based approval (no repeated prompts)
+- **📋 Planning Mode** — Analyzes your request and generates comprehensive task checklist with recursive decomposition
+- **⚡ Execution Mode** — Iteratively completes all tasks until done with optional action-level review
 - **🚀 Parallel Execution** — Run 2+ tasks concurrently for 2-4x faster completion
 - **🧪 Automatic Testing** — Runs tests after each change to validate correctness
 - **🔧 Full Code Operations** — Review, edit, add, delete, rename files
@@ -14,44 +21,81 @@ A minimal, autonomous CI/CD agent powered by [Ollama](https://ollama.ai) for loc
 - **📦 Minimal Dependencies** — Just `requests` library
 - **🎯 Advanced Planning** — Dependency analysis, impact assessment, risk evaluation, rollback planning
 - **🛠️ Built-in Utilities** — File conversion, code refactoring, dependency management, security scanning
-- **⚡ Intelligent Caching** — File content, LLM responses, repo context, dependency trees (NEW!)
+- **⚡ Intelligent Caching** — File content, LLM responses, repo context, dependency trees
 
 ## Architecture
+
+**6-Agent Autonomous System (v5.0)**
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │                   USER REQUEST                      │
 └─────────────────┬───────────────────────────────────┘
                   │
+         ┌────────┴────────┐
+         │  ORCHESTRATOR   │  (Optional - coordinates all agents)
+         └────────┬────────┘
+                  │
                   ▼
 ┌─────────────────────────────────────────────────────┐
-│              PLANNING MODE                          │
-│  • Analyze repository context                      │
+│           1. LEARNING AGENT (NEW!)                  │
+│  • Recall similar past tasks                       │
+│  • Provide success patterns                        │
+│  • Estimate execution time                         │
+│  • Warn about past failures                        │
+└─────────────────┬───────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────┐
+│           2. RESEARCH AGENT (NEW!)                  │
+│  • Explore codebase before planning               │
+│  • Find relevant files and patterns               │
+│  • Identify similar implementations               │
+│  • Suggest approach based on codebase style       │
+└─────────────────┬───────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────┐
+│           3. PLANNING AGENT                         │
 │  • Break down request into atomic tasks            │
+│  • Recursive breakdown for complex features        │
 │  • Generate ordered execution checklist            │
+│  • Assess dependencies, risks, and impact          │
 └─────────────────┬───────────────────────────────────┘
                   │
                   ▼
 ┌─────────────────────────────────────────────────────┐
-│           SINGLE APPROVAL GATE                      │
-│  Press [y] to approve autonomous execution          │
+│           4. REVIEW AGENT                           │
+│  • Validate plan completeness                      │
+│  • Identify security vulnerabilities               │
+│  • Check for missing or unnecessary tasks          │
+│  • Decision: Approved / Suggestions / Rejected     │
 └─────────────────┬───────────────────────────────────┘
                   │
                   ▼
 ┌─────────────────────────────────────────────────────┐
-│             EXECUTION MODE (Iterative)              │
-│  For each task:                                     │
-│    1. Analyze current task                          │
-│    2. Gather information (read/search files)        │
-│    3. Make changes (edit/add/delete)                │
-│    4. Run tests to validate                         │
-│    5. Mark complete and move to next                │
+│           5. EXECUTION AGENT                        │
+│  • Execute tasks sequentially or in parallel       │
+│  • [Optional] Review Agent validates each action   │
+│  • Make changes, run tests, validate               │
 └─────────────────┬───────────────────────────────────┘
                   │
                   ▼
 ┌─────────────────────────────────────────────────────┐
-│               FINAL SUMMARY                         │
-│  ✓ Tasks completed  ✗ Tasks failed                 │
+│           6. VALIDATION AGENT (NEW!)                │
+│  • Run test suite                                  │
+│  • Check syntax errors                             │
+│  • Run linter                                      │
+│  • Semantic validation (did changes match request?)│
+│  • Auto-fix minor issues (optional)               │
+└─────────────────┬───────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────┐
+│           LEARNING AGENT (POST)                     │
+│  • Store successful patterns                       │
+│  • Update project context                          │
+│  • Record for future reference                     │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -212,12 +256,24 @@ python rev.py "Your task here"
 python rev.py [OPTIONS] "task description"
 
 Options:
-  --repl              Interactive REPL mode
-  --model MODEL       Ollama model to use (default: codellama:latest)
-  --base-url URL      Ollama API URL (default: http://localhost:11434)
-  --prompt            Prompt for approval before execution (default: auto-approve)
-  -j N, --parallel N  Number of concurrent tasks (default: 2, use 1 for sequential)
-  -h, --help          Show help message
+  --repl                       Interactive REPL mode
+  --model MODEL                Ollama model to use (default: codellama:latest)
+  --base-url URL               Ollama API URL (default: http://localhost:11434)
+  --prompt                     Prompt for approval before execution (default: auto-approve)
+  -j N, --parallel N           Number of concurrent tasks (default: 2, use 1 for sequential)
+
+  # Agent Control
+  --orchestrate                Enable orchestrator mode (full multi-agent coordination)
+  --learn                      Enable learning agent for project memory
+  --research                   Enable research agent for pre-planning exploration
+  --research-depth LEVEL       Research depth: shallow, medium, deep (default: medium)
+  --review / --no-review       Enable/disable review agent (default: enabled)
+  --review-strictness LEVEL    Review strictness: lenient, moderate, strict (default: moderate)
+  --action-review              Enable action-level review during execution
+  --validate / --no-validate   Enable/disable validation agent (default: enabled)
+  --auto-fix                   Enable auto-fix for minor validation issues
+
+  -h, --help                   Show help message
 ```
 
 ### Parallel Execution
@@ -610,6 +666,265 @@ Risk distribution:
 ```
 
 **Learn More:** See [ADVANCED_PLANNING.md](ADVANCED_PLANNING.md) for complete documentation.
+
+## Multi-Agent Quorum System
+
+**New in v4.0:** rev.py now uses a **3-agent quorum system** that provides intelligent review and validation at multiple stages for more accurate and secure code changes.
+
+### The Three Agents
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  1. PLANNING AGENT                                       │
+│  • Breaks down complex requests into atomic tasks       │
+│  • Analyzes dependencies and risks                      │
+│  • Performs recursive breakdown for complex features    │
+│  • Creates comprehensive execution plans                │
+└───────────────────┬──────────────────────────────────────┘
+                    ↓
+┌──────────────────────────────────────────────────────────┐
+│  2. REVIEW AGENT (NEW!)                                  │
+│  • Validates execution plans before execution           │
+│  • Reviews individual actions during execution          │
+│  • Identifies security vulnerabilities                  │
+│  • Suggests improvements and alternatives               │
+│  • Checks for missing tasks or unnecessary steps        │
+└───────────────────┬──────────────────────────────────────┘
+                    ↓
+┌──────────────────────────────────────────────────────────┐
+│  3. EXECUTION AGENT                                      │
+│  • Executes approved tasks sequentially or in parallel  │
+│  • Calls tools and makes code changes                   │
+│  • Validates results                                    │
+│  • Applies recommendations from Review Agent            │
+└──────────────────────────────────────────────────────────┘
+```
+
+### How It Works
+
+**1. Planning Phase** - The Planning Agent analyzes your request
+```bash
+python rev.py "Add user authentication with JWT"
+```
+
+The Planning Agent will:
+- Analyze your repository structure
+- Break down the request into specific tasks
+- Identify dependencies between tasks
+- Assess risks for each task
+- **Handle recursive breakdown** for complex features
+
+For example, a high-level task like "Implement authentication system" will be automatically broken down into:
+- Design authentication architecture
+- Create user model and database schema
+- Implement JWT token generation
+- Add authentication middleware
+- Create login/register endpoints
+- Write authentication tests
+
+**2. Review Phase** - The Review Agent validates the plan
+```
+============================================================
+REVIEW AGENT - PLAN REVIEW
+============================================================
+→ Analyzing plan with review agent...
+
+============================================================
+REVIEW RESULTS
+============================================================
+
+Decision: ✅ APPROVED WITH SUGGESTIONS
+Confidence: 85%
+
+Plan is generally sound but could be improved
+
+💡 Suggestions (3):
+  - Add rate limiting to prevent brute force attacks
+  - Include password reset functionality
+  - Add integration tests for authentication flow
+
+🔒 Security Concerns (1):
+  - Ensure JWT secrets are stored in environment variables
+============================================================
+```
+
+The Review Agent examines:
+- **Completeness**: Are all necessary tasks included?
+- **Security**: Are there potential vulnerabilities?
+- **Best Practices**: Does the plan follow industry standards?
+- **Edge Cases**: Are error cases handled?
+- **Dependencies**: Are task dependencies correct?
+
+**3. Execution Phase** - The Execution Agent runs the tasks
+- Each task is executed with full context
+- **Optional**: Action-level review can validate each tool call
+- Results are validated and tested
+
+### Review Modes
+
+**Plan Review** (Default: Enabled)
+```bash
+# Enable plan review (default)
+python rev.py "Add authentication"
+
+# Disable plan review
+python rev.py --no-review "Add authentication"
+
+# Adjust review strictness
+python rev.py --review-strictness strict "Delete old migrations"
+python rev.py --review-strictness lenient "Add logging"
+```
+
+Strictness levels:
+- **Lenient**: Only flags critical issues
+- **Moderate** (default): Flags medium+ severity issues
+- **Strict**: Flags all potential issues
+
+**Action Review** (Optional: Disabled by default)
+```bash
+# Enable action-level review (reviews each tool call)
+python rev.py --action-review "Implement payment processing"
+```
+
+Action review provides real-time validation:
+- Detects command injection vulnerabilities
+- Identifies hardcoded secrets
+- Warns about SQL injection risks
+- Suggests alternative approaches
+- Validates file operations
+
+### Review Decision Types
+
+The Review Agent can make four types of decisions:
+
+**✅ APPROVED** - Plan is safe and complete
+```
+✅ Plan approved by review agent.
+```
+
+**✅ APPROVED WITH SUGGESTIONS** - Plan is good but has recommendations
+```
+✅ Plan approved with suggestions. Review recommendations above.
+
+💡 Suggestions:
+  - Add error handling for edge cases
+  - Consider adding validation tests
+```
+
+**⚠️ REQUIRES CHANGES** - Plan has issues that should be addressed
+```
+⚠️ Plan requires changes. Review the issues above.
+Continue anyway? (y/N):
+```
+
+**❌ REJECTED** - Plan has critical issues
+```
+❌ Plan rejected by review agent. Please revise your request.
+
+🔴 Issues:
+  - CRITICAL: Hardcoded database credentials
+  - HIGH: Missing input validation
+```
+
+### Benefits of Multi-Agent System
+
+**🛡️ Enhanced Security**
+- Automatic detection of security vulnerabilities
+- Multiple layers of validation before code changes
+- Quick security checks without LLM calls (command injection, secrets, etc.)
+
+**🎯 Better Accuracy**
+- Identifies missing tasks before execution
+- Catches logical errors in plans
+- Suggests improvements and alternative approaches
+
+**📚 Complex Task Handling**
+- Recursive breakdown for large features
+- Automatic decomposition of high-complexity tasks
+- Better handling of multi-step implementations
+
+**⚡ Smart Defaults**
+- Auto-approves low-risk plans (review only, read-only operations)
+- Focuses review effort on high-risk changes
+- Configurable strictness for different scenarios
+
+### Example: Complex Feature with Review
+
+```bash
+python rev.py "Implement a REST API for user management with authentication, validation, and tests"
+```
+
+**Planning Agent Output:**
+```
+→ Checking for complex tasks...
+  ├─ Breaking down complex task: Implement REST API authentication...
+     └─ Expanded into 8 subtasks
+
+EXECUTION PLAN
+1. [REVIEW] Analyze current project structure
+2. [ADD] Create user model with validation
+3. [ADD] Implement JWT authentication middleware
+4. [ADD] Create user registration endpoint
+5. [ADD] Create user login endpoint
+6. [ADD] Add password hashing utilities
+7. [ADD] Write unit tests for authentication
+8. [ADD] Write integration tests for API endpoints
+9. [TEST] Run full test suite
+```
+
+**Review Agent Output:**
+```
+REVIEW RESULTS
+
+Decision: ✅ APPROVED WITH SUGGESTIONS
+Confidence: 90%
+
+Plan provides comprehensive REST API implementation
+
+💡 Suggestions (3):
+  - Add rate limiting to login endpoint
+  - Include password reset functionality
+  - Add API documentation (OpenAPI/Swagger)
+
+🔒 Security Concerns (2):
+  - Ensure JWT secrets use environment variables
+  - Add HTTPS requirement for production
+```
+
+**The quorum ensures:**
+- Planning Agent decomposes the complex request
+- Review Agent validates completeness and security
+- Execution Agent implements with confidence
+
+### Configuration Options
+
+```bash
+# Full control over review behavior
+python rev.py \
+  --review \                      # Enable plan review (default)
+  --review-strictness moderate \  # Set strictness level
+  --action-review \               # Enable action-level review
+  "Your complex task"
+
+# Minimal review for simple tasks
+python rev.py \
+  --review-strictness lenient \
+  "Update documentation"
+
+# Maximum scrutiny for critical changes
+python rev.py \
+  --review-strictness strict \
+  --action-review \
+  "Migrate database schema"
+```
+
+**Best Practices with Multi-Agent System:**
+
+1. **Use default settings** for most tasks - they provide good balance
+2. **Enable action review** for security-critical operations (auth, payments, database)
+3. **Use strict mode** when working with production code or critical infrastructure
+4. **Use lenient mode** for documentation updates or low-risk refactoring
+5. **Review suggestions** even when approved - they often provide valuable insights
 
 ## Best Practices
 
