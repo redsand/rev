@@ -42,6 +42,8 @@ class Task:
         self.breaking_change = False  # Whether this might break existing functionality
         self.rollback_plan = None  # Rollback instructions if things go wrong
         self.validation_steps = []  # Steps to validate task completion
+        self.complexity = "low"  # Task complexity: low, medium, high
+        self.subtasks = []  # For complex tasks, list of subtask IDs
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -58,7 +60,9 @@ class Task:
             "estimated_changes": self.estimated_changes,
             "breaking_change": self.breaking_change,
             "rollback_plan": self.rollback_plan,
-            "validation_steps": self.validation_steps
+            "validation_steps": self.validation_steps,
+            "complexity": self.complexity,
+            "subtasks": self.subtasks
         }
 
 

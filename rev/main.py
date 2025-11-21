@@ -8,6 +8,7 @@ import argparse
 from . import config
 from .cache import initialize_caches
 from .execution import planning_mode, execution_mode, concurrent_execution_mode
+from .execution.reviewer import review_execution_plan, ReviewStrictness, ReviewDecision
 from .terminal import repl_mode
 
 
@@ -52,6 +53,28 @@ def main():
         metavar="N",
         help="Number of concurrent tasks to run in parallel (default: 2, use 1 for sequential)"
     )
+    parser.add_argument(
+        "--review",
+        action="store_true",
+        default=True,
+        help="Enable review agent to validate plans (default: enabled)"
+    )
+    parser.add_argument(
+        "--no-review",
+        action="store_true",
+        help="Disable review agent"
+    )
+    parser.add_argument(
+        "--review-strictness",
+        choices=["lenient", "moderate", "strict"],
+        default="moderate",
+        help="Review agent strictness level (default: moderate)"
+    )
+    parser.add_argument(
+        "--action-review",
+        action="store_true",
+        help="Enable action-level review during execution (reviews each tool call)"
+    )
 
     args = parser.parse_args()
 
@@ -75,11 +98,50 @@ def main():
         else:
             task_description = " ".join(args.task)
             plan = planning_mode(task_description)
+
+            # Review phase - Review Agent validates the plan
+            enable_review = args.review and not args.no_review
+            if enable_review:
+                strictness = ReviewStrictness(args.review_strictness)
+                review = review_execution_plan(
+                    plan,
+                    task_description,
+                    strictness=strictness,
+                    auto_approve_low_risk=True
+                )
+
+                # Handle review decision
+                if review.decision == ReviewDecision.REJECTED:
+                    print("\n❌ Plan rejected by review agent. Please revise your request.")
+                    sys.exit(1)
+                elif review.decision == ReviewDecision.REQUIRES_CHANGES:
+                    print("\n⚠️  Plan requires changes. Review the issues above.")
+                    if args.prompt:
+                        response = input("Continue anyway? (y/N): ")
+                        if response.lower() != 'y':
+                            print("Aborted by user")
+                            sys.exit(1)
+                    else:
+                        print("Continuing with warnings (use --prompt to review)...")
+                elif review.decision == ReviewDecision.APPROVED_WITH_SUGGESTIONS:
+                    print("\n✅ Plan approved with suggestions. Review recommendations above.")
+                else:
+                    print("\n✅ Plan approved by review agent.")
+
             # Use concurrent execution if parallel > 1, otherwise sequential
             if args.parallel > 1:
-                concurrent_execution_mode(plan, max_workers=args.parallel, auto_approve=not args.prompt)
+                concurrent_execution_mode(
+                    plan,
+                    max_workers=args.parallel,
+                    auto_approve=not args.prompt,
+                    enable_action_review=args.action_review
+                )
             else:
-                execution_mode(plan, auto_approve=not args.prompt)
+                execution_mode(
+                    plan,
+                    auto_approve=not args.prompt,
+                    enable_action_review=args.action_review
+                )
     except KeyboardInterrupt:
         print("\n\nAborted by user")
         sys.exit(1)
