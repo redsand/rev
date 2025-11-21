@@ -4,9 +4,13 @@ A minimal, autonomous CI/CD agent powered by [Ollama](https://ollama.ai) for loc
 
 ## Key Features
 
-- **🤖 Multi-Agent Quorum System** — 3 specialized agents (Planning, Review, Execution) work together for accurate, secure code changes (NEW!)
-- **🛡️ Intelligent Review** — Automatic validation of plans and actions with security vulnerability detection (NEW!)
-- **📚 Complex Task Handling** — Recursive breakdown of large features into manageable subtasks (NEW!)
+- **🤖 6-Agent System** — Planning, Research, Review, Execution, Validation, and Learning agents work together (NEW v5.0!)
+- **🎭 Orchestrator Mode** — Optional meta-agent coordinates all agents for maximum autonomy (NEW!)
+- **🔍 Research Agent** — Pre-planning codebase exploration to gather context (NEW!)
+- **📚 Learning Agent** — Project memory that learns from past executions (NEW!)
+- **✅ Validation Agent** — Post-execution verification with tests, linting, and semantic checks (NEW!)
+- **🛡️ Intelligent Review** — Automatic validation of plans and actions with security vulnerability detection
+- **📚 Complex Task Handling** — Recursive breakdown of large features into manageable subtasks
 - **🔓 Smart Automation** — Autonomous execution with review-based approval (no repeated prompts)
 - **📋 Planning Mode** — Analyzes your request and generates comprehensive task checklist with recursive decomposition
 - **⚡ Execution Mode** — Iteratively completes all tasks until done with optional action-level review
@@ -21,17 +25,38 @@ A minimal, autonomous CI/CD agent powered by [Ollama](https://ollama.ai) for loc
 
 ## Architecture
 
-**Multi-Agent Quorum System (v4.0)**
+**6-Agent Autonomous System (v5.0)**
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │                   USER REQUEST                      │
 └─────────────────┬───────────────────────────────────┘
                   │
+         ┌────────┴────────┐
+         │  ORCHESTRATOR   │  (Optional - coordinates all agents)
+         └────────┬────────┘
+                  │
                   ▼
 ┌─────────────────────────────────────────────────────┐
-│           1. PLANNING AGENT                         │
-│  • Analyze repository context                      │
+│           1. LEARNING AGENT (NEW!)                  │
+│  • Recall similar past tasks                       │
+│  • Provide success patterns                        │
+│  • Estimate execution time                         │
+│  • Warn about past failures                        │
+└─────────────────┬───────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────┐
+│           2. RESEARCH AGENT (NEW!)                  │
+│  • Explore codebase before planning               │
+│  • Find relevant files and patterns               │
+│  • Identify similar implementations               │
+│  • Suggest approach based on codebase style       │
+└─────────────────┬───────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────┐
+│           3. PLANNING AGENT                         │
 │  • Break down request into atomic tasks            │
 │  • Recursive breakdown for complex features        │
 │  • Generate ordered execution checklist            │
@@ -40,31 +65,37 @@ A minimal, autonomous CI/CD agent powered by [Ollama](https://ollama.ai) for loc
                   │
                   ▼
 ┌─────────────────────────────────────────────────────┐
-│           2. REVIEW AGENT (NEW!)                    │
+│           4. REVIEW AGENT                           │
 │  • Validate plan completeness                      │
 │  • Identify security vulnerabilities               │
 │  • Check for missing or unnecessary tasks          │
-│  • Suggest improvements                            │
 │  • Decision: Approved / Suggestions / Rejected     │
 └─────────────────┬───────────────────────────────────┘
                   │
                   ▼
 ┌─────────────────────────────────────────────────────┐
-│           3. EXECUTION AGENT                        │
-│  For each task:                                     │
-│    1. Analyze current task                          │
-│    2. [Optional] Review Agent validates action      │
-│    3. Gather information (read/search files)        │
-│    4. Make changes (edit/add/delete)                │
-│    5. Run tests to validate                         │
-│    6. Mark complete and move to next                │
+│           5. EXECUTION AGENT                        │
+│  • Execute tasks sequentially or in parallel       │
+│  • [Optional] Review Agent validates each action   │
+│  • Make changes, run tests, validate               │
 └─────────────────┬───────────────────────────────────┘
                   │
                   ▼
 ┌─────────────────────────────────────────────────────┐
-│               FINAL SUMMARY                         │
-│  ✓ Tasks completed  ✗ Tasks failed                 │
-│  📊 Review insights  🔒 Security warnings           │
+│           6. VALIDATION AGENT (NEW!)                │
+│  • Run test suite                                  │
+│  • Check syntax errors                             │
+│  • Run linter                                      │
+│  • Semantic validation (did changes match request?)│
+│  • Auto-fix minor issues (optional)               │
+└─────────────────┬───────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────┐
+│           LEARNING AGENT (POST)                     │
+│  • Store successful patterns                       │
+│  • Update project context                          │
+│  • Record for future reference                     │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -230,10 +261,18 @@ Options:
   --base-url URL               Ollama API URL (default: http://localhost:11434)
   --prompt                     Prompt for approval before execution (default: auto-approve)
   -j N, --parallel N           Number of concurrent tasks (default: 2, use 1 for sequential)
-  --review                     Enable review agent (default: enabled)
-  --no-review                  Disable review agent
+
+  # Agent Control
+  --orchestrate                Enable orchestrator mode (full multi-agent coordination)
+  --learn                      Enable learning agent for project memory
+  --research                   Enable research agent for pre-planning exploration
+  --research-depth LEVEL       Research depth: shallow, medium, deep (default: medium)
+  --review / --no-review       Enable/disable review agent (default: enabled)
   --review-strictness LEVEL    Review strictness: lenient, moderate, strict (default: moderate)
-  --action-review              Enable action-level review during execution (default: disabled)
+  --action-review              Enable action-level review during execution
+  --validate / --no-validate   Enable/disable validation agent (default: enabled)
+  --auto-fix                   Enable auto-fix for minor validation issues
+
   -h, --help                   Show help message
 ```
 

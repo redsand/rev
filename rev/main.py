@@ -9,6 +9,8 @@ from . import config
 from .cache import initialize_caches
 from .execution import planning_mode, execution_mode, concurrent_execution_mode
 from .execution.reviewer import review_execution_plan, ReviewStrictness, ReviewDecision
+from .execution.validator import validate_execution, ValidationStatus
+from .execution.orchestrator import run_orchestrated
 from .terminal import repl_mode
 
 
@@ -75,6 +77,43 @@ def main():
         action="store_true",
         help="Enable action-level review during execution (reviews each tool call)"
     )
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        default=True,
+        help="Enable validation agent after execution (default: enabled)"
+    )
+    parser.add_argument(
+        "--no-validate",
+        action="store_true",
+        help="Disable post-execution validation"
+    )
+    parser.add_argument(
+        "--auto-fix",
+        action="store_true",
+        help="Enable auto-fix for minor validation issues (linting, formatting)"
+    )
+    parser.add_argument(
+        "--orchestrate",
+        action="store_true",
+        help="Enable orchestrator mode - coordinates all agents for maximum autonomy"
+    )
+    parser.add_argument(
+        "--research",
+        action="store_true",
+        help="Enable research agent for pre-planning codebase exploration"
+    )
+    parser.add_argument(
+        "--research-depth",
+        choices=["shallow", "medium", "deep"],
+        default="medium",
+        help="Research agent depth (default: medium)"
+    )
+    parser.add_argument(
+        "--learn",
+        action="store_true",
+        help="Enable learning agent for project memory across sessions"
+    )
 
     args = parser.parse_args()
 
@@ -97,6 +136,28 @@ def main():
             repl_mode()
         else:
             task_description = " ".join(args.task)
+
+            # Orchestrator mode - full multi-agent coordination
+            if args.orchestrate:
+                result = run_orchestrated(
+                    task_description,
+                    config.ROOT,
+                    enable_learning=args.learn,
+                    enable_research=args.research,
+                    enable_review=args.review and not args.no_review,
+                    enable_validation=args.validate and not args.no_validate,
+                    review_strictness=args.review_strictness,
+                    enable_action_review=args.action_review,
+                    enable_auto_fix=args.auto_fix,
+                    parallel_workers=args.parallel,
+                    auto_approve=not args.prompt,
+                    research_depth=args.research_depth
+                )
+                if not result.success:
+                    sys.exit(1)
+                sys.exit(0)
+
+            # Standard mode - manual agent coordination
             plan = planning_mode(task_description)
 
             # Review phase - Review Agent validates the plan
@@ -142,6 +203,29 @@ def main():
                     auto_approve=not args.prompt,
                     enable_action_review=args.action_review
                 )
+
+            # Validation phase - Validation Agent verifies results
+            enable_validation = args.validate and not args.no_validate
+            if enable_validation:
+                validation_report = validate_execution(
+                    plan,
+                    task_description,
+                    run_tests=True,
+                    run_linter=True,
+                    check_syntax=True,
+                    enable_auto_fix=args.auto_fix
+                )
+
+                if validation_report.overall_status == ValidationStatus.FAILED:
+                    print("\n❌ Validation failed. Review issues above.")
+                    if validation_report.rollback_recommended:
+                        print("   Consider: git checkout -- . (to revert changes)")
+                    sys.exit(1)
+                elif validation_report.overall_status == ValidationStatus.PASSED_WITH_WARNINGS:
+                    print("\n⚠️  Validation passed with warnings.")
+                else:
+                    print("\n✅ Validation passed successfully.")
+
     except KeyboardInterrupt:
         print("\n\nAborted by user")
         sys.exit(1)
