@@ -94,19 +94,16 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
             print("[DEBUG] Using cached LLM response")
         return cached_response
 
-    # Detect cloud models and use appropriate endpoint
-    is_cloud_model = config.OLLAMA_MODEL.endswith("-cloud")
-    if is_cloud_model:
-        # Use Ollama cloud API for cloud models
-        base_url = "https://api.ollama.com"
-        if OLLAMA_DEBUG or not hasattr(ollama_chat, '_cloud_model_notified'):
-            print(f"ℹ️  Using Ollama Cloud API for model: {config.OLLAMA_MODEL}")
-            ollama_chat._cloud_model_notified = True
-    else:
-        # Use configured base URL for local models
-        base_url = config.OLLAMA_BASE_URL
-
+    # All models (including cloud models) use the local Ollama instance
+    # The local Ollama instance automatically proxies cloud model requests
+    base_url = config.OLLAMA_BASE_URL
     url = f"{base_url}/api/chat"
+
+    # Notify user if using a cloud model
+    is_cloud_model = config.OLLAMA_MODEL.endswith("-cloud")
+    if is_cloud_model and (OLLAMA_DEBUG or not hasattr(ollama_chat, '_cloud_model_notified')):
+        print(f"ℹ️  Using cloud model: {config.OLLAMA_MODEL} (proxied through local Ollama)")
+        ollama_chat._cloud_model_notified = True
 
     # Build base payload
     payload = {

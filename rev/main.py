@@ -121,13 +121,9 @@ def main():
     config.OLLAMA_MODEL = args.model
     config.OLLAMA_BASE_URL = args.base_url
 
-    # Detect cloud models
-    is_cloud_model = args.model.endswith("-cloud")
-    api_endpoint = "https://api.ollama.com" if is_cloud_model else config.OLLAMA_BASE_URL
-
     print(f"rev - CI/CD Agent")
     print(f"Model: {config.OLLAMA_MODEL}")
-    print(f"Ollama: {api_endpoint}")
+    print(f"Ollama: {config.OLLAMA_BASE_URL}")
     print(f"Repository: {config.ROOT}")
     if args.parallel > 1:
         print(f"Parallel execution: {args.parallel} concurrent tasks")
