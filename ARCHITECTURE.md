@@ -1,6 +1,51 @@
 # Rev Architecture
 
-This document describes the modular architecture of the `rev` project after refactoring from a monolithic `rev.py` file.
+This document describes the modular architecture of the `rev` project — a **6-Agent Autonomous System** (v5.0).
+
+## 6-Agent System Overview
+
+```
+┌─────────────────────────────────────────────────────┐
+│                   USER REQUEST                      │
+└─────────────────┬───────────────────────────────────┘
+                  │
+         ┌────────┴────────┐
+         │  ORCHESTRATOR   │  (Optional - coordinates all agents)
+         └────────┬────────┘
+                  │
+    ┌─────────────┼─────────────┐
+    ▼             ▼             ▼
+┌────────┐  ┌──────────┐  ┌─────────┐
+│LEARNING│→ │ RESEARCH │→ │PLANNING │
+└────────┘  └──────────┘  └─────────┘
+                               │
+                               ▼
+                         ┌──────────┐
+                         │  REVIEW  │
+                         └────┬─────┘
+                              │
+                              ▼
+                         ┌──────────┐
+                         │EXECUTION │
+                         └────┬─────┘
+                              │
+                              ▼
+                        ┌───────────┐
+                        │VALIDATION │
+                        └───────────┘
+```
+
+### Agent Responsibilities
+
+| Agent | Purpose | Module |
+|-------|---------|--------|
+| **Learning** | Project memory across sessions, pattern recognition | `execution/learner.py` |
+| **Research** | Pre-planning codebase exploration | `execution/researcher.py` |
+| **Planning** | Break down requests into atomic tasks | `execution/planner.py` |
+| **Review** | Validate plans and actions, security checks | `execution/reviewer.py` |
+| **Execution** | Execute tasks sequentially or in parallel | `execution/executor.py` |
+| **Validation** | Post-execution verification (tests, linting) | `execution/validator.py` |
+| **Orchestrator** | Coordinates all agents (optional) | `execution/orchestrator.py` |
 
 ## Directory Structure
 
@@ -41,10 +86,15 @@ rev/
 │   ├── __init__.py
 │   └── client.py           # MCPClient and utilities
 │
-├── execution/               # Planning and execution
+├── execution/               # 6-Agent System
 │   ├── __init__.py
-│   ├── planner.py          # planning_mode function
-│   ├── executor.py         # execution_mode, concurrent_execution_mode
+│   ├── planner.py          # Planning Agent - task breakdown
+│   ├── executor.py         # Execution Agent - task execution
+│   ├── reviewer.py         # Review Agent - plan/action validation
+│   ├── validator.py        # Validation Agent - post-execution checks
+│   ├── researcher.py       # Research Agent - codebase exploration
+│   ├── learner.py          # Learning Agent - project memory
+│   ├── orchestrator.py     # Orchestrator - agent coordination
 │   └── safety.py           # Safety checks for destructive operations
 │
 └── terminal/                # Terminal I/O
@@ -99,11 +149,43 @@ Data structures for task management:
 
 - **MCPClient**: Model Context Protocol client for external tools
 
-### Execution (`execution/`)
+### Execution (`execution/`) — 6-Agent System
 
-- **planner.py**: Generates execution plans with risk assessment and dependencies
-- **executor.py**: Executes plans sequentially or concurrently
-- **safety.py**: Validates and prompts for dangerous operations
+The execution module implements a multi-agent architecture:
+
+**Core Agents:**
+- **planner.py**: Planning Agent - generates execution plans with recursive breakdown
+- **executor.py**: Execution Agent - executes plans sequentially or concurrently
+- **reviewer.py**: Review Agent - validates plans, detects security vulnerabilities
+- **validator.py**: Validation Agent - post-execution verification (tests, linting, syntax)
+- **researcher.py**: Research Agent - pre-planning codebase exploration
+- **learner.py**: Learning Agent - project memory across sessions
+
+**Coordination:**
+- **orchestrator.py**: Orchestrator Agent - coordinates all agents for full autonomy
+- **safety.py**: Safety checks for destructive operations
+
+**Agent Data Structures:**
+```python
+# Review Agent
+class ReviewDecision(Enum):
+    APPROVED, APPROVED_WITH_SUGGESTIONS, REQUIRES_CHANGES, REJECTED
+
+# Validation Agent
+class ValidationStatus(Enum):
+    PASSED, PASSED_WITH_WARNINGS, FAILED, SKIPPED
+
+# Learning Agent
+class TaskPattern:  # Learned patterns from past executions
+class ProjectContext:  # Project-specific knowledge
+
+# Research Agent
+class ResearchFindings:  # Codebase exploration results
+
+# Orchestrator
+class AgentPhase(Enum):
+    LEARNING, RESEARCH, PLANNING, REVIEW, EXECUTION, VALIDATION, COMPLETE, FAILED
+```
 
 ### Terminal (`terminal/`)
 
@@ -125,14 +207,30 @@ python -m rev --help
 ### Running
 
 ```bash
-# Using installed command
+# Basic usage
 rev "Add error handling to API endpoints"
 
-# Using python module
-python -m rev --repl
+# Full orchestration mode (all 6 agents coordinated)
+rev --orchestrate --learn --research "Implement user authentication"
+
+# Enable specific agents
+rev --research "Find files related to payments"
+rev --learn "Add rate limiting"
+rev --research-depth deep "Analyze authentication flow"
+
+# Control review and validation
+rev --review-strictness strict "Database migration"
+rev --no-validate "Quick documentation update"
+rev --auto-fix "Add linting to codebase"
+
+# Action-level review (reviews each tool call)
+rev --action-review "Sensitive security changes"
 
 # Parallel execution
 python -m rev -j 4 "Refactor authentication module"
+
+# Interactive REPL mode
+python -m rev --repl
 ```
 
 ### Importing
@@ -146,6 +244,13 @@ from rev.models import TaskStatus, RiskLevel
 from rev.tools import search_code, analyze_dependencies
 from rev.execution import planning_mode, execution_mode
 from rev.terminal import repl_mode
+
+# Import agent modules
+from rev.execution.reviewer import review_execution_plan, ReviewStrictness, ReviewDecision
+from rev.execution.validator import validate_execution, ValidationStatus
+from rev.execution.researcher import research_codebase, ResearchFindings
+from rev.execution.learner import LearningAgent
+from rev.execution.orchestrator import run_orchestrated, Orchestrator
 ```
 
 ## Benefits of Modular Architecture
@@ -160,11 +265,23 @@ from rev.terminal import repl_mode
 
 ## Memory Isolation
 
-Memory (caching) remains **project-specific**:
-- Cache directory: `.rev_cache/` in project root
-- Each project has independent cache
-- No overlap between different projects
+Memory and caching remain **project-specific**:
+
+**Cache System** (`.rev_cache/`):
+- File content cache with mtime tracking
+- LLM response cache (1 hour TTL)
+- Repository context cache (30s TTL)
+- Dependency tree cache (10 min TTL)
+
+**Learning Agent Memory** (`.rev_memory/`):
+- `patterns.json` — Learned task patterns from successful executions
+- `context.json` — Project-specific knowledge (framework, language, style)
+- `history.json` — Last 100 execution memories
+
+Both directories are:
+- Project-specific (no overlap between projects)
 - Configured via `ROOT = pathlib.Path(os.getcwd()).resolve()`
+- Git-ignored by default
 
 ## Migration from Monolithic `rev.py`
 
