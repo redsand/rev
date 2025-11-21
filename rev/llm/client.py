@@ -8,7 +8,7 @@ from typing import Dict, Any, List, Optional
 
 import requests
 
-from rev.config import OLLAMA_BASE_URL, OLLAMA_MODEL
+from rev import config
 from rev.cache import get_llm_cache
 
 
@@ -35,11 +35,11 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
             print("[DEBUG] Using cached LLM response")
         return cached_response
 
-    url = f"{OLLAMA_BASE_URL}/api/chat"
+    url = f"{config.OLLAMA_BASE_URL}/api/chat"
 
     # Build base payload
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": config.OLLAMA_MODEL,
         "messages": messages,
         "stream": False
     }
@@ -50,7 +50,7 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
 
     if OLLAMA_DEBUG:
         print(f"[DEBUG] Ollama request to {url}")
-        print(f"[DEBUG] Model: {OLLAMA_MODEL}")
+        print(f"[DEBUG] Model: {config.OLLAMA_MODEL}")
         print(f"[DEBUG] Messages: {json.dumps(messages, indent=2)}")
         if tools:
             print(f"[DEBUG] Tools: {len(tools)} tools provided")
@@ -86,7 +86,7 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
                         print("\n" + "=" * 60)
                         print("OLLAMA CLOUD AUTHENTICATION REQUIRED")
                         print("=" * 60)
-                        print(f"\nModel '{OLLAMA_MODEL}' requires authentication.")
+                        print(f"\nModel '{config.OLLAMA_MODEL}' requires authentication.")
                         print(f"\nTo authenticate:")
                         print(f"1. Visit this URL in your browser:")
                         print(f"   {signin_url}")
@@ -117,7 +117,7 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
 
                 # Retry without tools
                 payload_no_tools = {
-                    "model": OLLAMA_MODEL,
+                    "model": config.OLLAMA_MODEL,
                     "messages": messages,
                     "stream": False
                 }
