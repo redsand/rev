@@ -37,6 +37,12 @@ tests_tmp_*/
 # Cache directory
 .rev_cache/
 
+# Checkpoint directory (for resume functionality)
+.rev_checkpoints/
+
+# Memory directory (for learning agent)
+.rev_memory/
+
 # OS
 .DS_Store
 Thumbs.db

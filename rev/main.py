@@ -12,6 +12,7 @@ from .execution.reviewer import review_execution_plan, ReviewStrictness, ReviewD
 from .execution.validator import validate_execution, ValidationStatus
 from .execution.orchestrator import run_orchestrated
 from .terminal import repl_mode
+from .models.task import ExecutionPlan
 
 
 def main():
@@ -114,12 +115,38 @@ def main():
         action="store_true",
         help="Enable learning agent for project memory across sessions"
     )
+    parser.add_argument(
+        "--resume",
+        metavar="CHECKPOINT",
+        help="Resume execution from a checkpoint file"
+    )
+    parser.add_argument(
+        "--list-checkpoints",
+        action="store_true",
+        help="List all available checkpoints"
+    )
 
     args = parser.parse_args()
 
     # Update config globals for ollama_chat function
     config.OLLAMA_MODEL = args.model
     config.OLLAMA_BASE_URL = args.base_url
+
+    # Handle list-checkpoints command
+    if args.list_checkpoints:
+        print("rev - Available Checkpoints\n")
+        checkpoints = ExecutionPlan.list_checkpoints()
+        if not checkpoints:
+            print("No checkpoints found.")
+            print(f"Checkpoints are saved in .rev_checkpoints/ directory when execution is interrupted.")
+        else:
+            for i, cp in enumerate(checkpoints, 1):
+                print(f"{i}. {cp['filename']}")
+                print(f"   Timestamp: {cp['timestamp']}")
+                print(f"   Tasks: {cp['tasks_total']}")
+                print(f"   Status: {cp['summary']}")
+                print()
+        sys.exit(0)
 
     print(f"rev - CI/CD Agent")
     print(f"Model: {config.OLLAMA_MODEL}")
@@ -132,6 +159,65 @@ def main():
     print()
 
     try:
+        # Handle resume command
+        if args.resume:
+            print(f"Resuming from checkpoint: {args.resume}\n")
+            try:
+                plan = ExecutionPlan.load_checkpoint(args.resume)
+                print(f"✓ Checkpoint loaded successfully")
+                print(f"  {plan.get_summary()}\n")
+
+                # Reset stopped tasks to pending so they can be executed
+                for task in plan.tasks:
+                    if task.status.value == "stopped":
+                        task.status = task.status.__class__("pending")
+
+                # Use concurrent execution if parallel > 1, otherwise sequential
+                if args.parallel > 1:
+                    concurrent_execution_mode(
+                        plan,
+                        max_workers=args.parallel,
+                        auto_approve=not args.prompt,
+                        enable_action_review=args.action_review
+                    )
+                else:
+                    execution_mode(
+                        plan,
+                        auto_approve=not args.prompt,
+                        enable_action_review=args.action_review
+                    )
+
+                # Validation phase
+                enable_validation = args.validate and not args.no_validate
+                if enable_validation:
+                    validation_report = validate_execution(
+                        plan,
+                        "Resumed execution",
+                        run_tests=True,
+                        run_linter=True,
+                        check_syntax=True,
+                        enable_auto_fix=args.auto_fix
+                    )
+
+                    if validation_report.overall_status == ValidationStatus.FAILED:
+                        print("\n❌ Validation failed. Review issues above.")
+                        if validation_report.rollback_recommended:
+                            print("   Consider: git checkout -- . (to revert changes)")
+                        sys.exit(1)
+                    elif validation_report.overall_status == ValidationStatus.PASSED_WITH_WARNINGS:
+                        print("\n⚠️  Validation passed with warnings.")
+                    else:
+                        print("\n✅ Validation passed successfully.")
+
+                sys.exit(0)
+
+            except FileNotFoundError:
+                print(f"✗ Checkpoint file not found: {args.resume}")
+                print("\nUse --list-checkpoints to see available checkpoints.")
+                sys.exit(1)
+            except Exception as e:
+                print(f"✗ Failed to load checkpoint: {e}")
+                sys.exit(1)
         if args.repl or not args.task:
             repl_mode()
         else:
