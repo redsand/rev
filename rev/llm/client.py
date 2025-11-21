@@ -30,8 +30,11 @@ def _signal_handler(signum, frame):
 
 def _setup_signal_handlers():
     """Setup signal handlers for cross-platform interrupt handling."""
-    # Set up SIGINT handler (Ctrl+C)
-    signal.signal(signal.SIGINT, _signal_handler)
+    # Only set up signal handlers in the main thread
+    # signal.signal() can only be called from the main thread
+    if threading.current_thread() is threading.main_thread():
+        # Set up SIGINT handler (Ctrl+C)
+        signal.signal(signal.SIGINT, _signal_handler)
 
 
 def _make_request_interruptible(url, json_payload, timeout):
