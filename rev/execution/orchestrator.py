@@ -14,10 +14,10 @@ from pathlib import Path
 from rev.models.task import ExecutionPlan, TaskStatus
 from rev.execution.planner import planning_mode
 from rev.execution.reviewer import review_execution_plan, ReviewStrictness, ReviewDecision
-from rev.execution.validator import validate_execution, ValidationStatus
+from rev.execution.validator import validate_execution, ValidationStatus, format_validation_feedback_for_llm
 from rev.execution.researcher import research_codebase, ResearchFindings
 from rev.execution.learner import LearningAgent, display_learning_suggestions
-from rev.execution.executor import execution_mode, concurrent_execution_mode
+from rev.execution.executor import execution_mode, concurrent_execution_mode, fix_validation_failures
 from rev.tools.registry import get_available_tools
 
 
@@ -222,11 +222,64 @@ class Orchestrator:
                     "auto_fixed": validation.auto_fixed
                 }
 
+                # Auto-fix loop for validation failures
                 if validation.overall_status == ValidationStatus.FAILED:
-                    result.errors.append("Validation failed")
-                    # Attempt retry if configured
-                    if self.config.max_retries > 0:
-                        print("\n⚠️  Validation failed - orchestrator could retry (not implemented)")
+                    result.errors.append("Initial validation failed")
+
+                    retry_count = 0
+                    while retry_count < self.config.max_retries and validation.overall_status == ValidationStatus.FAILED:
+                        retry_count += 1
+                        print(f"\n🔄 Validation Retry {retry_count}/{self.config.max_retries}")
+
+                        # Format validation feedback for LLM
+                        feedback = format_validation_feedback_for_llm(validation, user_request)
+                        if not feedback:
+                            print("  → No specific feedback to provide")
+                            break
+
+                        # Attempt to fix validation failures
+                        print("  → Attempting auto-fix...")
+                        tools = get_available_tools()
+                        fix_success = fix_validation_failures(
+                            validation_feedback=feedback,
+                            user_request=user_request,
+                            tools=tools,
+                            enable_action_review=self.config.enable_action_review,
+                            max_fix_attempts=3
+                        )
+
+                        if not fix_success:
+                            print("  ✗ Auto-fix failed")
+                            break
+
+                        # Re-run validation to check if fixes worked
+                        print("  → Re-running validation...")
+                        validation = validate_execution(
+                            plan,
+                            user_request,
+                            run_tests=True,
+                            run_linter=True,
+                            check_syntax=True,
+                            enable_auto_fix=False  # Don't auto-fix during retry validation
+                        )
+
+                        result.validation_status = validation.overall_status
+                        result.agent_insights["validation"][f"retry_{retry_count}"] = {
+                            "status": validation.overall_status.value,
+                            "checks_passed": sum(1 for r in validation.results if r.status == ValidationStatus.PASSED),
+                            "checks_failed": sum(1 for r in validation.results if r.status == ValidationStatus.FAILED)
+                        }
+
+                        if validation.overall_status == ValidationStatus.FAILED:
+                            print(f"  ⚠️  Validation still failing after retry {retry_count}")
+                        else:
+                            print(f"  ✓ Validation passed after {retry_count} fix attempt(s)!")
+                            result.errors = [e for e in result.errors if e != "Initial validation failed"]
+                            break
+
+                    if validation.overall_status == ValidationStatus.FAILED:
+                        print(f"\n❌ Validation failed after {retry_count} retry attempt(s)")
+                        result.errors.append(f"Validation failed after {retry_count} retry attempts")
 
             # Complete
             self._update_phase(AgentPhase.COMPLETE)
