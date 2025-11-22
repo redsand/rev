@@ -486,6 +486,98 @@ def _display_validation_report(report: ValidationReport):
     print("=" * 60)
 
 
+def format_validation_feedback_for_llm(report: ValidationReport, user_request: str) -> Optional[str]:
+    """Format validation report feedback for LLM consumption.
+
+    This creates a structured message that the executor LLM can understand and act upon,
+    allowing it to see what failed validation and attempt fixes.
+
+    Args:
+        report: The validation report with all check results
+        user_request: The original user request for context
+
+    Returns:
+        Formatted feedback string for inclusion in LLM conversation, or None if all passed
+    """
+    # Only provide feedback if there were failures or warnings
+    if report.overall_status == ValidationStatus.PASSED:
+        return None
+
+    feedback_parts = [
+        "=== VALIDATION FEEDBACK ===",
+        f"Original Request: {user_request[:100]}...",
+        f"Overall Status: {report.overall_status.value.upper()}",
+        f"Summary: {report.summary}",
+        ""
+    ]
+
+    # Group results by status
+    failed_checks = [r for r in report.results if r.status == ValidationStatus.FAILED]
+    warning_checks = [r for r in report.results if r.status == ValidationStatus.PASSED_WITH_WARNINGS]
+
+    # Failed checks (critical)
+    if failed_checks:
+        feedback_parts.append("❌ FAILED CHECKS:")
+        for result in failed_checks:
+            feedback_parts.append(f"\n  Check: {result.name}")
+            feedback_parts.append(f"  Issue: {result.message}")
+
+            # Add specific details
+            if result.details:
+                if "failures" in result.details and result.details["failures"]:
+                    feedback_parts.append("  Failed tests:")
+                    for failure in result.details["failures"][:3]:
+                        feedback_parts.append(f"    - {failure}")
+
+                if "issues" in result.details and result.details["issues"]:
+                    feedback_parts.append("  Linting issues:")
+                    for issue in result.details["issues"][:5]:
+                        if isinstance(issue, dict):
+                            feedback_parts.append(f"    - {issue.get('code', 'ERROR')}: {issue.get('message', '')} (line {issue.get('location', {}).get('row', '?')})")
+                        else:
+                            feedback_parts.append(f"    - {issue}")
+
+                if "output" in result.details:
+                    output = result.details["output"][:300]
+                    if output:
+                        feedback_parts.append(f"  Output: {output}")
+
+        feedback_parts.append("")
+
+    # Warning checks (informational)
+    if warning_checks:
+        feedback_parts.append("⚠️  WARNINGS:")
+        for result in warning_checks:
+            feedback_parts.append(f"  - {result.name}: {result.message}")
+        feedback_parts.append("")
+
+    # Provide actionable guidance
+    if failed_checks:
+        feedback_parts.append("🔧 REQUIRED ACTIONS:")
+        for result in failed_checks:
+            if result.name == "test_suite":
+                feedback_parts.append("  1. Fix the failing tests by addressing the assertion errors or logic issues")
+                feedback_parts.append("  2. Ensure all test dependencies are properly set up")
+            elif result.name == "linter":
+                feedback_parts.append("  1. Fix linting errors (imports, unused variables, style issues)")
+                feedback_parts.append("  2. Run 'ruff check --fix' or similar auto-formatter")
+            elif result.name == "syntax_check":
+                feedback_parts.append("  1. Fix syntax errors in Python files")
+                feedback_parts.append("  2. Check for missing colons, parentheses, or indentation issues")
+            elif result.name == "semantic_validation":
+                feedback_parts.append("  1. Review if the changes actually fulfill the original request")
+                feedback_parts.append("  2. Check if any steps were missed or incorrectly implemented")
+
+        feedback_parts.append("\nPlease create and execute tasks to fix these validation failures.")
+    else:
+        feedback_parts.append("ℹ️  Some checks have warnings but no critical failures.")
+        feedback_parts.append("Consider addressing the warnings for better code quality.")
+
+    feedback_parts.append("===================")
+
+    return "\n".join(feedback_parts)
+
+
 def quick_validate(plan: ExecutionPlan) -> bool:
     """Quick validation - just check if tasks completed and run tests.
 

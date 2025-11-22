@@ -16,7 +16,7 @@ from rev.tools.registry import execute_tool
 from rev.llm.client import ollama_chat
 from rev.config import get_system_info_cached, get_escape_interrupt, set_escape_interrupt
 from rev.execution.safety import is_scary_operation, prompt_scary_operation
-from rev.execution.reviewer import review_action, display_action_review
+from rev.execution.reviewer import review_action, display_action_review, format_review_feedback_for_llm
 
 EXECUTION_SYSTEM = """You are an autonomous CI/CD agent executing tasks.
 
@@ -237,6 +237,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                             break
 
                     # Action review (if enabled)
+                    action_review = None
                     if enable_action_review:
                         action_desc = f"{tool_name} with {len(tool_args)} arguments"
                         action_review = review_action(
@@ -250,13 +251,30 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         if not action_review.approved:
                             display_action_review(action_review, action_desc)
                             print(f"  ✗ Action blocked by review agent")
-                            plan.mark_failed("Action blocked by review agent")
-                            task_complete = True
-                            break
+
+                            # Inject feedback into conversation so LLM can adjust
+                            feedback = format_review_feedback_for_llm(action_review, action_desc, tool_name)
+                            if feedback:
+                                messages.append({
+                                    "role": "user",
+                                    "content": feedback
+                                })
+
+                            # Don't fail immediately - let LLM try a different approach
+                            continue
                         elif action_review.security_warnings or action_review.concerns:
                             display_action_review(action_review, action_desc)
 
                     result = execute_tool(tool_name, tool_args)
+
+                    # Inject review feedback into conversation (if any concerns/warnings)
+                    if enable_action_review and action_review:
+                        feedback = format_review_feedback_for_llm(action_review, action_desc, tool_name)
+                        if feedback:
+                            messages.append({
+                                "role": "user",
+                                "content": feedback
+                            })
 
                     # Add tool result to conversation
                     messages.append({
@@ -420,6 +438,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         return False
 
                 # Action review (if enabled)
+                action_review = None
                 if enable_action_review:
                     action_desc = f"{tool_name} with {len(tool_args)} arguments"
                     action_review = review_action(
@@ -433,12 +452,30 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                     if not action_review.approved:
                         display_action_review(action_review, action_desc)
                         print(f"  ✗ Action blocked by review agent")
-                        plan.mark_task_failed(task, "Action blocked by review agent")
-                        return False
+
+                        # Inject feedback into conversation so LLM can adjust
+                        feedback = format_review_feedback_for_llm(action_review, action_desc, tool_name)
+                        if feedback:
+                            messages.append({
+                                "role": "user",
+                                "content": feedback
+                            })
+
+                        # Don't fail immediately - let LLM try a different approach
+                        continue
                     elif action_review.security_warnings or action_review.concerns:
                         display_action_review(action_review, action_desc)
 
                 result = execute_tool(tool_name, tool_args)
+
+                # Inject review feedback into conversation (if any concerns/warnings)
+                if enable_action_review and action_review:
+                    feedback = format_review_feedback_for_llm(action_review, action_desc, tool_name)
+                    if feedback:
+                        messages.append({
+                            "role": "user",
+                            "content": feedback
+                        })
 
                 # Add tool result to conversation
                 messages.append({
@@ -575,3 +612,132 @@ def concurrent_execution_mode(plan: ExecutionPlan, max_workers: int = 2, auto_ap
     print("=" * 60)
 
     return all(t.status == TaskStatus.COMPLETED for t in plan.tasks)
+
+
+def fix_validation_failures(
+    validation_feedback: str,
+    user_request: str,
+    tools: list = None,
+    enable_action_review: bool = False,
+    max_fix_attempts: int = 5
+) -> bool:
+    """Attempt to fix validation failures based on feedback.
+
+    This creates a self-healing mechanism where the LLM sees validation failures
+    and attempts to fix them automatically.
+
+    Args:
+        validation_feedback: Formatted validation feedback from validator
+        user_request: Original user request for context
+        tools: List of available tools for LLM function calling
+        enable_action_review: Whether to review fix actions
+        max_fix_attempts: Maximum number of fix attempts
+
+    Returns:
+        True if fixes were attempted successfully, False otherwise
+    """
+    print("\n" + "=" * 60)
+    print("AUTO-FIX MODE - Addressing Validation Failures")
+    print("=" * 60)
+
+    # Get system info for context
+    sys_info = get_system_info_cached()
+    system_context = f"""System Information:
+OS: {sys_info['os']} {sys_info['os_release']}
+Platform: {sys_info['platform']}
+Architecture: {sys_info['architecture']}
+Shell Type: {sys_info['shell_type']}
+
+{EXECUTION_SYSTEM}
+
+IMPORTANT: You are in AUTO-FIX mode. Your task is to analyze validation failures
+and create fixes for them. Be methodical and targeted - fix one issue at a time."""
+
+    messages = [
+        {"role": "system", "content": system_context},
+        {"role": "user", "content": f"""Original task: {user_request}
+
+{validation_feedback}
+
+Please analyze these validation failures and fix them. Complete each fix and report TASK_COMPLETE when all issues are resolved."""}
+    ]
+
+    iteration = 0
+    fixes_complete = False
+
+    while iteration < max_fix_attempts and not fixes_complete:
+        iteration += 1
+        print(f"\n→ Fix attempt {iteration}/{max_fix_attempts}")
+
+        # Get LLM response
+        response = ollama_chat(messages, tools=tools)
+
+        if "error" in response:
+            print(f"  ✗ Error during fix: {response['error']}")
+            return False
+
+        msg = response.get("message", {})
+        content = msg.get("content", "")
+        tool_calls = msg.get("tool_calls", [])
+
+        # Add assistant response to conversation
+        messages.append(msg)
+
+        # Execute tool calls
+        if tool_calls:
+            for tool_call in tool_calls:
+                func = tool_call.get("function", {})
+                tool_name = func.get("name")
+                tool_args = func.get("arguments", {})
+
+                if isinstance(tool_args, str):
+                    try:
+                        tool_args = json.loads(tool_args)
+                    except:
+                        tool_args = {}
+
+                print(f"  → {tool_name}...")
+
+                # Action review if enabled
+                if enable_action_review:
+                    from rev.execution.reviewer import review_action, display_action_review, format_review_feedback_for_llm
+                    action_desc = f"{tool_name} with {len(tool_args)} arguments"
+                    action_review = review_action(
+                        action_type="fix",
+                        action_description=action_desc,
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        context="Auto-fixing validation failures"
+                    )
+
+                    if not action_review.approved:
+                        display_action_review(action_review, action_desc)
+                        feedback = format_review_feedback_for_llm(action_review, action_desc, tool_name)
+                        if feedback:
+                            messages.append({"role": "user", "content": feedback})
+                        continue
+
+                # Execute the fix
+                result = execute_tool(tool_name, tool_args)
+
+                # Add result to conversation
+                messages.append({
+                    "role": "tool",
+                    "content": result
+                })
+
+        # Check if fixes are complete
+        if "TASK_COMPLETE" in content or "task complete" in content.lower():
+            print(f"  ✓ Fixes completed")
+            fixes_complete = True
+            break
+
+        # If no tool calls and no completion, provide guidance
+        if not tool_calls:
+            print(f"  → LLM response: {content[:200]}")
+
+    if iteration >= max_fix_attempts:
+        print(f"  ⚠️  Reached maximum fix attempts ({max_fix_attempts})")
+        return False
+
+    return fixes_complete

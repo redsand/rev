@@ -487,3 +487,62 @@ def display_action_review(review: ActionReview, action_description: str):
 
     if review.recommendation:
         print(f"📋 Recommendation: {review.recommendation}")
+
+
+def format_review_feedback_for_llm(review: ActionReview, action_description: str, tool_name: str = None) -> str:
+    """Format action review feedback for LLM consumption.
+
+    This creates a structured message that the LLM can understand and act upon,
+    allowing it to adjust its approach based on reviewer feedback.
+
+    Args:
+        review: The action review results
+        action_description: Description of the action that was reviewed
+        tool_name: Name of the tool that was called (optional)
+
+    Returns:
+        Formatted feedback string for inclusion in LLM conversation
+    """
+    if not review.concerns and not review.security_warnings and not review.alternative_approaches:
+        # No feedback to provide
+        return None
+
+    feedback_parts = [
+        "=== REVIEW FEEDBACK ===",
+        f"Action: {action_description}"
+    ]
+
+    if tool_name:
+        feedback_parts.append(f"Tool: {tool_name}")
+
+    if review.approved:
+        feedback_parts.append("Status: Approved with concerns")
+    else:
+        feedback_parts.append("Status: BLOCKED - Action was not approved")
+
+    if review.security_warnings:
+        feedback_parts.append("\n🔒 SECURITY WARNINGS:")
+        for warning in review.security_warnings:
+            feedback_parts.append(f"  - {warning}")
+
+    if review.concerns:
+        feedback_parts.append("\n⚠️  CONCERNS:")
+        for concern in review.concerns:
+            feedback_parts.append(f"  - {concern}")
+
+    if review.alternative_approaches:
+        feedback_parts.append("\n💡 ALTERNATIVE APPROACHES:")
+        for i, alt in enumerate(review.alternative_approaches, 1):
+            feedback_parts.append(f"  {i}. {alt}")
+
+    if review.recommendation:
+        feedback_parts.append(f"\n📋 RECOMMENDATION: {review.recommendation}")
+
+    if not review.approved:
+        feedback_parts.append("\nPlease choose a different approach to accomplish this task.")
+    else:
+        feedback_parts.append("\nPlease consider this feedback in your next actions and adjust your approach if needed.")
+
+    feedback_parts.append("===================")
+
+    return "\n".join(feedback_parts)
