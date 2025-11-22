@@ -9,6 +9,7 @@ from rev.execution import planning_mode, execution_mode
 from rev.models.task import TaskStatus
 from rev.config import set_escape_interrupt, get_escape_interrupt
 from rev.terminal.input import get_input_with_escape
+from rev.tools.registry import get_available_tools
 
 
 def repl_mode():
@@ -93,7 +94,8 @@ Autonomous mode: destructive operations require confirmation, others run automat
         set_escape_interrupt(False)
 
         plan = planning_mode(user_input)
-        success = execution_mode(plan, auto_approve=True)
+        tools = get_available_tools()
+        success = execution_mode(plan, auto_approve=True, tools=tools)
 
         # Reset interrupt flag after execution (in case it was set)
         set_escape_interrupt(False)

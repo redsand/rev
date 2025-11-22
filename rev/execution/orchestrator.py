@@ -18,6 +18,7 @@ from rev.execution.validator import validate_execution, ValidationStatus
 from rev.execution.researcher import research_codebase, ResearchFindings
 from rev.execution.learner import LearningAgent, display_learning_suggestions
 from rev.execution.executor import execution_mode, concurrent_execution_mode
+from rev.tools.registry import get_available_tools
 
 
 class AgentPhase(Enum):
@@ -185,17 +186,20 @@ class Orchestrator:
 
             # Phase 5: Execution Agent - Execute the plan
             self._update_phase(AgentPhase.EXECUTION)
+            tools = get_available_tools()
             if self.config.parallel_workers > 1:
                 concurrent_execution_mode(
                     plan,
                     max_workers=self.config.parallel_workers,
                     auto_approve=self.config.auto_approve,
+                    tools=tools,
                     enable_action_review=self.config.enable_action_review
                 )
             else:
                 execution_mode(
                     plan,
                     auto_approve=self.config.auto_approve,
+                    tools=tools,
                     enable_action_review=self.config.enable_action_review
                 )
 
