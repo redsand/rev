@@ -21,6 +21,7 @@ from rev.llm.client import ollama_chat
 from rev.config import get_system_info_cached, get_escape_interrupt, set_escape_interrupt
 from rev.execution.safety import is_scary_operation, prompt_scary_operation
 from rev.execution.reviewer import review_action, display_action_review, format_review_feedback_for_llm
+from rev.execution.session import SessionTracker, create_message_summary_from_history
 
 EXECUTION_SYSTEM = """You are an autonomous CI/CD agent executing tasks.
 
@@ -56,15 +57,21 @@ After making changes, run tests to ensure nothing broke.
 Be concise. Execute the task and report success or failure."""
 
 
-def _summarize_old_messages(messages: List[Dict]) -> str:
+def _summarize_old_messages(messages: List[Dict], tracker: 'SessionTracker' = None) -> str:
     """Summarize completed tasks from old messages.
 
     Args:
         messages: List of old message dicts to summarize
+        tracker: Optional SessionTracker for enhanced summary
 
     Returns:
         Concise summary string of completed work
     """
+    # Use enhanced summary if tracker available
+    if tracker:
+        return create_message_summary_from_history(messages, tracker)
+
+    # Fallback: basic message-based summarization
     tasks_completed = []
     tools_used = []
 
@@ -99,7 +106,7 @@ def _summarize_old_messages(messages: List[Dict]) -> str:
     return "\n".join(summary_parts) if summary_parts else "Previous work completed successfully."
 
 
-def _manage_message_history(messages: List[Dict], max_recent: int = 20) -> List[Dict]:
+def _manage_message_history(messages: List[Dict], max_recent: int = 20, tracker: 'SessionTracker' = None) -> List[Dict]:
     """Keep recent messages and summarize old ones to prevent unbounded growth.
 
     This optimization prevents token explosion in long-running sessions by:
@@ -110,6 +117,7 @@ def _manage_message_history(messages: List[Dict], max_recent: int = 20) -> List[
     Args:
         messages: Current message history
         max_recent: Number of recent messages to keep (default: 20)
+        tracker: Optional SessionTracker for enhanced summaries
 
     Returns:
         Trimmed message list with summary of old messages
@@ -128,8 +136,8 @@ def _manage_message_history(messages: List[Dict], max_recent: int = 20) -> List[
     old_messages = messages[start_idx:-max_recent]
 
     if len(old_messages) > 0:
-        # Create summary of completed work
-        summary = _summarize_old_messages(old_messages)
+        # Create summary of completed work (use tracker if available)
+        summary = _summarize_old_messages(old_messages, tracker)
         summary_msg = {
             "role": "user",
             "content": f"[Summary of previous work]\n{summary}\n\n[Continuing with recent context...]"
@@ -194,6 +202,10 @@ Shell Type: {sys_info['shell_type']}
     max_iterations = 10000  # Very high limit to effectively remove restriction
     iteration = 0
 
+    # Initialize session tracker for comprehensive summarization
+    session_tracker = SessionTracker()
+    print(f"  📊 Session tracking enabled (ID: {session_tracker.session_id})\n")
+
     while not plan.is_complete() and iteration < max_iterations:
         # Check for escape key interrupt
         if get_escape_interrupt():
@@ -222,6 +234,9 @@ Shell Type: {sys_info['shell_type']}
         print(f"[Type: {current_task.action_type}]")
 
         current_task.status = TaskStatus.IN_PROGRESS
+
+        # Track task start
+        session_tracker.track_task_started(current_task.description)
 
         # Add task to conversation
         messages.append({
@@ -359,6 +374,9 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
 
                     result = execute_tool(tool_name, tool_args)
 
+                    # Track tool usage
+                    session_tracker.track_tool_call(tool_name, tool_args)
+
                     # Inject review feedback into conversation (if any concerns/warnings)
                     if enable_action_review and action_review:
                         feedback = format_review_feedback_for_llm(action_review, action_desc, tool_name)
@@ -374,8 +392,9 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         "content": result
                     })
 
-                    # Check for test failures
+                    # Check for test failures and track results
                     if tool_name == "run_tests":
+                        session_tracker.track_test_results(result)
                         try:
                             result_data = json.loads(result)
                             if result_data.get("rc", 0) != 0:
@@ -387,6 +406,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             if "TASK_COMPLETE" in content or "task complete" in content.lower():
                 print(f"  ✓ Task completed")
                 plan.mark_completed(content)
+                session_tracker.track_task_completed(current_task.description)
                 task_complete = True
                 break
 
@@ -397,19 +417,23 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
 
                 # If model keeps responding without tools or completion, it might not support them
                 if task_iterations >= 3:
+                    error_msg = "Model does not support tool calling. Consider using a model with tool support."
                     print(f"  ⚠ Model not using tools. Marking task as needs manual intervention.")
-                    plan.mark_failed("Model does not support tool calling. Consider using a model with tool support.")
+                    plan.mark_failed(error_msg)
+                    session_tracker.track_task_failed(current_task.description, error_msg)
                     break
 
         if not task_complete and task_iterations >= max_task_iterations:
+            error_msg = "Exceeded iteration limit"
             print(f"  ✗ Task exceeded iteration limit")
-            plan.mark_failed("Exceeded iteration limit")
+            plan.mark_failed(error_msg)
+            session_tracker.track_task_failed(current_task.description, error_msg)
 
         # OPTIMIZATION: Manage message history to prevent unbounded growth
         # Trim every 10 messages or when it exceeds 30 messages
         if len(messages) > 30:
             messages_before = len(messages)
-            messages = _manage_message_history(messages, max_recent=20)
+            messages = _manage_message_history(messages, max_recent=20, tracker=session_tracker)
             messages_trimmed = messages_before - len(messages)
             if messages_trimmed > 0:
                 print(f"  ℹ️  Message history optimized: {messages_before} → {len(messages)} messages")
@@ -435,6 +459,21 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             print(f"    Error: {task.error}")
 
     print("=" * 60)
+
+    # Finalize and display session summary
+    session_tracker.finalize()
+    print("\n" + "=" * 60)
+    print("SESSION SUMMARY")
+    print("=" * 60)
+    print(session_tracker.get_summary(detailed=False))
+    print("=" * 60)
+
+    # Save session summary to disk
+    try:
+        summary_path = session_tracker.save_to_file()
+        print(f"\n📊 Session summary saved to: {summary_path}")
+    except Exception as e:
+        print(f"\n⚠️  Failed to save session summary: {e}")
 
     return all(t.status == TaskStatus.COMPLETED for t in plan.tasks)
 
