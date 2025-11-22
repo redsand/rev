@@ -90,8 +90,8 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
     # Get the LLM cache
     llm_cache = get_llm_cache()
 
-    # Try to get cached response first
-    cached_response = llm_cache.get_response(messages, tools)
+    # Try to get cached response first (include model in cache key)
+    cached_response = llm_cache.get_response(messages, tools, config.OLLAMA_MODEL)
     if cached_response is not None:
         if OLLAMA_DEBUG:
             print("[DEBUG] Using cached LLM response")
@@ -197,8 +197,8 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
             resp.raise_for_status()
             response = resp.json()
 
-            # Cache the successful response
-            llm_cache.set_response(messages, response, tools)
+            # Cache the successful response (include model in cache key)
+            llm_cache.set_response(messages, response, tools, config.OLLAMA_MODEL)
 
             return response
 

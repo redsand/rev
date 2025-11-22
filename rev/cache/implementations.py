@@ -55,25 +55,46 @@ class LLMResponseCache(IntelligentCache):
     def __init__(self, **kwargs):
         super().__init__(name="llm_response", ttl=3600, **kwargs)  # 1 hour TTL
 
-    def _hash_messages(self, messages: List[Dict[str, str]], tools: Optional[List[Dict]] = None) -> str:
-        """Create hash of messages for cache key."""
+    def _hash_messages(self, messages: List[Dict[str, str]], tools: Optional[List[Dict]] = None, model: Optional[str] = None) -> str:
+        """Create hash of messages for cache key.
+
+        Args:
+            messages: List of message dicts
+            tools: Optional list of tool definitions
+            model: Optional model name to include in cache key
+        """
         # Create deterministic string representation
         key_data = json.dumps(messages, sort_keys=True)
         if tools:
             key_data += json.dumps(tools, sort_keys=True)
+        if model:
+            key_data += f"|model:{model}"
 
         # Hash it
         return hashlib.sha256(key_data.encode()).hexdigest()
 
-    def get_response(self, messages: List[Dict[str, str]], tools: Optional[List[Dict]] = None) -> Optional[Dict[str, Any]]:
-        """Get cached LLM response."""
-        cache_key = self._hash_messages(messages, tools)
+    def get_response(self, messages: List[Dict[str, str]], tools: Optional[List[Dict]] = None, model: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Get cached LLM response.
+
+        Args:
+            messages: List of message dicts
+            tools: Optional list of tool definitions
+            model: Optional model name to match in cache
+        """
+        cache_key = self._hash_messages(messages, tools, model)
         return self.get(cache_key)
 
-    def set_response(self, messages: List[Dict[str, str]], response: Dict[str, Any], tools: Optional[List[Dict]] = None):
-        """Cache LLM response."""
-        cache_key = self._hash_messages(messages, tools)
-        self.set(cache_key, response, metadata={"messages_count": len(messages)})
+    def set_response(self, messages: List[Dict[str, str]], response: Dict[str, Any], tools: Optional[List[Dict]] = None, model: Optional[str] = None):
+        """Cache LLM response.
+
+        Args:
+            messages: List of message dicts
+            response: LLM response to cache
+            tools: Optional list of tool definitions
+            model: Optional model name to include in cache key
+        """
+        cache_key = self._hash_messages(messages, tools, model)
+        self.set(cache_key, response, metadata={"messages_count": len(messages), "model": model})
 
 
 class RepoContextCache(IntelligentCache):
