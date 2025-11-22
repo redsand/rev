@@ -23,9 +23,65 @@ from rev.tools.utils import (
 )
 
 
+def _get_friendly_description(name: str, args: Dict[str, Any]) -> str:
+    """Generate a user-friendly description for tool execution."""
+    # Map tool names to friendly action descriptions with key arguments
+    descriptions = {
+        # File operations
+        "read_file": f"Reading file: {args.get('path', '')}",
+        "write_file": f"Writing file: {args.get('path', '')}",
+        "list_dir": f"Listing directory: {args.get('pattern', '**/*')}",
+        "search_code": f"Searching code: {args.get('pattern', '')} in {args.get('include', '**/*')}",
+        "delete_file": f"Deleting file: {args.get('path', '')}",
+        "move_file": f"Moving file: {args.get('src', '')} → {args.get('dest', '')}",
+        "append_to_file": f"Appending to file: {args.get('path', '')}",
+        "replace_in_file": f"Replacing in file: {args.get('path', '')}",
+        "create_directory": f"Creating directory: {args.get('path', '')}",
+        "get_file_info": f"Getting file info: {args.get('path', '')}",
+        "copy_file": f"Copying file: {args.get('src', '')} → {args.get('dest', '')}",
+        "file_exists": f"Checking file exists: {args.get('path', '')}",
+        "read_file_lines": f"Reading lines from file: {args.get('path', '')}",
+        "tree_view": f"Displaying tree view: {args.get('path', '.')}",
+
+        # Git operations
+        "git_diff": f"Showing git diff: {args.get('pathspec', '.')}",
+        "apply_patch": f"Applying patch{' (dry run)' if args.get('dry_run') else ''}",
+        "git_commit": f"Creating git commit: {args.get('message', '')[:50]}{'...' if len(args.get('message', '')) > 50 else ''}",
+        "git_status": "Getting git status",
+        "git_log": f"Viewing git log ({args.get('count', 10)} commits)",
+        "git_branch": f"Git branch: {args.get('action', 'list')}" + (f" {args.get('branch_name', '')}" if args.get('branch_name') else ""),
+        "run_cmd": f"Running command: {args.get('cmd', '')}",
+        "run_tests": f"Running tests: {args.get('cmd', 'pytest -q')}",
+        "get_repo_context": f"Getting repository context ({args.get('commits', 6)} commits)",
+
+        # Utility tools
+        "install_package": f"Installing package: {args.get('package', '')}",
+        "web_fetch": f"Fetching URL: {args.get('url', '')}",
+        "execute_python": "Executing Python code",
+        "get_system_info": "Getting system information",
+
+        # SSH operations
+        "ssh_connect": f"Connecting via SSH: {args.get('username', '')}@{args.get('host', '')}",
+        "ssh_exec": f"Executing SSH command on {args.get('connection_id', '')}: {args.get('command', '')}",
+        "ssh_copy_to": f"Copying to SSH server: {args.get('local_path', '')} → {args.get('remote_path', '')}",
+        "ssh_copy_from": f"Copying from SSH server: {args.get('remote_path', '')} → {args.get('local_path', '')}",
+        "ssh_disconnect": f"Disconnecting SSH: {args.get('connection_id', '')}",
+        "ssh_list_connections": "Listing SSH connections",
+
+        # MCP tools
+        "mcp_add_server": f"Adding MCP server: {args.get('name', '')}",
+        "mcp_list_servers": "Listing MCP servers",
+        "mcp_call_tool": f"Calling MCP tool: {args.get('server', '')}.{args.get('tool', '')}",
+    }
+
+    # Return the friendly description or fall back to technical format
+    return descriptions.get(name, f"{name}({', '.join(f'{k}={v!r}' for k, v in args.items())})")
+
+
 def execute_tool(name: str, args: Dict[str, Any]) -> str:
     """Execute a tool and return result."""
-    print(f"  → Executing: {name}({', '.join(f'{k}={v!r}' for k, v in args.items())})")
+    friendly_desc = _get_friendly_description(name, args)
+    print(f"  → {friendly_desc}")
 
     try:
         # Original tools
