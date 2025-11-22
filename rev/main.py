@@ -259,8 +259,16 @@ def main():
 
                 # Handle review decision
                 if review.decision == ReviewDecision.REJECTED:
-                    print("\n❌ Plan rejected by review agent. Please revise your request.")
-                    sys.exit(1)
+                    print("\n❌ Plan rejected by review agent.")
+                    if args.prompt:
+                        print("   The plan has critical issues that should be addressed.")
+                        response = input("Continue anyway? (y/N): ")
+                        if response.lower() != 'y':
+                            print("Aborted by user")
+                            sys.exit(1)
+                    else:
+                        print("   ⚠️  WARNING: Proceeding despite rejection (autonomous mode)")
+                        print("   The plan has critical issues. Use --prompt to review or --no-review to disable.")
                 elif review.decision == ReviewDecision.REQUIRES_CHANGES:
                     print("\n⚠️  Plan requires changes. Review the issues above.")
                     if args.prompt:
