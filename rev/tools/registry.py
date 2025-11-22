@@ -137,10 +137,143 @@ def get_available_tools() -> list:
     Returns a list of tool definitions in OpenAI format that can be passed
     to language models that support function calling.
     """
-    # For now, return an empty list to indicate tools are available
-    # but defined elsewhere (in the main rev module). The execution
-    # functions can obtain tools from the main rev module when needed.
-    #
-    # This is a placeholder that can be expanded to generate tool definitions
-    # dynamically from the execute_tool function's capabilities.
-    return []
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read contents of a file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to file"}
+                    },
+                    "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "Write content to a file (creates or overwrites)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to file"},
+                        "content": {"type": "string", "description": "File content"}
+                    },
+                    "required": ["path", "content"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_dir",
+                "description": "List files matching a pattern (glob syntax)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {"type": "string", "description": "Glob pattern (e.g., **/*.py)", "default": "**/*"}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_code",
+                "description": "Search code using regex pattern",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {"type": "string", "description": "Regex pattern to search"},
+                        "include": {"type": "string", "description": "Glob pattern for files to search", "default": "**/*"}
+                    },
+                    "required": ["pattern"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "git_diff",
+                "description": "Show git diff for current changes",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pathspec": {"type": "string", "description": "Path or pattern to diff", "default": "."}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "apply_patch",
+                "description": "Apply a unified diff patch to files",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "patch": {"type": "string", "description": "Unified diff patch content"},
+                        "dry_run": {"type": "boolean", "description": "Test patch without applying", "default": False}
+                    },
+                    "required": ["patch"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_cmd",
+                "description": "Execute a shell command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "cmd": {"type": "string", "description": "Command to execute"},
+                        "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 300}
+                    },
+                    "required": ["cmd"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_tests",
+                "description": "Run test suite",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "cmd": {"type": "string", "description": "Test command", "default": "pytest -q"},
+                        "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 600}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_repo_context",
+                "description": "Get repository status and recent commits",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "commits": {"type": "integer", "description": "Number of recent commits", "default": 6}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_system_info",
+                "description": "Get system information (OS, platform, architecture)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
+        }
+    ]
