@@ -1,4 +1,23 @@
 -r requirements.txt
+
+# Testing frameworks
 pytest>=9.0.0
 pytest-cov>=7.0.0
 coverage>=7.12.0
+
+# Static analysis tools - Cross-platform Python AST-based analysis
+# These tools work on Windows, Linux, and macOS
+
+# Code quality and linting
+pylint>=3.0.0              # Comprehensive static code analysis
+mypy>=1.7.0                # Static type checking
+bandit>=1.7.5              # Security vulnerability scanning
+radon>=6.0.1               # Code complexity metrics (cyclomatic, maintainability)
+vulture>=2.10              # Dead code detection
+
+# Additional security tools
+detect-secrets>=1.4.0      # Secret detection in code
+
+# Code formatting (optional)
+black>=23.0.0              # Code formatter
+isort>=5.12.0              # Import sorter

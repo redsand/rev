@@ -21,6 +21,10 @@ from rev.tools.ssh_ops import (
 from rev.tools.utils import (
     install_package, web_fetch, execute_python, get_system_info
 )
+from rev.tools.analysis import (
+    analyze_ast_patterns, run_pylint, run_mypy, run_radon_complexity,
+    find_dead_code, run_all_analysis
+)
 
 
 def _get_friendly_description(name: str, args: Dict[str, Any]) -> str:
@@ -72,6 +76,14 @@ def _get_friendly_description(name: str, args: Dict[str, Any]) -> str:
         "mcp_add_server": f"Adding MCP server: {args.get('name', '')}",
         "mcp_list_servers": "Listing MCP servers",
         "mcp_call_tool": f"Calling MCP tool: {args.get('server', '')}.{args.get('tool', '')}",
+
+        # Static analysis tools
+        "analyze_ast_patterns": f"Analyzing AST patterns: {args.get('path', '.')}",
+        "run_pylint": f"Running pylint on: {args.get('path', '.')}",
+        "run_mypy": f"Running mypy type check on: {args.get('path', '.')}",
+        "run_radon_complexity": f"Analyzing code complexity: {args.get('path', '.')}",
+        "find_dead_code": f"Finding dead code in: {args.get('path', '.')}",
+        "run_all_analysis": f"Running full analysis suite on: {args.get('path', '.')}",
     }
 
     # Return the friendly description or fall back to technical format
@@ -180,6 +192,20 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
                 return mcp_call_tool_impl(args["server"], args["tool"], args.get("arguments", "{}"))
             except ImportError:
                 return json.dumps({"error": "MCP tools not available"})
+
+        # Static analysis tools
+        elif name == "analyze_ast_patterns":
+            return analyze_ast_patterns(args.get("path", "."), args.get("patterns"))
+        elif name == "run_pylint":
+            return run_pylint(args.get("path", "."), args.get("config"))
+        elif name == "run_mypy":
+            return run_mypy(args.get("path", "."), args.get("config"))
+        elif name == "run_radon_complexity":
+            return run_radon_complexity(args.get("path", "."), args.get("min_rank", "C"))
+        elif name == "find_dead_code":
+            return find_dead_code(args.get("path", "."))
+        elif name == "run_all_analysis":
+            return run_all_analysis(args.get("path", "."))
 
         else:
             return json.dumps({"error": f"Unknown tool: {name}"})
@@ -717,6 +743,90 @@ def get_available_tools() -> list:
                         "arguments": {"type": "string", "description": "Tool arguments as JSON", "default": "{}"}
                     },
                     "required": ["server", "tool"]
+                }
+            }
+        },
+
+        # Static analysis tools
+        {
+            "type": "function",
+            "function": {
+                "name": "analyze_ast_patterns",
+                "description": "Analyze Python code using AST for pattern matching (cross-platform). Detects TODOs, print statements, dangerous functions, missing type hints, complex functions, global variables. More accurate than regex.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to Python file or directory", "default": "."},
+                        "patterns": {"type": "array", "items": {"type": "string"}, "description": "Patterns to check: todos, prints, dangerous, type_hints, complex_functions, globals"}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_pylint",
+                "description": "Run pylint static code analysis (cross-platform). Checks code errors, style violations, code smells, unused imports, naming conventions.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to analyze", "default": "."},
+                        "config": {"type": "string", "description": "Path to pylintrc config file (optional)"}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_mypy",
+                "description": "Run mypy static type checking (cross-platform). Verifies type hints and catches type-related bugs.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to analyze", "default": "."},
+                        "config": {"type": "string", "description": "Path to mypy.ini config file (optional)"}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_radon_complexity",
+                "description": "Analyze code complexity using radon (cross-platform). Measures cyclomatic complexity, maintainability index, and code metrics.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to analyze", "default": "."},
+                        "min_rank": {"type": "string", "description": "Minimum complexity rank to report (A-F)", "default": "C"}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "find_dead_code",
+                "description": "Find dead/unused code using vulture (cross-platform). Detects unused functions, classes, variables, imports, and unreachable code.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to analyze", "default": "."}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_all_analysis",
+                "description": "Run all available static analysis tools and combine results (cross-platform). Includes AST analysis, pylint, mypy, radon, and vulture.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to analyze", "default": "."}
+                    }
                 }
             }
         }
