@@ -41,10 +41,20 @@ help:
 	@echo "  validate      - Validate build"
 	@echo "  shell         - Activate virtual environment shell"
 	@echo ""
+	@echo "$(GREEN)Static Analysis:$(NC)"
+	@echo "  lint          - Run all linters (pylint, mypy, bandit)"
+	@echo "  pylint        - Run pylint code analysis"
+	@echo "  mypy          - Run mypy type checking"
+	@echo "  bandit        - Run bandit security scanning"
+	@echo "  complexity    - Analyze code complexity with radon"
+	@echo "  deadcode      - Find unused code with vulture"
+	@echo "  analyze       - Run complete analysis suite"
+	@echo ""
 	@echo "$(GREEN)Examples:$(NC)"
 	@echo "  make setup    # Basic setup"
 	@echo "  make dev test # Development setup with tests"
-	@echo "  make full coverage # Full setup with coverage"
+	@echo "  make lint     # Run all linters"
+	@echo "  make analyze  # Full code analysis"
 
 # Create virtual environment
 .PHONY: venv
@@ -177,6 +187,92 @@ shell:
 		echo "$(RED)Virtual environment not found. Run 'make setup' first.$(NC)"; \
 		exit 1; \
 	fi
+
+# Static analysis targets
+.PHONY: pylint
+pylint:
+	@echo "$(BLUE)Running pylint...$(NC)"
+	@if command -v pylint >/dev/null 2>&1; then \
+		$(VENV_PYTHON) -m pylint rev/ --rcfile=.pylintrc || true; \
+	elif [ -f $(VENV_BIN)/pylint ]; then \
+		$(VENV_BIN)/pylint rev/ --rcfile=.pylintrc || true; \
+	else \
+		echo "$(YELLOW)pylint not found, installing...$(NC)"; \
+		$(VENV_PIP) install pylint; \
+		$(VENV_PYTHON) -m pylint rev/ --rcfile=.pylintrc || true; \
+	fi
+
+.PHONY: mypy
+mypy:
+	@echo "$(BLUE)Running mypy type checking...$(NC)"
+	@if command -v mypy >/dev/null 2>&1; then \
+		$(VENV_PYTHON) -m mypy rev/ --config-file=mypy.ini || true; \
+	elif [ -f $(VENV_BIN)/mypy ]; then \
+		$(VENV_BIN)/mypy rev/ --config-file=mypy.ini || true; \
+	else \
+		echo "$(YELLOW)mypy not found, installing...$(NC)"; \
+		$(VENV_PIP) install mypy; \
+		$(VENV_PYTHON) -m mypy rev/ --config-file=mypy.ini || true; \
+	fi
+
+.PHONY: bandit
+bandit:
+	@echo "$(BLUE)Running bandit security scanning...$(NC)"
+	@if command -v bandit >/dev/null 2>&1; then \
+		$(VENV_PYTHON) -m bandit -r rev/ -f screen || true; \
+	elif [ -f $(VENV_BIN)/bandit ]; then \
+		$(VENV_BIN)/bandit -r rev/ -f screen || true; \
+	else \
+		echo "$(YELLOW)bandit not found, installing...$(NC)"; \
+		$(VENV_PIP) install bandit; \
+		$(VENV_PYTHON) -m bandit -r rev/ -f screen || true; \
+	fi
+
+.PHONY: complexity
+complexity:
+	@echo "$(BLUE)Analyzing code complexity...$(NC)"
+	@if command -v radon >/dev/null 2>&1; then \
+		echo "$(GREEN)Cyclomatic Complexity:$(NC)"; \
+		$(VENV_PYTHON) -m radon cc rev/ -a -s || true; \
+		echo ""; \
+		echo "$(GREEN)Maintainability Index:$(NC)"; \
+		$(VENV_PYTHON) -m radon mi rev/ -s || true; \
+	elif [ -f $(VENV_BIN)/radon ]; then \
+		echo "$(GREEN)Cyclomatic Complexity:$(NC)"; \
+		$(VENV_BIN)/radon cc rev/ -a -s || true; \
+		echo ""; \
+		echo "$(GREEN)Maintainability Index:$(NC)"; \
+		$(VENV_BIN)/radon mi rev/ -s || true; \
+	else \
+		echo "$(YELLOW)radon not found, installing...$(NC)"; \
+		$(VENV_PIP) install radon; \
+		echo "$(GREEN)Cyclomatic Complexity:$(NC)"; \
+		$(VENV_PYTHON) -m radon cc rev/ -a -s || true; \
+		echo ""; \
+		echo "$(GREEN)Maintainability Index:$(NC)"; \
+		$(VENV_PYTHON) -m radon mi rev/ -s || true; \
+	fi
+
+.PHONY: deadcode
+deadcode:
+	@echo "$(BLUE)Finding dead code...$(NC)"
+	@if command -v vulture >/dev/null 2>&1; then \
+		$(VENV_PYTHON) -m vulture rev/ --min-confidence 80 || true; \
+	elif [ -f $(VENV_BIN)/vulture ]; then \
+		$(VENV_BIN)/vulture rev/ --min-confidence 80 || true; \
+	else \
+		echo "$(YELLOW)vulture not found, installing...$(NC)"; \
+		$(VENV_PIP) install vulture; \
+		$(VENV_PYTHON) -m vulture rev/ --min-confidence 80 || true; \
+	fi
+
+.PHONY: lint
+lint: pylint mypy bandit
+	@echo "$(GREEN)All linters completed$(NC)"
+
+.PHONY: analyze
+analyze: lint complexity deadcode
+	@echo "$(GREEN)Complete analysis finished$(NC)"
 
 # Default target
 .PHONY: all
