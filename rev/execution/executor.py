@@ -16,7 +16,7 @@ from rev.tools.registry import execute_tool
 from rev.llm.client import ollama_chat
 from rev.config import get_system_info_cached, get_escape_interrupt, set_escape_interrupt
 from rev.execution.safety import is_scary_operation, prompt_scary_operation
-from rev.execution.reviewer import review_action, display_action_review
+from rev.execution.reviewer import review_action, display_action_review, format_review_feedback_for_llm
 
 EXECUTION_SYSTEM = """You are an autonomous CI/CD agent executing tasks.
 
@@ -237,6 +237,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                             break
 
                     # Action review (if enabled)
+                    action_review = None
                     if enable_action_review:
                         action_desc = f"{tool_name} with {len(tool_args)} arguments"
                         action_review = review_action(
@@ -250,13 +251,30 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         if not action_review.approved:
                             display_action_review(action_review, action_desc)
                             print(f"  ✗ Action blocked by review agent")
-                            plan.mark_failed("Action blocked by review agent")
-                            task_complete = True
-                            break
+
+                            # Inject feedback into conversation so LLM can adjust
+                            feedback = format_review_feedback_for_llm(action_review, action_desc, tool_name)
+                            if feedback:
+                                messages.append({
+                                    "role": "user",
+                                    "content": feedback
+                                })
+
+                            # Don't fail immediately - let LLM try a different approach
+                            continue
                         elif action_review.security_warnings or action_review.concerns:
                             display_action_review(action_review, action_desc)
 
                     result = execute_tool(tool_name, tool_args)
+
+                    # Inject review feedback into conversation (if any concerns/warnings)
+                    if enable_action_review and action_review:
+                        feedback = format_review_feedback_for_llm(action_review, action_desc, tool_name)
+                        if feedback:
+                            messages.append({
+                                "role": "user",
+                                "content": feedback
+                            })
 
                     # Add tool result to conversation
                     messages.append({
@@ -420,6 +438,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         return False
 
                 # Action review (if enabled)
+                action_review = None
                 if enable_action_review:
                     action_desc = f"{tool_name} with {len(tool_args)} arguments"
                     action_review = review_action(
@@ -433,12 +452,30 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                     if not action_review.approved:
                         display_action_review(action_review, action_desc)
                         print(f"  ✗ Action blocked by review agent")
-                        plan.mark_task_failed(task, "Action blocked by review agent")
-                        return False
+
+                        # Inject feedback into conversation so LLM can adjust
+                        feedback = format_review_feedback_for_llm(action_review, action_desc, tool_name)
+                        if feedback:
+                            messages.append({
+                                "role": "user",
+                                "content": feedback
+                            })
+
+                        # Don't fail immediately - let LLM try a different approach
+                        continue
                     elif action_review.security_warnings or action_review.concerns:
                         display_action_review(action_review, action_desc)
 
                 result = execute_tool(tool_name, tool_args)
+
+                # Inject review feedback into conversation (if any concerns/warnings)
+                if enable_action_review and action_review:
+                    feedback = format_review_feedback_for_llm(action_review, action_desc, tool_name)
+                    if feedback:
+                        messages.append({
+                            "role": "user",
+                            "content": feedback
+                        })
 
                 # Add tool result to conversation
                 messages.append({

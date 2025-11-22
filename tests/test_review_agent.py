@@ -15,7 +15,8 @@ from rev.execution.reviewer import (
     ReviewDecision,
     PlanReview,
     ActionReview,
-    _quick_security_check
+    _quick_security_check,
+    format_review_feedback_for_llm
 )
 
 
@@ -377,6 +378,101 @@ class TestActionReviewDataClass(unittest.TestCase):
         self.assertFalse(data["approved"])
         self.assertEqual(len(data["concerns"]), 1)
         self.assertEqual(data["recommendation"], "Do not proceed")
+
+
+class TestFeedbackFormatting(unittest.TestCase):
+    """Test feedback formatting for LLM consumption."""
+
+    def test_format_feedback_with_concerns(self):
+        """Test formatting feedback with concerns and warnings."""
+        review = ActionReview()
+        review.approved = True
+        review.concerns = ["Pattern may have false positives", "Could miss some variants"]
+        review.security_warnings = ["Potential regex DoS with complex patterns"]
+        review.alternative_approaches = [
+            "Use static analysis tools like AddressSanitizer",
+            "Consider combining with manual code review"
+        ]
+        review.recommendation = "Approve with caution"
+
+        feedback = format_review_feedback_for_llm(
+            review,
+            "search_code for use-after-free patterns",
+            "search_code"
+        )
+
+        self.assertIsNotNone(feedback)
+        self.assertIn("REVIEW FEEDBACK", feedback)
+        self.assertIn("search_code", feedback)
+        self.assertIn("Pattern may have false positives", feedback)
+        self.assertIn("AddressSanitizer", feedback)
+        self.assertIn("Approve with caution", feedback)
+
+    def test_format_feedback_blocked_action(self):
+        """Test formatting feedback for blocked actions."""
+        review = ActionReview()
+        review.approved = False
+        review.concerns = ["This will delete production data"]
+        review.recommendation = "Do not execute"
+
+        feedback = format_review_feedback_for_llm(
+            review,
+            "delete production database",
+            "run_cmd"
+        )
+
+        self.assertIsNotNone(feedback)
+        self.assertIn("BLOCKED", feedback)
+        self.assertIn("choose a different approach", feedback)
+
+    def test_format_feedback_no_concerns(self):
+        """Test that no feedback is returned when there are no concerns."""
+        review = ActionReview()
+        review.approved = True
+        review.recommendation = "Looks good"
+
+        feedback = format_review_feedback_for_llm(
+            review,
+            "read configuration file",
+            "read_file"
+        )
+
+        self.assertIsNone(feedback)
+
+    def test_format_feedback_with_alternatives_only(self):
+        """Test formatting with only alternative approaches."""
+        review = ActionReview()
+        review.approved = True
+        review.alternative_approaches = [
+            "Consider using pytest instead of unittest",
+            "Could add integration tests as well"
+        ]
+
+        feedback = format_review_feedback_for_llm(
+            review,
+            "run unit tests",
+            "run_tests"
+        )
+
+        self.assertIsNotNone(feedback)
+        self.assertIn("ALTERNATIVE APPROACHES", feedback)
+        self.assertIn("pytest", feedback)
+
+    def test_format_feedback_without_tool_name(self):
+        """Test formatting feedback without tool name specified."""
+        review = ActionReview()
+        review.approved = True
+        review.concerns = ["May cause issues"]
+
+        feedback = format_review_feedback_for_llm(
+            review,
+            "some action"
+        )
+
+        self.assertIsNotNone(feedback)
+        self.assertIn("some action", feedback)
+        # Should not include "Tool:" line
+        self.assertNotIn("Tool: None", feedback)
 
 
 if __name__ == "__main__":
