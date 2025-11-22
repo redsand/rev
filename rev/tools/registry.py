@@ -138,6 +138,7 @@ def get_available_tools() -> list:
     to language models that support function calling.
     """
     return [
+        # File operations
         {
             "type": "function",
             "function": {
@@ -198,6 +199,157 @@ def get_available_tools() -> list:
         {
             "type": "function",
             "function": {
+                "name": "delete_file",
+                "description": "Delete a file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to file to delete"}
+                    },
+                    "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "move_file",
+                "description": "Move or rename a file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "src": {"type": "string", "description": "Source file path"},
+                        "dest": {"type": "string", "description": "Destination file path"}
+                    },
+                    "required": ["src", "dest"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "append_to_file",
+                "description": "Append content to end of file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to file"},
+                        "content": {"type": "string", "description": "Content to append"}
+                    },
+                    "required": ["path", "content"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "replace_in_file",
+                "description": "Find and replace text in a file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to file"},
+                        "find": {"type": "string", "description": "Text to find"},
+                        "replace": {"type": "string", "description": "Replacement text"},
+                        "regex": {"type": "boolean", "description": "Use regex pattern", "default": False}
+                    },
+                    "required": ["path", "find", "replace"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "create_directory",
+                "description": "Create a directory (including parent directories)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Directory path to create"}
+                    },
+                    "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_file_info",
+                "description": "Get file metadata (size, modified time, etc)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to file"}
+                    },
+                    "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "copy_file",
+                "description": "Copy a file to a new location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "src": {"type": "string", "description": "Source file path"},
+                        "dest": {"type": "string", "description": "Destination file path"}
+                    },
+                    "required": ["src", "dest"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "file_exists",
+                "description": "Check if a file exists",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to check"}
+                    },
+                    "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file_lines",
+                "description": "Read specific lines from a file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to file"},
+                        "start": {"type": "integer", "description": "Starting line number", "default": 1},
+                        "end": {"type": "integer", "description": "Ending line number (optional)"}
+                    },
+                    "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "tree_view",
+                "description": "Display directory tree structure",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Directory path", "default": "."},
+                        "max_depth": {"type": "integer", "description": "Maximum depth to traverse", "default": 3},
+                        "max_files": {"type": "integer", "description": "Maximum files to show", "default": 100}
+                    }
+                }
+            }
+        },
+
+        # Git operations
+        {
+            "type": "function",
+            "function": {
                 "name": "git_diff",
                 "description": "Show git diff for current changes",
                 "parameters": {
@@ -220,6 +372,60 @@ def get_available_tools() -> list:
                         "dry_run": {"type": "boolean", "description": "Test patch without applying", "default": False}
                     },
                     "required": ["patch"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "git_commit",
+                "description": "Create a git commit",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string", "description": "Commit message"},
+                        "files": {"type": "string", "description": "Files to commit", "default": "."}
+                    },
+                    "required": ["message"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "git_status",
+                "description": "Get git status",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "git_log",
+                "description": "View git commit history",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "count": {"type": "integer", "description": "Number of commits to show", "default": 10},
+                        "oneline": {"type": "boolean", "description": "Show one line per commit", "default": False}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "git_branch",
+                "description": "Git branch operations (list, create, delete)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "description": "Action: list, create, delete", "default": "list"},
+                        "branch_name": {"type": "string", "description": "Branch name for create/delete"}
+                    }
                 }
             }
         },
@@ -265,6 +471,50 @@ def get_available_tools() -> list:
                 }
             }
         },
+
+        # Utility tools
+        {
+            "type": "function",
+            "function": {
+                "name": "install_package",
+                "description": "Install a Python package via pip",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "package": {"type": "string", "description": "Package name to install"}
+                    },
+                    "required": ["package"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "web_fetch",
+                "description": "Fetch content from a URL",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "URL to fetch"}
+                    },
+                    "required": ["url"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "execute_python",
+                "description": "Execute Python code in a subprocess",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "code": {"type": "string", "description": "Python code to execute"}
+                    },
+                    "required": ["code"]
+                }
+            }
+        },
         {
             "type": "function",
             "function": {
@@ -273,6 +523,144 @@ def get_available_tools() -> list:
                 "parameters": {
                     "type": "object",
                     "properties": {}
+                }
+            }
+        },
+
+        # SSH operations
+        {
+            "type": "function",
+            "function": {
+                "name": "ssh_connect",
+                "description": "Connect to a remote server via SSH",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "host": {"type": "string", "description": "Hostname or IP"},
+                        "username": {"type": "string", "description": "SSH username"},
+                        "password": {"type": "string", "description": "SSH password (optional)"},
+                        "key_file": {"type": "string", "description": "Path to private key file (optional)"},
+                        "port": {"type": "integer", "description": "SSH port", "default": 22}
+                    },
+                    "required": ["host", "username"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "ssh_exec",
+                "description": "Execute command on remote SSH server",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "connection_id": {"type": "string", "description": "SSH connection ID"},
+                        "command": {"type": "string", "description": "Command to execute"},
+                        "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 30}
+                    },
+                    "required": ["connection_id", "command"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "ssh_copy_to",
+                "description": "Copy local file to remote SSH server",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "connection_id": {"type": "string", "description": "SSH connection ID"},
+                        "local_path": {"type": "string", "description": "Local file path"},
+                        "remote_path": {"type": "string", "description": "Remote file path"}
+                    },
+                    "required": ["connection_id", "local_path", "remote_path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "ssh_copy_from",
+                "description": "Copy file from remote SSH server to local",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "connection_id": {"type": "string", "description": "SSH connection ID"},
+                        "remote_path": {"type": "string", "description": "Remote file path"},
+                        "local_path": {"type": "string", "description": "Local file path"}
+                    },
+                    "required": ["connection_id", "remote_path", "local_path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "ssh_disconnect",
+                "description": "Disconnect from SSH server",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "connection_id": {"type": "string", "description": "SSH connection ID"}
+                    },
+                    "required": ["connection_id"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "ssh_list_connections",
+                "description": "List active SSH connections",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
+        },
+
+        # MCP tools
+        {
+            "type": "function",
+            "function": {
+                "name": "mcp_add_server",
+                "description": "Add a new MCP server configuration",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Server name"},
+                        "command": {"type": "string", "description": "Server command to execute"},
+                        "args": {"type": "string", "description": "Server arguments (optional)", "default": ""}
+                    },
+                    "required": ["name", "command"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "mcp_list_servers",
+                "description": "List configured MCP servers",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "mcp_call_tool",
+                "description": "Call a tool from an MCP server",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "server": {"type": "string", "description": "MCP server name"},
+                        "tool": {"type": "string", "description": "Tool name"},
+                        "arguments": {"type": "string", "description": "Tool arguments as JSON", "default": "{}"}
+                    },
+                    "required": ["server", "tool"]
                 }
             }
         }
