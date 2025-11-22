@@ -15,6 +15,7 @@ from rev.models.task import ExecutionPlan, RiskLevel, TaskStatus
 from rev.llm.client import ollama_chat
 from rev.config import get_system_info_cached
 from rev.tools.git_ops import get_repo_context
+from rev.tools.registry import get_available_tools
 
 
 PLANNING_SYSTEM = """You are an expert CI/CD agent analyzing tasks and creating execution plans.
@@ -23,6 +24,19 @@ Your job is to:
 1. Understand the user's request
 2. Analyze the repository structure
 3. Create a comprehensive, ordered checklist of tasks
+
+You have access to code analysis tools that can be used during planning:
+- analyze_ast_patterns: AST-based pattern matching for Python code
+- run_pylint: Comprehensive static code analysis
+- run_mypy: Static type checking
+- run_radon_complexity: Code complexity metrics
+- find_dead_code: Dead code detection
+- run_all_analysis: Combined analysis suite
+- search_code: Search code using regex
+- list_dir: List files matching patterns
+- read_file: Read file contents
+
+Use these tools when you need to understand the codebase before planning!
 
 IMPORTANT - System Context:
 You will be provided with the operating system information. Use this to:
@@ -64,6 +78,10 @@ BREAKDOWN_SYSTEM = """You are an expert at breaking down complex tasks into smal
 
 Given a high-level task, break it down into specific, atomic subtasks that can be executed independently.
 
+You have access to code analysis tools to help understand the codebase:
+- analyze_ast_patterns, run_pylint, run_mypy, run_radon_complexity, find_dead_code
+- search_code, list_dir, read_file
+
 Consider:
 1. What files need to be created or modified?
 2. What are the logical steps to implement this?
@@ -80,7 +98,7 @@ Return ONLY a JSON array of subtasks:
 Keep subtasks focused and executable. Each should accomplish one clear goal."""
 
 
-def _recursive_breakdown(task_description: str, action_type: str, context: str, max_depth: int = 2, current_depth: int = 0) -> List[Dict[str, Any]]:
+def _recursive_breakdown(task_description: str, action_type: str, context: str, max_depth: int = 2, current_depth: int = 0, tools: list = None) -> List[Dict[str, Any]]:
     """Recursively break down a complex task into subtasks.
 
     Args:
@@ -89,6 +107,7 @@ def _recursive_breakdown(task_description: str, action_type: str, context: str, 
         context: Repository and system context
         max_depth: Maximum recursion depth
         current_depth: Current recursion level
+        tools: List of available tools for LLM function calling
 
     Returns:
         List of subtask dictionaries
@@ -110,7 +129,7 @@ Context:
 Provide detailed subtasks."""}
     ]
 
-    response = ollama_chat(messages)
+    response = ollama_chat(messages, tools=tools)
 
     if "error" in response:
         # Fallback to original task if breakdown fails
@@ -131,7 +150,8 @@ Provide detailed subtasks."""}
                         subtask["action_type"],
                         context,
                         max_depth,
-                        current_depth + 1
+                        current_depth + 1,
+                        tools
                     )
                     expanded_subtasks.extend(nested)
                 else:
@@ -154,6 +174,7 @@ def planning_mode(user_request: str, enable_advanced_analysis: bool = True, enab
     Args:
         user_request: The user's task request
         enable_advanced_analysis: Enable dependency, impact, and risk analysis
+        enable_recursive_breakdown: Enable recursive breakdown of complex tasks
 
     Returns:
         ExecutionPlan with comprehensive task breakdown and analysis
@@ -161,6 +182,9 @@ def planning_mode(user_request: str, enable_advanced_analysis: bool = True, enab
     print("=" * 60)
     print("PLANNING MODE")
     print("=" * 60)
+
+    # Get available tools for LLM function calling
+    tools = get_available_tools()
 
     # Get system and repository context
     print("→ Analyzing system and repository...")
@@ -185,7 +209,7 @@ Generate a comprehensive execution plan."""}
     ]
 
     print("→ Generating execution plan...")
-    response = ollama_chat(messages)
+    response = ollama_chat(messages, tools=tools)
 
     if "error" in response:
         print(f"Error: {response['error']}")
@@ -213,7 +237,8 @@ Generate a comprehensive execution plan."""}
                             task_data.get("action_type", "general"),
                             context,
                             max_depth=2,
-                            current_depth=0
+                            current_depth=0,
+                            tools=tools
                         )
                         print(f"     └─ Expanded into {len(subtasks)} subtasks")
                         expanded_tasks.extend(subtasks)

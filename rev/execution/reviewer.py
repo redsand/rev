@@ -12,6 +12,7 @@ from enum import Enum
 
 from rev.models.task import ExecutionPlan, Task, RiskLevel
 from rev.llm.client import ollama_chat
+from rev.tools.registry import get_available_tools
 
 
 class ReviewStrictness(Enum):
@@ -76,6 +77,19 @@ class ActionReview:
 
 PLAN_REVIEW_SYSTEM = """You are an expert code review agent specializing in CI/CD workflows and software architecture.
 
+You have access to code analysis tools to verify plans:
+- analyze_ast_patterns: AST-based pattern matching for Python code
+- run_pylint: Comprehensive static code analysis
+- run_mypy: Static type checking
+- run_radon_complexity: Code complexity metrics
+- find_dead_code: Dead code detection
+- run_all_analysis: Combined analysis suite
+- search_code: Search code using regex
+- list_dir: List files matching patterns
+- read_file: Read file contents
+
+Use these tools to verify the plan is realistic and complete!
+
 Your job is to review execution plans and identify:
 1. **Completeness**: Are all necessary tasks included?
 2. **Correctness**: Do the tasks achieve the stated goal?
@@ -119,6 +133,10 @@ Be thorough but practical. Focus on issues that could cause real problems."""
 
 
 ACTION_REVIEW_SYSTEM = """You are an expert security and best practices review agent.
+
+You have access to code analysis tools to help verify actions:
+- analyze_ast_patterns, run_pylint, run_mypy, run_radon_complexity, find_dead_code
+- search_code, list_dir, read_file
 
 Your job is to review individual actions (tool calls, code changes) before execution.
 
@@ -169,6 +187,9 @@ def review_execution_plan(
     print("REVIEW AGENT - PLAN REVIEW")
     print("=" * 60)
 
+    # Get available tools for LLM function calling
+    tools = get_available_tools()
+
     review = PlanReview()
 
     # Quick check: If all tasks are low risk, auto-approve if enabled
@@ -212,7 +233,7 @@ Provide a thorough review."""}
     ]
 
     print("→ Analyzing plan with review agent...")
-    response = ollama_chat(messages)
+    response = ollama_chat(messages, tools=tools)
 
     if "error" in response:
         print(f"⚠️  Review agent error: {response['error']}")
@@ -279,6 +300,9 @@ def review_action(
     Returns:
         ActionReview with approval decision and feedback
     """
+    # Get available tools for LLM function calling
+    tools = get_available_tools()
+
     review = ActionReview()
 
     # Quick security checks (pre-LLM)
@@ -306,7 +330,7 @@ def review_action(
 Should this action be approved?"""}
     ]
 
-    response = ollama_chat(messages)
+    response = ollama_chat(messages, tools=tools)
 
     if "error" in response:
         # Default to approved if review unavailable
