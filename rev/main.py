@@ -13,6 +13,7 @@ from .execution.validator import validate_execution, ValidationStatus
 from .execution.orchestrator import run_orchestrated
 from .terminal import repl_mode
 from .models.task import ExecutionPlan
+from .tools.registry import get_available_tools
 
 
 def main():
@@ -173,17 +174,20 @@ def main():
                         task.status = task.status.__class__("pending")
 
                 # Use concurrent execution if parallel > 1, otherwise sequential
+                tools = get_available_tools()
                 if args.parallel > 1:
                     concurrent_execution_mode(
                         plan,
                         max_workers=args.parallel,
                         auto_approve=not args.prompt,
+                        tools=tools,
                         enable_action_review=args.action_review
                     )
                 else:
                     execution_mode(
                         plan,
                         auto_approve=not args.prompt,
+                        tools=tools,
                         enable_action_review=args.action_review
                     )
 
@@ -284,17 +288,20 @@ def main():
                     print("\n✅ Plan approved by review agent.")
 
             # Use concurrent execution if parallel > 1, otherwise sequential
+            tools = get_available_tools()
             if args.parallel > 1:
                 concurrent_execution_mode(
                     plan,
                     max_workers=args.parallel,
                     auto_approve=not args.prompt,
+                    tools=tools,
                     enable_action_review=args.action_review
                 )
             else:
                 execution_mode(
                     plan,
                     auto_approve=not args.prompt,
+                    tools=tools,
                     enable_action_review=args.action_review
                 )
 
