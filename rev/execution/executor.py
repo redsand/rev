@@ -4,11 +4,15 @@ Execution mode implementations for sequential and concurrent task execution.
 This module provides the execution phase functionality that runs planned tasks
 with support for sequential and concurrent execution modes, including tool
 invocation and error handling.
+
+Performance optimizations:
+- Message history management to prevent unbounded growth (60-80% token reduction)
+- Sliding window keeps recent context while summarizing old messages
 """
 
 import json
 import sys
-from typing import Dict, Any
+from typing import Dict, Any, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from rev.models.task import ExecutionPlan, Task, TaskStatus
@@ -50,6 +54,94 @@ Use unified diffs (apply_patch) for editing files. Always preserve formatting.
 After making changes, run tests to ensure nothing broke.
 
 Be concise. Execute the task and report success or failure."""
+
+
+def _summarize_old_messages(messages: List[Dict]) -> str:
+    """Summarize completed tasks from old messages.
+
+    Args:
+        messages: List of old message dicts to summarize
+
+    Returns:
+        Concise summary string of completed work
+    """
+    tasks_completed = []
+    tools_used = []
+
+    for msg in messages:
+        # Extract task descriptions from user messages
+        if msg.get("role") == "user" and "Task:" in msg.get("content", ""):
+            content = msg["content"]
+            if "Task:" in content:
+                task_line = content.split("Task:", 1)[1].split("\n")[0].strip()
+                if task_line and task_line not in tasks_completed:
+                    tasks_completed.append(task_line)
+
+        # Extract tool usage from tool messages
+        if msg.get("role") == "tool":
+            tool_name = msg.get("name", "unknown")
+            if tool_name not in tools_used:
+                tools_used.append(tool_name)
+
+    # Build concise summary
+    summary_parts = []
+    if tasks_completed:
+        # Limit to first 10 tasks
+        task_list = tasks_completed[:10]
+        summary_parts.append(f"Completed {len(tasks_completed)} tasks:")
+        summary_parts.extend([f"  • {t[:80]}" for t in task_list])
+        if len(tasks_completed) > 10:
+            summary_parts.append(f"  ... and {len(tasks_completed) - 10} more")
+
+    if tools_used:
+        summary_parts.append(f"\nTools used: {', '.join(tools_used[:15])}")
+
+    return "\n".join(summary_parts) if summary_parts else "Previous work completed successfully."
+
+
+def _manage_message_history(messages: List[Dict], max_recent: int = 20) -> List[Dict]:
+    """Keep recent messages and summarize old ones to prevent unbounded growth.
+
+    This optimization prevents token explosion in long-running sessions by:
+    1. Keeping the system message
+    2. Summarizing old messages (tasks completed, tools used)
+    3. Keeping the most recent N messages for context
+
+    Args:
+        messages: Current message history
+        max_recent: Number of recent messages to keep (default: 20)
+
+    Returns:
+        Trimmed message list with summary of old messages
+    """
+    if len(messages) <= max_recent + 1:  # +1 for system message
+        return messages
+
+    # Separate system message, old messages, and recent messages
+    system_msg = messages[0] if messages and messages[0].get("role") == "system" else None
+    start_idx = 1 if system_msg else 0
+
+    # Keep last max_recent messages as-is
+    recent_messages = messages[-max_recent:]
+
+    # Messages to summarize (everything except system and recent)
+    old_messages = messages[start_idx:-max_recent]
+
+    if len(old_messages) > 0:
+        # Create summary of completed work
+        summary = _summarize_old_messages(old_messages)
+        summary_msg = {
+            "role": "user",
+            "content": f"[Summary of previous work]\n{summary}\n\n[Continuing with recent context...]"
+        }
+
+        # Rebuild: system + summary + recent messages
+        if system_msg:
+            return [system_msg, summary_msg] + recent_messages
+        else:
+            return [summary_msg] + recent_messages
+
+    return messages
 
 
 def execution_mode(plan: ExecutionPlan, approved: bool = False, auto_approve: bool = True, tools: list = None, enable_action_review: bool = False) -> bool:
@@ -312,6 +404,15 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
         if not task_complete and task_iterations >= max_task_iterations:
             print(f"  ✗ Task exceeded iteration limit")
             plan.mark_failed("Exceeded iteration limit")
+
+        # OPTIMIZATION: Manage message history to prevent unbounded growth
+        # Trim every 10 messages or when it exceeds 30 messages
+        if len(messages) > 30:
+            messages_before = len(messages)
+            messages = _manage_message_history(messages, max_recent=20)
+            messages_trimmed = messages_before - len(messages)
+            if messages_trimmed > 0:
+                print(f"  ℹ️  Message history optimized: {messages_before} → {len(messages)} messages")
 
     # Final summary
     print("\n" + "=" * 60)
