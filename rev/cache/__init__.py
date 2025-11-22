@@ -9,7 +9,8 @@ from .implementations import (
     FileContentCache,
     LLMResponseCache,
     RepoContextCache,
-    DependencyTreeCache
+    DependencyTreeCache,
+    ASTAnalysisCache
 )
 
 __all__ = [
@@ -19,6 +20,7 @@ __all__ = [
     "LLMResponseCache",
     "RepoContextCache",
     "DependencyTreeCache",
+    "ASTAnalysisCache",
     "get_all_cache_stats",
     "clear_all_caches",
     "save_all_caches",
@@ -26,7 +28,8 @@ __all__ = [
     "get_file_cache",
     "get_llm_cache",
     "get_repo_cache",
-    "get_dep_cache"
+    "get_dep_cache",
+    "get_ast_cache"
 ]
 
 # Global cache instances (will be initialized by initialize_caches())
@@ -34,16 +37,18 @@ _FILE_CACHE: FileContentCache = None
 _LLM_CACHE: LLMResponseCache = None
 _REPO_CACHE: RepoContextCache = None
 _DEP_CACHE: DependencyTreeCache = None
+_AST_CACHE: ASTAnalysisCache = None
 
 
 def initialize_caches(root, cache_dir):
     """Initialize all global cache instances."""
-    global _FILE_CACHE, _LLM_CACHE, _REPO_CACHE, _DEP_CACHE
+    global _FILE_CACHE, _LLM_CACHE, _REPO_CACHE, _DEP_CACHE, _AST_CACHE
 
     _FILE_CACHE = FileContentCache(persist_path=cache_dir / "file_cache.pkl")
     _LLM_CACHE = LLMResponseCache(persist_path=cache_dir / "llm_cache.pkl")
     _REPO_CACHE = RepoContextCache(root=root, persist_path=cache_dir / "repo_cache.pkl")
     _DEP_CACHE = DependencyTreeCache(root=root, persist_path=cache_dir / "dep_cache.pkl")
+    _AST_CACHE = ASTAnalysisCache(persist_path=cache_dir / "ast_cache.pkl")
 
 
 def get_file_cache() -> FileContentCache:
@@ -66,13 +71,19 @@ def get_dep_cache() -> DependencyTreeCache:
     return _DEP_CACHE
 
 
+def get_ast_cache() -> ASTAnalysisCache:
+    """Get the global AST analysis cache."""
+    return _AST_CACHE
+
+
 def get_all_cache_stats() -> Dict[str, Any]:
     """Get statistics for all caches."""
     return {
         "file_content": _FILE_CACHE.get_stats(),
         "llm_response": _LLM_CACHE.get_stats(),
         "repo_context": _REPO_CACHE.get_stats(),
-        "dependency_tree": _DEP_CACHE.get_stats()
+        "dependency_tree": _DEP_CACHE.get_stats(),
+        "ast_analysis": _AST_CACHE.get_stats()
     }
 
 
@@ -82,6 +93,7 @@ def clear_all_caches():
     _LLM_CACHE.clear()
     _REPO_CACHE.clear()
     _DEP_CACHE.clear()
+    _AST_CACHE.clear()
 
 
 def save_all_caches():
@@ -90,3 +102,4 @@ def save_all_caches():
     _LLM_CACHE._save_to_disk()
     _REPO_CACHE._save_to_disk()
     _DEP_CACHE._save_to_disk()
+    _AST_CACHE._save_to_disk()
