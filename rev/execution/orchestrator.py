@@ -179,8 +179,16 @@ class Orchestrator:
                     result.phase_reached = AgentPhase.REVIEW
                     return result
 
-                if review.decision == ReviewDecision.REQUIRES_CHANGES and not self.config.auto_approve:
+                if review.decision == ReviewDecision.REQUIRES_CHANGES:
+                    # REQUIRES_CHANGES should stop execution regardless of auto_approve
+                    # The review agent identified significant issues that need addressing
                     print("\n⚠️  Plan requires changes - stopping for manual review")
+                    print(f"   Review confidence: {review.confidence_score:.0%}")
+                    print(f"   Issues found: {len(review.issues)}")
+                    print(f"   Security concerns: {len(review.security_concerns)}")
+                    if review.suggestions:
+                        print(f"   Suggestions: {len(review.suggestions)}")
+                    result.errors.append("Plan requires changes before execution")
                     result.phase_reached = AgentPhase.REVIEW
                     return result
 
