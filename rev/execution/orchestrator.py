@@ -155,34 +155,83 @@ class Orchestrator:
                 result.phase_reached = AgentPhase.FAILED
                 return result
 
-            # Phase 4: Review Agent - Validate plan
+            # Phase 4: Review Agent - Validate plan with retry loop
+            review = None
             if self.config.enable_review:
                 self._update_phase(AgentPhase.REVIEW)
-                review = review_execution_plan(
-                    plan,
-                    user_request,
-                    strictness=self.config.review_strictness,
-                    auto_approve_low_risk=True
-                )
-                result.review_decision = review.decision
-                result.agent_insights["review"] = {
-                    "decision": review.decision.value,
-                    "confidence": review.confidence_score,
-                    "issues": len(review.issues),
-                    "suggestions": len(review.suggestions)
-                }
 
-                # Handle review decision
-                if review.decision == ReviewDecision.REJECTED:
-                    print("\n❌ Plan rejected by review agent")
-                    result.errors.append("Plan rejected by review agent")
-                    result.phase_reached = AgentPhase.REVIEW
-                    return result
+                # Retry loop for plan regeneration
+                planning_retry_count = 0
+                while planning_retry_count <= self.config.max_retries:
+                    review = review_execution_plan(
+                        plan,
+                        user_request,
+                        strictness=self.config.review_strictness,
+                        auto_approve_low_risk=True
+                    )
+                    result.review_decision = review.decision
 
-                if review.decision == ReviewDecision.REQUIRES_CHANGES and not self.config.auto_approve:
-                    print("\n⚠️  Plan requires changes - stopping for manual review")
-                    result.phase_reached = AgentPhase.REVIEW
-                    return result
+                    # Store review insights
+                    review_key = "review" if planning_retry_count == 0 else f"review_retry_{planning_retry_count}"
+                    result.agent_insights[review_key] = {
+                        "decision": review.decision.value,
+                        "confidence": review.confidence_score,
+                        "issues": len(review.issues),
+                        "suggestions": len(review.suggestions)
+                    }
+
+                    # Handle review decision
+                    if review.decision == ReviewDecision.REJECTED:
+                        print("\n❌ Plan rejected by review agent")
+                        result.errors.append("Plan rejected by review agent")
+                        result.phase_reached = AgentPhase.REVIEW
+                        return result
+
+                    if review.decision == ReviewDecision.REQUIRES_CHANGES:
+                        # Display review feedback
+                        print(f"\n⚠️  Plan requires changes (attempt {planning_retry_count + 1}/{self.config.max_retries + 1})")
+                        print(f"   Review confidence: {review.confidence_score:.0%}")
+                        print(f"   Issues found: {len(review.issues)}")
+                        print(f"   Security concerns: {len(review.security_concerns)}")
+                        if review.suggestions:
+                            print(f"   Suggestions: {len(review.suggestions)}")
+
+                        # Check if we've exhausted retries
+                        if planning_retry_count >= self.config.max_retries:
+                            print(f"\n❌ Plan still requires changes after {self.config.max_retries} regeneration attempt(s)")
+                            result.errors.append(f"Plan requires changes after {self.config.max_retries} regeneration attempts")
+                            result.phase_reached = AgentPhase.REVIEW
+                            return result
+
+                        # Regenerate plan with review feedback
+                        planning_retry_count += 1
+                        print(f"\n🔄 Plan Regeneration {planning_retry_count}/{self.config.max_retries}")
+                        print("  → Incorporating review feedback...")
+
+                        # Format review feedback for planning agent
+                        feedback = self._format_review_feedback_for_planning(review, user_request)
+
+                        # Regenerate plan with feedback
+                        plan = planning_mode(f"""{user_request}
+
+IMPORTANT - Address the following review feedback:
+{feedback}""")
+                        result.plan = plan
+
+                        if not plan.tasks:
+                            print("  ✗ Plan regeneration produced no tasks")
+                            result.errors.append("Plan regeneration failed")
+                            result.phase_reached = AgentPhase.FAILED
+                            return result
+
+                        print(f"  ✓ Generated new plan with {len(plan.tasks)} tasks")
+                        # Continue to next iteration for re-review
+
+                    else:
+                        # Plan approved or approved with suggestions - proceed
+                        if planning_retry_count > 0:
+                            print(f"\n✓ Plan approved after {planning_retry_count} regeneration attempt(s)!")
+                        break
 
             # Phase 5: Execution Agent - Execute the plan
             self._update_phase(AgentPhase.EXECUTION)
@@ -326,6 +375,52 @@ class Orchestrator:
         }
         icon = phase_icons.get(phase, "▶️")
         print(f"\n{icon} Phase: {phase.value.upper()}")
+
+    def _format_review_feedback_for_planning(self, review, user_request: str) -> str:
+        """Format review feedback for the planning agent to incorporate.
+
+        Args:
+            review: PlanReview object with feedback
+            user_request: Original user request
+
+        Returns:
+            Formatted feedback string
+        """
+        feedback_parts = []
+
+        if review.overall_assessment:
+            feedback_parts.append(f"Assessment: {review.overall_assessment}\n")
+
+        if review.issues:
+            feedback_parts.append("Issues to address:")
+            for issue in review.issues:
+                severity = issue.get("severity", "unknown").upper()
+                description = issue.get("description", "")
+                impact = issue.get("impact", "")
+                feedback_parts.append(f"  - [{severity}] {description}")
+                if impact:
+                    feedback_parts.append(f"    Impact: {impact}")
+            feedback_parts.append("")
+
+        if review.security_concerns:
+            feedback_parts.append("Security concerns:")
+            for concern in review.security_concerns:
+                feedback_parts.append(f"  - {concern}")
+            feedback_parts.append("")
+
+        if review.missing_tasks:
+            feedback_parts.append("Missing tasks to add:")
+            for task in review.missing_tasks:
+                feedback_parts.append(f"  - {task}")
+            feedback_parts.append("")
+
+        if review.suggestions:
+            feedback_parts.append("Suggestions:")
+            for suggestion in review.suggestions:
+                feedback_parts.append(f"  - {suggestion}")
+            feedback_parts.append("")
+
+        return "\n".join(feedback_parts)
 
     def _display_summary(self, result: OrchestratorResult):
         """Display orchestration summary."""
