@@ -41,7 +41,7 @@ class PlanReview:
         self.unnecessary_tasks: List[int] = []  # Task IDs
         self.improved_plan: Optional[ExecutionPlan] = None
         self.overall_assessment: str = ""
-        self.confidence_score: float = 0.0  # 0.0 to 1.0
+        self.confidence_score: float = 0.7  # 0.0 to 1.0, default 0.7
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -240,7 +240,7 @@ Provide a thorough review."""}
         # Default to approved with warning
         review.decision = ReviewDecision.APPROVED_WITH_SUGGESTIONS
         review.suggestions.append("Review agent unavailable - plan approved by default")
-        review.confidence_score = 0.5
+        review.confidence_score = 0.7
         return review
 
     # Parse review response
@@ -273,7 +273,7 @@ Provide a thorough review."""}
         print(f"⚠️  Error parsing review: {e}")
         review.decision = ReviewDecision.APPROVED_WITH_SUGGESTIONS
         review.suggestions.append("Could not parse review - approved by default")
-        review.confidence_score = 0.5
+        review.confidence_score = 0.7
 
     # Display review
     _display_plan_review(review, plan)
