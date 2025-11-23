@@ -140,12 +140,31 @@ You have access to code analysis tools to help verify actions:
 
 Your job is to review individual actions (tool calls, code changes) before execution.
 
+CRITICAL DISTINCTION:
+- **Review CODE for security flaws**: Focus on code being written/modified that could introduce vulnerabilities
+- **Trust LOCAL TOOL EXECUTION**: Build tools (compilers, linkers, test runners) are trusted - don't block them
+- Only flag command execution if there's ACTUAL evidence of injection from USER INPUT
+
 Analyze each action for:
-1. **Security**: SQL injection, XSS, command injection, exposed secrets, etc.
+1. **Security in CODE**: SQL injection, XSS, command injection in written code, exposed secrets in files
 2. **Safety**: Data loss, destructive operations, breaking changes
-3. **Correctness**: Logic errors, incorrect assumptions
+3. **Correctness**: Logic errors in code, incorrect assumptions
 4. **Best Practices**: Code quality, maintainability, performance
 5. **Alternative Approaches**: Better ways to achieve the same goal
+
+DO NOT flag as security issues:
+- Hardcoded paths in build commands (these are local development tools)
+- Compiler invocations with known paths (cl.exe, gcc, etc.)
+- Build system commands (cmake, make, msbuild, etc.)
+- Test runner commands with fixed parameters
+- Package manager commands (npm, pip, cargo, etc.)
+
+DO flag as security issues:
+- Code that concatenates user input into SQL queries
+- Code that uses eval() or exec() with external input
+- Code that writes secrets/passwords/tokens into source files
+- Code that builds shell commands from unsanitized user input
+- Code that lacks input validation at system boundaries
 
 Return your review in JSON format:
 {
@@ -155,7 +174,7 @@ Return your review in JSON format:
     "Specific concern about this action"
   ],
   "security_warnings": [
-    "Security issue found"
+    "Security issue found in CODE"
   ],
   "alternative_approaches": [
     "Consider using X instead because..."
@@ -163,7 +182,7 @@ Return your review in JSON format:
 }
 
 Be practical - don't block reasonable actions over minor style issues.
-Focus on preventing real bugs, security issues, and architectural problems."""
+Focus on preventing real bugs and security issues IN THE CODE BEING WRITTEN."""
 
 
 def review_execution_plan(
@@ -373,38 +392,109 @@ def _quick_security_check(tool_name: str, tool_args: Dict[str, Any], description
     if not tool_args:
         tool_args = {}
 
-    # Check for command injection patterns
+    # Trusted development tools - don't flag as security issues
+    TRUSTED_BUILD_TOOLS = [
+        'cl.exe', 'gcc', 'g++', 'clang', 'clang++',  # Compilers
+        'link.exe', 'ld', 'lld',  # Linkers
+        'cmake', 'make', 'nmake', 'msbuild', 'ninja',  # Build systems
+        'cargo', 'npm', 'pip', 'yarn', 'go build',  # Package managers
+        'pytest', 'jest', 'mocha', 'cargo test',  # Test runners
+        'python -m', 'node ', 'javac', 'java ',  # Language runtimes
+    ]
+
+    # Check for command execution patterns
     if tool_name == "run_cmd":
         cmd = tool_args.get("command", "")
-        # Check for shell injection patterns
-        dangerous_patterns = [";", "&&", "||", "|", "`", "$(", "${"]
-        if any(pattern in cmd for pattern in dangerous_patterns):
-            warnings.append("Command contains shell operators - verify no injection vulnerability")
+        cmd_lower = cmd.lower()
 
-    # Check for exposed secrets in code
-    if tool_name in ["write_file", "edit_file"]:
-        content = str(tool_args.get("content", "")) + str(tool_args.get("new_content", ""))
-        secret_patterns = [
-            r'password\s*=\s*["\'][^"\']+["\']',
-            r'api[_-]?key\s*=\s*["\'][^"\']+["\']',
-            r'secret\s*=\s*["\'][^"\']+["\']',
-            r'token\s*=\s*["\'][^"\']+["\']',
-        ]
-        for pattern in secret_patterns:
-            if re.search(pattern, content, re.IGNORECASE):
-                warnings.append("Possible hardcoded secret detected - use environment variables")
+        # Skip security checks for trusted build/dev tools
+        is_trusted_tool = any(tool in cmd_lower for tool in TRUSTED_BUILD_TOOLS)
+        if is_trusted_tool:
+            # Trusted tools can have hardcoded paths, shell operators, etc.
+            # These are local development commands, not user-facing code
+            return warnings
+
+        # For other commands, check for dangerous patterns
+        # Only flag if there's evidence of actual injection risk
+        dangerous_patterns = {
+            ';': 'Command chaining',
+            '&&': 'Command chaining',
+            '||': 'Command chaining',
+            '|': 'Pipe operator',
+            '$(': 'Command substitution',
+            '`': 'Command substitution',
+            '${': 'Variable expansion',
+        }
+        for pattern, desc in dangerous_patterns.items():
+            if pattern in cmd:
+                warnings.append(f"{desc} detected in command - verify no injection from user input")
                 break
 
-    # Check for SQL injection in database operations
-    if "sql" in description.lower() or "query" in description.lower():
-        if "'" in str(tool_args) or '"' in str(tool_args):
-            warnings.append("Possible SQL injection - verify parameterized queries are used")
+    # Check for exposed secrets in CODE being written
+    if tool_name in ["write_file", "apply_patch"]:
+        content = str(tool_args.get("content", "")) + str(tool_args.get("patch", ""))
+        secret_patterns = [
+            (r'password\s*=\s*["\'][^"\']+["\']', 'hardcoded password'),
+            (r'api[_-]?key\s*=\s*["\'][^"\']+["\']', 'hardcoded API key'),
+            (r'secret\s*=\s*["\'][^"\']+["\']', 'hardcoded secret'),
+            (r'token\s*=\s*["\'][^"\']+["\']', 'hardcoded token'),
+            (r'-----BEGIN (PRIVATE|RSA) KEY-----', 'private key'),
+        ]
+        for pattern, name in secret_patterns:
+            if re.search(pattern, content, re.IGNORECASE):
+                warnings.append(f"Possible {name} in code - use environment variables or secret management")
+                break
 
-    # Check for path traversal
+    # Check for SQL injection vulnerabilities IN CODE
+    if tool_name in ["write_file", "apply_patch"]:
+        content = str(tool_args.get("content", "")) + str(tool_args.get("patch", ""))
+        # Look for string concatenation in SQL queries (sign of SQL injection)
+        sql_injection_patterns = [
+            r'execute\([^)]*\+[^)]*\)',  # execute("SELECT * FROM" + user_input)
+            r'query\([^)]*\+[^)]*\)',    # query("SELECT * FROM" + user_input)
+            r'f["\']SELECT.*\{.*\}',     # f"SELECT * FROM {table}"
+            r'["\']SELECT.*["\'].*\+',   # "SELECT * FROM users WHERE id = " + user_id
+            r'["\']INSERT.*["\'].*\+',   # "INSERT INTO users VALUES (" + values
+            r'["\']UPDATE.*["\'].*\+',   # "UPDATE users SET name = " + name
+            r'["\']DELETE.*["\'].*\+',   # "DELETE FROM users WHERE id = " + id
+        ]
+        for pattern in sql_injection_patterns:
+            if re.search(pattern, content, re.IGNORECASE):
+                warnings.append("Possible SQL injection - use parameterized queries instead of string concatenation")
+                break
+
+    # Check for command injection vulnerabilities IN CODE
+    if tool_name in ["write_file", "apply_patch"]:
+        content = str(tool_args.get("content", "")) + str(tool_args.get("patch", ""))
+        # Look for shell command construction from user input
+        cmd_injection_patterns = [
+            r'os\.system\([^)]*\+',  # os.system("cmd " + user_input)
+            r'subprocess\.\w+\([^)]*\+',  # subprocess.call("cmd " + input)
+            r'exec\([^)]*\+',  # exec("code " + user_input)
+            r'eval\(',  # eval() is almost always dangerous
+        ]
+        for pattern in cmd_injection_patterns:
+            if re.search(pattern, content):
+                warnings.append("Possible command injection - avoid string concatenation in shell commands and eval/exec")
+                break
+
+    # Check for path traversal vulnerabilities IN CODE
+    if tool_name in ["write_file", "apply_patch"]:
+        content = str(tool_args.get("content", "")) + str(tool_args.get("patch", ""))
+        if re.search(r'open\([^)]*\+', content) or re.search(r'file_path\s*=.*\+', content):
+            warnings.append("Possible path traversal - validate and sanitize file paths from user input")
+
+    # Check for path traversal in file operations
     if tool_name in ["read_file", "write_file", "delete_file"]:
         path = tool_args.get("file_path", "")
         if ".." in path or path.startswith("/etc/") or path.startswith("/root/"):
             warnings.append("Suspicious file path detected - verify this is intentional")
+
+    # Check for SQL injection in database operation descriptions
+    # (this is a heuristic check for when SQL is being executed)
+    if "sql" in description.lower() or "query" in description.lower():
+        if "'" in str(tool_args) or '"' in str(tool_args):
+            warnings.append("Possible SQL injection - verify parameterized queries are used")
 
     return warnings
 
