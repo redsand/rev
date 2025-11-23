@@ -14,6 +14,7 @@ from .execution.orchestrator import run_orchestrated
 from .terminal import repl_mode
 from .models.task import ExecutionPlan
 from .tools.registry import get_available_tools
+from .debug_logger import DebugLogger
 
 
 def main():
@@ -126,12 +127,37 @@ def main():
         action="store_true",
         help="List all available checkpoints"
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable detailed debug logging to file for LLM review"
+    )
 
     args = parser.parse_args()
+
+    # Initialize debug logging if requested
+    debug_logger = DebugLogger.initialize(enabled=args.debug)
+    if args.debug:
+        print(f"Debug logging enabled: {debug_logger.log_file_path}")
 
     # Update config globals for ollama_chat function
     config.OLLAMA_MODEL = args.model
     config.OLLAMA_BASE_URL = args.base_url
+
+    # Log configuration
+    debug_logger.log("main", "CONFIGURATION", {
+        "model": args.model,
+        "base_url": args.base_url,
+        "mode": "repl" if args.repl else ("orchestrate" if args.orchestrate else "standard"),
+        "parallel": args.parallel,
+        "review_enabled": args.review and not args.no_review,
+        "validate_enabled": args.validate and not args.no_validate,
+        "auto_approve": not args.prompt,
+        "research_enabled": args.research,
+        "learn_enabled": args.learn,
+        "action_review_enabled": args.action_review,
+        "auto_fix_enabled": args.auto_fix,
+    })
 
     # Handle list-checkpoints command
     if args.list_checkpoints:
@@ -162,11 +188,17 @@ def main():
     try:
         # Handle resume command
         if args.resume:
+            debug_logger.log_workflow_phase("resume", {"checkpoint": args.resume})
             print(f"Resuming from checkpoint: {args.resume}\n")
             try:
                 plan = ExecutionPlan.load_checkpoint(args.resume)
                 print(f"✓ Checkpoint loaded successfully")
                 print(f"  {plan.get_summary()}\n")
+                debug_logger.log("main", "CHECKPOINT_LOADED", {
+                    "checkpoint": args.resume,
+                    "task_count": len(plan.tasks),
+                    "summary": plan.get_summary()
+                })
 
                 # Reset stopped tasks to pending so they can be executed
                 for task in plan.tasks:
@@ -174,6 +206,11 @@ def main():
                         task.status = task.status.__class__("pending")
 
                 # Use concurrent execution if parallel > 1, otherwise sequential
+                debug_logger.log_workflow_phase("execution", {
+                    "mode": "concurrent" if args.parallel > 1 else "sequential",
+                    "workers": args.parallel,
+                    "task_count": len(plan.tasks)
+                })
                 tools = get_available_tools()
                 if args.parallel > 1:
                     concurrent_execution_mode(
@@ -194,6 +231,7 @@ def main():
                 # Validation phase
                 enable_validation = args.validate and not args.no_validate
                 if enable_validation:
+                    debug_logger.log_workflow_phase("validation", {"resumed": True})
                     validation_report = validate_execution(
                         plan,
                         "Resumed execution",
@@ -202,6 +240,11 @@ def main():
                         check_syntax=True,
                         enable_auto_fix=args.auto_fix
                     )
+
+                    debug_logger.log("main", "VALIDATION_RESULT", {
+                        "status": validation_report.overall_status.value,
+                        "rollback_recommended": validation_report.rollback_recommended
+                    })
 
                     if validation_report.overall_status == ValidationStatus.FAILED:
                         print("\n❌ Validation failed. Review issues above.")
@@ -223,12 +266,19 @@ def main():
                 print(f"✗ Failed to load checkpoint: {e}")
                 sys.exit(1)
         if args.repl or not args.task:
+            debug_logger.log_workflow_phase("repl", {})
             repl_mode()
         else:
             task_description = " ".join(args.task)
+            debug_logger.log("main", "TASK_DESCRIPTION", {"task": task_description})
 
             # Orchestrator mode - full multi-agent coordination
             if args.orchestrate:
+                debug_logger.log_workflow_phase("orchestrate", {
+                    "task": task_description,
+                    "learning": args.learn,
+                    "research": args.research
+                })
                 result = run_orchestrated(
                     task_description,
                     config.ROOT,
@@ -248,11 +298,19 @@ def main():
                 sys.exit(0)
 
             # Standard mode - manual agent coordination
+            debug_logger.log_workflow_phase("planning", {"task": task_description})
             plan = planning_mode(task_description)
+            debug_logger.log("main", "PLAN_GENERATED", {
+                "task_count": len(plan.tasks),
+                "tasks": [{"id": t.id, "description": t.description[:100]} for t in plan.tasks]
+            })
 
             # Review phase - Review Agent validates the plan
             enable_review = args.review and not args.no_review
             if enable_review:
+                debug_logger.log_workflow_phase("review", {
+                    "strictness": args.review_strictness
+                })
                 strictness = ReviewStrictness(args.review_strictness)
                 review = review_execution_plan(
                     plan,
@@ -260,6 +318,11 @@ def main():
                     strictness=strictness,
                     auto_approve_low_risk=True
                 )
+
+                debug_logger.log("main", "REVIEW_DECISION", {
+                    "decision": review.decision.value,
+                    "risk_level": review.risk_level.value if hasattr(review, 'risk_level') else None
+                })
 
                 # Handle review decision
                 if review.decision == ReviewDecision.REJECTED:
@@ -288,6 +351,11 @@ def main():
                     print("\n✅ Plan approved by review agent.")
 
             # Use concurrent execution if parallel > 1, otherwise sequential
+            debug_logger.log_workflow_phase("execution", {
+                "mode": "concurrent" if args.parallel > 1 else "sequential",
+                "workers": args.parallel,
+                "task_count": len(plan.tasks)
+            })
             tools = get_available_tools()
             if args.parallel > 1:
                 concurrent_execution_mode(
@@ -308,6 +376,7 @@ def main():
             # Validation phase - Validation Agent verifies results
             enable_validation = args.validate and not args.no_validate
             if enable_validation:
+                debug_logger.log_workflow_phase("validation", {})
                 validation_report = validate_execution(
                     plan,
                     task_description,
@@ -316,6 +385,11 @@ def main():
                     check_syntax=True,
                     enable_auto_fix=args.auto_fix
                 )
+
+                debug_logger.log("main", "VALIDATION_RESULT", {
+                    "status": validation_report.overall_status.value,
+                    "rollback_recommended": validation_report.rollback_recommended
+                })
 
                 if validation_report.overall_status == ValidationStatus.FAILED:
                     print("\n❌ Validation failed. Review issues above.")
@@ -328,8 +402,15 @@ def main():
                     print("\n✅ Validation passed successfully.")
 
     except KeyboardInterrupt:
+        debug_logger.log("main", "USER_INTERRUPT", {}, "WARNING")
         print("\n\nAborted by user")
         sys.exit(1)
+    except Exception as e:
+        debug_logger.log_error("main", e, {"context": "main execution loop"})
+        raise
+    finally:
+        # Close the debug logger
+        debug_logger.close()
 
 
 if __name__ == "__main__":
