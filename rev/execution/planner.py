@@ -377,7 +377,7 @@ After gathering information with tools, generate a comprehensive execution plan 
     ]
 
     print("→ Generating execution plan...")
-    response = _call_llm_with_tools(messages, tools, max_iterations=5)
+    response = _call_llm_with_tools(messages, tools, max_iterations=30)
 
     if "error" in response:
         print(f"Error: {response['error']}")
