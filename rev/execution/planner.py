@@ -98,6 +98,48 @@ Return ONLY a JSON array of subtasks:
 Keep subtasks focused and executable. Each should accomplish one clear goal."""
 
 
+def _format_available_tools(tools: List[Dict[str, Any]]) -> str:
+    """Format available tools for inclusion in planning prompt.
+
+    Args:
+        tools: List of tool definitions in OpenAI format
+
+    Returns:
+        Formatted string describing available tools
+    """
+    tool_descriptions = []
+
+    for tool in tools:
+        if tool.get("type") == "function":
+            func = tool.get("function", {})
+            name = func.get("name", "")
+            description = func.get("description", "")
+
+            # Categorize tools
+            if any(keyword in name for keyword in ["memory", "valgrind", "asan", "sanitizer", "leak"]):
+                category = "🔍 Memory Analysis"
+            elif any(keyword in name for keyword in ["security", "vulnerability", "cve", "scan"]):
+                category = "🔒 Security Analysis"
+            elif any(keyword in name for keyword in ["pylint", "mypy", "radon", "analysis", "ast"]):
+                category = "📊 Static Analysis"
+            elif any(keyword in name for keyword in ["mcp", "server"]):
+                category = "🔌 MCP Servers"
+            elif any(keyword in name for keyword in ["search", "grep", "find", "list", "tree"]):
+                category = "🔎 Code Search"
+            elif any(keyword in name for keyword in ["read", "write", "file"]):
+                category = "📁 File Operations"
+            else:
+                category = "🛠️  General Tools"
+
+            tool_descriptions.append(f"  - {name}: {description} [{category}]")
+
+    if not tool_descriptions:
+        return "  (No additional tools available)"
+
+    # Group by category
+    return "\n".join(sorted(set(tool_descriptions)))
+
+
 def _recursive_breakdown(task_description: str, action_type: str, context: str, max_depth: int = 2, current_depth: int = 0, tools: list = None) -> List[Dict[str, Any]]:
     """Recursively break down a complex task into subtasks.
 
@@ -191,8 +233,25 @@ def planning_mode(user_request: str, enable_advanced_analysis: bool = True, enab
     sys_info = get_system_info_cached()
     context = get_repo_context()
 
+    # Format available tools for the planning prompt
+    tools_description = _format_available_tools(tools)
+
+    # Enhanced system prompt with available tools
+    enhanced_system_prompt = f"""{PLANNING_SYSTEM}
+
+AVAILABLE TOOLS AND CAPABILITIES:
+{tools_description}
+
+Use these tools when planning to:
+- Search for relevant code patterns
+- Analyze security vulnerabilities
+- Detect memory issues, buffer overflows, use-after-free
+- Run static analysis tools
+- Verify file existence before planning modifications
+"""
+
     messages = [
-        {"role": "system", "content": PLANNING_SYSTEM},
+        {"role": "system", "content": enhanced_system_prompt},
         {"role": "user", "content": f"""System Information:
 OS: {sys_info['os']} {sys_info['os_release']}
 Platform: {sys_info['platform']}

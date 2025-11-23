@@ -24,14 +24,100 @@ class TestOrchestratorReviewHandling(unittest.TestCase):
     @patch('rev.execution.orchestrator.review_execution_plan')
     @patch('rev.execution.orchestrator.planning_mode')
     @patch('rev.execution.orchestrator.research_codebase')
-    def test_requires_changes_stops_execution_with_auto_approve(
+    def test_requires_changes_with_retry_success(
         self, mock_research, mock_planning, mock_review
     ):
-        """Test that REQUIRES_CHANGES stops execution even with auto_approve=True.
+        """Test that REQUIRES_CHANGES triggers retry loop and succeeds on second attempt.
 
-        This is a regression test for the bug where REQUIRES_CHANGES was ignored
-        when auto_approve was True, allowing execution to proceed despite critical
-        review findings.
+        This test verifies that the orchestrator will regenerate the plan when
+        review says REQUIRES_CHANGES, and that it eventually succeeds when the
+        regenerated plan is approved.
+        """
+        # Setup initial plan
+        initial_plan = ExecutionPlan()
+        initial_plan.add_task("Incomplete security audit", "general")
+        initial_plan.tasks[0].risk_level = RiskLevel.HIGH
+
+        # Setup improved plan after feedback
+        improved_plan = ExecutionPlan()
+        improved_plan.add_task("Run AddressSanitizer for memory corruption", "test")
+        improved_plan.add_task("Run Valgrind for use-after-free detection", "test")
+        improved_plan.add_task("Analyze results and report findings", "review")
+        for task in improved_plan.tasks:
+            task.risk_level = RiskLevel.MEDIUM
+
+        # Mock planning_mode to return initial plan first, then improved plan
+        mock_planning.side_effect = [initial_plan, improved_plan]
+
+        # Setup mock research
+        mock_research.return_value = MagicMock(
+            relevant_files=[],
+            estimated_complexity="HIGH",
+            warnings=[]
+        )
+
+        # Setup mock review: first REQUIRES_CHANGES, then APPROVED
+        review_needs_changes = PlanReview()
+        review_needs_changes.decision = ReviewDecision.REQUIRES_CHANGES
+        review_needs_changes.confidence_score = 0.95
+        review_needs_changes.issues = [
+            {
+                "severity": "critical",
+                "task_id": 0,
+                "description": "Vague task description",
+                "impact": "Could miss critical vulnerabilities"
+            }
+        ]
+        review_needs_changes.security_concerns = [
+            "No adequate coverage for security analysis"
+        ]
+        review_needs_changes.suggestions = [
+            "Add static analysis with memory error detection"
+        ]
+        review_needs_changes.overall_assessment = "Plan is insufficient"
+
+        review_approved = PlanReview()
+        review_approved.decision = ReviewDecision.APPROVED
+        review_approved.confidence_score = 0.90
+        review_approved.overall_assessment = "Plan now addresses security concerns"
+
+        mock_review.side_effect = [review_needs_changes, review_approved]
+
+        # Create orchestrator with max_retries=2
+        config = OrchestratorConfig(
+            enable_learning=False,
+            enable_research=True,
+            enable_review=True,
+            enable_validation=False,
+            auto_approve=True,
+            max_retries=2
+        )
+
+        orchestrator = Orchestrator(Path("/test"), config)
+        result = orchestrator.execute("find security bugs")
+
+        # Verify plan was regenerated
+        self.assertEqual(mock_planning.call_count, 2, "Planning should be called twice")
+        self.assertEqual(mock_review.call_count, 2, "Review should be called twice")
+
+        # Verify second planning call included feedback
+        second_call_args = mock_planning.call_args_list[1][0][0]
+        self.assertIn("IMPORTANT", second_call_args)
+        self.assertIn("review feedback", second_call_args.lower())
+
+        # Verify execution did NOT stop at review (it should proceed)
+        self.assertNotEqual(result.phase_reached, AgentPhase.REVIEW)
+
+    @patch('rev.execution.orchestrator.review_execution_plan')
+    @patch('rev.execution.orchestrator.planning_mode')
+    @patch('rev.execution.orchestrator.research_codebase')
+    def test_requires_changes_exhausts_retries(
+        self, mock_research, mock_planning, mock_review
+    ):
+        """Test that orchestrator stops after exhausting max retries.
+
+        This test verifies that if the plan keeps requiring changes after
+        max_retries attempts, the orchestrator stops and reports failure.
         """
         # Setup mock plan
         plan = ExecutionPlan()
@@ -46,7 +132,7 @@ class TestOrchestratorReviewHandling(unittest.TestCase):
             warnings=[]
         )
 
-        # Setup mock review with REQUIRES_CHANGES decision
+        # Setup mock review to always return REQUIRES_CHANGES
         review = PlanReview()
         review.decision = ReviewDecision.REQUIRES_CHANGES
         review.confidence_score = 0.95
@@ -54,46 +140,37 @@ class TestOrchestratorReviewHandling(unittest.TestCase):
             {
                 "severity": "critical",
                 "task_id": 0,
-                "description": "Vague task description",
-                "impact": "Could miss critical vulnerabilities"
-            },
-            {
-                "severity": "critical",
-                "task_id": 0,
-                "description": "No static analysis tools specified",
-                "impact": "High likelihood of missing memory safety issues"
+                "description": "Still incomplete",
+                "impact": "Not good enough"
             }
         ]
-        review.security_concerns = [
-            "No adequate coverage for security analysis",
-            "No specific tools or methodologies mentioned"
-        ]
-        review.suggestions = [
-            "Add static analysis with memory error detection",
-            "Include dynamic analysis with fuzzing"
-        ]
-        review.overall_assessment = "Plan is insufficient for security goals"
+        review.security_concerns = ["Still has issues"]
+        review.suggestions = ["Keep trying"]
+        review.overall_assessment = "Plan is still insufficient"
         mock_review.return_value = review
 
-        # Create orchestrator with auto_approve=True (the problematic config)
+        # Create orchestrator with max_retries=2
         config = OrchestratorConfig(
             enable_learning=False,
             enable_research=True,
             enable_review=True,
             enable_validation=False,
-            auto_approve=True  # This was causing the bug
+            auto_approve=True,
+            max_retries=2  # Will try: initial + 2 retries = 3 total attempts
         )
 
         orchestrator = Orchestrator(Path("/test"), config)
         result = orchestrator.execute("find security bugs")
 
-        # Verify execution stopped at review phase
+        # Verify it tried 3 times total (initial + 2 retries)
+        self.assertEqual(mock_planning.call_count, 3, "Should try initial + 2 retries")
+        self.assertEqual(mock_review.call_count, 3, "Should review 3 times")
+
+        # Verify execution stopped at review phase with error
         self.assertEqual(result.phase_reached, AgentPhase.REVIEW)
         self.assertFalse(result.success)
-        self.assertIn("requires changes", result.errors[0].lower())
-
-        # Verify review was actually called
-        mock_review.assert_called_once()
+        self.assertTrue(any("requires changes" in err.lower() for err in result.errors))
+        self.assertTrue(any("2 regeneration" in err for err in result.errors))
 
     @patch('rev.execution.orchestrator.review_execution_plan')
     @patch('rev.execution.orchestrator.planning_mode')
