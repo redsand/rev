@@ -31,7 +31,8 @@ class TestQuickSecurityCheck(unittest.TestCase):
             "Execute system command"
         )
         self.assertTrue(len(warnings) > 0)
-        self.assertIn("shell", warnings[0].lower())
+        # Should detect command chaining
+        self.assertIn("command", warnings[0].lower())
 
     def test_hardcoded_secret_detection(self):
         """Test detection of hardcoded secrets."""
@@ -71,6 +72,98 @@ class TestQuickSecurityCheck(unittest.TestCase):
             "Read source file"
         )
         self.assertEqual(len(warnings), 0)
+
+    def test_trusted_compiler_not_flagged(self):
+        """Test that trusted compiler commands are not flagged as security issues."""
+        # Test cl.exe (Microsoft C/C++ Compiler)
+        warnings = _quick_security_check(
+            "run_cmd",
+            {"command": 'cl.exe /I"C:\\Program Files\\Windows Kits\\10\\Include" /c driver.c'},
+            "Compile driver code"
+        )
+        self.assertEqual(len(warnings), 0)
+
+        # Test gcc
+        warnings = _quick_security_check(
+            "run_cmd",
+            {"command": "gcc -o output main.c -I/usr/include"},
+            "Compile with GCC"
+        )
+        self.assertEqual(len(warnings), 0)
+
+        # Test cmake
+        warnings = _quick_security_check(
+            "run_cmd",
+            {"command": "cmake -DCMAKE_BUILD_TYPE=Release .."},
+            "Run CMake build"
+        )
+        self.assertEqual(len(warnings), 0)
+
+    def test_trusted_build_tools_not_flagged(self):
+        """Test that trusted build tools are not flagged."""
+        # Test npm
+        warnings = _quick_security_check(
+            "run_cmd",
+            {"command": "npm install && npm run build"},
+            "Build Node.js project"
+        )
+        self.assertEqual(len(warnings), 0)
+
+        # Test cargo
+        warnings = _quick_security_check(
+            "run_cmd",
+            {"command": "cargo build --release"},
+            "Build Rust project"
+        )
+        self.assertEqual(len(warnings), 0)
+
+        # Test pytest
+        warnings = _quick_security_check(
+            "run_cmd",
+            {"command": "pytest tests/ -v"},
+            "Run Python tests"
+        )
+        self.assertEqual(len(warnings), 0)
+
+    def test_code_with_command_injection_flagged(self):
+        """Test that code with command injection is flagged."""
+        code_with_injection = '''
+import os
+user_input = request.args.get("filename")
+os.system("cat " + user_input)
+'''
+        warnings = _quick_security_check(
+            "write_file",
+            {"content": code_with_injection},
+            "Write file handler"
+        )
+        self.assertTrue(len(warnings) > 0)
+        self.assertIn("command injection", warnings[0].lower())
+
+    def test_code_with_sql_injection_flagged(self):
+        """Test that code with SQL injection is flagged."""
+        code_with_sql_injection = '''
+def get_user(user_id):
+    query = "SELECT * FROM users WHERE id = " + user_id
+    return db.execute(query)
+'''
+        warnings = _quick_security_check(
+            "write_file",
+            {"content": code_with_sql_injection},
+            "Write database handler"
+        )
+        self.assertTrue(len(warnings) > 0)
+        self.assertIn("sql injection", warnings[0].lower())
+
+    def test_non_trusted_command_with_substitution_flagged(self):
+        """Test that non-trusted commands with substitution are flagged."""
+        warnings = _quick_security_check(
+            "run_cmd",
+            {"command": "echo $(whoami)"},
+            "Execute custom script"
+        )
+        self.assertTrue(len(warnings) > 0)
+        self.assertIn("substitution", warnings[0].lower())
 
 
 class TestActionReview(unittest.TestCase):
