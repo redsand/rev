@@ -5,6 +5,8 @@
 import json
 from typing import Dict, Any
 
+from rev.debug_logger import get_logger
+
 # Import tool functions from their respective modules
 from rev.tools.file_ops import (
     read_file, write_file, list_dir, delete_file, move_file,
@@ -199,21 +201,32 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
     friendly_desc = _get_friendly_description(name, args)
     print(f"  → {friendly_desc}")
 
+    # Get debug logger
+    debug_logger = get_logger()
+
     try:
         # Check if it's an MCP tool (special handling for lazy imports)
         if name.startswith("mcp_"):
-            return _handle_mcp_tool(name, args)
+            result = _handle_mcp_tool(name, args)
+            debug_logger.log_tool_execution(name, args, result)
+            return result
 
         # O(1) dictionary lookup
         handler = _TOOL_DISPATCH.get(name)
         if handler is None:
-            return json.dumps({"error": f"Unknown tool: {name}"})
+            error_result = json.dumps({"error": f"Unknown tool: {name}"})
+            debug_logger.log_tool_execution(name, args, error=f"Unknown tool: {name}")
+            return error_result
 
         # Execute the tool handler
-        return handler(args)
+        result = handler(args)
+        debug_logger.log_tool_execution(name, args, result)
+        return result
 
     except Exception as e:
-        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+        error_msg = f"{type(e).__name__}: {e}"
+        debug_logger.log_tool_execution(name, args, error=error_msg)
+        return json.dumps({"error": error_msg})
 
 
 def get_available_tools() -> list:

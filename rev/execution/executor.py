@@ -22,6 +22,7 @@ from rev.config import get_system_info_cached, get_escape_interrupt, set_escape_
 from rev.execution.safety import is_scary_operation, prompt_scary_operation
 from rev.execution.reviewer import review_action, display_action_review, format_review_feedback_for_llm
 from rev.execution.session import SessionTracker, create_message_summary_from_history
+from rev.debug_logger import get_logger
 
 EXECUTION_SYSTEM = """You are an autonomous CI/CD agent executing tasks.
 
@@ -234,6 +235,19 @@ Shell Type: {sys_info['shell_type']}
         print(f"[Type: {current_task.action_type}]")
 
         current_task.status = TaskStatus.IN_PROGRESS
+
+        # Log task start
+        debug_logger = get_logger()
+        debug_logger.log_task_status(
+            current_task.id,
+            "IN_PROGRESS",
+            {
+                "task_index": plan.current_index + 1,
+                "total_tasks": len(plan.tasks),
+                "description": current_task.description,
+                "action_type": current_task.action_type
+            }
+        )
 
         # Track task start
         session_tracker.track_task_started(current_task.description)
