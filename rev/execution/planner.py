@@ -15,28 +15,41 @@ from rev.models.task import ExecutionPlan, RiskLevel, TaskStatus
 from rev.llm.client import ollama_chat
 from rev.config import get_system_info_cached
 from rev.tools.git_ops import get_repo_context
-from rev.tools.registry import get_available_tools
+from rev.tools.registry import get_available_tools, execute_tool
 
 
 PLANNING_SYSTEM = """You are an expert CI/CD agent analyzing tasks and creating execution plans.
 
 Your job is to:
 1. Understand the user's request
-2. Analyze the repository structure
-3. Create a comprehensive, ordered checklist of tasks
+2. USE TOOLS to analyze the repository structure and gather information
+3. Create a comprehensive, ordered checklist of tasks based on what you discover
 
-You have access to code analysis tools that can be used during planning:
+CRITICAL: You MUST use tools to explore the codebase before planning!
+
+Available tools include:
 - analyze_ast_patterns: AST-based pattern matching for Python code
 - run_pylint: Comprehensive static code analysis
 - run_mypy: Static type checking
 - run_radon_complexity: Code complexity metrics
 - find_dead_code: Dead code detection
 - run_all_analysis: Combined analysis suite
-- search_code: Search code using regex
-- list_dir: List files matching patterns
+- search_code: Search code using regex patterns
+- list_dir: List files matching patterns (use this to enumerate files!)
 - read_file: Read file contents
+- tree_view: View directory tree structure
 
-Use these tools when you need to understand the codebase before planning!
+PLANNING WORKFLOW:
+1. First, use tools to explore (list_dir, search_code, tree_view, read_file)
+2. For security audits: enumerate ALL relevant source files, search for unsafe patterns
+3. For multi-file changes: list all files that need modification
+4. Based on tool results, create detailed, file-specific tasks
+
+Example for security audit:
+- Call list_dir to find all .c and .cpp files
+- Call search_code for each unsafe pattern (strcpy, malloc, etc.)
+- Create separate tasks for EACH file found
+- Add tasks for running security tools (Valgrind, AddressSanitizer, etc.)
 
 IMPORTANT - System Context:
 You will be provided with the operating system information. Use this to:
@@ -138,6 +151,96 @@ def _format_available_tools(tools: List[Dict[str, Any]]) -> str:
 
     # Group by category
     return "\n".join(sorted(set(tool_descriptions)))
+
+
+def _execute_tool_calls(tool_calls: List[Dict], verbose: bool = True) -> List[Dict[str, Any]]:
+    """Execute tool calls from LLM response and return results.
+
+    Args:
+        tool_calls: List of tool call dictionaries from LLM
+        verbose: Whether to print tool execution info
+
+    Returns:
+        List of tool result messages for LLM
+    """
+    tool_results = []
+
+    for tool_call in tool_calls:
+        function_info = tool_call.get("function", {})
+        tool_name = function_info.get("name", "")
+        arguments = function_info.get("arguments", {})
+
+        # Parse arguments if they're a JSON string
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+
+        if verbose:
+            print(f"  → Calling tool: {tool_name}")
+
+        try:
+            # Execute the tool
+            result = execute_tool(tool_name, arguments)
+            tool_results.append({
+                "role": "tool",
+                "content": result
+            })
+        except Exception as e:
+            error_msg = f"Error executing {tool_name}: {str(e)}"
+            if verbose:
+                print(f"    ✗ {error_msg}")
+            tool_results.append({
+                "role": "tool",
+                "content": json.dumps({"error": error_msg})
+            })
+
+    return tool_results
+
+
+def _call_llm_with_tools(messages: List[Dict], tools: List[Dict], max_iterations: int = 5) -> Dict[str, Any]:
+    """Call LLM with tools, handling tool calling loop.
+
+    Args:
+        messages: Initial messages for LLM
+        tools: Available tools
+        max_iterations: Maximum tool calling iterations
+
+    Returns:
+        Final LLM response after tool calls complete
+    """
+    conversation = messages.copy()
+
+    for iteration in range(max_iterations):
+        response = ollama_chat(conversation, tools=tools)
+
+        if "error" in response:
+            return response
+
+        message = response.get("message", {})
+
+        # Check if LLM wants to call tools
+        tool_calls = message.get("tool_calls", [])
+
+        if not tool_calls:
+            # No more tool calls - return final response
+            return response
+
+        print(f"\n  Planning iteration {iteration + 1}: LLM calling {len(tool_calls)} tool(s)...")
+
+        # Add assistant message with tool calls to conversation
+        conversation.append(message)
+
+        # Execute tool calls and get results
+        tool_results = _execute_tool_calls(tool_calls)
+
+        # Add tool results to conversation
+        conversation.extend(tool_results)
+
+    # Max iterations reached
+    print(f"  Warning: Max planning iterations ({max_iterations}) reached")
+    return ollama_chat(conversation, tools=None)  # Final call without tools
 
 
 def _recursive_breakdown(task_description: str, action_type: str, context: str, max_depth: int = 2, current_depth: int = 0, tools: list = None) -> List[Dict[str, Any]]:
@@ -264,11 +367,17 @@ Repository context:
 User request:
 {user_request}
 
-Generate a comprehensive execution plan."""}
+IMPORTANT: Before creating the execution plan:
+1. Use available tools to explore the codebase
+2. For security audits: enumerate C/C++ files, search for unsafe functions
+3. For multi-file tasks: use list_dir to find all relevant files
+4. Call tools as needed to gather information
+
+After gathering information with tools, generate a comprehensive execution plan as a JSON array."""}
     ]
 
     print("→ Generating execution plan...")
-    response = ollama_chat(messages, tools=tools)
+    response = _call_llm_with_tools(messages, tools, max_iterations=5)
 
     if "error" in response:
         print(f"Error: {response['error']}")

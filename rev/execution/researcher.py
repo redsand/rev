@@ -144,16 +144,49 @@ def _extract_search_keywords(user_request: str) -> List[str]:
     stop_words = {
         'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
         'with', 'all', 'my', 'this', 'that', 'add', 'create', 'make', 'implement',
-        'fix', 'update', 'change', 'modify', 'please', 'can', 'you', 'i', 'want'
+        'fix', 'update', 'change', 'modify', 'please', 'can', 'you', 'i', 'want',
+        'find', 'other', 'related', 'after', 'before', 'should', 'would', 'could',
+        'any', 'without', 'risk', 'bugs'
     }
 
-    # Extract words
-    words = re.findall(r'\b\w+\b', user_request.lower())
+    request_lower = user_request.lower()
+
+    # Security audit detection - use security-specific keywords
+    if any(keyword in request_lower for keyword in ['security', 'vulnerability', 'buffer overflow',
+                                                      'memory corruption', 'use after free', 'exploit']):
+        # Return security-focused search terms
+        security_keywords = []
+
+        # C/C++ memory safety patterns
+        if 'memory' in request_lower or 'buffer' in request_lower or 'overflow' in request_lower:
+            security_keywords.extend([
+                'strcpy', 'strcat', 'sprintf', 'gets', 'scanf',  # Unsafe functions
+                'malloc', 'calloc', 'realloc', 'free',  # Memory management
+                'memcpy', 'memmove', 'memset',  # Memory operations
+                'sizeof', 'strlen',  # Size operations
+            ])
+
+        # Use-after-free patterns
+        if 'use after free' in request_lower or 'uaf' in request_lower:
+            security_keywords.extend(['free', 'delete', 'kfree', 'ExFreePool'])
+
+        # Driver-specific security
+        if any(word in request_lower for word in ['driver', 'kernel', 'ioctl']):
+            security_keywords.extend(['IOCTL', 'DeviceIoControl', 'IRP', 'ProbeFor'])
+
+        # Add any specific technical terms from the request
+        words = re.findall(r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)*\b', user_request)  # CamelCase
+        security_keywords.extend([w for w in words if w not in ['This', 'Should']])
+
+        return security_keywords[:15] if security_keywords else ['security', 'vulnerability']
+
+    # Extract words (original logic for non-security requests)
+    words = re.findall(r'\b\w+\b', request_lower)
     keywords = [w for w in words if len(w) > 2 and w not in stop_words]
 
     # Also extract potential class/function names (CamelCase, snake_case)
     camel_case = re.findall(r'[A-Z][a-z]+(?:[A-Z][a-z]+)*', user_request)
-    snake_case = re.findall(r'[a-z]+_[a-z_]+', user_request.lower())
+    snake_case = re.findall(r'[a-z]+_[a-z_]+', request_lower)
 
     keywords.extend([w.lower() for w in camel_case])
     keywords.extend(snake_case)
