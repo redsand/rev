@@ -572,8 +572,12 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
     try:
         summary_path = session_tracker.save_to_file()
         print(f"\n📊 Session summary saved to: {summary_path}")
+
+        # Emit metrics for evaluation and monitoring
+        metrics_path = session_tracker.emit_metrics()
+        print(f"📈 Metrics emitted to: {metrics_path}")
     except Exception as e:
-        print(f"\n⚠️  Failed to save session summary: {e}")
+        print(f"\n⚠️  Failed to save session data: {e}")
 
     return all(t.status == TaskStatus.COMPLETED for t in plan.tasks)
 

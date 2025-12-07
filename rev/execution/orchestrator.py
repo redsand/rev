@@ -102,7 +102,20 @@ class Orchestrator:
         print("ORCHESTRATOR - MULTI-AGENT COORDINATION")
         print("=" * 60)
         print(f"Task: {user_request[:100]}...")
-        print(f"Agents enabled: ", end="")
+
+        # NEW: Route the request to determine optimal configuration
+        from rev.execution.router import TaskRouter
+        router = TaskRouter()
+        route = router.route(user_request, repo_stats={})
+
+        # Apply routing decision to config (if not explicitly overridden)
+        print(f"\n🔀 Routing Decision: {route.mode}")
+        print(f"   Reasoning: {route.reasoning}")
+
+        # Update config based on route (only if using default config)
+        coding_mode = route.mode in ["full_feature", "refactor"]  # Enable coding mode for these routes
+
+        print(f"\nAgents enabled: ", end="")
         agents = []
         if self.config.enable_learning:
             agents.append("Learning")
@@ -115,6 +128,8 @@ class Orchestrator:
         if self.config.enable_validation:
             agents.append("Validation")
         print(", ".join(agents))
+        if coding_mode:
+            print("   🔧 Coding mode: ENABLED (test + doc enforcement)")
         print("=" * 60)
 
         result = OrchestratorResult(success=False, phase_reached=AgentPhase.LEARNING)
@@ -147,7 +162,7 @@ class Orchestrator:
 
             # Phase 3: Planning Agent - Create execution plan
             self._update_phase(AgentPhase.PLANNING)
-            plan = planning_mode(user_request)
+            plan = planning_mode(user_request, coding_mode=coding_mode)
             result.plan = plan
 
             if not plan.tasks:
@@ -212,10 +227,13 @@ class Orchestrator:
                         feedback = self._format_review_feedback_for_planning(review, user_request)
 
                         # Regenerate plan with feedback
-                        plan = planning_mode(f"""{user_request}
+                        plan = planning_mode(
+                            f"""{user_request}
 
 IMPORTANT - Address the following review feedback:
-{feedback}""")
+{feedback}""",
+                            coding_mode=coding_mode
+                        )
                         result.plan = plan
 
                         if not plan.tasks:
@@ -242,14 +260,16 @@ IMPORTANT - Address the following review feedback:
                     max_workers=self.config.parallel_workers,
                     auto_approve=self.config.auto_approve,
                     tools=tools,
-                    enable_action_review=self.config.enable_action_review
+                    enable_action_review=self.config.enable_action_review,
+                    coding_mode=coding_mode
                 )
             else:
                 execution_mode(
                     plan,
                     auto_approve=self.config.auto_approve,
                     tools=tools,
-                    enable_action_review=self.config.enable_action_review
+                    enable_action_review=self.config.enable_action_review,
+                    coding_mode=coding_mode
                 )
 
             # Phase 6: Validation Agent - Verify results
@@ -294,7 +314,8 @@ IMPORTANT - Address the following review feedback:
                             user_request=user_request,
                             tools=tools,
                             enable_action_review=self.config.enable_action_review,
-                            max_fix_attempts=3
+                            max_fix_attempts=3,
+                            coding_mode=coding_mode
                         )
 
                         if not fix_success:

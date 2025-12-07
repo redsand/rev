@@ -540,6 +540,17 @@ After gathering information with tools, generate a comprehensive execution plan 
         print("\n→ Ensuring test and documentation coverage...")
         _ensure_test_and_doc_coverage(plan, user_request)
 
+    # Derive and set goals for goal-oriented execution
+    if len(plan.tasks) > 0:
+        print("→ Deriving execution goals...")
+        try:
+            from rev.models.goal import derive_goals_from_request
+            task_types = list(set(t.action_type for t in plan.tasks))
+            plan.goals = derive_goals_from_request(user_request, task_types)
+            print(f"  ✓ {len(plan.goals)} goal(s) derived")
+        except Exception as e:
+            print(f"  ⚠ Could not derive goals: {e}")
+
     # Display plan
     print("\n" + "=" * 60)
     print("EXECUTION PLAN")
@@ -607,6 +618,15 @@ After gathering information with tools, generate a comprehensive execution plan 
 
         if high_risk_tasks:
             print(f"\n🟠 WARNING: {len(high_risk_tasks)} task(s) have elevated risk")
+
+        # Goals summary
+        if plan.goals:
+            print(f"\n🎯 GOALS ({len(plan.goals)}):")
+            for goal in plan.goals:
+                if hasattr(goal, 'description'):
+                    print(f"   - {goal.description}")
+                    if hasattr(goal, 'metrics'):
+                        print(f"     Metrics: {len(goal.metrics)}")
 
         print("=" * 60)
 
