@@ -29,6 +29,52 @@ from rev.tools.analysis import (
 )
 
 
+def rag_search(query: str, k: int = 10, filters: dict = None) -> str:
+    """Semantic code search using RAG (Retrieval-Augmented Generation).
+
+    Args:
+        query: Natural language query
+        k: Number of results to return
+        filters: Optional filters (language, chunk_type, file_pattern)
+
+    Returns:
+        JSON string with search results
+    """
+    try:
+        from pathlib import Path
+        from rev.retrieval import SimpleCodeRetriever
+
+        # Initialize or reuse retriever
+        retriever = SimpleCodeRetriever(root=Path.cwd(), chunk_size=50)
+
+        if not retriever.index_built:
+            retriever.build_index()
+
+        # Query
+        chunks = retriever.query(query, k=k, filters=filters)
+
+        # Format results
+        results = []
+        for chunk in chunks:
+            results.append({
+                "location": chunk.get_location(),
+                "score": chunk.score,
+                "preview": chunk.get_preview(max_lines=5),
+                "chunk_type": chunk.chunk_type,
+                "language": chunk.metadata.get("language", "unknown")
+            })
+
+        return json.dumps({
+            "success": True,
+            "query": query,
+            "results": results,
+            "count": len(results)
+        })
+
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
 # Cache for static descriptions (tools with no dynamic args)
 _DESCRIPTION_CACHE = {}
 
@@ -42,6 +88,7 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         "write_file": lambda args: write_file(args["path"], args["content"]),
         "list_dir": lambda args: list_dir(args.get("pattern", "**/*")),
         "search_code": lambda args: search_code(args["pattern"], args.get("include", "**/*")),
+        "rag_search": lambda args: rag_search(args["query"], args.get("k", 10), args.get("filters")),
         "delete_file": lambda args: delete_file(args["path"]),
         "move_file": lambda args: move_file(args["src"], args["dest"]),
         "append_to_file": lambda args: append_to_file(args["path"], args["content"]),
@@ -139,6 +186,7 @@ def _format_description(name: str, args: Dict[str, Any]) -> str:
         "write_file": f"Writing file: {args.get('path', '')}",
         "list_dir": f"Listing directory: {args.get('pattern', '**/*')}",
         "search_code": f"Searching code: {args.get('pattern', '')} in {args.get('include', '**/*')}",
+        "rag_search": f"RAG semantic search: {args.get('query', '')}",
         "delete_file": f"Deleting file: {args.get('path', '')}",
         "move_file": f"Moving file: {args.get('src', '')} → {args.get('dest', '')}",
         "append_to_file": f"Appending to file: {args.get('path', '')}",
@@ -291,6 +339,22 @@ def get_available_tools() -> list:
                         "include": {"type": "string", "description": "Glob pattern for files to search", "default": "**/*"}
                     },
                     "required": ["pattern"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "rag_search",
+                "description": "Semantic code search using RAG (Retrieval-Augmented Generation). Searches codebase using natural language queries with TF-IDF scoring. More effective than regex for conceptual searches.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Natural language search query"},
+                        "k": {"type": "integer", "description": "Number of results to return", "default": 10},
+                        "filters": {"type": "object", "description": "Optional filters: language, chunk_type, file_pattern"}
+                    },
+                    "required": ["query"]
                 }
             }
         },
