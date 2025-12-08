@@ -73,7 +73,7 @@ class HelpCommand(CommandHandler):
         categories = {
             "Session Management": ["clear", "exit", "quit"],
             "Information": ["status", "cost", "config", "doctor", "version"],
-            "Model & Configuration": ["model", "add-dir"],
+            "Model & Configuration": ["model", "mode", "add-dir"],
             "Code Review & Validation": ["review", "validate"],
             "Project Setup": ["init", "export"],
             "Help": ["help"]
@@ -548,12 +548,13 @@ class VersionCommand(CommandHandler):
         )
 
     def execute(self, args: List[str], session_context: Dict[str, Any]) -> str:
+        from rev import __version__
         system_info = config.get_system_info_cached()
 
-        output = ["\nRev - Autonomous Development System"]
+        output = ["\nRev - Autonomous AI Development System"]
         output.append("=" * 60)
-        output.append("  Version:          5.0")
-        output.append("  Architecture:     6-Agent System")
+        output.append(f"  Version:          {__version__}")
+        output.append("  Architecture:     Multi-Agent Orchestration")
         output.append(f"  Model:            {config.OLLAMA_MODEL}")
         output.append(f"\nSystem:")
         output.append(f"  OS:               {system_info['os']} {system_info['os_release']}")
@@ -634,6 +635,145 @@ class AgentsCommand(CommandHandler):
         return "\n".join(output)
 
 
+class ModeCommand(CommandHandler):
+    """Set execution mode with predefined configurations."""
+
+    def __init__(self):
+        super().__init__(
+            "mode",
+            "Set execution mode: simple, standard, thorough, or max"
+        )
+
+    def get_help(self) -> str:
+        return """Set the execution mode with predefined configurations.
+
+Available modes:
+
+  simple      - Fast execution with minimal overhead
+                • No research or learning
+                • Lenient review
+                • Shallow codebase exploration
+                • Sequential execution
+
+  standard    - Balanced approach (default)
+                • Medium research depth
+                • Moderate review strictness
+                • Validation enabled
+                • Parallel execution (2 workers)
+
+  thorough    - Comprehensive analysis and validation
+                • Deep research
+                • Strict review
+                • Full validation with auto-fix
+                • Parallel execution (3 workers)
+
+  max         - Maximum capabilities (orchestrator mode)
+                • Full orchestration with all agents
+                • Deep research + learning enabled
+                • Strict review + action review
+                • Full validation + auto-fix
+                • Maximum parallelism (4 workers)
+
+Usage: /mode <mode_name>
+Example: /mode thorough
+"""
+
+    def execute(self, args: List[str], session_context: Dict[str, Any]) -> str:
+        if not args:
+            # Show current mode
+            current_mode = session_context.get("execution_mode", "standard")
+            output = [create_header("Current Execution Mode", width=80)]
+            output.append(f"\n  {colorize(Symbols.ARROW, Colors.BRIGHT_GREEN)} {colorize(current_mode, Colors.BRIGHT_CYAN, bold=True)}")
+            output.append(f"\n{self.get_help()}")
+            return "\n".join(output)
+
+        mode = args[0].lower()
+
+        # Define mode configurations
+        modes = {
+            "simple": {
+                "orchestrate": False,
+                "research": False,
+                "learn": False,
+                "review": True,
+                "review_strictness": "lenient",
+                "research_depth": "shallow",
+                "validate": False,
+                "auto_fix": False,
+                "action_review": False,
+                "parallel": 1,
+                "description": "Fast execution with minimal overhead"
+            },
+            "standard": {
+                "orchestrate": True,  # Changed to True (default orchestration)
+                "research": True,
+                "learn": False,
+                "review": True,
+                "review_strictness": "moderate",
+                "research_depth": "medium",
+                "validate": True,
+                "auto_fix": False,
+                "action_review": False,
+                "parallel": 2,
+                "description": "Balanced approach with orchestration"
+            },
+            "thorough": {
+                "orchestrate": True,
+                "research": True,
+                "learn": True,
+                "review": True,
+                "review_strictness": "strict",
+                "research_depth": "deep",
+                "validate": True,
+                "auto_fix": True,
+                "action_review": False,
+                "parallel": 3,
+                "description": "Comprehensive analysis and validation"
+            },
+            "max": {
+                "orchestrate": True,
+                "research": True,
+                "learn": True,
+                "review": True,
+                "review_strictness": "strict",
+                "research_depth": "deep",
+                "validate": True,
+                "auto_fix": True,
+                "action_review": True,
+                "parallel": 4,
+                "description": "Maximum capabilities with all agents"
+            }
+        }
+
+        if mode not in modes:
+            return f"\n{colorize('Unknown mode:', Colors.BRIGHT_RED)} {mode}\n{self.get_help()}"
+
+        # Apply mode configuration
+        mode_config = modes[mode]
+        session_context["execution_mode"] = mode
+        session_context["mode_config"] = mode_config
+
+        # Build output
+        output = [create_header(f"Mode: {mode}", width=80)]
+        output.append(f"\n  {colorize(mode_config['description'], Colors.BRIGHT_WHITE)}\n")
+        output.append(create_section("Configuration Applied"))
+
+        if mode_config["orchestrate"]:
+            output.append(create_bullet_item("Orchestrator mode enabled", 'check'))
+
+        output.append(create_item("Research", f"{'Enabled' if mode_config['research'] else 'Disabled'} ({mode_config['research_depth']})"))
+        output.append(create_item("Learning", 'Enabled' if mode_config['learn'] else 'Disabled'))
+        output.append(create_item("Review", f"{'Enabled' if mode_config['review'] else 'Disabled'} ({mode_config['review_strictness']})"))
+        output.append(create_item("Validation", f"{'Enabled' if mode_config['validate'] else 'Disabled'}{' + auto-fix' if mode_config['auto_fix'] else ''}"))
+        output.append(create_item("Action Review", 'Enabled' if mode_config['action_review'] else 'Disabled'))
+        output.append(create_item("Parallel Workers", str(mode_config['parallel'])))
+
+        output.append(f"\n  {colorize('✓ Mode configuration saved to session', Colors.BRIGHT_GREEN)}")
+        output.append(f"  {colorize('Next task will use these settings', Colors.DIM)}")
+
+        return "\n".join(output)
+
+
 # Command registry - dictionary for O(1) lookup
 def _build_command_registry() -> Dict[str, CommandHandler]:
     """Build the command registry with all available commands."""
@@ -654,7 +794,8 @@ def _build_command_registry() -> Dict[str, CommandHandler]:
         VersionCommand(),
         CompactCommand(),
         PermissionsCommand(),
-        AgentsCommand()
+        AgentsCommand(),
+        ModeCommand()
     ]
 
     registry = {}

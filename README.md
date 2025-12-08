@@ -45,7 +45,7 @@ Rev isn't just another AI coding assistant — it's a **complete agentic develop
 
 ## Architecture
 
-**6-Agent Autonomous System (v5.0)**
+**Multi-Agent Orchestration System (v2.0)**
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -211,6 +211,18 @@ python rev.py --review-strictness strict "Critical production change"
 
 ## Installation
 
+### Quick Install (Recommended)
+
+```bash
+# Install via pip (coming soon to PyPI)
+pip install rev-ai
+
+# Or install from source
+git clone https://github.com/redsand/rev
+cd rev
+pip install -e .
+```
+
 ### 1. Install Ollama
 
 ```bash
@@ -321,6 +333,64 @@ Session Summary:
 - `/clear` - Clear session memory
 - `/help` - Show all commands
 - `/exit` - Exit with session summary
+- **`/mode`** - Control execution depth and thinking level (NEW in v2.0!)
+
+### Execution Modes (NEW!)
+
+Rev v2.0 introduces flexible execution modes that control the depth of analysis, research, and validation. Use `/mode` in REPL or configure via command-line:
+
+```bash
+# In REPL
+rev> /mode thorough
+Mode: thorough
+  ✓ Orchestrator mode enabled
+  Research:        Enabled (deep)
+  Learning:        Enabled
+  Review:          Enabled (strict)
+  Validation:      Enabled + auto-fix
+  Parallel Workers: 3
+
+rev> Implement user authentication
+# Executes with thorough mode settings...
+```
+
+**Available Modes:**
+
+#### Mode Feature Matrix
+
+| Feature | simple | standard | thorough | max |
+|---------|--------|----------|----------|-----|
+| **Orchestration** | ❌ | ✅ | ✅ | ✅ |
+| **Research** | ❌ | Medium | Deep | Deep |
+| **Learning** | ❌ | ❌ | ✅ | ✅ |
+| **Review** | Lenient | Moderate | Strict | Strict |
+| **Validation** | ❌ | ✅ | ✅ + auto-fix | ✅ + auto-fix |
+| **Action Review** | ❌ | ❌ | ❌ | ✅ |
+| **Parallel Workers** | 1 | 2 | 3 | 4 |
+| **Best For** | Quick fixes | Daily development | Complex features | Critical changes |
+
+**Mode Descriptions:**
+
+- **`simple`** - Fast execution with minimal overhead. No research or learning. Sequential execution. Perfect for quick fixes and testing.
+
+- **`standard`** - Balanced approach (DEFAULT). Medium research depth, moderate review, validation enabled, 2 parallel workers. Ideal for daily development.
+
+- **`thorough`** - Comprehensive analysis. Deep research + learning, strict review, full validation with auto-fix, 3 parallel workers. Use for complex features and refactoring.
+
+- **`max`** - Maximum capabilities. Full orchestration with all agents, deep research + learning, strict review with action-level validation, auto-fix, 4 parallel workers. For critical architectural changes.
+
+**Command-Line Mode Control:**
+
+```bash
+# Standard mode (default)
+rev "Add feature X"
+
+# Simple mode for quick tasks
+rev --no-orchestrate "Fix typo in README"
+
+# Thorough mode for complex tasks
+rev --orchestrate --research-depth deep --learn --auto-fix "Refactor auth system"
+```
 
 ### Manual Approval Mode
 

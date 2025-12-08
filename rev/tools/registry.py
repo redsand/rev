@@ -3,9 +3,11 @@
 """Tool registry and execution for rev."""
 
 import json
+import os
 from typing import Dict, Any
 
 from rev.debug_logger import get_logger
+from rev.execution.timeout_manager import TimeoutManager, TimeoutConfig
 
 # Import tool functions from their respective modules
 from rev.tools.file_ops import (
@@ -77,6 +79,35 @@ def rag_search(query: str, k: int = 10, filters: dict = None) -> str:
 
 # Cache for static descriptions (tools with no dynamic args)
 _DESCRIPTION_CACHE = {}
+
+# Global timeout manager instance (lazy initialization)
+_TIMEOUT_MANAGER = None
+
+# Tools that should have timeout protection
+_TIMEOUT_PROTECTED_TOOLS = {
+    "run_cmd",
+    "run_tests",
+    "execute_python",
+    "search_code",
+    "rag_search",
+    "web_fetch",
+    "ssh_exec",
+    "run_pylint",
+    "run_mypy",
+    "run_radon_complexity",
+    "find_dead_code",
+    "run_all_analysis"
+}
+
+def _get_timeout_manager() -> TimeoutManager:
+    """Get or create the global timeout manager."""
+    global _TIMEOUT_MANAGER
+    if _TIMEOUT_MANAGER is None:
+        # Check if timeouts are disabled via environment variable
+        if os.getenv("REV_DISABLE_TIMEOUTS", "0") == "1":
+            return None
+        _TIMEOUT_MANAGER = TimeoutManager(TimeoutConfig.from_env())
+    return _TIMEOUT_MANAGER
 
 
 # Tool dispatch table for O(1) lookup
@@ -247,6 +278,7 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
     """Execute a tool and return result.
 
     Optimized for O(1) lookup using dictionary dispatch instead of O(n) elif chain.
+    Tools in the timeout-protected list will be executed with automatic retry on timeout.
     """
     friendly_desc = _get_friendly_description(name, args)
     print(f"  → {friendly_desc}")
@@ -268,7 +300,25 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
             debug_logger.log_tool_execution(name, args, error=f"Unknown tool: {name}")
             return error_result
 
-        # Execute the tool handler
+        # Execute with timeout protection if applicable
+        if name in _TIMEOUT_PROTECTED_TOOLS:
+            timeout_mgr = _get_timeout_manager()
+            if timeout_mgr:
+                try:
+                    result = timeout_mgr.execute_with_retry(
+                        handler,
+                        f"{name}({', '.join(f'{k}={v!r}' for k, v in list(args.items())[:2])})",
+                        args
+                    )
+                    debug_logger.log_tool_execution(name, args, result)
+                    return result
+                except Exception as e:
+                    # Timeout or max retries exceeded
+                    error_msg = f"{type(e).__name__}: {e}"
+                    debug_logger.log_tool_execution(name, args, error=error_msg)
+                    return json.dumps({"error": error_msg})
+
+        # Execute the tool handler without timeout protection
         result = handler(args)
         debug_logger.log_tool_execution(name, args, result)
         return result

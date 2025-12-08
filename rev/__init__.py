@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""rev - An AI-powered code review and execution framework."""
+"""rev - Autonomous AI Development System with Multi-Agent Orchestration."""
 
-__version__ = "0.1.0"
+__version__ = "2.0.0"
 
 # Configuration
 from rev.config import ROOT
