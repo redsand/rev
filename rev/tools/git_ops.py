@@ -67,13 +67,39 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
             pass
 
 
-def git_commit(message: str, files: str = ".") -> str:
-    """Commit changes to git."""
+def git_add(files: str = ".") -> str:
+    """Add files to git staging area."""
     try:
-        # Add files
-        add_result = _run_shell(f"git add {shlex.quote(files)}")
-        if add_result.returncode != 0:
-            return json.dumps({"error": f"git add failed: {add_result.stderr}"})
+        result = _run_shell(f"git add {shlex.quote(files)}")
+        if result.returncode != 0:
+            return json.dumps({
+                "error": f"git add failed: {result.stderr}",
+                "returncode": result.returncode
+            })
+        return json.dumps({
+            "added": True,
+            "files": files,
+            "output": result.stdout,
+            "returncode": result.returncode
+        })
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def git_commit(message: str, add_files: bool = False, files: str = ".") -> str:
+    """Commit changes to git.
+
+    Args:
+        message: Commit message
+        add_files: Whether to add files before committing (default: False)
+        files: Files to add if add_files is True (default: ".")
+    """
+    try:
+        # Optionally add files first
+        if add_files:
+            add_result = _run_shell(f"git add {shlex.quote(files)}")
+            if add_result.returncode != 0:
+                return json.dumps({"error": f"git add failed: {add_result.stderr}"})
 
         # Commit
         commit_result = _run_shell(f"git commit -m {shlex.quote(message)}")

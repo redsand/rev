@@ -14,7 +14,7 @@ from rev.tools.file_ops import (
     copy_file, file_exists, read_file_lines, tree_view, search_code
 )
 from rev.tools.git_ops import (
-    git_diff, apply_patch, git_commit, git_status, git_log, git_branch,
+    git_diff, apply_patch, git_add, git_commit, git_status, git_log, git_branch,
     run_cmd, run_tests, get_repo_context
 )
 from rev.tools.ssh_ops import (
@@ -103,7 +103,8 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         # Git operations
         "git_diff": lambda args: git_diff(args.get("pathspec", ".")),
         "apply_patch": lambda args: apply_patch(args["patch"], args.get("dry_run", False)),
-        "git_commit": lambda args: git_commit(args["message"], args.get("files", ".")),
+        "git_add": lambda args: git_add(args.get("files", ".")),
+        "git_commit": lambda args: git_commit(args["message"], args.get("add_files", False), args.get("files", ".")),
         "git_status": lambda args: git_status(),
         "git_log": lambda args: git_log(args.get("count", 10), args.get("oneline", False)),
         "git_branch": lambda args: git_branch(args.get("action", "list"), args.get("branch_name")),
@@ -201,7 +202,8 @@ def _format_description(name: str, args: Dict[str, Any]) -> str:
         # Git operations
         "git_diff": f"Showing git diff: {args.get('pathspec', '.')}",
         "apply_patch": f"Applying patch{' (dry run)' if args.get('dry_run') else ''}",
-        "git_commit": f"Creating git commit: {args.get('message', '')[:50]}{'...' if len(args.get('message', '')) > 50 else ''}",
+        "git_add": f"Adding files to staging: {args.get('files', '.')}",
+        "git_commit": f"Creating git commit{' (with auto-add)' if args.get('add_files') else ''}: {args.get('message', '')[:50]}{'...' if len(args.get('message', '')) > 50 else ''}",
         "git_status": "Getting git status",
         "git_log": f"Viewing git log ({args.get('count', 10)} commits)",
         "git_branch": f"Git branch: {args.get('action', 'list')}" + (f" {args.get('branch_name', '')}" if args.get('branch_name') else ""),
@@ -540,13 +542,27 @@ def get_available_tools() -> list:
         {
             "type": "function",
             "function": {
+                "name": "git_add",
+                "description": "Add files to git staging area",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "files": {"type": "string", "description": "Files to add (path or pattern)", "default": "."}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "git_commit",
-                "description": "Create a git commit",
+                "description": "Create a git commit. Use git_add first to stage files, or set add_files=true to auto-stage.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "message": {"type": "string", "description": "Commit message"},
-                        "files": {"type": "string", "description": "Files to commit", "default": "."}
+                        "add_files": {"type": "boolean", "description": "Automatically add files before committing", "default": False},
+                        "files": {"type": "string", "description": "Files to add if add_files is true", "default": "."}
                     },
                     "required": ["message"]
                 }
