@@ -220,9 +220,54 @@ find .rev_checkpoints -type f -name "*.json" | sort -r | tail -n +11 | xargs rm
 
 ## Integration Points
 
+### Automatic Tool Timeout Protection
+
+The following tools are automatically protected with timeout and retry logic:
+
+**Command Execution:**
+- `run_cmd` - Shell command execution
+- `run_tests` - Test suite execution
+- `execute_python` - Python code execution
+
+**Search & Analysis:**
+- `search_code` - Code search with regex
+- `rag_search` - Semantic code search
+- `run_pylint` - Pylint static analysis
+- `run_mypy` - MyPy type checking
+- `run_radon_complexity` - Complexity analysis
+- `find_dead_code` - Dead code detection
+- `run_all_analysis` - Full analysis suite
+
+**Network & SSH:**
+- `web_fetch` - Web content fetching
+- `ssh_exec` - Remote SSH command execution
+
+These tools will automatically:
+1. Start with configured initial timeout (default 5 minutes)
+2. Retry with exponentially increasing timeouts on failure
+3. Display retry progress to the user
+4. Fail gracefully after max retries
+
+**Disable Timeouts** (for debugging):
+```bash
+export REV_DISABLE_TIMEOUTS=1
+```
+
 ### For Tool Developers
 
-Wrap long-running tools with timeout management:
+Add new tools to timeout protection:
+
+```python
+# In rev/tools/registry.py
+_TIMEOUT_PROTECTED_TOOLS = {
+    "run_cmd",
+    "run_tests",
+    "your_new_tool",  # Add here
+    # ...
+}
+```
+
+Or wrap tools manually:
 
 ```python
 from rev.execution.timeout_manager import with_retry_and_timeout, TimeoutConfig
@@ -235,6 +280,17 @@ def my_long_running_tool(args):
     # Your tool implementation
     pass
 ```
+
+### LLM Timeout Configuration
+
+LLM API calls (via `ollama_chat`) already have built-in timeout protection:
+- **Initial timeout**: 600 seconds (10 minutes)
+- **Retry timeouts**: 1200s (20 min), 1800s (30 min)
+- **Max retries**: 3 attempts
+- **Server errors (5xx)**: Automatic retry
+- **Authentication prompts**: Interactive handling
+
+This is separate from the tool timeout manager and configured in `rev/llm/client.py`.
 
 ### For Execution Engine
 
