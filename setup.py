@@ -19,7 +19,7 @@ if requirements_file.exists():
     ]
 
 setup(
-    name="rev",
+    name="rev-agentic",
     version="2.0.0",
     description="Rev - Autonomous AI Development System with Multi-Agent Orchestration",
     long_description=long_description,

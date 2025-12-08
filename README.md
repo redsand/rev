@@ -215,7 +215,7 @@ python rev.py --review-strictness strict "Critical production change"
 
 ```bash
 # Install via pip (coming soon to PyPI)
-pip install rev-ai
+pip install rev-agentic
 
 # Or install from source
 git clone https://github.com/redsand/rev
