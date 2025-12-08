@@ -99,12 +99,19 @@ def main():
     parser.add_argument(
         "--orchestrate",
         action="store_true",
-        help="Enable orchestrator mode - coordinates all agents for maximum autonomy"
+        default=True,
+        help="Enable orchestrator mode - coordinates all agents (default: enabled)"
+    )
+    parser.add_argument(
+        "--no-orchestrate",
+        action="store_true",
+        help="Disable orchestrator mode for simple execution"
     )
     parser.add_argument(
         "--research",
         action="store_true",
-        help="Enable research agent for pre-planning codebase exploration"
+        default=True,
+        help="Enable research agent for pre-planning codebase exploration (default: enabled)"
     )
     parser.add_argument(
         "--research-depth",
@@ -287,6 +294,10 @@ def main():
         else:
             task_description = " ".join(args.task)
             debug_logger.log("main", "TASK_DESCRIPTION", {"task": task_description})
+
+            # Handle --no-orchestrate flag
+            if args.no_orchestrate:
+                args.orchestrate = False
 
             # Orchestrator mode - full multi-agent coordination
             if args.orchestrate:
