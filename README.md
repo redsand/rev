@@ -1,26 +1,46 @@
-# rev.py — Autonomous CI/CD Agent
+# rev.py — Production-Grade Agentic Development System
 
-A minimal, autonomous CI/CD agent powered by [Ollama](https://ollama.ai) for local LLM inference. Designed for iterative code development with single-gate approval and comprehensive testing.
+A **robust, pattern-based autonomous development system** powered by [Ollama](https://ollama.ai) for local LLM inference. Built on **21 Agentic Design Patterns** for production-grade code generation, testing, and validation.
+
+## 🌟 What Makes Rev Different
+
+Rev isn't just another AI coding assistant — it's a **complete agentic development system** implementing industry-proven design patterns:
+
+- **🧠 Agentic Design Patterns** — Built on 21 patterns from research (Goal Setting, Routing, RAG, Recovery, Resource Budgets, etc.)
+- **🔍 Hybrid Search** — Combines symbolic (regex) + semantic (RAG/TF-IDF) code search for superior context gathering
+- **📊 Resource-Aware** — Tracks steps, tokens, and time budgets to prevent runaway execution
+- **🎯 Goal-Oriented** — Derives measurable goals from requests and validates they're met
+- **🛡️ Production-Ready** — Multi-layer validation, security scanning, auto-recovery, and rollback planning
+- **⚡ Intelligent** — Self-routing, priority scheduling, and adaptive agent configuration
 
 ## Key Features
 
-- **🤖 6-Agent System** — Planning, Research, Review, Execution, Validation, and Learning agents work together (NEW v5.0!)
-- **🎭 Orchestrator Mode** — Optional meta-agent coordinates all agents for maximum autonomy (NEW!)
-- **🔍 Research Agent** — Pre-planning codebase exploration to gather context (NEW!)
-- **📚 Learning Agent** — Project memory that learns from past executions (NEW!)
-- **✅ Validation Agent** — Post-execution verification with tests, linting, and semantic checks (NEW!)
-- **🛡️ Intelligent Review** — Automatic validation of plans and actions with security vulnerability detection
-- **📚 Complex Task Handling** — Recursive breakdown of large features into manageable subtasks
-- **🔓 Smart Automation** — Autonomous execution with review-based approval (no repeated prompts)
-- **📋 Planning Mode** — Analyzes your request and generates comprehensive task checklist with recursive decomposition
-- **⚡ Execution Mode** — Iteratively completes all tasks until done with optional action-level review
+### Agentic Design Patterns (NEW!)
+- **🎯 Goal Setting & Monitoring** — Automatic goal derivation with measurable success metrics
+- **🔀 Intelligent Routing** — Analyzes requests and configures optimal agent pipeline
+- **🔍 RAG (Retrieval-Augmented Generation)** — Semantic code search using TF-IDF for better context
+- **📊 Resource Budgets** — Tracks and enforces limits on steps, tokens, and execution time
+- **🔄 Exception Recovery** — Automatic rollback plans and recovery strategies
+- **📡 Inter-Agent Communication** — Message bus for coordinated multi-agent workflows
+- **⚙️ Coding Workflows** — Multi-stage chains (analyze → design → plan → implement → test → refine)
+
+### Core Capabilities
+- **🤖 6-Agent System** — Planning, Research, Review, Execution, Validation, and Learning agents
+- **🎭 Orchestrator Mode** — Meta-agent coordinates all agents with resource tracking
+- **🔍 Research Agent** — Pre-planning codebase exploration (symbolic + semantic search)
+- **📚 Learning Agent** — Project memory that learns from past executions
+- **✅ Validation Agent** — Post-execution verification with goal evaluation
+- **🛡️ Intelligent Review** — Automatic validation with security vulnerability detection
+- **📚 Complex Task Handling** — Recursive breakdown of large features
+- **🔓 Smart Automation** — Autonomous execution with review-based approval
+- **📋 Planning Mode** — Comprehensive task checklists with recursive decomposition
+- **⚡ Execution Mode** — Iterative completion with optional action-level review
 - **🚀 Parallel Execution** — Run 2+ tasks concurrently for 2-4x faster completion
 - **🧪 Automatic Testing** — Runs tests after each change to validate correctness
 - **🔧 Full Code Operations** — Review, edit, add, delete, rename files
 - **🏠 Local LLM** — Uses Ollama (no API keys, fully private)
-- **📦 Minimal Dependencies** — Just `requests` library
-- **🎯 Advanced Planning** — Dependency analysis, impact assessment, risk evaluation, rollback planning
-- **🛠️ Built-in Utilities** — File conversion, code refactoring, dependency management, security scanning
+- **🎯 Advanced Planning** — Dependency analysis, impact assessment, risk evaluation
+- **🛠️ Built-in Utilities** — File conversion, code refactoring, dependency management
 - **⚡ Intelligent Caching** — File content, LLM responses, repo context, dependency trees
 
 ## Architecture
@@ -98,6 +118,96 @@ A minimal, autonomous CI/CD agent powered by [Ollama](https://ollama.ai) for loc
 │  • Record for future reference                     │
 └─────────────────────────────────────────────────────┘
 ```
+
+## Agentic Design Patterns
+
+Rev implements **21 Agentic Design Patterns** from cutting-edge AI agent research, making it a production-grade development system rather than a simple code assistant.
+
+### Pattern Implementations
+
+**Phase 1: Foundational Patterns** ✅
+- **Goal Setting & Monitoring** — Automatic derivation of measurable goals from user requests
+- **Prompt Chaining (Coding Workflows)** — Multi-stage workflows: analyze → design → plan → implement → test → refine
+- **Routing** — Intelligent request analysis that selects optimal agent configuration
+- **Inter-Agent Communication** — Message bus with pub/sub for coordinated workflows
+- **RAG (Retrieval-Augmented Generation)** — Semantic code search using TF-IDF alongside symbolic search
+- **Exception Handling & Recovery** — Automatic rollback plans and recovery strategies
+- **Resource-Aware Optimization** — Budget tracking for steps, tokens, and execution time
+
+**Phase 2: Core Integrations** ✅
+- **TaskRouter Integration** — Routes every request to determine coding mode and agent configuration
+- **Goal Integration** — Goals automatically derived and validated post-execution
+- **Priority Scheduling** — Higher-priority tasks execute first for critical path optimization
+- **Metrics Emission** — JSONL metrics for evaluation and monitoring (`.rev-metrics/`)
+
+**Phase 3: Advanced Integration** ✅
+- **RAG Integration** — Research Agent uses hybrid symbolic + semantic search (enabled by default)
+- **Resource Budget Tracking** — Orchestrator tracks and enforces budgets across all phases
+- **Goal Validation** — Validation Agent evaluates whether goals were met
+
+### Pattern Benefits
+
+**🎯 Superior Context Gathering**
+```bash
+# Research Agent uses both approaches:
+# Symbolic: Finds exact matches for "authenticate", "login", "jwt"
+# Semantic: Finds conceptually related code even without keywords
+python rev.py "Add OAuth2 authentication"
+```
+
+**📊 Controlled Execution**
+```bash
+# Resource budgets prevent runaway execution:
+# - Max steps: 200 (configurable via REV_MAX_STEPS)
+# - Max tokens: 100,000 (REV_MAX_TOKENS)
+# - Max time: 1800s / 30min (REV_MAX_SECONDS)
+python rev.py "Refactor entire authentication system"
+# Output: "📊 Resource Usage: Steps: 45/200 | Tokens: 12000/100000 | Time: 120s/1800s"
+```
+
+**🎯 Goal-Oriented Validation**
+```bash
+# Goals automatically derived and validated:
+python rev.py "Fix all failing tests"
+# Derives goal: "All tests must pass"
+# Validation checks: Tests passed? ✅
+# Goal met? ✅
+```
+
+**🔀 Adaptive Configuration**
+```bash
+# Router analyzes request and optimizes:
+python rev.py "Quick typo fix in README"
+# → Route: quick_edit (skips research, minimal review)
+
+python rev.py "Implement payment processing system"
+# → Route: full_feature (enables all agents, strict review)
+```
+
+### Pattern Usage
+
+Most patterns are **enabled by default** with graceful degradation:
+
+- **RAG Search**: Enabled (falls back to symbolic if unavailable)
+- **Resource Budgets**: Always tracking (configurable limits)
+- **Goal Validation**: Runs if goals exist (auto-derived for most tasks)
+- **Routing**: Always active (optimizes agent pipeline)
+
+**Configuration:**
+```bash
+# Disable RAG for faster execution
+python rev.py --research-depth shallow "Quick task"
+
+# Adjust resource budgets
+export REV_MAX_STEPS=500
+export REV_MAX_TOKENS=200000
+export REV_MAX_SECONDS=3600  # 1 hour
+
+# Control routing behavior via strictness
+python rev.py --review-strictness strict "Critical production change"
+```
+
+**See [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) for complete pattern documentation and usage examples.**
 
 ## Installation
 
@@ -402,7 +512,8 @@ The agent has access to **36 powerful tools** across multiple categories:
 | Tool | Description |
 |------|-------------|
 | `list_dir` | List files matching glob pattern |
-| `search_code` | Search code with regex |
+| `search_code` | Search code with regex (symbolic search) |
+| `rag_search` | Semantic code search using RAG/TF-IDF (NEW!) |
 
 #### Git Operations
 | Tool | Description |
