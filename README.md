@@ -463,7 +463,7 @@ Options:
 
 ### Parallel Execution
 
-**New in v3.0:** Concurrent task execution for faster completion!
+**New in v2.0:** Concurrent task execution for faster completion!
 
 By default, rev.py now runs **2 tasks in parallel** when they don't have dependencies on each other. This dramatically speeds up execution for complex tasks.
 
