@@ -58,6 +58,78 @@ After making changes, run tests to ensure nothing broke.
 Be concise. Execute the task and report success or failure."""
 
 
+CODING_EXECUTION_SUFFIX = """
+You are executing CODE and TEST tasks.
+
+When the task involves code changes:
+
+1. Understand first:
+   - Use search_code, list_dir, tree_view, and read_file to inspect the relevant code.
+2. Make changes safely:
+   - Use apply_patch with unified diffs instead of overwriting files blindly.
+   - Keep changes minimal, consistent, and well-structured.
+3. Validate:
+   - Use run_tests with an appropriate command (e.g. 'pytest -q') AFTER making changes.
+   - If tests fail, inspect the output and fix the issues before declaring completion.
+4. Git hygiene:
+   - Use git_diff to inspect your changes.
+   - Do NOT force-push or run destructive git commands without a clear reason.
+
+You MUST NOT respond with TASK_COMPLETE until:
+- All intended code changes for this task are implemented, AND
+- Relevant tests have been run, AND
+- Tests either pass OR you have a clear, explicit reason why tests cannot yet pass.
+"""
+
+
+TEST_WRITER_SYSTEM = """
+You are an expert test engineer.
+
+Given:
+- A description of the user's requested change
+- A summary of the codebase
+- Validation or test failures
+
+Your job is to:
+1. Propose or update automated tests that clearly exercise the behavior.
+2. Use existing test patterns and frameworks in this repo when possible.
+3. Write tests that are small, focused, and easy to debug.
+
+Use tools such as read_file, list_dir, search_code, write_file, and run_tests
+to locate existing tests, add new test files, and verify that tests run.
+
+When you create or update tests, explain briefly:
+- Which behavior is being tested
+- Where the tests were added or modified
+
+Do not change production code in this mode unless it is required to fix a
+test that cannot be executed otherwise.
+"""
+
+
+def _build_execution_system_context(sys_info: Dict[str, Any], coding_mode: bool = False) -> str:
+    """Build the system context string for execution, optionally with coding suffix.
+
+    Args:
+        sys_info: System information dictionary
+        coding_mode: Whether to include coding-specific instructions
+
+    Returns:
+        Formatted system context string
+    """
+    base = EXECUTION_SYSTEM
+    if coding_mode:
+        base += CODING_EXECUTION_SUFFIX
+
+    return f"""System Information:
+OS: {sys_info['os']} {sys_info['os_release']}
+Platform: {sys_info['platform']}
+Architecture: {sys_info['architecture']}
+Shell Type: {sys_info['shell_type']}
+
+{base}"""
+
+
 def _summarize_old_messages(messages: List[Dict], tracker: 'SessionTracker' = None) -> str:
     """Summarize completed tasks from old messages.
 
@@ -153,7 +225,14 @@ def _manage_message_history(messages: List[Dict], max_recent: int = 20, tracker:
     return messages
 
 
-def execution_mode(plan: ExecutionPlan, approved: bool = False, auto_approve: bool = True, tools: list = None, enable_action_review: bool = False) -> bool:
+def execution_mode(
+    plan: ExecutionPlan,
+    approved: bool = False,
+    auto_approve: bool = True,
+    tools: list = None,
+    enable_action_review: bool = False,
+    coding_mode: bool = False
+) -> bool:
     """Execute all tasks in the plan iteratively.
 
     This function executes tasks sequentially, maintaining a conversation with
@@ -167,6 +246,7 @@ def execution_mode(plan: ExecutionPlan, approved: bool = False, auto_approve: bo
                       Scary operations still require confirmation regardless.
         tools: List of available tools for LLM function calling (optional)
         enable_action_review: If True, review each action before execution (default: False)
+        coding_mode: If True, use coding-specific execution prompts with test enforcement
 
     Returns:
         True if all tasks completed successfully, False otherwise
@@ -189,15 +269,9 @@ def execution_mode(plan: ExecutionPlan, approved: bool = False, auto_approve: bo
     if auto_approve:
         print("  ℹ️  Running in autonomous mode. Destructive operations will prompt for confirmation.\n")
 
-    # Get system info for context
+    # Get system info and build context
     sys_info = get_system_info_cached()
-    system_context = f"""System Information:
-OS: {sys_info['os']} {sys_info['os_release']}
-Platform: {sys_info['platform']}
-Architecture: {sys_info['architecture']}
-Shell Type: {sys_info['shell_type']}
-
-{EXECUTION_SYSTEM}"""
+    system_context = _build_execution_system_context(sys_info, coding_mode)
 
     messages = [{"role": "system", "content": system_context}]
     max_iterations = 10000  # Very high limit to effectively remove restriction
@@ -411,8 +485,20 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         session_tracker.track_test_results(result)
                         try:
                             result_data = json.loads(result)
-                            if result_data.get("rc", 0) != 0:
-                                print(f"  ⚠ Tests failed (rc={result_data['rc']})")
+                            rc = result_data.get("rc", 0)
+                            if rc != 0:
+                                print(f"  ⚠ Tests failed (rc={rc})")
+                                # NEW: Inject explicit feedback for the LLM in coding mode
+                                if coding_mode:
+                                    messages.append({
+                                        "role": "user",
+                                        "content": (
+                                            f"Tests failed with exit code {rc}. "
+                                            f"Here is the test output:\n\n{result}\n\n"
+                                            "You MUST fix the underlying issues and re-run tests "
+                                            "before responding with TASK_COMPLETE."
+                                        ),
+                                    })
                         except:
                             pass
 
@@ -486,13 +572,25 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
     try:
         summary_path = session_tracker.save_to_file()
         print(f"\n📊 Session summary saved to: {summary_path}")
+
+        # Emit metrics for evaluation and monitoring
+        metrics_path = session_tracker.emit_metrics()
+        print(f"📈 Metrics emitted to: {metrics_path}")
     except Exception as e:
-        print(f"\n⚠️  Failed to save session summary: {e}")
+        print(f"\n⚠️  Failed to save session data: {e}")
 
     return all(t.status == TaskStatus.COMPLETED for t in plan.tasks)
 
 
-def execute_single_task(task: Task, plan: ExecutionPlan, sys_info: Dict[str, Any], auto_approve: bool = True, tools: list = None, enable_action_review: bool = False) -> bool:
+def execute_single_task(
+    task: Task,
+    plan: ExecutionPlan,
+    sys_info: Dict[str, Any],
+    auto_approve: bool = True,
+    tools: list = None,
+    enable_action_review: bool = False,
+    coding_mode: bool = False
+) -> bool:
     """Execute a single task (for concurrent execution).
 
     This function is designed to be run in a thread pool and executes a single
@@ -505,6 +603,7 @@ def execute_single_task(task: Task, plan: ExecutionPlan, sys_info: Dict[str, Any
         auto_approve: If True, skip initial approval prompt
         tools: List of available tools for LLM function calling (optional)
         enable_action_review: If True, review each action before execution (default: False)
+        coding_mode: If True, use coding-specific execution prompts
 
     Returns:
         True if task completed successfully, False otherwise
@@ -514,13 +613,7 @@ def execute_single_task(task: Task, plan: ExecutionPlan, sys_info: Dict[str, Any
 
     plan.mark_task_in_progress(task)
 
-    system_context = f"""System Information:
-OS: {sys_info['os']} {sys_info['os_release']}
-Platform: {sys_info['platform']}
-Architecture: {sys_info['architecture']}
-Shell Type: {sys_info['shell_type']}
-
-{EXECUTION_SYSTEM}"""
+    system_context = _build_execution_system_context(sys_info, coding_mode)
 
     messages = [{"role": "system", "content": system_context}]
 
@@ -671,7 +764,14 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
     return True
 
 
-def concurrent_execution_mode(plan: ExecutionPlan, max_workers: int = 2, auto_approve: bool = True, tools: list = None, enable_action_review: bool = False) -> bool:
+def concurrent_execution_mode(
+    plan: ExecutionPlan,
+    max_workers: int = 2,
+    auto_approve: bool = True,
+    tools: list = None,
+    enable_action_review: bool = False,
+    coding_mode: bool = False
+) -> bool:
     """Execute tasks in the plan concurrently with dependency tracking.
 
     This function executes tasks in parallel while respecting task dependencies.
@@ -684,6 +784,7 @@ def concurrent_execution_mode(plan: ExecutionPlan, max_workers: int = 2, auto_ap
         auto_approve: If True (default), runs autonomously without initial approval
         tools: List of available tools for LLM function calling (optional)
         enable_action_review: If True, review each action before execution (default: False)
+        coding_mode: If True, use coding-specific execution prompts
 
     Returns:
         True if all tasks completed successfully, False otherwise
@@ -720,7 +821,10 @@ def concurrent_execution_mode(plan: ExecutionPlan, max_workers: int = 2, auto_ap
 
                 # Submit new tasks
                 for task in executable_tasks:
-                    future = executor.submit(execute_single_task, task, plan, sys_info, auto_approve, tools, enable_action_review)
+                    future = executor.submit(
+                        execute_single_task, task, plan, sys_info,
+                        auto_approve, tools, enable_action_review, coding_mode
+                    )
                     futures[future] = task
 
             # Wait for at least one task to complete
@@ -773,7 +877,8 @@ def fix_validation_failures(
     user_request: str,
     tools: list = None,
     enable_action_review: bool = False,
-    max_fix_attempts: int = 5
+    max_fix_attempts: int = 5,
+    coding_mode: bool = False
 ) -> bool:
     """Attempt to fix validation failures based on feedback.
 
@@ -786,6 +891,7 @@ def fix_validation_failures(
         tools: List of available tools for LLM function calling
         enable_action_review: Whether to review fix actions
         max_fix_attempts: Maximum number of fix attempts
+        coding_mode: If True, use test-writer specialized prompt
 
     Returns:
         True if fixes were attempted successfully, False otherwise
@@ -796,13 +902,19 @@ def fix_validation_failures(
 
     # Get system info for context
     sys_info = get_system_info_cached()
+
+    # Use specialized test-writer prompt in coding mode
+    system_prompt = EXECUTION_SYSTEM
+    if coding_mode:
+        system_prompt = TEST_WRITER_SYSTEM + "\n\n" + CODING_EXECUTION_SUFFIX
+
     system_context = f"""System Information:
 OS: {sys_info['os']} {sys_info['os_release']}
 Platform: {sys_info['platform']}
 Architecture: {sys_info['architecture']}
 Shell Type: {sys_info['shell_type']}
 
-{EXECUTION_SYSTEM}
+{system_prompt}
 
 IMPORTANT: You are in AUTO-FIX mode. Your task is to analyze validation failures
 and create fixes for them. Be methodical and targeted - fix one issue at a time."""

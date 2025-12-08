@@ -3,6 +3,8 @@ Orchestrator Agent for coordinating multi-agent workflow.
 
 This module provides orchestration capabilities that coordinate all agents,
 manage workflow, resolve conflicts, and make meta-decisions.
+
+Implements Resource-Aware Optimization pattern to track and enforce budgets.
 """
 
 import time
@@ -19,6 +21,78 @@ from rev.execution.researcher import research_codebase, ResearchFindings
 from rev.execution.learner import LearningAgent, display_learning_suggestions
 from rev.execution.executor import execution_mode, concurrent_execution_mode, fix_validation_failures
 from rev.tools.registry import get_available_tools
+from rev.config import MAX_STEPS_PER_RUN, MAX_LLM_TOKENS_PER_RUN, MAX_WALLCLOCK_SECONDS
+
+
+@dataclass
+class ResourceBudget:
+    """Resource budget tracker for resource-aware optimization."""
+    max_steps: int = MAX_STEPS_PER_RUN
+    max_tokens: int = MAX_LLM_TOKENS_PER_RUN
+    max_seconds: float = MAX_WALLCLOCK_SECONDS
+
+    # Current usage
+    steps_used: int = 0
+    tokens_used: int = 0
+    seconds_used: float = 0.0
+
+    # Start time for duration tracking
+    start_time: float = field(default_factory=time.time)
+
+    def update_step(self, count: int = 1) -> None:
+        """Increment step counter."""
+        self.steps_used += count
+
+    def update_tokens(self, count: int) -> None:
+        """Add to token counter."""
+        self.tokens_used += count
+
+    def update_time(self) -> None:
+        """Update elapsed time."""
+        self.seconds_used = time.time() - self.start_time
+
+    def is_exceeded(self) -> bool:
+        """Check if any budget limit is exceeded."""
+        self.update_time()
+        return (
+            self.steps_used >= self.max_steps or
+            self.tokens_used >= self.max_tokens or
+            self.seconds_used >= self.max_seconds
+        )
+
+    def get_remaining(self) -> Dict[str, float]:
+        """Get remaining budget percentages."""
+        self.update_time()
+        return {
+            "steps": max(0, (self.max_steps - self.steps_used) / self.max_steps * 100),
+            "tokens": max(0, (self.max_tokens - self.tokens_used) / self.max_tokens * 100),
+            "time": max(0, (self.max_seconds - self.seconds_used) / self.max_seconds * 100)
+        }
+
+    def get_usage_summary(self) -> str:
+        """Get human-readable usage summary."""
+        self.update_time()
+        return (
+            f"Steps: {self.steps_used}/{self.max_steps} | "
+            f"Tokens: {self.tokens_used}/{self.max_tokens} | "
+            f"Time: {self.seconds_used:.1f}s/{self.max_seconds:.0f}s"
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        self.update_time()
+        return {
+            "max_steps": self.max_steps,
+            "max_tokens": self.max_tokens,
+            "max_seconds": self.max_seconds,
+            "steps_used": self.steps_used,
+            "tokens_used": self.tokens_used,
+            "seconds_used": self.seconds_used,
+            "steps_remaining_pct": self.get_remaining()["steps"],
+            "tokens_remaining_pct": self.get_remaining()["tokens"],
+            "time_remaining_pct": self.get_remaining()["time"],
+            "exceeded": self.is_exceeded()
+        }
 
 
 class AgentPhase(Enum):
@@ -59,6 +133,7 @@ class OrchestratorResult:
     review_decision: Optional[ReviewDecision] = None
     validation_status: Optional[ValidationStatus] = None
     execution_time: float = 0.0
+    resource_budget: Optional[ResourceBudget] = None
     agent_insights: Dict[str, Any] = field(default_factory=dict)
     errors: List[str] = field(default_factory=list)
 
@@ -69,6 +144,7 @@ class OrchestratorResult:
             "review_decision": self.review_decision.value if self.review_decision else None,
             "validation_status": self.validation_status.value if self.validation_status else None,
             "execution_time": self.execution_time,
+            "resource_budget": self.resource_budget.to_dict() if self.resource_budget else None,
             "agent_insights": self.agent_insights,
             "errors": self.errors
         }
@@ -102,7 +178,20 @@ class Orchestrator:
         print("ORCHESTRATOR - MULTI-AGENT COORDINATION")
         print("=" * 60)
         print(f"Task: {user_request[:100]}...")
-        print(f"Agents enabled: ", end="")
+
+        # NEW: Route the request to determine optimal configuration
+        from rev.execution.router import TaskRouter
+        router = TaskRouter()
+        route = router.route(user_request, repo_stats={})
+
+        # Apply routing decision to config (if not explicitly overridden)
+        print(f"\n🔀 Routing Decision: {route.mode}")
+        print(f"   Reasoning: {route.reasoning}")
+
+        # Update config based on route (only if using default config)
+        coding_mode = route.mode in ["full_feature", "refactor"]  # Enable coding mode for these routes
+
+        print(f"\nAgents enabled: ", end="")
         agents = []
         if self.config.enable_learning:
             agents.append("Learning")
@@ -115,15 +204,28 @@ class Orchestrator:
         if self.config.enable_validation:
             agents.append("Validation")
         print(", ".join(agents))
+        if coding_mode:
+            print("   🔧 Coding mode: ENABLED (test + doc enforcement)")
         print("=" * 60)
 
-        result = OrchestratorResult(success=False, phase_reached=AgentPhase.LEARNING)
+        # Initialize resource budget tracking
+        budget = ResourceBudget()
+        result = OrchestratorResult(
+            success=False,
+            phase_reached=AgentPhase.LEARNING,
+            resource_budget=budget
+        )
         start_time = time.time()
+
+        # Display resource budgets
+        print(f"\n📊 Resource Budgets:")
+        print(f"   Steps: {budget.max_steps} | Tokens: {budget.max_tokens} | Time: {budget.max_seconds}s")
 
         try:
             # Phase 1: Learning Agent - Get historical insights
             if self.config.enable_learning and self.learning_agent:
                 self._update_phase(AgentPhase.LEARNING)
+                budget.update_step()  # Track phase transition
                 suggestions = self.learning_agent.get_suggestions(user_request)
                 if suggestions["similar_patterns"]:
                     display_learning_suggestions(suggestions, user_request)
@@ -132,6 +234,7 @@ class Orchestrator:
             # Phase 2: Research Agent - Explore codebase
             if self.config.enable_research:
                 self._update_phase(AgentPhase.RESEARCH)
+                budget.update_step()
                 quick_mode = self.config.research_depth == "shallow"
                 research_findings = research_codebase(
                     user_request,
@@ -147,7 +250,8 @@ class Orchestrator:
 
             # Phase 3: Planning Agent - Create execution plan
             self._update_phase(AgentPhase.PLANNING)
-            plan = planning_mode(user_request)
+            budget.update_step()
+            plan = planning_mode(user_request, coding_mode=coding_mode)
             result.plan = plan
 
             if not plan.tasks:
@@ -159,6 +263,7 @@ class Orchestrator:
             review = None
             if self.config.enable_review:
                 self._update_phase(AgentPhase.REVIEW)
+                budget.update_step()
 
                 # Retry loop for plan regeneration
                 planning_retry_count = 0
@@ -212,10 +317,13 @@ class Orchestrator:
                         feedback = self._format_review_feedback_for_planning(review, user_request)
 
                         # Regenerate plan with feedback
-                        plan = planning_mode(f"""{user_request}
+                        plan = planning_mode(
+                            f"""{user_request}
 
 IMPORTANT - Address the following review feedback:
-{feedback}""")
+{feedback}""",
+                            coding_mode=coding_mode
+                        )
                         result.plan = plan
 
                         if not plan.tasks:
@@ -235,6 +343,9 @@ IMPORTANT - Address the following review feedback:
 
             # Phase 5: Execution Agent - Execute the plan
             self._update_phase(AgentPhase.EXECUTION)
+            budget.update_step()
+            # Track task execution steps
+            budget.update_step(len(plan.tasks))  # Count each task as a step
             tools = get_available_tools()
             if self.config.parallel_workers > 1:
                 concurrent_execution_mode(
@@ -242,19 +353,22 @@ IMPORTANT - Address the following review feedback:
                     max_workers=self.config.parallel_workers,
                     auto_approve=self.config.auto_approve,
                     tools=tools,
-                    enable_action_review=self.config.enable_action_review
+                    enable_action_review=self.config.enable_action_review,
+                    coding_mode=coding_mode
                 )
             else:
                 execution_mode(
                     plan,
                     auto_approve=self.config.auto_approve,
                     tools=tools,
-                    enable_action_review=self.config.enable_action_review
+                    enable_action_review=self.config.enable_action_review,
+                    coding_mode=coding_mode
                 )
 
             # Phase 6: Validation Agent - Verify results
             if self.config.enable_validation:
                 self._update_phase(AgentPhase.VALIDATION)
+                budget.update_step()
                 validation = validate_execution(
                     plan,
                     user_request,
@@ -294,7 +408,8 @@ IMPORTANT - Address the following review feedback:
                             user_request=user_request,
                             tools=tools,
                             enable_action_review=self.config.enable_action_review,
-                            max_fix_attempts=3
+                            max_fix_attempts=3,
+                            coding_mode=coding_mode
                         )
 
                         if not fix_success:
@@ -357,6 +472,16 @@ IMPORTANT - Address the following review feedback:
             result.phase_reached = AgentPhase.FAILED
 
         result.execution_time = time.time() - start_time
+
+        # Display final resource budget summary
+        budget.update_time()
+        print(f"\n📊 Resource Usage Summary:")
+        print(f"   {budget.get_usage_summary()}")
+        remaining = budget.get_remaining()
+        print(f"   Remaining: Steps {remaining['steps']:.0f}% | Tokens {remaining['tokens']:.0f}% | Time {remaining['time']:.0f}%")
+        if budget.is_exceeded():
+            print(f"   ⚠️  Budget exceeded!")
+
         self._display_summary(result)
         return result
 

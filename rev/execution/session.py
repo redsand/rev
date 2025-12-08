@@ -282,6 +282,73 @@ class SessionTracker:
 
         return path
 
+    def emit_metrics(self, path: Optional[Path] = None) -> Path:
+        """Emit structured metrics to JSONL for evaluation and monitoring.
+
+        This implements the Evaluation & Monitoring pattern by capturing
+        agent trajectories, tool usage, and outcomes over time.
+
+        Args:
+            path: Optional path to metrics file. If None, uses default location.
+
+        Returns:
+            Path where metrics were written
+        """
+        import json
+
+        if path is None:
+            # Default location: .rev-metrics/metrics.jsonl
+            metrics_dir = Path.cwd() / ".rev-metrics"
+            metrics_dir.mkdir(exist_ok=True)
+            path = metrics_dir / "metrics.jsonl"
+
+        # Ensure summary is finalized
+        self.summary.finalize()
+
+        # Create metrics record
+        metrics = {
+            "session_id": self.session_id,
+            "timestamp": self.summary.start_time,
+            "duration_seconds": self.summary.duration_seconds,
+            "tasks": {
+                "total": self.summary.total_tasks,
+                "completed": len(self.summary.tasks_completed),
+                "failed": len(self.summary.tasks_failed),
+                "success_rate": len(self.summary.tasks_completed) / max(self.summary.total_tasks, 1)
+            },
+            "tools": {
+                "total_calls": self.summary.total_tool_calls,
+                "unique_tools": len(self.summary.tools_used),
+                "by_tool": dict(self.summary.tools_used)
+            },
+            "tests": {
+                "total_runs": self.summary.tests_run,
+                "passed": self.summary.tests_passed,
+                "failed": self.summary.tests_failed,
+                "pass_rate": self.summary.tests_passed / max(self.summary.tests_run, 1) if self.summary.tests_run > 0 else None
+            },
+            "files": {
+                "created": len(self.summary.files_created),
+                "modified": len(self.summary.files_modified),
+                "deleted": len(self.summary.files_deleted)
+            },
+            "git": {
+                "commits": len(self.summary.commits_made)
+            },
+            "messages": {
+                "count": self.summary.message_count,
+                "tokens_estimated": self.summary.tokens_estimated
+            },
+            "success": self.summary.success,
+            "errors": len(self.summary.error_messages)
+        }
+
+        # Append to JSONL file (newline-delimited JSON)
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(metrics) + '\n')
+
+        return path
+
     @classmethod
     def load_from_file(cls, path: Path) -> 'SessionTracker':
         """Load session tracker from a saved file."""

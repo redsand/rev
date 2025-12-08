@@ -35,6 +35,11 @@ ALLOW_CMDS = {
     "node", "npm", "npx", "pnpm", "prettier", "eslint", "git", "make"
 }
 
+# Resource budgets (for resource-aware optimization pattern)
+MAX_STEPS_PER_RUN = int(os.getenv("REV_MAX_STEPS", "200"))
+MAX_LLM_TOKENS_PER_RUN = int(os.getenv("REV_MAX_TOKENS", "100000"))
+MAX_WALLCLOCK_SECONDS = int(os.getenv("REV_MAX_SECONDS", "1800"))  # 30 minutes default
+
 # System information (cached)
 _SYSTEM_INFO: Optional[Dict[str, Any]] = None
 

@@ -149,6 +149,12 @@ def validate_execution(
         )
         report.add_result(result)
 
+    # 0. Goal Validation (if goals were set)
+    if hasattr(plan, 'goals') and plan.goals:
+        print("→ Validating execution goals...")
+        goal_result = _validate_goals(plan.goals)
+        report.add_result(goal_result)
+
     # 1. Syntax Check
     if check_syntax:
         print("→ Running syntax checks...")
@@ -209,6 +215,80 @@ def validate_execution(
 
     _display_validation_report(report)
     return report
+
+
+def _validate_goals(goals: List) -> ValidationResult:
+    """Validate that execution goals were met.
+
+    Args:
+        goals: List of Goal objects from execution plan
+
+    Returns:
+        ValidationResult with goal validation outcome
+    """
+    try:
+        if not goals:
+            return ValidationResult(
+                name="goal_validation",
+                status=ValidationStatus.SKIPPED,
+                message="No goals defined for validation"
+            )
+
+        # Import Goal class
+        from rev.models.goal import Goal
+
+        total_goals = len(goals)
+        passed_goals = 0
+        failed_goals = []
+
+        for goal in goals:
+            if not isinstance(goal, Goal):
+                continue
+
+            # Evaluate goal metrics
+            goal_passed = goal.evaluate_metrics()
+
+            if goal_passed:
+                passed_goals += 1
+            else:
+                failed_goals.append({
+                    "description": goal.description if hasattr(goal, 'description') else "Unknown goal",
+                    "metrics": goal.get_metrics_summary() if hasattr(goal, 'get_metrics_summary') else {}
+                })
+
+        # Determine status
+        if passed_goals == total_goals:
+            return ValidationResult(
+                name="goal_validation",
+                status=ValidationStatus.PASSED,
+                message=f"All {total_goals} execution goal(s) met",
+                details={"goals_passed": passed_goals, "goals_total": total_goals}
+            )
+        elif passed_goals > 0:
+            return ValidationResult(
+                name="goal_validation",
+                status=ValidationStatus.PASSED_WITH_WARNINGS,
+                message=f"{passed_goals}/{total_goals} goal(s) met",
+                details={
+                    "goals_passed": passed_goals,
+                    "goals_total": total_goals,
+                    "failed_goals": failed_goals
+                }
+            )
+        else:
+            return ValidationResult(
+                name="goal_validation",
+                status=ValidationStatus.FAILED,
+                message=f"None of the {total_goals} goal(s) were met",
+                details={"failed_goals": failed_goals}
+            )
+
+    except Exception as e:
+        return ValidationResult(
+            name="goal_validation",
+            status=ValidationStatus.SKIPPED,
+            message=f"Could not validate goals: {e}"
+        )
 
 
 def _check_syntax() -> ValidationResult:

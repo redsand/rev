@@ -3,16 +3,53 @@ Research Agent for pre-planning codebase exploration.
 
 This module provides research capabilities that explore the codebase
 before planning to gather context, find patterns, and identify potential issues.
+
+Supports both symbolic search (keyword/regex) and semantic search (RAG/TF-IDF).
 """
 
 import json
 import re
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from rev.tools.registry import execute_tool
 from rev.llm.client import ollama_chat
+
+
+# Global RAG retriever (lazy initialization)
+_RAG_RETRIEVER = None
+
+
+def get_rag_retriever():
+    """Get or initialize the RAG code retriever.
+
+    Returns:
+        SimpleCodeRetriever instance or None if initialization fails
+    """
+    global _RAG_RETRIEVER
+
+    if _RAG_RETRIEVER is None:
+        try:
+            from rev.retrieval import SimpleCodeRetriever
+
+            # Initialize retriever for current directory
+            retriever = SimpleCodeRetriever(root=Path.cwd(), chunk_size=50)
+
+            # Build index if not already built
+            if not retriever.index_built:
+                print("  → Building RAG index (one-time setup)...")
+                retriever.build_index()
+                stats = retriever.get_index_stats()
+                print(f"    Indexed {stats.get('total_chunks', 0)} code chunks")
+
+            _RAG_RETRIEVER = retriever
+        except Exception as e:
+            print(f"  ⚠️  RAG initialization failed: {e}")
+            return None
+
+    return _RAG_RETRIEVER
 
 
 @dataclass
@@ -65,10 +102,57 @@ Return your analysis in JSON format:
 Be concise but thorough. Focus on actionable insights."""
 
 
+def _rag_search(query: str, k: int = 10) -> Dict[str, Any]:
+    """Perform semantic code search using RAG.
+
+    Args:
+        query: Natural language query
+        k: Number of results to return
+
+    Returns:
+        Dict with files and relevant chunks
+    """
+    retriever = get_rag_retriever()
+
+    if retriever is None:
+        return {"files": [], "chunks": []}
+
+    try:
+        # Query the RAG system
+        chunks = retriever.query(query, k=k)
+
+        # Convert chunks to file info
+        files = []
+        chunk_info = []
+
+        seen_files = set()
+        for chunk in chunks:
+            if chunk.path not in seen_files:
+                files.append({
+                    "path": chunk.path,
+                    "relevance": "semantic_match",
+                    "score": chunk.score
+                })
+                seen_files.add(chunk.path)
+
+            chunk_info.append({
+                "location": chunk.get_location(),
+                "preview": chunk.get_preview(max_lines=3),
+                "score": chunk.score
+            })
+
+        return {"files": files, "chunks": chunk_info}
+
+    except Exception as e:
+        print(f"  ⚠️  RAG search failed: {e}")
+        return {"files": [], "chunks": []}
+
+
 def research_codebase(
     user_request: str,
     quick_mode: bool = False,
-    search_depth: str = "medium"
+    search_depth: str = "medium",
+    use_rag: bool = True
 ) -> ResearchFindings:
     """Research the codebase to gather context for a task.
 
@@ -76,6 +160,7 @@ def research_codebase(
         user_request: The user's task request
         quick_mode: If True, do minimal research (faster)
         search_depth: "shallow", "medium", or "deep"
+        use_rag: If True, use RAG (semantic search) alongside symbolic search
 
     Returns:
         ResearchFindings with gathered context
@@ -91,20 +176,24 @@ def research_codebase(
     print(f"→ Searching for: {', '.join(keywords[:5])}")
 
     # Parallel research tasks
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {}
 
-        # 1. Search for relevant code
+        # 1. Search for relevant code (symbolic search)
         futures[executor.submit(_search_relevant_code, keywords)] = "code_search"
 
-        # 2. Get project structure
+        # 2. RAG semantic search (if enabled)
+        if use_rag and not quick_mode:
+            futures[executor.submit(_rag_search, user_request, 10)] = "rag_search"
+
+        # 3. Get project structure
         futures[executor.submit(_analyze_project_structure)] = "structure"
 
-        # 3. Check for similar implementations
+        # 4. Check for similar implementations
         if not quick_mode:
             futures[executor.submit(_find_similar_implementations, user_request, keywords)] = "similar"
 
-        # 4. Analyze dependencies (if not quick mode)
+        # 5. Analyze dependencies (if not quick mode)
         if not quick_mode and search_depth in ["medium", "deep"]:
             futures[executor.submit(_analyze_dependencies, keywords)] = "dependencies"
 
@@ -116,6 +205,17 @@ def research_codebase(
                 if task_name == "code_search":
                     findings.relevant_files = result.get("files", [])
                     findings.code_patterns = result.get("patterns", [])
+                elif task_name == "rag_search":
+                    # Merge RAG results with existing files
+                    rag_files = result.get("files", [])
+                    # Add RAG files that aren't already in the list
+                    existing_paths = {f['path'] for f in findings.relevant_files}
+                    for rag_file in rag_files:
+                        if rag_file['path'] not in existing_paths:
+                            findings.relevant_files.append(rag_file)
+                    # Add RAG-specific patterns
+                    for chunk in result.get("chunks", [])[:3]:
+                        findings.code_patterns.append(f"RAG: {chunk['location']}")
                 elif task_name == "structure":
                     findings.architecture_notes = result.get("notes", [])
                 elif task_name == "similar":

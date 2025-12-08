@@ -45,6 +45,7 @@ class Task:
         self.validation_steps = []  # Steps to validate task completion
         self.complexity = "low"  # Task complexity: low, medium, high
         self.subtasks = []  # For complex tasks, list of subtask IDs
+        self.priority = 0  # Task priority: higher values = more important (0 = normal)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -63,7 +64,8 @@ class Task:
             "rollback_plan": self.rollback_plan,
             "validation_steps": self.validation_steps,
             "complexity": self.complexity,
-            "subtasks": self.subtasks
+            "subtasks": self.subtasks,
+            "priority": self.priority
         }
 
     @classmethod
@@ -87,6 +89,7 @@ class Task:
         task.validation_steps = data.get("validation_steps", [])
         task.complexity = data.get("complexity", "low")
         task.subtasks = data.get("subtasks", [])
+        task.priority = data.get("priority", 0)
         return task
 
 
@@ -96,6 +99,7 @@ class ExecutionPlan:
         self.tasks: List[Task] = []
         self.current_index = 0
         self.lock = threading.Lock()  # Thread-safe operations
+        self.goals: List = []  # List of Goal objects for goal-oriented execution
 
     def add_task(self, description: str, action_type: str = "general", dependencies: List[int] = None):
         task = Task(description, action_type, dependencies)
@@ -112,6 +116,7 @@ class ExecutionPlan:
         """Get tasks that are ready to execute (all dependencies met).
 
         This includes both PENDING and STOPPED tasks for resume functionality.
+        Tasks are sorted by priority (higher priority first), then by task_id.
         """
         with self.lock:
             executable = []
@@ -129,10 +134,12 @@ class ExecutionPlan:
 
                 if deps_met:
                     executable.append(task)
-                    if len(executable) >= max_count:
-                        break
 
-            return executable
+            # Sort by priority (descending) then by task_id (ascending)
+            executable.sort(key=lambda t: (-t.priority, t.task_id))
+
+            # Return up to max_count
+            return executable[:max_count]
 
     def mark_task_in_progress(self, task: Task):
         """Mark a task as in progress."""
@@ -477,10 +484,16 @@ class ExecutionPlan:
         return steps
 
     def to_dict(self) -> Dict[str, Any]:
+        goals_data = []
+        for goal in self.goals:
+            if hasattr(goal, 'to_dict'):
+                goals_data.append(goal.to_dict())
+
         return {
             "tasks": [t.to_dict() for t in self.tasks],
             "current_index": self.current_index,
-            "summary": self.get_summary()
+            "summary": self.get_summary(),
+            "goals": goals_data
         }
 
     @classmethod
@@ -489,6 +502,16 @@ class ExecutionPlan:
         plan = cls()
         plan.tasks = [Task.from_dict(t) for t in data["tasks"]]
         plan.current_index = data.get("current_index", 0)
+
+        # Load goals if present (lazy import to avoid circular dependency)
+        goals_data = data.get("goals", [])
+        if goals_data:
+            try:
+                from rev.models.goal import Goal
+                plan.goals = [Goal.from_dict(g) for g in goals_data]
+            except ImportError:
+                plan.goals = []
+
         return plan
 
     def mark_task_stopped(self, task: Task):
