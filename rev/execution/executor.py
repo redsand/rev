@@ -313,7 +313,7 @@ def execution_mode(
         # Log task start
         debug_logger = get_logger()
         debug_logger.log_task_status(
-            current_task.id,
+            current_task.task_id,
             "IN_PROGRESS",
             {
                 "task_index": plan.current_index + 1,
