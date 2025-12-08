@@ -119,8 +119,10 @@ def main():
     )
     parser.add_argument(
         "--resume",
+        nargs="?",
+        const="latest",
         metavar="CHECKPOINT",
-        help="Resume execution from a checkpoint file"
+        help="Resume execution from a checkpoint file (defaults to latest if no path provided)"
     )
     parser.add_argument(
         "--list-checkpoints",
@@ -188,10 +190,24 @@ def main():
     try:
         # Handle resume command
         if args.resume:
-            debug_logger.log_workflow_phase("resume", {"checkpoint": args.resume})
-            print(f"Resuming from checkpoint: {args.resume}\n")
+            # Import StateManager for finding latest checkpoint
+            from .execution.state_manager import StateManager
+
+            # If resume is True (flag without value) or empty string, find latest checkpoint
+            checkpoint_path = args.resume
+            if checkpoint_path == True or checkpoint_path == "latest" or not checkpoint_path:
+                checkpoint_path = StateManager.find_latest_checkpoint()
+                if not checkpoint_path:
+                    print("✗ No checkpoints found.")
+                    print(f"\nCheckpoints are saved in .rev_checkpoints/ directory when execution is interrupted.")
+                    print("Use --list-checkpoints to see available checkpoints.")
+                    sys.exit(1)
+                print(f"Using latest checkpoint: {checkpoint_path}\n")
+
+            debug_logger.log_workflow_phase("resume", {"checkpoint": checkpoint_path})
+            print(f"Resuming from checkpoint: {checkpoint_path}\n")
             try:
-                plan = ExecutionPlan.load_checkpoint(args.resume)
+                plan = ExecutionPlan.load_checkpoint(checkpoint_path)
                 print(f"✓ Checkpoint loaded successfully")
                 print(f"  {plan.get_summary()}\n")
                 debug_logger.log("main", "CHECKPOINT_LOADED", {
