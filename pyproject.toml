@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rev-ai"
+version = "2.0.0"
+description = "Rev - Autonomous AI Development System with Multi-Agent Orchestration"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+keywords = ["ai", "agent", "ollama", "autonomous", "development", "orchestration", "ci-cd", "testing", "automation"]
+authors = [
+    {name = "Rev Team"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Software Development :: Testing",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "requests>=2.31.0",
+    "openai",
+    "pywinrm",
+    "playwright",
+    "colorama",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "black",
+    "ruff",
+    "mypy",
+]
+
+ssh = [
+    "paramiko>=3.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/redsand/rev"
+Documentation = "https://github.com/redsand/rev/blob/main/README.md"
+Repository = "https://github.com/redsand/rev"
+"Bug Tracker" = "https://github.com/redsand/rev/issues"
+
+[project.scripts]
+rev = "rev.main:main"
+
+[tool.setuptools.packages.find]
+exclude = ["tests*", "examples*", ".git*", "__pycache__*"]
+
+[tool.black]
+line-length = 100
+target-version = ['py38']
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true

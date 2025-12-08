@@ -20,8 +20,8 @@ if requirements_file.exists():
 
 setup(
     name="rev",
-    version="0.1.0",
-    description="CI/CD Agent powered by Ollama - Minimal autonomous agent with single-gate approval",
+    version="2.0.0",
+    description="Rev - Autonomous AI Development System with Multi-Agent Orchestration",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Rev Team",
@@ -34,13 +34,24 @@ setup(
         ],
     },
     classifiers=[
-        "Development Status :: 3 - Alpha",
+        "Development Status :: 4 - Beta",
         "Intended Audience :: Developers",
         "Topic :: Software Development :: Build Tools",
+        "Topic :: Software Development :: Code Generators",
+        "Topic :: Software Development :: Testing",
+        "License :: OSI Approved :: MIT License",
+        "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
     ],
+    keywords="ai agent ollama autonomous development orchestration ci-cd testing automation",
+    project_urls={
+        "Source": "https://github.com/redsand/rev",
+        "Bug Reports": "https://github.com/redsand/rev/issues",
+        "Documentation": "https://github.com/redsand/rev/blob/main/README.md",
+    },
 )

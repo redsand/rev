@@ -1,0 +1,21 @@
+# Include documentation
+include README.md
+include LICENSE
+include IMPLEMENTATION_SUMMARY.md
+include TIMEOUT_AND_RESUME.md
+include BUG_FIXING_GUIDE.md
+
+# Include requirements
+include requirements.txt
+
+# Include example configurations
+recursive-include examples *.py *.md *.json
+
+# Exclude development and test files
+recursive-exclude tests *
+recursive-exclude .git *
+recursive-exclude __pycache__ *
+recursive-exclude *.pyc *
+recursive-exclude .rev_cache *
+recursive-exclude .rev_checkpoints *
+recursive-exclude .rev_logs *

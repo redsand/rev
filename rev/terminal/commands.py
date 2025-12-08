@@ -548,12 +548,13 @@ class VersionCommand(CommandHandler):
         )
 
     def execute(self, args: List[str], session_context: Dict[str, Any]) -> str:
+        from rev import __version__
         system_info = config.get_system_info_cached()
 
-        output = ["\nRev - Autonomous Development System"]
+        output = ["\nRev - Autonomous AI Development System"]
         output.append("=" * 60)
-        output.append("  Version:          5.0")
-        output.append("  Architecture:     6-Agent System")
+        output.append(f"  Version:          {__version__}")
+        output.append("  Architecture:     Multi-Agent Orchestration")
         output.append(f"  Model:            {config.OLLAMA_MODEL}")
         output.append(f"\nSystem:")
         output.append(f"  OS:               {system_info['os']} {system_info['os_release']}")

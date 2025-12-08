@@ -13,6 +13,7 @@ from rev.config import set_escape_interrupt, get_escape_interrupt
 from rev.terminal.input import get_input_with_escape
 from rev.terminal.commands import execute_command
 from rev.terminal.formatting import colorize, Colors, Symbols, get_color_status
+from rev.terminal.escape_monitor import escape_monitor_context
 from rev.tools.registry import get_available_tools
 
 
@@ -111,30 +112,32 @@ def repl_mode():
         # Get mode configuration
         mode_cfg = session_context.get("mode_config", {})
 
-        # Use orchestrator if enabled in mode config
-        if mode_cfg.get("orchestrate", False):
-            result = run_orchestrated(
-                user_input,
-                config.ROOT,
-                enable_learning=mode_cfg.get("learn", False),
-                enable_research=mode_cfg.get("research", True),
-                enable_review=mode_cfg.get("review", True),
-                enable_validation=mode_cfg.get("validate", True),
-                review_strictness=mode_cfg.get("review_strictness", "moderate"),
-                enable_action_review=mode_cfg.get("action_review", False),
-                enable_auto_fix=mode_cfg.get("auto_fix", False),
-                parallel_workers=mode_cfg.get("parallel", 2),
-                auto_approve=True,  # REPL is always auto-approve (scary ops still prompt)
-                research_depth=mode_cfg.get("research_depth", "medium")
-            )
-            success = result.success
-            # Extract plan from result for session tracking
-            plan = result.plan if hasattr(result, 'plan') and result.plan else None
-        else:
-            # Use simple planning + execution mode
-            plan = planning_mode(user_input)
-            tools = get_available_tools()
-            success = execution_mode(plan, auto_approve=True, tools=tools)
+        # Use escape monitor for responsive ESC key handling during execution
+        with escape_monitor_context(check_interval=0.05):  # Check every 50ms
+            # Use orchestrator if enabled in mode config
+            if mode_cfg.get("orchestrate", False):
+                result = run_orchestrated(
+                    user_input,
+                    config.ROOT,
+                    enable_learning=mode_cfg.get("learn", False),
+                    enable_research=mode_cfg.get("research", True),
+                    enable_review=mode_cfg.get("review", True),
+                    enable_validation=mode_cfg.get("validate", True),
+                    review_strictness=mode_cfg.get("review_strictness", "moderate"),
+                    enable_action_review=mode_cfg.get("action_review", False),
+                    enable_auto_fix=mode_cfg.get("auto_fix", False),
+                    parallel_workers=mode_cfg.get("parallel", 2),
+                    auto_approve=True,  # REPL is always auto-approve (scary ops still prompt)
+                    research_depth=mode_cfg.get("research_depth", "medium")
+                )
+                success = result.success
+                # Extract plan from result for session tracking
+                plan = result.plan if hasattr(result, 'plan') and result.plan else None
+            else:
+                # Use simple planning + execution mode
+                plan = planning_mode(user_input)
+                tools = get_available_tools()
+                success = execution_mode(plan, auto_approve=True, tools=tools)
 
         # Reset interrupt flag after execution (in case it was set)
         set_escape_interrupt(False)
