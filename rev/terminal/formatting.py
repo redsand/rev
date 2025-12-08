@@ -3,6 +3,74 @@
 """Terminal formatting utilities for rich output."""
 
 import sys
+import os
+import platform
+
+
+# Global flag for color support
+_COLORS_ENABLED = None
+
+
+def _init_colors():
+    """Initialize color support for the terminal.
+
+    Returns:
+        bool: True if colors are supported, False otherwise
+    """
+    global _COLORS_ENABLED
+
+    if _COLORS_ENABLED is not None:
+        return _COLORS_ENABLED
+
+    # Check if NO_COLOR environment variable is set
+    if os.getenv('NO_COLOR'):
+        _COLORS_ENABLED = False
+        return False
+
+    # Check if FORCE_COLOR is set
+    if os.getenv('FORCE_COLOR'):
+        _COLORS_ENABLED = True
+        return True
+
+    # Check if stdout is a TTY
+    if not sys.stdout.isatty():
+        _COLORS_ENABLED = False
+        return False
+
+    # Windows-specific handling
+    if platform.system() == 'Windows':
+        try:
+            # Try to enable ANSI escape sequences on Windows 10+
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+
+            # Get stdout handle
+            STD_OUTPUT_HANDLE = -11
+            handle = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+
+            # Get current console mode
+            mode = ctypes.c_ulong()
+            kernel32.GetConsoleMode(handle, ctypes.byref(mode))
+
+            # Enable virtual terminal processing (ANSI support)
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+            new_mode = mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING
+
+            if kernel32.SetConsoleMode(handle, new_mode):
+                _COLORS_ENABLED = True
+                return True
+            else:
+                # Failed to enable VT mode, disable colors
+                _COLORS_ENABLED = False
+                return False
+        except Exception:
+            # If anything fails, disable colors on Windows
+            _COLORS_ENABLED = False
+            return False
+
+    # For Unix-like systems, assume color support if it's a TTY
+    _COLORS_ENABLED = True
+    return True
 
 
 class Colors:
@@ -32,9 +100,9 @@ class Colors:
     BRIGHT_WHITE = '\033[97m'
 
     @staticmethod
-    def is_tty():
-        """Check if output is a TTY (supports colors)."""
-        return sys.stdout.isatty()
+    def is_enabled():
+        """Check if colors are enabled."""
+        return _init_colors()
 
 
 class Symbols:
@@ -73,7 +141,7 @@ class Symbols:
 
 
 def colorize(text: str, color: str, bold: bool = False) -> str:
-    """Colorize text if TTY supports it.
+    """Colorize text if terminal supports it.
 
     Args:
         text: Text to colorize
@@ -81,13 +149,35 @@ def colorize(text: str, color: str, bold: bool = False) -> str:
         bold: Whether to make text bold
 
     Returns:
-        Formatted text
+        Formatted text (with ANSI codes if supported, plain text otherwise)
     """
-    if not Colors.is_tty():
+    if not Colors.is_enabled():
         return text
 
     prefix = Colors.BOLD if bold else ''
     return f"{prefix}{color}{text}{Colors.RESET}"
+
+
+def get_color_status() -> str:
+    """Get a message about color support status.
+
+    Returns:
+        Status message about color support
+    """
+    if Colors.is_enabled():
+        return "Colors: Enabled"
+    else:
+        reasons = []
+        if os.getenv('NO_COLOR'):
+            reasons.append("NO_COLOR environment variable set")
+        elif not sys.stdout.isatty():
+            reasons.append("Output is not a TTY")
+        elif platform.system() == 'Windows':
+            reasons.append("Windows ANSI support unavailable (use Windows Terminal or set FORCE_COLOR=1)")
+        else:
+            reasons.append("Unknown reason")
+
+        return f"Colors: Disabled ({', '.join(reasons)})"
 
 
 def create_header(title: str, width: int = 80) -> str:

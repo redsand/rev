@@ -18,7 +18,7 @@ except ImportError:
 # Configuration
 ROOT = pathlib.Path(os.getcwd()).resolve()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "codellama:latest")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mistral-large-3:675b-cloud")
 MAX_FILE_BYTES = 5 * 1024 * 1024
 READ_RETURN_LIMIT = 80_000
 SEARCH_MATCH_LIMIT = 2000

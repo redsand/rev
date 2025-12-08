@@ -171,20 +171,70 @@ class ModelCommand(CommandHandler):
     def __init__(self):
         super().__init__(
             "model",
-            "View or change the AI model (e.g., /model codellama:latest)"
+            "View or change the AI model (e.g., /model mistral-large-3:675b-cloud)"
         )
 
     def execute(self, args: List[str], session_context: Dict[str, Any]) -> str:
         if not args:
-            # Show current model
-            return f"\nCurrent model: {config.OLLAMA_MODEL}\nUsage: /model <model_name>"
+            # Show current model and available models
+            output = [create_header("Available Models", width=80)]
+            output.append(create_section("Current Model"))
+            output.append(f"  {colorize(Symbols.ARROW, Colors.BRIGHT_GREEN)} {config.OLLAMA_MODEL}")
+
+            # Fetch available models from Ollama
+            output.append(create_section("Available Models (Pulled)"))
+            import requests
+            try:
+                response = requests.get(f"{config.OLLAMA_BASE_URL}/api/tags", timeout=5)
+                if response.status_code == 200:
+                    models = response.json().get("models", [])
+                    if models:
+                        # Sort models by name
+                        models_sorted = sorted(models, key=lambda x: x['name'])
+                        for model in models_sorted:
+                            model_name = model['name']
+                            is_current = model_name == config.OLLAMA_MODEL
+
+                            # Format size
+                            size_bytes = model.get('size', 0)
+                            if size_bytes > 1_000_000_000:
+                                size_str = f"{size_bytes / 1_000_000_000:.1f}GB"
+                            else:
+                                size_str = f"{size_bytes / 1_000_000:.0f}MB"
+
+                            # Format modified date if available
+                            modified = model.get('modified_at', '')
+                            if modified:
+                                # Extract just the date part
+                                date_str = modified.split('T')[0] if 'T' in modified else modified[:10]
+                            else:
+                                date_str = "Unknown"
+
+                            if is_current:
+                                marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN)
+                                name_colored = colorize(model_name, Colors.BRIGHT_CYAN, bold=True)
+                            else:
+                                marker = "  "
+                                name_colored = model_name
+
+                            output.append(f"  {marker}{name_colored:<45} {colorize(size_str, Colors.BRIGHT_BLACK):<10} {colorize(date_str, Colors.BRIGHT_BLACK)}")
+                    else:
+                        output.append(create_bullet_item("No models found", 'warning'))
+                        output.append(f"  Pull a model with: ollama pull <model_name>")
+                else:
+                    output.append(create_bullet_item(f"Failed to fetch models (HTTP {response.status_code})", 'cross'))
+            except Exception as e:
+                output.append(create_bullet_item(f"Error connecting to Ollama: {str(e)[:50]}", 'cross'))
+
+            output.append(f"\n  {colorize('Usage: /model <model_name>', Colors.DIM)}")
+            return "\n".join(output)
 
         # Change model
         new_model = args[0]
         old_model = config.OLLAMA_MODEL
         config.OLLAMA_MODEL = new_model
 
-        return f"\nModel changed: {old_model} → {new_model}"
+        return f"\n{colorize('Model changed:', Colors.BRIGHT_WHITE, bold=True)} {old_model} {colorize(Symbols.ARROW, Colors.BRIGHT_GREEN)} {colorize(new_model, Colors.BRIGHT_CYAN, bold=True)}"
 
 
 class ConfigCommand(CommandHandler):

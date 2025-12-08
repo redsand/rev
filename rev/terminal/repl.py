@@ -10,7 +10,7 @@ from rev.models.task import TaskStatus
 from rev.config import set_escape_interrupt, get_escape_interrupt
 from rev.terminal.input import get_input_with_escape
 from rev.terminal.commands import execute_command
-from rev.terminal.formatting import colorize, Colors, Symbols
+from rev.terminal.formatting import colorize, Colors, Symbols, get_color_status
 from rev.tools.registry import get_available_tools
 
 
@@ -22,6 +22,11 @@ def repl_mode():
     print(f"  {colorize(f'{Symbols.INFO}  Type /help for commands', Colors.BRIGHT_BLUE)}")
     print(f"  {colorize(f'{Symbols.INFO}  Running in autonomous mode - destructive operations will prompt', Colors.BRIGHT_YELLOW)}")
     print(f"  {colorize(f'⚡ Press ESC to submit input immediately', Colors.BRIGHT_GREEN)}")
+
+    # Show color status if disabled
+    if not Colors.is_enabled():
+        print(f"  {Symbols.WARNING}  {get_color_status()}")
+
     print()
 
     # Session context to maintain memory across prompts
