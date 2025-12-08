@@ -130,21 +130,32 @@ This document summarizes the implementation of Agentic Design Patterns into Rev,
    - ✓ Captures: tasks, tools, tests, files, git, messages, success rate
    - ✓ Integrated into execution pipeline
 
-### Future Integrations (Phase 3)
+## Phase 3: Advanced Pattern Integration (COMPLETED ✅)
 
-5. **RAG Integration** (`researcher.py`) ⏳
-   - Initialize `SimpleCodeRetriever` in Research Agent
-   - Call `retriever.query()` alongside symbolic search
-   - Add `rag_search` tool to `tools/registry.py`
+### Advanced Integrations (Completed)
 
-6. **Resource Budget Tracking** (`orchestrator.py`) ⏳
-   - Track steps, tokens (approx), and wall-clock time
-   - Graceful stop when budget exceeded
-   - Summary report with Reflection pattern
+5. **RAG Integration** (`researcher.py`, `tools/registry.py`) ✅
+   - ✓ Added `get_rag_retriever()` for lazy initialization
+   - ✓ Added `_rag_search()` helper for semantic code search
+   - ✓ Enhanced `research_codebase()` with `use_rag` parameter (default: True)
+   - ✓ RAG runs in parallel with symbolic search
+   - ✓ Merges RAG results with keyword search (deduplicates by path)
+   - ✓ Added `rag_search()` tool function to registry
+   - ✓ Tool integrated into dispatch table and function calling
 
-7. **Goal Validation Integration** (`validator.py`) ⏳
-   - Update goals in Validation Agent with test results
-   - Goal metric evaluation post-validation
+6. **Resource Budget Tracking** (`orchestrator.py`) ✅
+   - ✓ Created `ResourceBudget` dataclass for tracking
+   - ✓ Tracks steps, tokens, and wall-clock time
+   - ✓ Budget tracking throughout all agent phases
+   - ✓ Budget summary displayed at completion
+   - ✓ Integration with `OrchestratorResult`
+   - ✓ Budget data serialization to JSON
+
+7. **Goal Validation Integration** (`validator.py`) ✅
+   - ✓ Added `_validate_goals()` function
+   - ✓ Goal metric evaluation in validation pipeline
+   - ✓ Goal validation results included in ValidationReport
+   - ✓ Distinguishes passed/failed/partial goal completion
 
 ### Documentation Needed
 
@@ -264,8 +275,11 @@ All new features are **100% backward compatible**:
 4. ✅ Test Phase 2 integrations
 5. ✅ Update documentation with Phase 2 completion
 6. ✅ Commit Phase 2 and push
-7. ⏳ Phase 3: RAG integration, resource budgets, goal validation (future work)
-8. ⏳ Create comprehensive pattern usage guide (PATTERNS_GUIDE.md)
+7. ✅ Phase 3: RAG integration, resource budgets, goal validation
+8. ✅ Test Phase 3 integrations
+9. ✅ Update documentation with Phase 3 completion
+10. ⏳ Create comprehensive pattern usage guide (PATTERNS_GUIDE.md)
+11. ⏳ Integrate Recovery pattern with orchestrator error handling
 
 ## References
 
