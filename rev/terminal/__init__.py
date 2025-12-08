@@ -7,7 +7,8 @@ from rev.terminal.repl import repl_mode
 from rev.terminal.commands import execute_command, COMMAND_HANDLERS
 from rev.terminal.formatting import (
     colorize, create_header, create_section, create_item,
-    create_bullet_item, create_tree_item, Colors, Symbols
+    create_bullet_item, create_tree_item, Colors, Symbols,
+    get_color_status
 )
 
 __all__ = [
@@ -23,4 +24,5 @@ __all__ = [
     "create_tree_item",
     "Colors",
     "Symbols",
+    "get_color_status",
 ]
