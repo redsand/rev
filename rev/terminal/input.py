@@ -327,8 +327,11 @@ def get_input_with_escape(prompt: str = "") -> Tuple[str, bool]:
     """
     # Check if we're in a TTY (terminal)
     if not sys.stdin.isatty():
-        # Fallback to regular input if not in a TTY
-        return input(prompt), False
+        # Non‑interactive environments: still use platform‑specific input handling
+        if platform.system() == "Windows":
+            return _get_input_windows(prompt)
+        else:
+            return _get_input_unix(prompt)
 
     # Use platform-specific implementation
     if platform.system() == "Windows":

@@ -198,3 +198,30 @@ __all__ = [
     # Internal (for testing)
     "_safe_path",
 ]
+
+# Compatibility shim for legacy tests expecting a low‑level shell runner.
+import json
+import subprocess
+
+def _run_shell(cmd, timeout=30):
+    """Execute a shell command and return a JSON string.
+
+    Captures ``stdout``, ``stderr`` and the return code. On error returns a JSON
+    object with an ``error`` key. This matches the legacy interface expected by
+    the test suite.
+    """
+    try:
+        completed = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return json.dumps({
+            "rc": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+        })
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
