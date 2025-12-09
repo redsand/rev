@@ -1,8 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Entry point wrapper for the rev package.
+"""Test shim for the rev package.
 
-Provides a minimal CLI to satisfy test expectations:
+⚠️  WARNING: This file is for testing purposes only.
+    For production use, install the package and use the 'rev' command:
+
+    Installation:
+        pip install -e .
+
+    Usage:
+        rev "your task"           # Recommended
+        python -m rev "your task" # Alternative
+
+    DO NOT use 'python rev.py' in production or documentation.
+
+This shim provides a minimal CLI to satisfy test expectations:
 - ``--repl`` invokes :func:`rev.terminal.repl_mode`.
 - ``--model`` changes the global OLLAMA_MODEL (if present).
 - ``--prompt`` disables auto‑approve for execution mode.
