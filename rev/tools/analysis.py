@@ -585,6 +585,340 @@ def find_dead_code(path: str = ".") -> str:
         return json.dumps({"error": f"Dead code detection failed: {type(e).__name__}: {e}"})
 
 
+def analyze_code_structures(path: str = ".") -> str:
+    """Analyze code structures across multiple file types and languages.
+
+    Detects structures in:
+    - Database schemas: Prisma (.prisma), SQL (.sql), MongoDB
+    - TypeScript/JavaScript: interfaces, types, enums, classes
+    - Python: classes, dataclasses, TypedDict, Enum
+    - C/C++: struct, typedef, enum
+    - Configuration: config files, environment variables
+    - Documentation: README structure, API docs
+
+    Returns comprehensive analysis to prevent duplicate definitions.
+
+    Args:
+        path: Path to file or directory to analyze
+
+    Returns:
+        JSON string with structure analysis
+    """
+    try:
+        scan_path = _safe_path(path)
+        if not scan_path.exists():
+            return json.dumps({"error": f"Path not found: {path}"})
+
+        # Find relevant structure files
+        structure_files = {
+            'prisma': [],
+            'typescript': [],
+            'python': [],
+            'c_cpp': [],
+            'sql': [],
+            'config': [],
+            'docs': []
+        }
+
+        if scan_path.is_file():
+            # Single file analysis
+            suffix = scan_path.suffix
+            if suffix == '.prisma':
+                structure_files['prisma'].append(scan_path)
+            elif suffix in ['.ts', '.tsx', '.js', '.jsx']:
+                structure_files['typescript'].append(scan_path)
+            elif suffix == '.py':
+                structure_files['python'].append(scan_path)
+            elif suffix in ['.c', '.cpp', '.h', '.hpp', '.cc']:
+                structure_files['c_cpp'].append(scan_path)
+            elif suffix == '.sql':
+                structure_files['sql'].append(scan_path)
+            elif scan_path.name in ['README.md', 'README', 'DOCUMENTATION.md']:
+                structure_files['docs'].append(scan_path)
+            elif 'config' in scan_path.name.lower() or '.env' in scan_path.name:
+                structure_files['config'].append(scan_path)
+        else:
+            # Directory analysis - search for multiple file types
+            structure_files['prisma'].extend(list(scan_path.rglob('*.prisma')))
+            structure_files['typescript'].extend(list(scan_path.rglob('*.ts')))
+            structure_files['typescript'].extend(list(scan_path.rglob('*.tsx')))
+            structure_files['python'].extend(list(scan_path.rglob('*.py')))
+            structure_files['c_cpp'].extend(list(scan_path.rglob('*.c')))
+            structure_files['c_cpp'].extend(list(scan_path.rglob('*.cpp')))
+            structure_files['c_cpp'].extend(list(scan_path.rglob('*.h')))
+            structure_files['c_cpp'].extend(list(scan_path.rglob('*.hpp')))
+            structure_files['sql'].extend(list(scan_path.rglob('*.sql')))
+            structure_files['docs'].extend(list(scan_path.rglob('README*')))
+            structure_files['docs'].extend(list(scan_path.rglob('DOCUMENTATION*')))
+            structure_files['config'].extend(list(scan_path.rglob('config.*')))
+            structure_files['config'].extend(list(scan_path.rglob('.env*')))
+
+        total_files = sum(len(files) for files in structure_files.values())
+        if total_files == 0:
+            return json.dumps({"error": "No structure files found"})
+
+        results: Dict[str, Any] = {
+            "files_analyzed": {k: len(v) for k, v in structure_files.items() if v},
+            "enums": [],
+            "classes": [],
+            "interfaces": [],
+            "types": [],
+            "structs": [],
+            "typedefs": [],
+            "models": [],
+            "tables": [],
+            "configs": [],
+            "docs": []
+        }
+
+        import re
+
+        # Process Prisma files
+        for file in structure_files['prisma']:
+            try:
+                with open(file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                rel_path = str(file.relative_to(ROOT))
+
+                # Parse Prisma enums
+                for match in re.finditer(r'enum\s+(\w+)\s*\{([^}]+)\}', content):
+                    results["enums"].append({
+                        "name": match.group(1),
+                        "values": [v.strip() for v in match.group(2).strip().split('\n') if v.strip()],
+                        "file": rel_path,
+                        "language": "prisma",
+                        "line": content[:match.start()].count('\n') + 1
+                    })
+
+                # Parse Prisma models
+                for match in re.finditer(r'model\s+(\w+)\s*\{([^}]+)\}', content):
+                    results["models"].append({
+                        "name": match.group(1),
+                        "file": rel_path,
+                        "language": "prisma",
+                        "line": content[:match.start()].count('\n') + 1
+                    })
+            except Exception as e:
+                results.setdefault("errors", []).append({
+                    "file": rel_path,
+                    "error": f"Prisma parse error: {e}"
+                })
+
+        # Process TypeScript/JavaScript files
+        for file in structure_files['typescript']:
+            try:
+                with open(file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                rel_path = str(file.relative_to(ROOT))
+
+                # Parse TS enums
+                for match in re.finditer(r'enum\s+(\w+)\s*\{', content):
+                    results["enums"].append({
+                        "name": match.group(1),
+                        "file": rel_path,
+                        "language": "typescript",
+                        "line": content[:match.start()].count('\n') + 1
+                    })
+
+                # Parse TS interfaces
+                for match in re.finditer(r'interface\s+(\w+)', content):
+                    results["interfaces"].append({
+                        "name": match.group(1),
+                        "file": rel_path,
+                        "language": "typescript",
+                        "line": content[:match.start()].count('\n') + 1
+                    })
+
+                # Parse TS types
+                for match in re.finditer(r'type\s+(\w+)\s*=', content):
+                    results["types"].append({
+                        "name": match.group(1),
+                        "file": rel_path,
+                        "language": "typescript",
+                        "line": content[:match.start()].count('\n') + 1
+                    })
+
+                # Parse TS/JS classes
+                for match in re.finditer(r'class\s+(\w+)', content):
+                    results["classes"].append({
+                        "name": match.group(1),
+                        "file": rel_path,
+                        "language": "typescript",
+                        "line": content[:match.start()].count('\n') + 1
+                    })
+            except Exception as e:
+                results.setdefault("errors", []).append({
+                    "file": rel_path,
+                    "error": f"TypeScript parse error: {e}"
+                })
+
+        # Process Python files
+        for file in structure_files['python']:
+            try:
+                with open(file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                rel_path = str(file.relative_to(ROOT))
+
+                # Parse Python classes
+                for match in re.finditer(r'class\s+(\w+)', content):
+                    results["classes"].append({
+                        "name": match.group(1),
+                        "file": rel_path,
+                        "language": "python",
+                        "line": content[:match.start()].count('\n') + 1
+                    })
+
+                # Parse Python Enums
+                for match in re.finditer(r'class\s+(\w+)\(Enum\)', content):
+                    results["enums"].append({
+                        "name": match.group(1),
+                        "file": rel_path,
+                        "language": "python",
+                        "line": content[:match.start()].count('\n') + 1
+                    })
+            except Exception as e:
+                results.setdefault("errors", []).append({
+                    "file": rel_path,
+                    "error": f"Python parse error: {e}"
+                })
+
+        # Process C/C++ files
+        for file in structure_files['c_cpp']:
+            try:
+                with open(file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                rel_path = str(file.relative_to(ROOT))
+
+                # Parse C/C++ structs
+                for match in re.finditer(r'struct\s+(\w+)', content):
+                    results["structs"].append({
+                        "name": match.group(1),
+                        "file": rel_path,
+                        "language": "c/c++",
+                        "line": content[:match.start()].count('\n') + 1
+                    })
+
+                # Parse C/C++ typedefs
+                for match in re.finditer(r'typedef\s+.*?\s+(\w+);', content):
+                    results["typedefs"].append({
+                        "name": match.group(1),
+                        "file": rel_path,
+                        "language": "c/c++",
+                        "line": content[:match.start()].count('\n') + 1
+                    })
+
+                # Parse C/C++ enums
+                for match in re.finditer(r'enum\s+(\w+)', content):
+                    results["enums"].append({
+                        "name": match.group(1),
+                        "file": rel_path,
+                        "language": "c/c++",
+                        "line": content[:match.start()].count('\n') + 1
+                    })
+
+                # Parse C++ classes
+                for match in re.finditer(r'class\s+(\w+)', content):
+                    results["classes"].append({
+                        "name": match.group(1),
+                        "file": rel_path,
+                        "language": "c++",
+                        "line": content[:match.start()].count('\n') + 1
+                    })
+            except Exception as e:
+                results.setdefault("errors", []).append({
+                    "file": rel_path,
+                    "error": f"C/C++ parse error: {e}"
+                })
+
+        # Process SQL files
+        for file in structure_files['sql']:
+            try:
+                with open(file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                rel_path = str(file.relative_to(ROOT))
+
+                # Parse SQL tables
+                for match in re.finditer(r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)', content, re.IGNORECASE):
+                    results["tables"].append({
+                        "name": match.group(1),
+                        "file": rel_path,
+                        "language": "sql",
+                        "line": content[:match.start()].count('\n') + 1
+                    })
+
+                # Parse SQL enums (PostgreSQL syntax)
+                for match in re.finditer(r'CREATE\s+TYPE\s+(\w+)\s+AS\s+ENUM', content, re.IGNORECASE):
+                    results["enums"].append({
+                        "name": match.group(1),
+                        "file": rel_path,
+                        "language": "sql",
+                        "line": content[:match.start()].count('\n') + 1
+                    })
+            except Exception as e:
+                results.setdefault("errors", []).append({
+                    "file": rel_path,
+                    "error": f"SQL parse error: {e}"
+                })
+
+        # Process config files
+        for file in structure_files['config']:
+            try:
+                rel_path = str(file.relative_to(ROOT))
+                results["configs"].append({
+                    "name": file.name,
+                    "file": rel_path,
+                    "type": "config"
+                })
+            except Exception as e:
+                results.setdefault("errors", []).append({
+                    "file": str(file),
+                    "error": f"Config parse error: {e}"
+                })
+
+        # Process documentation files
+        for file in structure_files['docs']:
+            try:
+                rel_path = str(file.relative_to(ROOT))
+                results["docs"].append({
+                    "name": file.name,
+                    "file": rel_path,
+                    "type": "documentation"
+                })
+            except Exception as e:
+                results.setdefault("errors", []).append({
+                    "file": str(file),
+                    "error": f"Docs parse error: {e}"
+                })
+
+        # Summary
+        results["summary"] = {
+            "total_files": total_files,
+            "total_enums": len(results["enums"]),
+            "total_classes": len(results["classes"]),
+            "total_interfaces": len(results["interfaces"]),
+            "total_types": len(results["types"]),
+            "total_structs": len(results["structs"]),
+            "total_typedefs": len(results["typedefs"]),
+            "total_models": len(results["models"]),
+            "total_tables": len(results["tables"]),
+            "total_configs": len(results["configs"]),
+            "total_docs": len(results["docs"]),
+            "enum_names": sorted(set(e["name"] for e in results["enums"])),
+            "class_names": sorted(set(c["name"] for c in results["classes"])),
+            "interface_names": sorted(set(i["name"] for i in results["interfaces"])),
+            "type_names": sorted(set(t["name"] for t in results["types"])),
+            "struct_names": sorted(set(s["name"] for s in results["structs"])),
+            "typedef_names": sorted(set(t["name"] for t in results["typedefs"])),
+            "model_names": sorted(set(m["name"] for m in results["models"])),
+            "table_names": sorted(set(t["name"] for t in results["tables"]))
+        }
+
+        return json.dumps(results, indent=2)
+
+    except Exception as e:
+        return json.dumps({"error": f"Code structure analysis failed: {type(e).__name__}: {e}"})
+
+
 def run_all_analysis(path: str = ".") -> str:
     """Run all available analysis tools and combine results.
 

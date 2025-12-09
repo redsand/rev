@@ -280,6 +280,58 @@ def _extract_search_keywords(user_request: str) -> List[str]:
 
         return security_keywords[:15] if security_keywords else ['security', 'vulnerability']
 
+    # Structure investigation detection - covers schemas, docs, code structures, config
+    structure_keywords = [
+        # Database/Schema
+        'prisma', 'schema', 'database', 'enum', 'model', 'migration',
+        'sequelize', 'typeorm', 'mongoose', 'sql', 'table', 'entity',
+        # Documentation
+        'readme', 'documentation', 'docs', 'api documentation', 'guide',
+        # Code structures
+        'class', 'interface', 'type', 'typedef', 'struct',
+        # Configuration
+        'config', 'configuration', 'settings', 'environment'
+    ]
+
+    if any(keyword in request_lower for keyword in structure_keywords):
+        # Return structure-focused search terms
+        investigation_keywords = []
+
+        # Database/Schema patterns
+        if any(word in request_lower for word in ['prisma', 'schema', 'database', 'sql', 'migration']):
+            investigation_keywords.extend([
+                'enum', 'model', 'table', 'schema', 'migration',
+                'CREATE TABLE', 'ALTER TABLE', '@db', '@relation',
+                'interface', 'type', 'class'
+            ])
+
+        # Documentation patterns
+        if any(word in request_lower for word in ['readme', 'documentation', 'docs', 'guide']):
+            investigation_keywords.extend([
+                'README', 'DOCUMENTATION', 'docs/', 'documentation/',
+                '# ', '## ', 'API', 'guide', 'tutorial'
+            ])
+
+        # Code structure patterns (enum, class, interface, type)
+        if any(word in request_lower for word in ['enum', 'class', 'interface', 'type', 'struct']):
+            investigation_keywords.extend([
+                'enum ', 'enum{', 'class ', 'interface ', 'type ',
+                'struct ', 'typedef ', 'def class', '@dataclass'
+            ])
+
+        # Configuration patterns
+        if any(word in request_lower for word in ['config', 'configuration', 'settings', 'environment']):
+            investigation_keywords.extend([
+                'config.', 'settings.', '.env', 'environment',
+                'CONFIG', 'SETTINGS', 'dotenv'
+            ])
+
+        # Add any CamelCase/PascalCase identifiers (likely type/class/enum names)
+        words = re.findall(r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)*\b', user_request)
+        investigation_keywords.extend([w for w in words if w not in ['This', 'Should', 'Add', 'Create', 'Update', 'Modify']])
+
+        return investigation_keywords[:20] if investigation_keywords else ['structure', 'definition', 'existing']
+
     # Extract words (original logic for non-security requests)
     words = re.findall(r'\b\w+\b', request_lower)
     keywords = [w for w in words if len(w) > 2 and w not in stop_words]

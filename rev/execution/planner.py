@@ -43,13 +43,23 @@ PLANNING WORKFLOW:
 1. First, use tools to explore (list_dir, search_code, tree_view, read_file)
 2. For security audits: enumerate ALL relevant source files, search for unsafe patterns
 3. For multi-file changes: list all files that need modification
-4. Based on tool results, create detailed, file-specific tasks
+4. For ANY structural changes: MUST investigate existing structures before creating new ones
+5. Based on tool results, create detailed, file-specific tasks
 
 Example for security audit:
 - Call list_dir to find all .c and .cpp files
 - Call search_code for each unsafe pattern (strcpy, malloc, etc.)
 - Create separate tasks for EACH file found
 - Add tasks for running security tools (Valgrind, AddressSanitizer, etc.)
+
+Example for structural changes (schemas, types, classes, enums, docs, config):
+- Call list_dir to find relevant files (*.prisma, *.ts, *.py, README*, config/*, etc.)
+- Call search_code to find ALL existing definitions (enum, class, interface, type, table)
+- Call read_file to review existing structures
+- Call analyze_code_structures to get comprehensive analysis
+- Check for similar or duplicate names
+- Create tasks to REUSE existing structures where possible
+- Only create new structures if they don't already exist
 
 IMPORTANT - System Context:
 You will be provided with the operating system information. Use this to:
@@ -442,7 +452,24 @@ IMPORTANT: Before creating the execution plan:
 1. Use available tools to explore the codebase
 2. For security audits: enumerate C/C++ files, search for unsafe functions
 3. For multi-file tasks: use list_dir to find all relevant files
-4. Call tools as needed to gather information
+4. For structural changes: MUST investigate existing definitions first
+5. Call tools as needed to gather information
+
+CRITICAL FOR STRUCTURAL CHANGES (schemas, types, classes, docs, config):
+- ALWAYS call search_code to find existing definitions:
+  * For schemas: search "enum ", "model ", "table ", "CREATE TABLE"
+  * For types/classes: search "interface ", "type ", "class ", "struct "
+  * For docs: search existing README, documentation structure
+  * For config: search existing config files, environment variables
+- ALWAYS call list_dir with appropriate patterns:
+  * Schemas: *.prisma, schema.*, migrations/*, *.sql
+  * Code: *.ts, *.py, *.js, *.go, *.java
+  * Docs: README*, docs/*, *.md
+  * Config: config/*, .env*, settings.*
+- ALWAYS call read_file to understand existing structures
+- ALWAYS call analyze_code_structures for comprehensive analysis
+- NEVER create new structures without checking if they already exist
+- Reuse and extend existing structures whenever possible
 
 After gathering information with tools, generate a comprehensive execution plan as a JSON array."""}
     ]

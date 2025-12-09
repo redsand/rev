@@ -99,6 +99,24 @@ class TaskRouter:
                 reasoning="Security audit requires thorough analysis and strict review"
             )
 
+        # Structural change mode - requires deep investigation
+        # Covers: schemas, types, classes, documentation, configuration
+        if self._is_structural_change(text):
+            return RouteDecision(
+                mode="full_feature",
+                enable_learning=True,
+                enable_research=True,  # Critical: must research existing structures
+                enable_review=True,
+                enable_validation=True,
+                review_strictness="strict",
+                parallel_workers=1,  # Sequential to avoid conflicts
+                enable_action_review=True,
+                research_depth="deep",  # Deep search for existing structures
+                max_retries=3,
+                priority=RoutePriority.HIGH,
+                reasoning="Structural changes require deep investigation of existing definitions to avoid duplication"
+            )
+
         # Test-focused mode
         if self._is_test_focus(text):
             return RouteDecision(
@@ -184,6 +202,36 @@ class TaskRouter:
             "penetration test", "security scan", "threat"
         ]
         return any(keyword in text for keyword in security_keywords)
+
+    def _is_structural_change(self, text: str) -> bool:
+        """Check if request involves structural changes to code, schemas, docs, or config."""
+        structure_keywords = [
+            # Database/Schema structures
+            "prisma", "schema", "database", "enum", "model",
+            "migration", "sequelize", "typeorm", "mongoose",
+            "table", "entity", "sql",
+            # Code structures
+            "class", "interface", "type", "typedef", "struct",
+            "enum", "dataclass",
+            # Documentation structures
+            "readme", "documentation", "docs", "api documentation",
+            "guide", "tutorial",
+            # Configuration structures
+            "config", "configuration", "settings", "environment",
+            ".env", "config file"
+        ]
+
+        # Action verbs that indicate creation/modification
+        action_verbs = [
+            "add", "create", "update", "modify", "change",
+            "define", "implement", "build", "generate"
+        ]
+
+        # Must have structure keyword AND an action verb
+        has_structure = any(keyword in text for keyword in structure_keywords)
+        has_action = any(action in text for action in action_verbs)
+
+        return has_structure and has_action
 
     def _is_test_focus(self, text: str) -> bool:
         """Check if request is test-focused."""

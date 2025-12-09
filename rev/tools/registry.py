@@ -27,7 +27,11 @@ from rev.tools.utils import (
 )
 from rev.tools.analysis import (
     analyze_ast_patterns, run_pylint, run_mypy, run_radon_complexity,
-    find_dead_code, run_all_analysis
+    find_dead_code, run_all_analysis, analyze_code_structures
+)
+from rev.tools.advanced_analysis import (
+    analyze_test_coverage, analyze_code_context, find_symbol_usages,
+    analyze_dependencies, analyze_semantic_diff
 )
 
 
@@ -164,6 +168,14 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         "run_radon_complexity": lambda args: run_radon_complexity(args.get("path", "."), args.get("min_rank", "C")),
         "find_dead_code": lambda args: find_dead_code(args.get("path", ".")),
         "run_all_analysis": lambda args: run_all_analysis(args.get("path", ".")),
+        "analyze_code_structures": lambda args: analyze_code_structures(args.get("path", ".")),
+
+        # Advanced analysis tools
+        "analyze_test_coverage": lambda args: analyze_test_coverage(args.get("path", "."), args.get("show_untested", True)),
+        "analyze_code_context": lambda args: analyze_code_context(args["file_path"], args.get("line_range")),
+        "find_symbol_usages": lambda args: find_symbol_usages(args["symbol"], args.get("scope", "project")),
+        "analyze_dependencies": lambda args: analyze_dependencies(args["target"], args.get("depth", 3)),
+        "analyze_semantic_diff": lambda args: analyze_semantic_diff(args["file_path"], args.get("compare_to", "HEAD")),
     }
 
 
@@ -268,6 +280,14 @@ def _format_description(name: str, args: Dict[str, Any]) -> str:
         "run_radon_complexity": f"Analyzing code complexity: {args.get('path', '.')}",
         "find_dead_code": f"Finding dead code in: {args.get('path', '.')}",
         "run_all_analysis": f"Running full analysis suite on: {args.get('path', '.')}",
+        "analyze_code_structures": f"Analyzing code structures: {args.get('path', '.')}",
+
+        # Advanced analysis tools
+        "analyze_test_coverage": f"Analyzing test coverage: {args.get('path', '.')}",
+        "analyze_code_context": f"Analyzing code context: {args.get('file_path', '')}",
+        "find_symbol_usages": f"Finding usages of symbol: {args.get('symbol', '')}",
+        "analyze_dependencies": f"Analyzing dependencies: {args.get('target', '')}",
+        "analyze_semantic_diff": f"Analyzing semantic diff: {args.get('file_path', '')}",
     }
 
     # Return the friendly description or fall back to technical format
@@ -973,6 +993,95 @@ def get_available_tools() -> list:
                     "properties": {
                         "path": {"type": "string", "description": "Path to analyze", "default": "."}
                     }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "analyze_code_structures",
+                "description": "Analyze code structures across multiple languages and file types. Detects: database schemas (Prisma, SQL), TypeScript/JavaScript (interfaces, types, enums, classes), Python (classes, Enum), C/C++ (struct, typedef, enum), configuration files, and documentation. CRITICAL: always use this before creating new structures to avoid duplication and find existing definitions to reuse.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to file or directory to analyze for code structures", "default": "."}
+                    }
+                }
+            }
+        },
+
+        # Advanced analysis tools
+        {
+            "type": "function",
+            "function": {
+                "name": "analyze_test_coverage",
+                "description": "Analyze test coverage using coverage.py (Python) or Istanbul/nyc (JavaScript/TypeScript). Identifies untested code paths and critical gaps. Use BEFORE modifying code to ensure adequate test coverage exists.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to analyze coverage for", "default": "."},
+                        "show_untested": {"type": "boolean", "description": "Show untested functions and lines", "default": True}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "analyze_code_context",
+                "description": "Analyze code history and context using git blame, commit history, and comments. Shows WHY code exists, what bugs were fixed, change frequency, and warnings. Use BEFORE refactoring to understand original intent and avoid re-introducing bugs.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string", "description": "Path to file to analyze"},
+                        "line_range": {"type": "array", "items": {"type": "integer"}, "description": "Optional [start_line, end_line] to focus analysis"}
+                    },
+                    "required": ["file_path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "find_symbol_usages",
+                "description": "Find all usages of a symbol (function, class, variable, type) across the codebase. Shows where it's defined, referenced, and imported. Use BEFORE renaming, deleting, or modifying to understand impact. Returns safe_to_delete and rename_impact assessments.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string", "description": "Symbol name to find (e.g., 'UserRole', 'authenticate', 'Config')"},
+                        "scope": {"type": "string", "description": "Search scope", "enum": ["project", "file", "directory"], "default": "project"}
+                    },
+                    "required": ["symbol"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "analyze_dependencies",
+                "description": "Build dependency graph showing what code depends on the target (reverse dependencies) and what the target depends on (forward dependencies). Calculates impact radius and detects circular dependencies. Use BEFORE major refactoring to understand ripple effects.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string", "description": "File path or symbol to analyze dependencies for"},
+                        "depth": {"type": "integer", "description": "Dependency traversal depth", "default": 3}
+                    },
+                    "required": ["target"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "analyze_semantic_diff",
+                "description": "Analyze semantic changes beyond line diffs. Detects breaking changes (signature changes, deleted functions), behavior changes (error handling, control flow), and performance impacts. Use AFTER making changes to verify backward compatibility.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string", "description": "Path to file to analyze"},
+                        "compare_to": {"type": "string", "description": "Git ref to compare against", "default": "HEAD"}
+                    },
+                    "required": ["file_path"]
                 }
             }
         }
