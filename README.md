@@ -632,7 +632,7 @@ The agent has access to **41 powerful tools** across multiple categories:
 
 #### Advanced Code Analysis Tools (NEW!)
 
-**New in v2.8:** Five powerful analysis tools for improved development accuracy, review, and bug fixing:
+**New in v2.0.1:** Five powerful analysis tools for improved development accuracy, review, and bug fixing:
 
 | Tool | Description | Use Case |
 |------|-------------|----------|
