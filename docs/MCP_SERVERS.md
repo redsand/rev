@@ -10,7 +10,7 @@ Model Context Protocol (MCP) is an open protocol that enables AI assistants to s
 
 **Rev comes pre-configured with the following default MCP servers** (enabled automatically, no setup required):
 
-### 🎯 Included by Default
+### 🎯 Core Servers (Included by Default)
 
 1. **Memory Server** (`@modelcontextprotocol/server-memory`)
    - **Purpose**: Persistent memory storage for AI context across sessions
@@ -30,6 +30,54 @@ Model Context Protocol (MCP) is an open protocol that enables AI assistants to s
    - **No API key required** ✅
    - **Auto-enabled**: Yes (disable with `REV_MCP_FETCH=false`)
 
+### 🚀 Coding & CI/CD Servers (New!)
+
+4. **DeepWiki** (https://mcp.deepwiki.com/sse)
+   - **Purpose**: RAG-as-a-Service for GitHub repositories
+   - **Benefits**: Search and analyze code across GitHub repos
+   - **No API key required** ✅
+   - **Auto-enabled**: Yes (disable with `REV_MCP_DEEPWIKI=false`)
+   - **Type**: Remote MCP server
+
+5. **Exa Search** (https://mcp.exa.ai/mcp)
+   - **Purpose**: Search code, documentation, and web resources
+   - **Benefits**: Enhanced code search capabilities
+   - **No API key required** ✅
+   - **Auto-enabled**: Yes (disable with `REV_MCP_EXA_SEARCH=false`)
+   - **Type**: Remote MCP server
+
+6. **Semgrep** (https://mcp.semgrep.ai/sse)
+   - **Purpose**: Static code analysis for security and quality
+   - **Benefits**: Automated code security scanning
+   - **No API key required** ✅
+   - **Auto-enabled**: Yes (disable with `REV_MCP_SEMGREP=false`)
+   - **Type**: Remote MCP server
+
+### 📚 Documentation Servers
+
+7. **Cloudflare Docs** (https://docs.mcp.cloudflare.com/sse)
+   - **Purpose**: Access Cloudflare API and platform documentation
+   - **Benefits**: Quick access to Cloudflare resources
+   - **No API key required** ✅
+   - **Auto-enabled**: Yes (disable with `REV_MCP_CLOUDFLARE_DOCS=false`)
+   - **Type**: Remote MCP server
+
+8. **Astro Docs** (https://mcp.docs.astro.build/mcp)
+   - **Purpose**: Access Astro framework documentation
+   - **Benefits**: Quick access to Astro resources
+   - **No API key required** ✅
+   - **Auto-enabled**: Yes (disable with `REV_MCP_ASTRO_DOCS=false`)
+   - **Type**: Remote MCP server
+
+### 🤖 AI/ML Servers
+
+9. **Hugging Face** (https://hf.co/mcp)
+   - **Purpose**: Access Hugging Face models and repositories
+   - **Benefits**: Model discovery and deployment tools
+   - **No API key required** ✅
+   - **Auto-enabled**: Yes (disable with `REV_MCP_HUGGINGFACE=false`)
+   - **Type**: Remote MCP server
+
 ### 🔧 Configuration
 
 Default servers are automatically loaded when rev starts. To disable a default server:
@@ -39,6 +87,12 @@ Default servers are automatically loaded when rev starts. To disable a default s
 export REV_MCP_MEMORY=false
 export REV_MCP_SEQUENTIAL_THINKING=false
 export REV_MCP_FETCH=false
+export REV_MCP_DEEPWIKI=false
+export REV_MCP_EXA_SEARCH=false
+export REV_MCP_SEMGREP=false
+export REV_MCP_CLOUDFLARE_DOCS=false
+export REV_MCP_ASTRO_DOCS=false
+export REV_MCP_HUGGINGFACE=false
 ```
 
 Or in your `.env` file:
@@ -47,6 +101,58 @@ REV_MCP_MEMORY=false
 REV_MCP_SEQUENTIAL_THINKING=false
 REV_MCP_FETCH=false
 ```
+
+### 🔒 Private Mode
+
+**New Feature!** Private mode allows you to disable all public MCP servers when working with secure or unsharable code. This ensures your code and data are not sent to any public MCP servers.
+
+#### Using Private Mode
+
+**Via Slash Command** (in REPL):
+```bash
+# Check status
+/private
+
+# Enable private mode
+/private on
+
+# Disable private mode
+/private off
+```
+
+**Via Environment Variable** (before starting rev):
+```bash
+export REV_PRIVATE_MODE=true
+python rev.py
+```
+
+**Via .env File**:
+```bash
+# .env
+REV_PRIVATE_MODE=true
+```
+
+#### What Private Mode Does
+
+✅ **Disabled in Private Mode** (all public servers):
+- memory, sequential-thinking, fetch (core servers)
+- deepwiki, exa-search (code search)
+- semgrep (static analysis)
+- cloudflare-docs, astro-docs (documentation)
+- huggingface (AI models)
+
+✅ **Still Enabled in Private Mode** (private servers with your API keys):
+- brave-search (if `BRAVE_API_KEY` is set)
+- github (if `GITHUB_TOKEN` is set)
+- Any custom MCP servers you've configured
+
+#### When to Use Private Mode
+
+- Working with proprietary/confidential code
+- Handling sensitive customer data
+- Compliance requirements (HIPAA, SOC 2, etc.)
+- Air-gapped or restricted environments
+- Testing without external dependencies
 
 ### 📋 Checking Active Servers
 

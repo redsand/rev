@@ -73,7 +73,7 @@ class HelpCommand(CommandHandler):
         categories = {
             "Session Management": ["clear", "exit", "quit"],
             "Information": ["status", "cost", "config", "doctor", "version"],
-            "Model & Configuration": ["model", "mode", "add-dir"],
+            "Model & Configuration": ["model", "mode", "private", "add-dir"],
             "Code Review & Validation": ["review", "validate"],
             "Project Setup": ["init", "export"],
             "Help": ["help"]
@@ -635,6 +635,101 @@ class AgentsCommand(CommandHandler):
         return "\n".join(output)
 
 
+class PrivateCommand(CommandHandler):
+    """Toggle private mode to disable public MCP servers."""
+
+    def __init__(self):
+        super().__init__(
+            "private",
+            "Toggle private mode to disable all public MCP servers"
+        )
+
+    def get_help(self) -> str:
+        return """Toggle private mode to disable all public MCP servers.
+
+Private mode is useful when working with secure or unsharable code.
+When enabled, all public MCP servers are disabled, but private servers
+with API keys (like GitHub with your token) remain enabled.
+
+Usage:
+  /private on     - Enable private mode
+  /private off    - Disable private mode
+  /private        - Show current status
+
+Public MCP servers disabled in private mode:
+  - memory, sequential-thinking, fetch (core servers)
+  - deepwiki, exa-search (code search)
+  - semgrep (static analysis)
+  - cloudflare-docs, astro-docs (documentation)
+  - huggingface (AI models)
+
+Private servers (with API keys) remain enabled:
+  - brave-search (if BRAVE_API_KEY is set)
+  - github (if GITHUB_TOKEN is set)
+"""
+
+    def execute(self, args: List[str], session_context: Dict[str, Any]) -> str:
+        if not args:
+            # Show current status
+            current_status = config.PRIVATE_MODE
+            output = [create_header("Private Mode Status", width=80)]
+            status_text = "ENABLED" if current_status else "DISABLED"
+            status_color = Colors.BRIGHT_RED if current_status else Colors.BRIGHT_GREEN
+            output.append(f"\n  {colorize('Private Mode:', Colors.BRIGHT_WHITE)} {colorize(status_text, status_color, bold=True)}\n")
+
+            if current_status:
+                output.append(create_section("Current Configuration"))
+                output.append(create_bullet_item("Public MCP servers are disabled", 'cross'))
+                output.append(create_bullet_item("Private MCP servers (with API keys) remain enabled", 'check'))
+                output.append(f"\n  {colorize('Your code and data will not be sent to public MCP servers', Colors.BRIGHT_GREEN)}")
+            else:
+                output.append(create_section("Current Configuration"))
+                output.append(create_bullet_item("All MCP servers are available", 'check'))
+                output.append(f"\n  {colorize('Use /private on to disable public servers for secure code', Colors.DIM)}")
+
+            output.append(f"\n  {colorize('Type /private on or /private off to change', Colors.DIM)}")
+            return "\n".join(output)
+
+        action = args[0].lower()
+
+        if action == "on":
+            config.PRIVATE_MODE = True
+            os.environ["REV_PRIVATE_MODE"] = "true"
+
+            # Reload MCP client with new settings
+            from rev.mcp.client import mcp_client
+            mcp_client.servers.clear()
+            mcp_client._load_default_servers()
+
+            output = [create_header("Private Mode Enabled", width=80)]
+            output.append(f"\n  {colorize('✓ Private mode is now enabled', Colors.BRIGHT_GREEN)}\n")
+            output.append(create_section("Changes Applied"))
+            output.append(create_bullet_item("All public MCP servers have been disabled", 'check'))
+            output.append(create_bullet_item("Private servers (with API keys) remain active", 'check'))
+            output.append(create_bullet_item("Your code will not be sent to public servers", 'check'))
+            output.append(f"\n  {colorize('Use /private off to re-enable public servers', Colors.DIM)}")
+            return "\n".join(output)
+
+        elif action == "off":
+            config.PRIVATE_MODE = False
+            os.environ["REV_PRIVATE_MODE"] = "false"
+
+            # Reload MCP client with new settings
+            from rev.mcp.client import mcp_client
+            mcp_client.servers.clear()
+            mcp_client._load_default_servers()
+
+            output = [create_header("Private Mode Disabled", width=80)]
+            output.append(f"\n  {colorize('✓ Private mode is now disabled', Colors.BRIGHT_GREEN)}\n")
+            output.append(create_section("Changes Applied"))
+            output.append(create_bullet_item("All MCP servers are now available", 'check'))
+            output.append(f"\n  {colorize('Use /private on to disable public servers', Colors.DIM)}")
+            return "\n".join(output)
+
+        else:
+            return f"\n{colorize('Invalid argument:', Colors.BRIGHT_RED)} {action}\n{self.get_help()}"
+
+
 class ModeCommand(CommandHandler):
     """Set execution mode with predefined configurations."""
 
@@ -795,7 +890,8 @@ def _build_command_registry() -> Dict[str, CommandHandler]:
         CompactCommand(),
         PermissionsCommand(),
         AgentsCommand(),
-        ModeCommand()
+        ModeCommand(),
+        PrivateCommand()
     ]
 
     registry = {}

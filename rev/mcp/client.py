@@ -55,10 +55,18 @@ class MCPClient:
     def _load_default_servers(self) -> None:
         """Load default MCP servers from configuration."""
         try:
-            from rev.config import DEFAULT_MCP_SERVERS, OPTIONAL_MCP_SERVERS
+            from rev.config import DEFAULT_MCP_SERVERS, OPTIONAL_MCP_SERVERS, PRIVATE_MODE
+
+            # Check if private mode is enabled
+            if PRIVATE_MODE:
+                print("Private mode enabled - public MCP servers disabled")
 
             # Load default servers (enabled by default, no API keys required)
             for name, config in DEFAULT_MCP_SERVERS.items():
+                # Skip public servers if in private mode
+                if PRIVATE_MODE and config.get("public", False):
+                    continue
+
                 if config.get("enabled", True):
                     self.add_server(
                         name=name,
@@ -67,6 +75,7 @@ class MCPClient:
                     )
 
             # Load optional servers only if environment variables are present
+            # Private servers (with API keys) are always allowed even in private mode
             for name, config in OPTIONAL_MCP_SERVERS.items():
                 if config.get("enabled", False):
                     env_vars = config.get("env_required", [])

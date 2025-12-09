@@ -1,6 +1,6 @@
 # Default MCP Servers in Rev
 
-Rev comes pre-configured with three default MCP (Model Context Protocol) servers that enhance AI capabilities without requiring any setup or API keys.
+Rev comes pre-configured with **nine default MCP (Model Context Protocol) servers** that enhance AI capabilities without requiring any setup or API keys.
 
 ## Overview
 
@@ -8,8 +8,14 @@ These servers are automatically loaded when rev starts, providing immediate acce
 - **Persistent memory** across sessions
 - **Advanced reasoning** capabilities
 - **External documentation** access via HTTP
+- **Code search & analysis** across GitHub repositories
+- **Static code analysis** for security and quality
+- **Documentation access** for popular frameworks
+- **AI model discovery** via Hugging Face
 
 ## Default Servers
+
+### Core Servers (Original)
 
 ### 1. Memory Server 🧠
 **Package**: `@modelcontextprotocol/server-memory`
@@ -98,6 +104,180 @@ result = mcp_call_tool("fetch", "get", {
 ```
 
 **Configuration**: Auto-enabled (disable with `REV_MCP_FETCH=false`)
+
+---
+
+### Coding & CI/CD Servers (New!)
+
+### 4. DeepWiki 🔍
+**Endpoint**: https://mcp.deepwiki.com/sse
+
+**Purpose**: RAG-as-a-Service for GitHub repositories - search and analyze code across repositories.
+
+**Key Features**:
+- Search GitHub repository code
+- Analyze code structures
+- Extract code snippets
+- Retrieve documentation from repos
+
+**Use Cases**:
+- Finding code examples in popular repos
+- Understanding library implementations
+- Code pattern discovery
+- Open-source research
+
+**Configuration**: Auto-enabled (disable with `REV_MCP_DEEPWIKI=false`)
+
+---
+
+### 5. Exa Search 🔎
+**Endpoint**: https://mcp.exa.ai/mcp
+
+**Purpose**: Search code, documentation, and web resources with AI-powered relevance.
+
+**Key Features**:
+- Code search across multiple sources
+- Documentation search
+- Web resource discovery
+- AI-powered result ranking
+
+**Use Cases**:
+- Finding relevant documentation
+- Code example discovery
+- Technical resource search
+- API documentation lookup
+
+**Configuration**: Auto-enabled (disable with `REV_MCP_EXA_SEARCH=false`)
+
+---
+
+### 6. Semgrep 🛡️
+**Endpoint**: https://mcp.semgrep.ai/sse
+
+**Purpose**: Static code analysis for security vulnerabilities and code quality issues.
+
+**Key Features**:
+- Security vulnerability detection
+- Code quality analysis
+- Pattern-based scanning
+- Multi-language support
+
+**Use Cases**:
+- Security auditing
+- Code review automation
+- CI/CD integration
+- Pre-commit checks
+
+**Configuration**: Auto-enabled (disable with `REV_MCP_SEMGREP=false`)
+
+---
+
+### Documentation Servers
+
+### 7. Cloudflare Docs ☁️
+**Endpoint**: https://docs.mcp.cloudflare.com/sse
+
+**Purpose**: Access Cloudflare API and platform documentation.
+
+**Key Features**:
+- Cloudflare API docs
+- Platform configuration guides
+- Worker documentation
+- CDN configuration
+
+**Use Cases**:
+- Cloudflare integration development
+- API reference lookup
+- Worker development
+- CDN optimization
+
+**Configuration**: Auto-enabled (disable with `REV_MCP_CLOUDFLARE_DOCS=false`)
+
+---
+
+### 8. Astro Docs ⚡
+**Endpoint**: https://mcp.docs.astro.build/mcp
+
+**Purpose**: Access Astro framework documentation.
+
+**Key Features**:
+- Astro component documentation
+- Framework API reference
+- Integration guides
+- Best practices
+
+**Use Cases**:
+- Astro web development
+- Component creation
+- Framework learning
+- Integration setup
+
+**Configuration**: Auto-enabled (disable with `REV_MCP_ASTRO_DOCS=false`)
+
+---
+
+### AI/ML Servers
+
+### 9. Hugging Face 🤗
+**Endpoint**: https://hf.co/mcp
+
+**Purpose**: Access Hugging Face models, datasets, and repositories.
+
+**Key Features**:
+- Model discovery
+- Dataset exploration
+- Repository access
+- Model card retrieval
+
+**Use Cases**:
+- ML model selection
+- Dataset research
+- Model deployment planning
+- AI/ML development
+
+**Configuration**: Auto-enabled (disable with `REV_MCP_HUGGINGFACE=false`)
+
+---
+
+## Private Mode 🔒
+
+**New Feature!** Private mode disables all public MCP servers for secure/unsharable code.
+
+### Enabling Private Mode
+
+**Via Slash Command** (in REPL):
+```bash
+/private on      # Enable
+/private off     # Disable
+/private         # Check status
+```
+
+**Via Environment Variable**:
+```bash
+export REV_PRIVATE_MODE=true
+python -m rev
+```
+
+**Via .env File**:
+```bash
+# .env
+REV_PRIVATE_MODE=true
+```
+
+### How It Works
+
+When private mode is enabled:
+- ❌ All 9 default public MCP servers are disabled
+- ✅ Private servers with your API keys remain enabled (GitHub, Brave Search, etc.)
+- ✅ Your code stays local and secure
+
+### When to Use
+
+- Working with proprietary code
+- Handling sensitive data
+- Compliance requirements (HIPAA, SOC 2, etc.)
+- Air-gapped environments
+- Security-focused development
 
 ---
 
