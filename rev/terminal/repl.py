@@ -21,14 +21,14 @@ def repl_mode():
     """Interactive REPL for iterative development with session memory."""
     # Print welcome message with styling
     print(f"\n{colorize('rev Interactive REPL', Colors.BRIGHT_CYAN, bold=True)}")
-    print(f"{colorize('─' * 80, Colors.BRIGHT_BLACK)}")
-    print(f"  {colorize(f'{Symbols.INFO}  Type /help for commands', Colors.BRIGHT_BLUE)}")
-    print(f"  {colorize(f'{Symbols.INFO}  Running in autonomous mode - destructive operations will prompt', Colors.BRIGHT_YELLOW)}")
-    print(f"  {colorize(f'⚡ Press ESC to submit input immediately', Colors.BRIGHT_GREEN)}")
+    print(f"{colorize('-' * 80, Colors.BRIGHT_BLACK)}")
+    print(f"  {colorize('[i] Type /help for commands', Colors.BRIGHT_BLUE)}")
+    print(f"  {colorize('[i] Running in autonomous mode - destructive operations will prompt', Colors.BRIGHT_YELLOW)}")
+    print(f"  {colorize(f'[!] Press ESC to submit input immediately', Colors.BRIGHT_GREEN)}")
 
     # Show color status if disabled
     if not Colors.is_enabled():
-        print(f"  {Symbols.WARNING}  {get_color_status()}")
+        print(f"  [!]  {get_color_status()}")
 
     print()
 

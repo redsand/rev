@@ -40,6 +40,16 @@ MAX_STEPS_PER_RUN = int(os.getenv("REV_MAX_STEPS", "200"))
 MAX_LLM_TOKENS_PER_RUN = int(os.getenv("REV_MAX_TOKENS", "100000"))
 MAX_WALLCLOCK_SECONDS = int(os.getenv("REV_MAX_SECONDS", "1800"))  # 30 minutes default
 
+# History configuration
+HISTORY_SIZE = int(os.getenv("REV_HISTORY_SIZE", "100"))  # Number of history entries to keep
+HISTORY_FILE = os.getenv("REV_HISTORY_FILE", "")  # Empty means no file persistence
+
+# Input configuration
+PASTE_THRESHOLD = int(os.getenv("REV_PASTE_THRESHOLD", "3"))  # Lines threshold for paste detection
+PASTE_TIME_THRESHOLD = float(os.getenv("REV_PASTE_TIME_THRESHOLD", "0.5"))  # Seconds between lines for paste detection
+ESCAPE_INTERVAL = float(os.getenv("REV_ESCAPE_INTERVAL", "0.05"))  # Escape key check interval in seconds
+ESCAPE_TIMEOUT = float(os.getenv("REV_ESCAPE_TIMEOUT", "0.1"))  # Escape key timeout in seconds
+
 # System information (cached)
 _SYSTEM_INFO: Optional[Dict[str, Any]] = None
 
