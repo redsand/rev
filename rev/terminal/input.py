@@ -6,13 +6,26 @@ Provides cross-platform support for:
 - Unix/Linux/macOS: Uses termios and tty for raw mode input
 - Windows: Uses msvcrt for console input
 - Escape key detection for immediate submission
+
+Features:
+- Arrow key navigation (left/right)
+- History navigation (up/down)
+- Escape key for immediate submission
 """
 
 import sys
 import platform
 from typing import Tuple
+from rev.terminal.history import PromptHistory
 
 from rev.config import get_escape_interrupt, set_escape_interrupt
+
+# Global history instance
+_history = PromptHistory()
+
+def get_history() -> PromptHistory:
+    """Get the global history instance."""
+    return _history
 
 # Platform-specific imports
 if platform.system() != "Windows":
@@ -38,6 +51,8 @@ def _get_input_unix(prompt: str) -> Tuple[str, bool]:
 
     buffer = []
     cursor_pos = 0
+    navigating_history = False
+    is_command = prompt.strip().endswith('/')  # Simple heuristic for command mode
     escape_pressed = False
 
     try:
@@ -47,6 +62,11 @@ def _get_input_unix(prompt: str) -> Tuple[str, bool]:
         while True:
             # Read one character
             char = sys.stdin.read(1)
+            
+            # Reset navigation state on any non-arrow key input
+            if navigating_history and char not in ('\x1b', '[', 'A', 'B', 'C', 'D'):
+                navigating_history = False
+                _history.start_navigation(is_command, ''.join(buffer))
 
             # Check for ESC key
             if char == '\x1b':  # ESC key
@@ -58,16 +78,43 @@ def _get_input_unix(prompt: str) -> Tuple[str, bool]:
                     if next_chars == '[D':  # Left arrow
                         if cursor_pos > 0:
                             cursor_pos -= 1
+                            navigating_history = False
                             sys.stdout.write('\x1b[D')
                             sys.stdout.flush()
                     elif next_chars == '[C':  # Right arrow
                         if cursor_pos < len(buffer):
                             cursor_pos += 1
+                            navigating_history = False
                             sys.stdout.write('\x1b[C')
                             sys.stdout.flush()
-                    elif next_chars == '[A' or next_chars == '[B':  # Up/Down arrows
-                        # Ignore for now
-                        pass
+                    elif next_chars == '[A':  # Up arrow
+                        if not navigating_history:
+                            _history.start_navigation(is_command, ''.join(buffer))
+                            navigating_history = True
+                        
+                        previous = _history.get_previous()
+                        if previous is not None:
+                            # Clear current line
+                            sys.stdout.write('\r' + ' ' * (len(prompt) + len(buffer)) + '\r' + prompt)
+                            # Write previous entry
+                            buffer = list(previous)
+                            cursor_pos = len(buffer)
+                            sys.stdout.write(previous)
+                            sys.stdout.flush()
+                    elif next_chars == '[B':  # Down arrow
+                        if navigating_history:
+                            next_entry = _history.get_next()
+                            # Clear current line
+                            sys.stdout.write('\r' + ' ' * (len(prompt) + len(buffer)) + '\r' + prompt)
+                            
+                            if next_entry is not None:
+                                buffer = list(next_entry)
+                                cursor_pos = len(buffer)
+                                sys.stdout.write(next_entry)
+                            else:
+                                buffer = []
+                                cursor_pos = 0
+                            sys.stdout.flush()
                 else:
                     # Just ESC key pressed alone - submit input immediately
                     escape_pressed = True
@@ -104,6 +151,7 @@ def _get_input_unix(prompt: str) -> Tuple[str, bool]:
                 # Insert character at cursor position
                 buffer.insert(cursor_pos, char)
                 cursor_pos += 1
+                navigating_history = False
 
                 # Redraw from cursor position
                 sys.stdout.write(''.join(buffer[cursor_pos-1:]))
@@ -111,13 +159,19 @@ def _get_input_unix(prompt: str) -> Tuple[str, bool]:
                     # Move cursor back to correct position
                     sys.stdout.write('\x1b[' + str(len(buffer) - cursor_pos) + 'D')
                 sys.stdout.flush()
+            else:
+                navigating_history = False
 
     finally:
         # Restore terminal settings
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
-    return ''.join(buffer), escape_pressed
+    result = ''.join(buffer)
+    return result, escape_pressed
 
+    # Note: History addition is handled by the caller (REPL) to properly
+    # distinguish between commands and regular input based on context
+    # that's not available at this level
 
 def _get_input_windows(prompt: str) -> Tuple[str, bool]:
     """Windows implementation of input with escape key detection."""
@@ -129,6 +183,8 @@ def _get_input_windows(prompt: str) -> Tuple[str, bool]:
     buffer = []
     cursor_pos = 0
     escape_pressed = False
+    navigating_history = False
+    is_command = prompt.strip().endswith('/')  # Simple heuristic for command mode
 
     try:
         while True:
@@ -139,21 +195,54 @@ def _get_input_windows(prompt: str) -> Tuple[str, bool]:
             if char in (b'\x00', b'\xe0'):
                 # Extended key - read the next byte
                 extended = msvcrt.getch()
-
+                
+                # Handle arrow keys
                 if extended == b'K':  # Left arrow
                     if cursor_pos > 0:
                         cursor_pos -= 1
+                        navigating_history = False
                         sys.stdout.write('\x1b[D')
                         sys.stdout.flush()
                 elif extended == b'M':  # Right arrow
                     if cursor_pos < len(buffer):
                         cursor_pos += 1
+                        navigating_history = False
                         sys.stdout.write('\x1b[C')
                         sys.stdout.flush()
-                elif extended in (b'H', b'P'):  # Up/Down arrows
-                    # Ignore for now
-                    pass
+                elif extended == b'H':  # Up arrow
+                    if not navigating_history:
+                        _history.start_navigation(is_command, ''.join(buffer))
+                        navigating_history = True
+                    
+                    previous = _history.get_previous()
+                    if previous is not None:
+                        # Clear current line
+                        sys.stdout.write('\r' + ' ' * (len(prompt) + len(buffer)) + '\r' + prompt)
+                        # Write previous entry
+                        buffer = list(previous)
+                        cursor_pos = len(buffer)
+                        sys.stdout.write(previous)
+                        sys.stdout.flush()
+                elif extended == b'P':  # Down arrow
+                    if navigating_history:
+                        next_entry = _history.get_next()
+                        # Clear current line
+                        sys.stdout.write('\r' + ' ' * (len(prompt) + len(buffer)) + '\r' + prompt)
+                        
+                        if next_entry is not None:
+                            buffer = list(next_entry)
+                            cursor_pos = len(buffer)
+                            sys.stdout.write(next_entry)
+                        else:
+                            buffer = []
+                            cursor_pos = 0
+                        sys.stdout.flush()
                 continue
+                
+            # Reset navigation state on any non-arrow key input
+            if navigating_history and char not in (b'\x00', b'\xe0'):
+                navigating_history = False
+                _history.start_navigation(is_command, ''.join(buffer))
 
             # Check for ESC key
             if char == b'\x1b':
@@ -215,8 +304,12 @@ def _get_input_windows(prompt: str) -> Tuple[str, bool]:
     except Exception:
         raise
 
-    return ''.join(buffer), escape_pressed
+    result = ''.join(buffer)
+    return result, escape_pressed
 
+    # Note: History addition is handled by the caller (REPL) to properly
+    # distinguish between commands and regular input based on context
+    # that's not available at this level
 
 def get_input_with_escape(prompt: str = "") -> Tuple[str, bool]:
     """
@@ -234,8 +327,11 @@ def get_input_with_escape(prompt: str = "") -> Tuple[str, bool]:
     """
     # Check if we're in a TTY (terminal)
     if not sys.stdin.isatty():
-        # Fallback to regular input if not in a TTY
-        return input(prompt), False
+        # Non‑interactive environments: still use platform‑specific input handling
+        if platform.system() == "Windows":
+            return _get_input_windows(prompt)
+        else:
+            return _get_input_unix(prompt)
 
     # Use platform-specific implementation
     if platform.system() == "Windows":

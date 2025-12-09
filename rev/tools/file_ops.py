@@ -12,7 +12,10 @@ import glob
 import shlex
 from typing import List, Optional
 
-from rev.config import ROOT, EXCLUDE_DIRS, MAX_FILE_BYTES, READ_RETURN_LIMIT, SEARCH_MATCH_LIMIT, LIST_LIMIT
+from rev.config import (
+    ROOT, EXCLUDE_DIRS, MAX_FILE_BYTES, READ_RETURN_LIMIT, SEARCH_MATCH_LIMIT, LIST_LIMIT,
+    WARN_ON_NEW_FILES, SIMILARITY_THRESHOLD
+)
 from rev.cache import get_file_cache, get_repo_cache
 
 
@@ -61,6 +64,94 @@ def _run_shell(cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:
     )
 
 
+def _calculate_similarity(str1: str, str2: str) -> float:
+    """Calculate similarity between two strings (simple edit distance based).
+
+    Returns:
+        Similarity score between 0.0 and 1.0
+    """
+    # Simple Levenshtein-based similarity
+    if not str1 or not str2:
+        return 0.0
+
+    # Normalize strings
+    s1 = str1.lower()
+    s2 = str2.lower()
+
+    if s1 == s2:
+        return 1.0
+
+    # Calculate Levenshtein distance
+    len1, len2 = len(s1), len(s2)
+    if len1 > len2:
+        s1, s2 = s2, s1
+        len1, len2 = len2, len1
+
+    current_row = range(len1 + 1)
+    for i in range(1, len2 + 1):
+        previous_row, current_row = current_row, [i] + [0] * len1
+        for j in range(1, len1 + 1):
+            add, delete, change = previous_row[j] + 1, current_row[j - 1] + 1, previous_row[j - 1]
+            if s1[j - 1] != s2[i - 1]:
+                change += 1
+            current_row[j] = min(add, delete, change)
+
+    max_len = max(len(str1), len(str2))
+    distance = current_row[len1]
+    return 1.0 - (distance / max_len)
+
+
+def _check_for_similar_files(path: str) -> dict:
+    """Check if similar files exist that could be used instead (Phase 2).
+
+    Args:
+        path: Path to the file being created
+
+    Returns:
+        Dict with 'warnings' and 'similar_files' if found
+    """
+    if not WARN_ON_NEW_FILES:
+        return {"warnings": [], "similar_files": []}
+
+    try:
+        p = _safe_path(path)
+        filename = p.name
+        filestem = p.stem
+        parent_dir = p.parent
+
+        warnings = []
+        similar_files = []
+
+        # Check for files with similar names in same directory
+        if parent_dir.exists():
+            for existing in parent_dir.iterdir():
+                if not existing.is_file() or existing == p:
+                    continue
+
+                # Check file extension matches
+                if existing.suffix == p.suffix:
+                    similarity = _calculate_similarity(existing.stem, filestem)
+                    if similarity >= SIMILARITY_THRESHOLD:
+                        similar_files.append({
+                            "path": str(existing.relative_to(ROOT)),
+                            "similarity": f"{similarity:.1%}"
+                        })
+
+        if similar_files:
+            files_str = ", ".join(f"{s['path']} ({s['similarity']})" for s in similar_files[:3])
+            warnings.append(
+                f"Similar files exist: {files_str}. "
+                f"Consider extending existing files instead of creating new one."
+            )
+
+        return {
+            "warnings": warnings,
+            "similar_files": [s["path"] for s in similar_files]
+        }
+    except Exception:
+        return {"warnings": [], "similar_files": []}
+
+
 # ========== Core File Operations ==========
 
 def read_file(path: str) -> str:
@@ -93,12 +184,47 @@ def read_file(path: str) -> str:
 
 
 def write_file(path: str, content: str) -> str:
-    """Write content to a file."""
+    """Write content to a file (Phase 2-3: with similarity checking and metrics)."""
     try:
         p = _safe_path(path)
+
+        # Check if creating a new file
+        is_new = not p.exists()
+        check_result = {"warnings": [], "similar_files": []}
+
+        if is_new:
+            # Run similarity check for new files
+            check_result = _check_for_similar_files(path)
+
+            if check_result.get('warnings'):
+                # Log warnings (visible to user/LLM)
+                for warning in check_result['warnings']:
+                    print(f"  ⚠️  {warning}")
+
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
-        return json.dumps({"wrote": str(p.relative_to(ROOT)), "bytes": len(content)})
+
+        # Track metrics (Phase 3)
+        try:
+            from rev.tools.reuse_metrics import track_file_operation
+            if is_new:
+                track_file_operation('create', str(p.relative_to(ROOT)),
+                                      has_similar=bool(check_result.get('similar_files')))
+            else:
+                track_file_operation('modify', str(p.relative_to(ROOT)))
+        except Exception:
+            # Don't fail if metrics tracking fails
+            pass
+
+        result = {"wrote": str(p.relative_to(ROOT)), "bytes": len(content)}
+
+        # Include warnings and similar files in result for LLM awareness
+        if is_new and check_result.get('similar_files'):
+            result['warning'] = check_result['warnings'][0] if check_result['warnings'] else ""
+            result['similar_files'] = check_result['similar_files']
+            result['is_new_file'] = True
+
+        return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 

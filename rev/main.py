@@ -191,7 +191,7 @@ def main():
     if args.parallel > 1:
         print(f"Parallel execution: {args.parallel} concurrent tasks")
     if not args.prompt:
-        print("  ℹ️  Autonomous mode: destructive operations will prompt for confirmation")
+        print("  [i] Autonomous mode: destructive operations will prompt for confirmation")
     print()
 
     try:
@@ -275,7 +275,7 @@ def main():
                             print("   Consider: git checkout -- . (to revert changes)")
                         sys.exit(1)
                     elif validation_report.overall_status == ValidationStatus.PASSED_WITH_WARNINGS:
-                        print("\n⚠️  Validation passed with warnings.")
+                        print("\n[!] Validation passed with warnings.")
                     else:
                         print("\n✅ Validation passed successfully.")
 
@@ -361,10 +361,10 @@ def main():
                             print("Aborted by user")
                             sys.exit(1)
                     else:
-                        print("   ⚠️  WARNING: Proceeding despite rejection (autonomous mode)")
+                        print("   [!] WARNING: Proceeding despite rejection (autonomous mode)")
                         print("   The plan has critical issues. Use --prompt to review or --no-review to disable.")
                 elif review.decision == ReviewDecision.REQUIRES_CHANGES:
-                    print("\n⚠️  Plan requires changes. Review the issues above.")
+                    print("\n[!] Plan requires changes. Review the issues above.")
                     if args.prompt:
                         response = input("Continue anyway? (y/N): ")
                         if response.lower() != 'y':
@@ -424,7 +424,7 @@ def main():
                         print("   Consider: git checkout -- . (to revert changes)")
                     sys.exit(1)
                 elif validation_report.overall_status == ValidationStatus.PASSED_WITH_WARNINGS:
-                    print("\n⚠️  Validation passed with warnings.")
+                    print("\n[!] Validation passed with warnings.")
                 else:
                     print("\n✅ Validation passed successfully.")
 
