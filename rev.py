@@ -12,8 +12,10 @@ Provides a minimal CLI to satisfy test expectations:
 import argparse
 import sys
 
-# Re-export everything from the rev package for convenience
-from rev import *  # noqa: F403,F401
+# Import necessary functions from rev package
+from rev.terminal import repl_mode
+from rev.execution import planning_mode, execution_mode
+from rev import config
 
 
 def main():
@@ -41,7 +43,7 @@ def main():
     # Model selection – adjust the global variable if it exists.
     if args.model:
         try:
-            globals()["OLLAMA_MODEL"] = args.model
+            config.OLLAMA_MODEL = args.model
         except Exception:
             # If the attribute does not exist, ignore – tests only verify the
             # assignment does not raise.
