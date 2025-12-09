@@ -31,6 +31,7 @@ Rev isn't just another AI coding assistant — it's a **complete agentic develop
 - **📚 Learning Agent** — Project memory that learns from past executions
 - **✅ Validation Agent** — Post-execution verification with goal evaluation
 - **🛡️ Intelligent Review** — Automatic validation with security vulnerability detection
+- **🔬 Advanced Analysis** (NEW!) — Test coverage, code context, symbol usage, dependencies, semantic diffs
 - **📚 Complex Task Handling** — Recursive breakdown of large features
 - **🔓 Smart Automation** — Autonomous execution with review-based approval
 - **📋 Planning Mode** — Comprehensive task checklists with recursive decomposition
@@ -556,7 +557,7 @@ For each task, the agent:
 
 ### Available Tools
 
-The agent has access to **36 powerful tools** across multiple categories:
+The agent has access to **41 powerful tools** across multiple categories:
 
 **New in v2.7:** SSH remote execution! Connect to remote hosts, execute commands, and transfer files for managing your infrastructure.
 
@@ -628,6 +629,41 @@ The agent has access to **36 powerful tools** across multiple categories:
 | `mcp_call_tool` | Call tools on MCP servers |
 
 **New in v2.5:** MCP support allows the agent to connect to external tools and data sources through the Model Context Protocol, enabling integration with databases, APIs, and other development tools.
+
+#### Advanced Code Analysis Tools (NEW!)
+
+**New in v2.8:** Five powerful analysis tools for improved development accuracy, review, and bug fixing:
+
+| Tool | Description | Use Case |
+|------|-------------|----------|
+| `analyze_test_coverage` | Test coverage analysis using coverage.py/Istanbul | Check coverage before modifying code |
+| `analyze_code_context` | Git history, bug fixes, code churn analysis | Understand why code exists before refactoring |
+| `find_symbol_usages` | Find all references to functions/classes/variables | Assess impact before renaming/deleting |
+| `analyze_dependencies` | Dependency graph with impact radius | Understand ripple effects before changes |
+| `analyze_semantic_diff` | Detect breaking changes beyond line diffs | Verify backward compatibility |
+
+**How Agents Use These Tools:**
+
+```bash
+# Before refactoring, agents automatically:
+python rev.py "Refactor UserService.authenticate method"
+
+# 1. analyze_test_coverage() → Ensures 85% coverage exists
+# 2. analyze_code_context() → Discovers recent bug fix for race condition
+# 3. find_symbol_usages() → Finds 47 usages across 12 files
+# 4. analyze_dependencies() → Calculates HIGH impact radius
+# 5. Makes changes with full awareness
+# 6. analyze_semantic_diff() → Verifies no breaking changes
+```
+
+**Benefits:**
+- **🛡️ Prevents bugs:** Understands historical context to avoid re-introducing bugs
+- **🎯 Impact awareness:** Knows exactly what will break before making changes
+- **✅ Coverage validation:** Ensures adequate tests exist before modifications
+- **🔍 Dependency tracking:** Maps full impact radius of changes
+- **⚡ Breaking change detection:** Automatic backward compatibility checks
+
+These tools transform Rev from "code modifier" to "intelligent code surgeon" with full awareness of consequences.
 
 ## Comparison with agent.py
 
@@ -1332,8 +1368,6 @@ MIT
 
 ## Contributing
 
-This is a minimal implementation focused on core CI/CD workflows. For advanced features (SSH, WinRM, HTTP client, secrets management), see the full `agent.py`.
+Contributions are welcome! This is a production-grade agentic development system focused on autonomous workflows with comprehensive analysis capabilities.
 
-## Credits
-
-Based on the hawk-ops-ai framework, streamlined for autonomous CI/CD workflows with Ollama integration.
+For feature requests or bug reports, please open an issue on GitHub.
