@@ -153,7 +153,7 @@ Rev implements **21 Agentic Design Patterns** from cutting-edge AI agent researc
 # Research Agent uses both approaches:
 # Symbolic: Finds exact matches for "authenticate", "login", "jwt"
 # Semantic: Finds conceptually related code even without keywords
-python rev.py "Add OAuth2 authentication"
+rev "Add OAuth2 authentication"
 ```
 
 **📊 Controlled Execution**
@@ -162,14 +162,14 @@ python rev.py "Add OAuth2 authentication"
 # - Max steps: 200 (configurable via REV_MAX_STEPS)
 # - Max tokens: 100,000 (REV_MAX_TOKENS)
 # - Max time: 1800s / 30min (REV_MAX_SECONDS)
-python rev.py "Refactor entire authentication system"
+rev "Refactor entire authentication system"
 # Output: "📊 Resource Usage: Steps: 45/200 | Tokens: 12000/100000 | Time: 120s/1800s"
 ```
 
 **🎯 Goal-Oriented Validation**
 ```bash
 # Goals automatically derived and validated:
-python rev.py "Fix all failing tests"
+rev "Fix all failing tests"
 # Derives goal: "All tests must pass"
 # Validation checks: Tests passed? ✅
 # Goal met? ✅
@@ -178,10 +178,10 @@ python rev.py "Fix all failing tests"
 **🔀 Adaptive Configuration**
 ```bash
 # Router analyzes request and optimizes:
-python rev.py "Quick typo fix in README"
+rev "Quick typo fix in README"
 # → Route: quick_edit (skips research, minimal review)
 
-python rev.py "Implement payment processing system"
+rev "Implement payment processing system"
 # → Route: full_feature (enables all agents, strict review)
 ```
 
@@ -197,7 +197,7 @@ Most patterns are **enabled by default** with graceful degradation:
 **Configuration:**
 ```bash
 # Disable RAG for faster execution
-python rev.py --research-depth shallow "Quick task"
+rev --research-depth shallow "Quick task"
 
 # Adjust resource budgets
 export REV_MAX_STEPS=500
@@ -205,7 +205,7 @@ export REV_MAX_TOKENS=200000
 export REV_MAX_SECONDS=3600  # 1 hour
 
 # Control routing behavior via strictness
-python rev.py --review-strictness strict "Critical production change"
+rev --review-strictness strict "Critical production change"
 ```
 
 **See [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) for complete pattern documentation and usage examples.**
@@ -258,8 +258,8 @@ ollama pull deepseek-coder:latest   # ⚠️ Check version for tool support
 ollama serve
 
 # Use powerful cloud-hosted models (requires authentication)
-python rev.py --model qwen3-coder:480b-cloud "Your task"
-python rev.py --model llama3.3:90b-cloud "Complex refactoring task"
+rev --model qwen3-coder:480b-cloud "Your task"
+rev --model llama3.3:90b-cloud "Complex refactoring task"
 ```
 
 **Important:** Cloud models require your local Ollama instance to be running. The local instance automatically proxies requests to Ollama's cloud service.
@@ -292,7 +292,7 @@ pip install -r requirements.txt
 Execute a single task with **fully autonomous** operation:
 
 ```bash
-python rev.py "Add error handling to all API endpoints"
+rev "Add error handling to all API endpoints"
 ```
 
 The agent will:
@@ -309,7 +309,7 @@ The agent will:
 For iterative development with **session memory**:
 
 ```bash
-python rev.py --repl
+rev --repl
 ```
 
 The REPL now maintains context across multiple prompts:
@@ -398,7 +398,7 @@ rev --orchestrate --research-depth deep --learn --auto-fix "Refactor auth system
 If you want to manually approve the execution plan (old behavior):
 
 ```bash
-python rev.py --prompt "Run all tests and fix any failures"
+rev --prompt "Run all tests and fix any failures"
 ```
 
 With `--prompt`, the agent will ask for approval before starting execution.
@@ -433,13 +433,13 @@ export OLLAMA_BASE_URL="http://localhost:11434"  # Default
 export OLLAMA_MODEL="codellama:latest"           # Default
 
 # Then run agent
-python rev.py "Your task here"
+rev "Your task here"
 ```
 
 ### Command-Line Options
 
 ```bash
-python rev.py [OPTIONS] "task description"
+rev [OPTIONS] "task description"
 
 Options:
   --repl                       Interactive REPL mode
@@ -472,16 +472,16 @@ By default, rev.py now runs **2 tasks in parallel** when they don't have depende
 
 ```bash
 # Use default (2 concurrent tasks)
-python rev.py "Review all API endpoints and add tests"
+rev "Review all API endpoints and add tests"
 
 # Run 4 tasks in parallel for maximum speed
-python rev.py -j 4 "Refactor all components and update tests"
+rev -j 4 "Refactor all components and update tests"
 
 # Run sequentially (old behavior) for debugging
-python rev.py -j 1 "Complex refactoring that needs careful sequencing"
+rev -j 1 "Complex refactoring that needs careful sequencing"
 
 # Run 8 tasks in parallel for large codebases
-python rev.py -j 8 "Update all imports across the project"
+rev -j 8 "Update all imports across the project"
 ```
 
 **How it works:**
@@ -500,7 +500,7 @@ python rev.py -j 8 "Update all imports across the project"
 ### Example 1: Add Feature
 
 ```bash
-python rev.py "Add rate limiting middleware to Express app"
+rev "Add rate limiting middleware to Express app"
 ```
 
 **Generated Plan:**
@@ -513,7 +513,7 @@ python rev.py "Add rate limiting middleware to Express app"
 ### Example 2: Fix Bugs
 
 ```bash
-python rev.py "Fix all ESLint errors in src/ directory"
+rev "Fix all ESLint errors in src/ directory"
 ```
 
 **Generated Plan:**
@@ -526,7 +526,7 @@ python rev.py "Fix all ESLint errors in src/ directory"
 ### Example 3: Refactoring
 
 ```bash
-python rev.py "Refactor authentication logic into separate service"
+rev "Refactor authentication logic into separate service"
 ```
 
 **Generated Plan:**
@@ -646,7 +646,7 @@ The agent has access to **41 powerful tools** across multiple categories:
 
 ```bash
 # Before refactoring, agents automatically:
-python rev.py "Refactor UserService.authenticate method"
+rev "Refactor UserService.authenticate method"
 
 # 1. analyze_test_coverage() → Ensures 85% coverage exists
 # 2. analyze_code_context() → Discovers recent bug fix for race condition
@@ -664,18 +664,6 @@ python rev.py "Refactor UserService.authenticate method"
 - **⚡ Breaking change detection:** Automatic backward compatibility checks
 
 These tools transform Rev from "code modifier" to "intelligent code surgeon" with full awareness of consequences.
-
-## Comparison with agent.py
-
-| Feature | agent.py | rev.py |
-|---------|----------|-----------|
-| **LLM** | OpenAI API | Ollama (local) |
-| **Approval** | Multiple prompts | Single approval |
-| **Planning** | None | Comprehensive |
-| **Execution** | Manual steps | Autonomous iteration |
-| **Testing** | Manual | Automatic |
-| **Privacy** | API calls | Fully local |
-| **Cost** | Pay per token | Free |
 
 ## Troubleshooting
 
@@ -715,7 +703,7 @@ Cloud models (ending with `-cloud`) require authentication. The agent will:
 
 **Example:**
 ```bash
-python rev.py --model qwen3-coder:480b-cloud "Review code"
+rev --model qwen3-coder:480b-cloud "Review code"
 
 # Output:
 # ============================================================
@@ -749,12 +737,12 @@ Some Ollama models don't support function/tool calling. This is normal for older
 1. Use a model with tool support:
    ```bash
    ollama pull llama3.1:latest
-   python rev.py --model llama3.1:latest "Your task"
+   rev --model llama3.1:latest "Your task"
    ```
 
 2. Or enable debug mode to see what's happening:
    ```bash
-   OLLAMA_DEBUG=1 python rev.py "Your task"
+   OLLAMA_DEBUG=1 rev "Your task"
    ```
 
 The agent will automatically retry without tools if it detects the model doesn't support them, but tool support is highly recommended for best results.
@@ -768,7 +756,7 @@ rev.py only operates within the current repository for safety. Use relative path
 Try a more specific request or use a larger model:
 
 ```bash
-python rev.py --model deepseek-coder:33b "Your task"
+rev --model deepseek-coder:33b "Your task"
 ```
 
 ## Testing & Coverage
@@ -926,7 +914,7 @@ Risk distribution:
 
 **1. Planning Phase** - The Planning Agent analyzes your request
 ```bash
-python rev.py "Add user authentication with JWT"
+rev "Add user authentication with JWT"
 ```
 
 The Planning Agent will:
@@ -987,14 +975,14 @@ The Review Agent examines:
 **Plan Review** (Default: Enabled)
 ```bash
 # Enable plan review (default)
-python rev.py "Add authentication"
+rev "Add authentication"
 
 # Disable plan review
-python rev.py --no-review "Add authentication"
+rev --no-review "Add authentication"
 
 # Adjust review strictness
-python rev.py --review-strictness strict "Delete old migrations"
-python rev.py --review-strictness lenient "Add logging"
+rev --review-strictness strict "Delete old migrations"
+rev --review-strictness lenient "Add logging"
 ```
 
 Strictness levels:
@@ -1005,7 +993,7 @@ Strictness levels:
 **Action Review** (Optional: Disabled by default)
 ```bash
 # Enable action-level review (reviews each tool call)
-python rev.py --action-review "Implement payment processing"
+rev --action-review "Implement payment processing"
 ```
 
 Action review provides real-time validation:
@@ -1073,7 +1061,7 @@ Continue anyway? (y/N):
 ### Example: Complex Feature with Review
 
 ```bash
-python rev.py "Implement a REST API for user management with authentication, validation, and tests"
+rev "Implement a REST API for user management with authentication, validation, and tests"
 ```
 
 **Planning Agent Output:**
@@ -1122,19 +1110,19 @@ Plan provides comprehensive REST API implementation
 
 ```bash
 # Full control over review behavior
-python rev.py \
+rev \
   --review \                      # Enable plan review (default)
   --review-strictness moderate \  # Set strictness level
   --action-review \               # Enable action-level review
   "Your complex task"
 
 # Minimal review for simple tasks
-python rev.py \
+rev \
   --review-strictness lenient \
   "Update documentation"
 
 # Maximum scrutiny for critical changes
-python rev.py \
+rev \
   --review-strictness strict \
   --action-review \
   "Migrate database schema"
@@ -1164,14 +1152,14 @@ python rev.py \
 
 4. **Review Changes** — Use `git diff` before committing
    ```bash
-   python rev.py "Add feature X"
+   rev "Add feature X"
    git diff  # Review changes
    git commit -am "Add feature X"
    ```
 
 5. **Iterative Development** — Use REPL for interactive work
    ```bash
-   python rev.py --repl
+   rev --repl
    ```
 
 6. **Documentation First** — Review documentation before making changes
@@ -1198,15 +1186,15 @@ Convert between common file formats without external tools:
 
 ```python
 # JSON ↔ YAML
-python rev.py "Convert config.json to YAML format"
-python rev.py "Convert docker-compose.yaml to JSON"
+rev "Convert config.json to YAML format"
+rev "Convert docker-compose.yaml to JSON"
 
 # CSV ↔ JSON
-python rev.py "Convert users.csv to JSON array"
-python rev.py "Convert data.json to CSV format"
+rev "Convert users.csv to JSON array"
+rev "Convert data.json to CSV format"
 
 # .env to JSON
-python rev.py "Convert .env to JSON configuration"
+rev "Convert .env to JSON configuration"
 ```
 
 ### Code Refactoring
@@ -1215,13 +1203,13 @@ Automated code analysis and improvement:
 
 ```python
 # Remove unused imports
-python rev.py "Remove unused imports from src/app.py"
+rev "Remove unused imports from src/app.py"
 
 # Extract magic numbers to constants
-python rev.py "Find magic numbers in config.py that should be constants"
+rev "Find magic numbers in config.py that should be constants"
 
 # Simplify complex conditionals
-python rev.py "Analyze validator.py for overly complex if statements"
+rev "Analyze validator.py for overly complex if statements"
 ```
 
 ### Dependency Management
@@ -1230,11 +1218,11 @@ Multi-language dependency analysis and updates:
 
 ```python
 # Analyze dependencies (auto-detects Python/JavaScript/Rust/Go)
-python rev.py "Analyze project dependencies and check for issues"
+rev "Analyze project dependencies and check for issues"
 
 # Check for outdated packages
-python rev.py "Check for outdated dependencies"
-python rev.py "Find outdated packages including major version updates"
+rev "Check for outdated dependencies"
+rev "Find outdated packages including major version updates"
 ```
 
 ### Security Scanning
@@ -1243,16 +1231,16 @@ Comprehensive security analysis:
 
 ```python
 # Scan for vulnerabilities
-python rev.py "Scan dependencies for known security vulnerabilities"
+rev "Scan dependencies for known security vulnerabilities"
 
 # Static code security analysis
-python rev.py "Run security scan on src/ directory"
+rev "Run security scan on src/ directory"
 
 # Detect secrets
-python rev.py "Scan repository for accidentally committed secrets"
+rev "Scan repository for accidentally committed secrets"
 
 # Check license compliance
-python rev.py "Check dependency licenses for GPL and restrictive licenses"
+rev "Check dependency licenses for GPL and restrictive licenses"
 ```
 
 **See [UTILITIES.md](UTILITIES.md) for complete documentation, API reference, and integration examples.**
@@ -1286,11 +1274,11 @@ rev.py includes a high-performance caching system that dramatically improves spe
 
 ```bash
 # View cache statistics
-python rev.py "Show cache statistics"
+rev "Show cache statistics"
 
 # Clear caches (useful after major changes)
-python rev.py "Clear all caches"
-python rev.py "Clear LLM response cache"
+rev "Clear all caches"
+rev "Clear LLM response cache"
 
 # Caches persist automatically to .rev_cache/
 ```
@@ -1315,16 +1303,16 @@ The agent detects test frameworks automatically, but you can customize:
 
 ```bash
 # For Python projects
-python rev.py "Fix failing tests" --model codellama:latest
+rev "Fix failing tests" --model codellama:latest
 
 # For Node.js projects
-python rev.py "Add tests for new API endpoints"
+rev "Add tests for new API endpoints"
 ```
 
 ### Chain Multiple Tasks
 
 ```bash
-python rev.py "Add logging, then refactor error handling, then update tests"
+rev "Add logging, then refactor error handling, then update tests"
 ```
 
 The agent will create a plan that sequences these correctly.
@@ -1333,7 +1321,7 @@ The agent will create a plan that sequences these correctly.
 
 ```bash
 # In your CI pipeline
-python rev.py --yes "Run tests and fix any linting errors"
+rev --yes "Run tests and fix any linting errors"
 if [ $? -eq 0 ]; then
   git commit -am "Auto-fix linting issues"
   git push
