@@ -16,6 +16,7 @@ import threading
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 from pathlib import Path
+import uuid
 
 from rev.models.task import ExecutionPlan, Task, TaskStatus
 from rev.debug_logger import get_logger
@@ -48,8 +49,8 @@ class StateManager:
         # Create checkpoint directory
         self.checkpoint_dir.mkdir(exist_ok=True, parents=True)
 
-        # Generate session ID
-        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Generate session ID using a UUID4 for uniqueness across runs
+        self.session_id = uuid.uuid4().hex
 
     def save_checkpoint(
         self,
@@ -72,6 +73,7 @@ class StateManager:
             try:
                 self._checkpoint_count += 1
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+                # Filename now includes the GUID‑based session_id for clear identification
                 filename = f"checkpoint_{self.session_id}_{self._checkpoint_count:04d}_{timestamp}.json"
                 filepath = self.checkpoint_dir / filename
 
@@ -178,7 +180,7 @@ class StateManager:
         if self.auto_save:
             self.save_checkpoint(reason="task_failed")
 
-    def on_interrupt(self, task: Optional[Task] = None):
+    def on_interrupt(self, task: Optional[Task] = None, token_usage: Optional[Dict[str, int]] = None):
         """Handle execution interrupt.
 
         Args:
@@ -193,16 +195,28 @@ class StateManager:
         checkpoint_path = self.save_checkpoint(reason="interrupt", force=True)
 
         if checkpoint_path:
+
             print("\n" + "=" * 60)
             print("⚠️  EXECUTION INTERRUPTED")
             print("=" * 60)
             print(f"\n✓ State saved to: {checkpoint_path}")
             print("\nTo resume from where you left off, run:")
-            print(f"\n  rev resume {checkpoint_path}")
+            print(f"\n  rev --resume {checkpoint_path}")
             print("\nOr to resume from the latest checkpoint:")
-            print("\n  rev resume")
-            print("\n" + "=" * 60)
 
+            if token_usage:
+                total = token_usage.get("total", 0)
+                prompt = token_usage.get("prompt", 0)
+                completion = token_usage.get("completion", 0)
+                print("\nToken Usage:")
+                print(f"  Total: {total:,}")
+                print(f"  Prompt: {prompt:,}")
+                print(f"  Completion: {completion:,}")
+
+
+
+
+            print("\n" + "=" * 60)
         return checkpoint_path
 
     def get_last_checkpoint(self) -> Optional[str]:
@@ -361,7 +375,7 @@ class StateManager:
 
             resume_info = data.get("resume_info", {})
 
-            print("\n" + "=" * 60)
+
             print("RESUME INFORMATION")
             print("=" * 60)
             print(f"\nCheckpoint: {checkpoint_path}")
@@ -378,9 +392,9 @@ class StateManager:
                 print(f"\nNext task: {resume_info['next_task']}")
 
             print("\nTo resume:")
-            print(f"  rev resume {checkpoint_path}")
+            print(f"  rev --resume {checkpoint_path}")
             print("\nOr:")
-            print("  rev resume  (uses latest checkpoint)")
+            print("  rev --resume  (uses latest checkpoint)")
             print("=" * 60)
 
         except Exception as e:
