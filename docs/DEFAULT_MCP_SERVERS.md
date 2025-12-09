@@ -1,6 +1,6 @@
 # Default MCP Servers in Rev
 
-Rev comes pre-configured with three default MCP (Model Context Protocol) servers that enhance AI capabilities without requiring any setup or API keys.
+Rev comes pre-configured with **8 default MCP (Model Context Protocol) servers** that enhance AI capabilities without requiring any setup or API keys.
 
 ## Overview
 
@@ -8,6 +8,14 @@ These servers are automatically loaded when rev starts, providing immediate acce
 - **Persistent memory** across sessions
 - **Advanced reasoning** capabilities
 - **External documentation** access via HTTP
+- **Code understanding** via GitHub repository RAG
+- **Security scanning** with static analysis
+- **Web and code search** capabilities
+
+### Two Types of Default Servers
+
+1. **Local NPM Servers** (3 servers) - Run locally via `npx`
+2. **Remote MCP Servers** (5 servers) - Publicly hosted SSE/HTTP endpoints
 
 ## Default Servers
 
@@ -98,6 +106,172 @@ result = mcp_call_tool("fetch", "get", {
 ```
 
 **Configuration**: Auto-enabled (disable with `REV_MCP_FETCH=false`)
+
+---
+
+## Remote MCP Servers (New!)
+
+Rev now includes remote MCP servers - publicly hosted endpoints that provide specialized capabilities without requiring local installation.
+
+### 4. DeepWiki Server 📚
+**URL**: `https://mcp.deepwiki.com/sse`
+
+**Purpose**: RAG-as-a-Service for GitHub repositories - semantic code understanding.
+
+**Key Features**:
+- Semantic search across GitHub repos
+- Repository analysis and insights
+- Code pattern detection
+- Documentation extraction
+
+**Use Cases**:
+- Understanding large codebases
+- Finding similar code patterns
+- Exploring open source projects
+- Learning from existing implementations
+
+**Benefits**:
+- No local indexing required
+- Works with any public GitHub repo
+- Fast semantic search
+- Contextual code understanding
+
+**Configuration**: Auto-enabled (disable with `REV_MCP_DEEPWIKI=false`)
+
+---
+
+### 5. Exa Search Server 🔍
+**URL**: `https://mcp.exa.ai/mcp`
+
+**Purpose**: Advanced code, documentation, and web search capabilities.
+
+**Key Features**:
+- Code search across repositories
+- Documentation search
+- Web search with developer focus
+- Filtered results for technical content
+
+**Use Cases**:
+- Finding code examples
+- Searching API documentation
+- Discovering best practices
+- Technical research
+
+**Benefits**:
+- Developer-focused search results
+- Code-aware ranking
+- Multiple search sources
+- High-quality technical content
+
+**Configuration**: Auto-enabled (disable with `REV_MCP_EXA_SEARCH=false`)
+
+---
+
+### 6. Semgrep Server 🔒
+**URL**: `https://mcp.semgrep.ai/sse`
+
+**Purpose**: Static analysis and security scanning for code.
+
+**Key Features**:
+- Automated security checks
+- Code quality analysis
+- Pattern-based detection
+- Multi-language support
+
+**Use Cases**:
+- Security vulnerability scanning
+- Code quality checks
+- Detecting anti-patterns
+- CI/CD integration
+
+**Benefits**:
+- Real-time security feedback
+- Industry-standard rules
+- Low false-positive rate
+- Actionable recommendations
+
+**Configuration**: Auto-enabled (disable with `REV_MCP_SEMGREP=false`)
+
+**Note**: Semgrep's remote endpoint is evolving - check their docs for latest status.
+
+---
+
+### 7. Cloudflare Docs Server 📖
+**URL**: `https://docs.mcp.cloudflare.com/sse`
+
+**Purpose**: Access Cloudflare documentation and API references.
+
+**Key Features**:
+- Cloudflare API documentation
+- Workers documentation
+- Platform feature guides
+- Configuration examples
+
+**Use Cases**:
+- Cloudflare Workers development
+- API integration
+- Platform configuration
+- Feature exploration
+
+**Benefits**:
+- Always up-to-date docs
+- Structured API reference
+- Code examples included
+- Fast search
+
+**Configuration**: Auto-enabled (disable with `REV_MCP_CLOUDFLARE_DOCS=false`)
+
+---
+
+### 8. LLM Text Server 📝
+**URL**: `https://mcp.llmtxt.dev/sse`
+
+**Purpose**: Text and data analysis helpers for development work.
+
+**Key Features**:
+- Text processing utilities
+- Data transformation
+- Format conversion
+- Analysis tools
+
+**Use Cases**:
+- Log analysis
+- Data cleaning
+- Format conversion
+- Text extraction
+
+**Benefits**:
+- Specialized text tools
+- Development-focused
+- Quick transformations
+- Multiple formats
+
+**Configuration**: Auto-enabled (disable with `REV_MCP_LLMTEXT=false`)
+
+---
+
+## 🔒 Private Mode
+
+**Important**: All default servers (both local and remote) are disabled when **Private Mode** is enabled.
+
+Use private mode when working with confidential code:
+
+```python
+from rev.mcp import mcp_enable_private_mode, mcp_disable_private_mode
+
+# Enable private mode - disables all 8 default servers
+mcp_enable_private_mode()
+
+# Disable private mode - re-enables all servers
+mcp_disable_private_mode()
+```
+
+Or via environment variable:
+```bash
+export REV_PRIVATE_MODE=true
+```
+
+See [PRIVATE_MODE.md](./PRIVATE_MODE.md) for complete documentation.
 
 ---
 
@@ -238,16 +412,19 @@ python -m rev
 ## Benefits of Default Servers
 
 ### For Users
-✅ **Zero configuration** - Works out of the box
-✅ **No API keys** - Completely free
-✅ **Enhanced capabilities** - Better memory, reasoning, and research
-✅ **Easy to disable** - Simple environment variables
+✅ **Zero configuration** - 8 servers work out of the box
+✅ **No API keys** - All default servers are completely free
+✅ **Enhanced capabilities** - Memory, reasoning, search, security, and documentation
+✅ **Easy to disable** - Simple environment variables or private mode
+✅ **Privacy control** - Private mode for confidential work
 
 ### For Developers
 ✅ **Standard toolset** - Consistent across installations
+✅ **Dual deployment** - Local (NPM) + Remote (SSE) servers
 ✅ **Extensible** - Easy to add more servers
 ✅ **Well-documented** - Clear usage patterns
 ✅ **Production-ready** - Tested and reliable
+✅ **Security-focused** - Includes Semgrep for code scanning
 
 ## Future Enhancements
 

@@ -56,6 +56,72 @@ from rev.mcp import mcp_list_servers
 print(mcp_list_servers())  # Shows default + any custom servers
 ```
 
+### 🔒 Private Mode
+
+Rev includes a **private mode** feature for working with confidential code. When enabled, all public MCP servers are disabled:
+
+```python
+from rev.mcp import mcp_enable_private_mode, mcp_disable_private_mode
+
+# Enable private mode (disables all public servers)
+mcp_enable_private_mode()
+
+# Disable private mode (re-enables public servers)
+mcp_disable_private_mode()
+```
+
+Or set via environment variable:
+```bash
+export REV_PRIVATE_MODE=true
+```
+
+See [PRIVATE_MODE.md](./PRIVATE_MODE.md) for complete documentation.
+
+---
+
+## Remote MCP Servers (New!)
+
+Rev now includes **remote MCP servers** - publicly hosted SSE/HTTP endpoints that provide specialized development capabilities:
+
+### 🎯 Included Remote Servers
+
+1. **DeepWiki** (`https://mcp.deepwiki.com/sse`)
+   - **Purpose**: RAG-as-a-Service for GitHub repositories
+   - **Category**: Code Understanding
+   - **Benefits**: Semantic code search, repository analysis
+   - **No API key required** ✅
+   - **Auto-enabled**: Yes (disable with `REV_MCP_DEEPWIKI=false`)
+
+2. **Exa Search** (`https://mcp.exa.ai/mcp`)
+   - **Purpose**: Code, documentation, and web search
+   - **Category**: Search
+   - **Benefits**: Find code examples, documentation, best practices
+   - **No API key required** ✅
+   - **Auto-enabled**: Yes (disable with `REV_MCP_EXA_SEARCH=false`)
+
+3. **Semgrep** (`https://mcp.semgrep.ai/sse`)
+   - **Purpose**: Static analysis and security scanning
+   - **Category**: Security
+   - **Benefits**: Automated security checks, code quality
+   - **No API key required** ✅
+   - **Auto-enabled**: Yes (disable with `REV_MCP_SEMGREP=false`)
+
+4. **Cloudflare Docs** (`https://docs.mcp.cloudflare.com/sse`)
+   - **Purpose**: Cloudflare documentation access
+   - **Category**: Documentation
+   - **Benefits**: Quick access to Cloudflare API docs
+   - **No API key required** ✅
+   - **Auto-enabled**: Yes (disable with `REV_MCP_CLOUDFLARE_DOCS=false`)
+
+5. **LLM Text** (`https://mcp.llmtxt.dev/sse`)
+   - **Purpose**: Text and data analysis helpers
+   - **Category**: Analysis
+   - **Benefits**: Advanced text processing and analysis
+   - **No API key required** ✅
+   - **Auto-enabled**: Yes (disable with `REV_MCP_LLMTEXT=false`)
+
+**Note**: All remote servers are disabled when [Private Mode](./PRIVATE_MODE.md) is enabled.
+
 ---
 
 ## Official MCP Servers
