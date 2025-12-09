@@ -3,15 +3,20 @@
 """MCP (Model Context Protocol) client for rev."""
 
 import json
+import os
 from typing import Dict, Any, List, Optional
 
 
 class MCPClient:
     """Client for Model Context Protocol servers."""
 
-    def __init__(self):
+    def __init__(self, load_defaults: bool = True):
         self.servers = {}
         self.tools = {}
+
+        # Load default MCP servers if enabled
+        if load_defaults:
+            self._load_default_servers()
 
     def add_server(self, name: str, command: str, args: List[str] = None) -> Dict[str, Any]:
         """Add an MCP server."""
@@ -46,6 +51,42 @@ class MCPClient:
             }
         except Exception as e:
             return {"error": f"{type(e).__name__}: {e}"}
+
+    def _load_default_servers(self) -> None:
+        """Load default MCP servers from configuration."""
+        try:
+            from rev.config import DEFAULT_MCP_SERVERS, OPTIONAL_MCP_SERVERS
+
+            # Load default servers (enabled by default, no API keys required)
+            for name, config in DEFAULT_MCP_SERVERS.items():
+                if config.get("enabled", True):
+                    self.add_server(
+                        name=name,
+                        command=config["command"],
+                        args=config["args"]
+                    )
+
+            # Load optional servers only if environment variables are present
+            for name, config in OPTIONAL_MCP_SERVERS.items():
+                if config.get("enabled", False):
+                    env_vars = config.get("env_required", [])
+                    # Only load if all required environment variables are set
+                    if all(os.getenv(var) for var in env_vars):
+                        self.add_server(
+                            name=name,
+                            command=config["command"],
+                            args=config["args"]
+                        )
+        except ImportError:
+            # Gracefully handle case where config is not available
+            pass
+        except Exception as e:
+            # Log error but don't fail initialization
+            print(f"Warning: Failed to load default MCP servers: {e}")
+
+    def get_server_info(self, name: str) -> Optional[Dict[str, Any]]:
+        """Get information about a specific MCP server."""
+        return self.servers.get(name)
 
 
 # Global MCP client instance

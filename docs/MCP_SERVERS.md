@@ -6,6 +6,58 @@ A curated list of publicly available MCP servers for use with rev.py.
 
 Model Context Protocol (MCP) is an open protocol that enables AI assistants to securely access external tools, data sources, and services. MCP servers provide tools that can be called by LLMs during task execution.
 
+## Default MCP Servers
+
+**Rev comes pre-configured with the following default MCP servers** (enabled automatically, no setup required):
+
+### 🎯 Included by Default
+
+1. **Memory Server** (`@modelcontextprotocol/server-memory`)
+   - **Purpose**: Persistent memory storage for AI context across sessions
+   - **Benefits**: Maintains long-term context, knowledge graphs, entity tracking
+   - **No API key required** ✅
+   - **Auto-enabled**: Yes (disable with `REV_MCP_MEMORY=false`)
+
+2. **Sequential Thinking Server** (`@modelcontextprotocol/server-sequential-thinking`)
+   - **Purpose**: Enable step-by-step reasoning for complex problem solving
+   - **Benefits**: Improves planning and problem-solving capabilities
+   - **No API key required** ✅
+   - **Auto-enabled**: Yes (disable with `REV_MCP_SEQUENTIAL_THINKING=false`)
+
+3. **Fetch Server** (`@modelcontextprotocol/server-fetch`)
+   - **Purpose**: Make HTTP requests to access documentation and APIs
+   - **Benefits**: Access external documentation, API endpoints, web resources
+   - **No API key required** ✅
+   - **Auto-enabled**: Yes (disable with `REV_MCP_FETCH=false`)
+
+### 🔧 Configuration
+
+Default servers are automatically loaded when rev starts. To disable a default server:
+
+```bash
+# Disable specific servers via environment variables
+export REV_MCP_MEMORY=false
+export REV_MCP_SEQUENTIAL_THINKING=false
+export REV_MCP_FETCH=false
+```
+
+Or in your `.env` file:
+```bash
+REV_MCP_MEMORY=false
+REV_MCP_SEQUENTIAL_THINKING=false
+REV_MCP_FETCH=false
+```
+
+### 📋 Checking Active Servers
+
+List all active MCP servers:
+```python
+from rev.mcp import mcp_list_servers
+print(mcp_list_servers())  # Shows default + any custom servers
+```
+
+---
+
 ## Official MCP Servers
 
 ### 1. **Filesystem Server**
