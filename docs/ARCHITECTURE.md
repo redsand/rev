@@ -1,6 +1,6 @@
 # Rev Architecture
 
-This document describes the modular architecture of the `rev` project — a **6-Agent Autonomous System** (v5.0).
+This document describes the modular architecture of the `rev` project — a **6-Agent Autonomous System** (v2.0.1).
 
 ## 6-Agent System Overview
 

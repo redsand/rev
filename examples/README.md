@@ -56,7 +56,7 @@ Integrate rev.py into your CI/CD pipelines:
 
 ## Usage Examples
 
-### 6-Agent System (v5.0)
+### 6-Agent System (v2.0.1)
 
 rev.py now features a **6-agent autonomous system**:
 

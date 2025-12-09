@@ -559,9 +559,9 @@ For each task, the agent:
 
 The agent has access to **41 powerful tools** across multiple categories:
 
-**New in v2.7:** SSH remote execution! Connect to remote hosts, execute commands, and transfer files for managing your infrastructure.
+**New in v2.0.1:** SSH remote execution! Connect to remote hosts, execute commands, and transfer files for managing your infrastructure.
 
-**New in v2.6:** Cross-platform OS detection! The agent automatically detects your operating system (Windows, Linux, macOS) and adapts tool usage accordingly - choosing bash vs PowerShell, correct path separators, and platform-specific commands.
+**New in v2.0.1:** Cross-platform OS detection! The agent automatically detects your operating system (Windows, Linux, macOS) and adapts tool usage accordingly - choosing bash vs PowerShell, correct path separators, and platform-specific commands.
 
 #### Core File Operations
 | Tool | Description |
@@ -628,7 +628,15 @@ The agent has access to **41 powerful tools** across multiple categories:
 | `mcp_list_servers` | List configured MCP servers |
 | `mcp_call_tool` | Call tools on MCP servers |
 
-**New in v2.5:** MCP support allows the agent to connect to external tools and data sources through the Model Context Protocol, enabling integration with databases, APIs, and other development tools.
+**New in v2.0.1:** MCP support allows the agent to connect to external tools and data sources through the Model Context Protocol, enabling integration with databases, APIs, and other development tools.
+
+**New in v2.0.1:** Rev now includes **9 default MCP servers** for enhanced coding capabilities:
+- 🧠 **Core**: memory, sequential-thinking, fetch
+- 🚀 **Coding & CI/CD**: DeepWiki (GitHub search), Exa Search (code search), Semgrep (static analysis)
+- 📚 **Docs**: Cloudflare Docs, Astro Docs
+- 🤖 **AI/ML**: Hugging Face
+
+**🔒 Private Mode:** Use `/private on` to disable all public MCP servers when working with secure/unsharable code. See [MCP_SERVERS.md](docs/MCP_SERVERS.md) for details.
 
 #### Advanced Code Analysis Tools (NEW!)
 
@@ -879,7 +887,7 @@ Risk distribution:
 
 ## Multi-Agent Quorum System
 
-**New in v4.0:** rev.py now uses a **3-agent quorum system** that provides intelligent review and validation at multiple stages for more accurate and secure code changes.
+**New in v2.0.1:** rev.py now uses a **3-agent quorum system** that provides intelligent review and validation at multiple stages for more accurate and secure code changes.
 
 ### The Three Agents
 
