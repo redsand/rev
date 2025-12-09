@@ -54,12 +54,23 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
             args.append("--check")
         args.extend(["--3way", "--reject", tfp])
         proc = _run_shell(" ".join(shlex.quote(a) for a in args))
-        return json.dumps({
+
+        success = proc.returncode == 0
+        result = {
+            "success": success,
             "rc": proc.returncode,
             "stdout": proc.stdout,
             "stderr": proc.stderr,
             "dry_run": dry_run
-        })
+        }
+
+        # Make failures explicit
+        if not success:
+            result["error"] = f"Patch failed to apply (exit code {proc.returncode})"
+            if proc.stderr:
+                result["error"] += f": {proc.stderr[:500]}"
+
+        return json.dumps(result)
     finally:
         try:
             os.unlink(tfp)
@@ -71,19 +82,22 @@ def git_add(files: str = ".") -> str:
     """Add files to git staging area."""
     try:
         result = _run_shell(f"git add {shlex.quote(files)}")
-        if result.returncode != 0:
+        success = result.returncode == 0
+        if not success:
             return json.dumps({
+                "success": False,
                 "error": f"git add failed: {result.stderr}",
                 "returncode": result.returncode
             })
         return json.dumps({
+            "success": True,
             "added": True,
             "files": files,
             "output": result.stdout,
             "returncode": result.returncode
         })
     except Exception as e:
-        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+        return json.dumps({"success": False, "error": f"{type(e).__name__}: {e}"})
 
 
 def git_commit(message: str, add_files: bool = False, files: str = ".") -> str:
@@ -99,20 +113,21 @@ def git_commit(message: str, add_files: bool = False, files: str = ".") -> str:
         if add_files:
             add_result = _run_shell(f"git add {shlex.quote(files)}")
             if add_result.returncode != 0:
-                return json.dumps({"error": f"git add failed: {add_result.stderr}"})
+                return json.dumps({"success": False, "error": f"git add failed: {add_result.stderr}"})
 
         # Commit
         commit_result = _run_shell(f"git commit -m {shlex.quote(message)}")
         if commit_result.returncode != 0:
-            return json.dumps({"error": f"git commit failed: {commit_result.stderr}"})
+            return json.dumps({"success": False, "error": f"git commit failed: {commit_result.stderr}"})
 
         return json.dumps({
+            "success": True,
             "committed": True,
             "message": message,
             "output": commit_result.stdout
         })
     except Exception as e:
-        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+        return json.dumps({"success": False, "error": f"{type(e).__name__}: {e}"})
 
 
 def git_status() -> str:
