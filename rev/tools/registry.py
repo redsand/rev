@@ -27,7 +27,7 @@ from rev.tools.utils import (
 )
 from rev.tools.analysis import (
     analyze_ast_patterns, run_pylint, run_mypy, run_radon_complexity,
-    find_dead_code, run_all_analysis
+    find_dead_code, run_all_analysis, analyze_prisma_schema
 )
 
 
@@ -164,6 +164,7 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         "run_radon_complexity": lambda args: run_radon_complexity(args.get("path", "."), args.get("min_rank", "C")),
         "find_dead_code": lambda args: find_dead_code(args.get("path", ".")),
         "run_all_analysis": lambda args: run_all_analysis(args.get("path", ".")),
+        "analyze_prisma_schema": lambda args: analyze_prisma_schema(args.get("path", ".")),
     }
 
 
@@ -268,6 +269,7 @@ def _format_description(name: str, args: Dict[str, Any]) -> str:
         "run_radon_complexity": f"Analyzing code complexity: {args.get('path', '.')}",
         "find_dead_code": f"Finding dead code in: {args.get('path', '.')}",
         "run_all_analysis": f"Running full analysis suite on: {args.get('path', '.')}",
+        "analyze_prisma_schema": f"Analyzing Prisma schema: {args.get('path', '.')}",
     }
 
     # Return the friendly description or fall back to technical format
@@ -972,6 +974,19 @@ def get_available_tools() -> list:
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "description": "Path to analyze", "default": "."}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "analyze_prisma_schema",
+                "description": "Analyze Prisma schema files to find existing enums, models, and database structures. CRITICAL for schema changes: always use this tool before creating new enums/models to avoid duplication.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to Prisma schema file or directory", "default": "."}
                     }
                 }
             }

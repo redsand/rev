@@ -43,13 +43,22 @@ PLANNING WORKFLOW:
 1. First, use tools to explore (list_dir, search_code, tree_view, read_file)
 2. For security audits: enumerate ALL relevant source files, search for unsafe patterns
 3. For multi-file changes: list all files that need modification
-4. Based on tool results, create detailed, file-specific tasks
+4. For schema/database changes: MUST search for existing structures before creating new ones
+5. Based on tool results, create detailed, file-specific tasks
 
 Example for security audit:
 - Call list_dir to find all .c and .cpp files
 - Call search_code for each unsafe pattern (strcpy, malloc, etc.)
 - Create separate tasks for EACH file found
 - Add tasks for running security tools (Valgrind, AddressSanitizer, etc.)
+
+Example for schema/database changes:
+- Call list_dir to find schema files (*.prisma, schema.*, migrations/*)
+- Call search_code to find ALL existing enum definitions
+- Call read_file to review existing schema structure
+- Check for similar or duplicate enum/model names
+- Create tasks to REUSE existing structures where possible
+- Only create new enums/models if they don't already exist
 
 IMPORTANT - System Context:
 You will be provided with the operating system information. Use this to:
@@ -442,7 +451,15 @@ IMPORTANT: Before creating the execution plan:
 1. Use available tools to explore the codebase
 2. For security audits: enumerate C/C++ files, search for unsafe functions
 3. For multi-file tasks: use list_dir to find all relevant files
-4. Call tools as needed to gather information
+4. For schema/database tasks: MUST search for existing enums/models/types first
+5. Call tools as needed to gather information
+
+CRITICAL FOR SCHEMA CHANGES:
+- ALWAYS call search_code for "enum " to find existing enums
+- ALWAYS call list_dir to find schema files (*.prisma, schema.*, etc.)
+- ALWAYS call read_file on schema files to understand existing structure
+- NEVER create new enums/models without checking if they already exist
+- Reuse existing structures whenever possible
 
 After gathering information with tools, generate a comprehensive execution plan as a JSON array."""}
     ]

@@ -585,6 +585,144 @@ def find_dead_code(path: str = ".") -> str:
         return json.dumps({"error": f"Dead code detection failed: {type(e).__name__}: {e}"})
 
 
+def analyze_prisma_schema(path: str = ".") -> str:
+    """Analyze Prisma schema files for enums, models, and structures.
+
+    Detects:
+    - All enum definitions
+    - All model definitions
+    - Relations between models
+    - Database configuration
+    - Generator settings
+
+    Args:
+        path: Path to Prisma schema file or directory
+
+    Returns:
+        JSON string with Prisma schema analysis
+    """
+    try:
+        scan_path = _safe_path(path)
+        if not scan_path.exists():
+            return json.dumps({"error": f"Path not found: {path}"})
+
+        # Find Prisma schema files
+        schema_files = []
+        if scan_path.is_file() and scan_path.suffix == '.prisma':
+            schema_files = [scan_path]
+        elif scan_path.is_file() and scan_path.name in ['schema.prisma', 'prisma.schema']:
+            schema_files = [scan_path]
+        else:
+            # Search for schema files in directory
+            schema_files.extend(list(scan_path.rglob('*.prisma')))
+            schema_files.extend(list(scan_path.rglob('schema.prisma')))
+
+        if not schema_files:
+            return json.dumps({"error": "No Prisma schema files found"})
+
+        results: Dict[str, Any] = {
+            "schema_files": [str(f.relative_to(ROOT)) for f in schema_files],
+            "enums": [],
+            "models": [],
+            "generators": [],
+            "datasources": []
+        }
+
+        for schema_file in schema_files:
+            try:
+                with open(schema_file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+
+                rel_path = str(schema_file.relative_to(ROOT))
+
+                # Parse enums
+                import re
+                enum_pattern = r'enum\s+(\w+)\s*\{([^}]+)\}'
+                for match in re.finditer(enum_pattern, content):
+                    enum_name = match.group(1)
+                    enum_values = [v.strip() for v in match.group(2).strip().split('\n') if v.strip()]
+
+                    results["enums"].append({
+                        "name": enum_name,
+                        "values": enum_values,
+                        "file": rel_path,
+                        "line": content[:match.start()].count('\n') + 1
+                    })
+
+                # Parse models
+                model_pattern = r'model\s+(\w+)\s*\{([^}]+)\}'
+                for match in re.finditer(model_pattern, content):
+                    model_name = match.group(1)
+                    model_body = match.group(2)
+
+                    # Extract fields
+                    fields = []
+                    field_pattern = r'(\w+)\s+(\w+)(\??)\s*(@[^\n]*)?'
+                    for field_match in re.finditer(field_pattern, model_body):
+                        field_name = field_match.group(1)
+                        field_type = field_match.group(2)
+                        optional = field_match.group(3) == '?'
+                        attributes = field_match.group(4) or ''
+
+                        fields.append({
+                            "name": field_name,
+                            "type": field_type,
+                            "optional": optional,
+                            "attributes": attributes.strip()
+                        })
+
+                    results["models"].append({
+                        "name": model_name,
+                        "fields": fields,
+                        "file": rel_path,
+                        "line": content[:match.start()].count('\n') + 1
+                    })
+
+                # Parse generators
+                generator_pattern = r'generator\s+(\w+)\s*\{([^}]+)\}'
+                for match in re.finditer(generator_pattern, content):
+                    gen_name = match.group(1)
+                    gen_body = match.group(2)
+
+                    results["generators"].append({
+                        "name": gen_name,
+                        "config": gen_body.strip(),
+                        "file": rel_path
+                    })
+
+                # Parse datasources
+                datasource_pattern = r'datasource\s+(\w+)\s*\{([^}]+)\}'
+                for match in re.finditer(datasource_pattern, content):
+                    ds_name = match.group(1)
+                    ds_body = match.group(2)
+
+                    results["datasources"].append({
+                        "name": ds_name,
+                        "config": ds_body.strip(),
+                        "file": rel_path
+                    })
+
+            except Exception as e:
+                results.setdefault("errors", []).append({
+                    "file": rel_path,
+                    "error": f"Failed to parse: {type(e).__name__}: {e}"
+                })
+
+        # Summary
+        results["summary"] = {
+            "total_files": len(schema_files),
+            "total_enums": len(results["enums"]),
+            "total_models": len(results["models"]),
+            "enum_names": [e["name"] for e in results["enums"]],
+            "model_names": [m["name"] for m in results["models"]]
+        }
+
+        return json.dumps(results, indent=2)
+
+    except Exception as e:
+        return json.dumps({"error": f"Prisma schema analysis failed: {type(e).__name__}: {e}"})
+
+
 def run_all_analysis(path: str = ".") -> str:
     """Run all available analysis tools and combine results.
 

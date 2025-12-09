@@ -99,6 +99,23 @@ class TaskRouter:
                 reasoning="Security audit requires thorough analysis and strict review"
             )
 
+        # Schema/database change mode - requires deep investigation
+        if self._is_schema_change(text):
+            return RouteDecision(
+                mode="full_feature",
+                enable_learning=True,
+                enable_research=True,  # Critical: must research existing structures
+                enable_review=True,
+                enable_validation=True,
+                review_strictness="strict",
+                parallel_workers=1,  # Sequential to avoid conflicts
+                enable_action_review=True,
+                research_depth="deep",  # Deep search for existing schemas
+                max_retries=3,
+                priority=RoutePriority.HIGH,
+                reasoning="Schema changes require deep investigation of existing structures to avoid duplication"
+            )
+
         # Test-focused mode
         if self._is_test_focus(text):
             return RouteDecision(
@@ -184,6 +201,18 @@ class TaskRouter:
             "penetration test", "security scan", "threat"
         ]
         return any(keyword in text for keyword in security_keywords)
+
+    def _is_schema_change(self, text: str) -> bool:
+        """Check if request involves schema or database changes."""
+        schema_keywords = [
+            "prisma", "schema", "database", "enum", "model",
+            "migration", "sequelize", "typeorm", "mongoose",
+            "table", "entity", "database model"
+        ]
+        # Must have schema keyword AND an action (add, create, update, modify)
+        has_schema = any(keyword in text for keyword in schema_keywords)
+        has_action = any(action in text for action in ["add", "create", "update", "modify", "change"])
+        return has_schema and has_action
 
     def _is_test_focus(self, text: str) -> bool:
         """Check if request is test-focused."""

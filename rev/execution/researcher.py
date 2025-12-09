@@ -280,6 +280,41 @@ def _extract_search_keywords(user_request: str) -> List[str]:
 
         return security_keywords[:15] if security_keywords else ['security', 'vulnerability']
 
+    # Schema/database detection - use schema-specific keywords
+    if any(keyword in request_lower for keyword in ['prisma', 'schema', 'database', 'enum', 'model',
+                                                      'migration', 'sequelize', 'typeorm', 'mongoose']):
+        # Return schema-focused search terms
+        schema_keywords = []
+
+        # Prisma-specific patterns
+        if 'prisma' in request_lower:
+            schema_keywords.extend([
+                'enum', 'model', 'schema.prisma', 'prisma.schema',
+                '@db', '@relation', '@default', '@id', '@unique',
+                'generator', 'datasource'
+            ])
+
+        # Enum-specific search
+        if 'enum' in request_lower:
+            schema_keywords.extend([
+                'enum ', 'enum{', 'Enum ', 'type ',  # Different enum patterns
+                'values', 'options'
+            ])
+
+        # Database model patterns
+        if any(word in request_lower for word in ['model', 'table', 'entity']):
+            schema_keywords.extend(['model ', 'type ', 'interface ', 'class '])
+
+        # Migration patterns
+        if 'migration' in request_lower:
+            schema_keywords.extend(['migration', 'migrate', 'up()', 'down()'])
+
+        # Add any CamelCase identifiers (likely model/enum names)
+        words = re.findall(r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)*\b', user_request)
+        schema_keywords.extend([w for w in words if w not in ['This', 'Should', 'Add', 'Create']])
+
+        return schema_keywords[:15] if schema_keywords else ['schema', 'model', 'enum']
+
     # Extract words (original logic for non-security requests)
     words = re.findall(r'\b\w+\b', request_lower)
     keywords = [w for w in words if len(w) > 2 and w not in stop_words]
