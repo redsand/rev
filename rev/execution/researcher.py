@@ -64,6 +64,11 @@ class ResearchFindings:
     suggested_approach: Optional[str] = None
     estimated_complexity: str = "medium"
     warnings: List[str] = field(default_factory=list)
+    # Phase 2: Reuse tracking
+    reusable_code: List[Dict[str, str]] = field(default_factory=list)
+    existing_utilities: List[str] = field(default_factory=list)
+    reuse_opportunities: List[str] = field(default_factory=list)
+    files_to_extend: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -75,7 +80,11 @@ class ResearchFindings:
             "architecture_notes": self.architecture_notes,
             "suggested_approach": self.suggested_approach,
             "estimated_complexity": self.estimated_complexity,
-            "warnings": self.warnings
+            "warnings": self.warnings,
+            "reusable_code": self.reusable_code,
+            "existing_utilities": self.existing_utilities,
+            "reuse_opportunities": self.reuse_opportunities,
+            "files_to_extend": self.files_to_extend,
         }
 
 
