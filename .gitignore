@@ -46,3 +46,5 @@ tests_tmp_*/
 # OS
 .DS_Store
 Thumbs.db
+
+.rev*
