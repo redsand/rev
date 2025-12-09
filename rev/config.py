@@ -57,6 +57,47 @@ REQUIRE_REUSE_JUSTIFICATION = os.getenv("REV_REQUIRE_JUSTIFICATION", "false").lo
 MAX_FILES_PER_FEATURE = int(os.getenv("REV_MAX_FILES", "5"))  # Encourage consolidation
 SIMILARITY_THRESHOLD = float(os.getenv("REV_SIMILARITY_THRESHOLD", "0.6"))  # For file name similarity
 
+# Default MCP (Model Context Protocol) servers
+# These are public, free servers that enhance AI capabilities without requiring API keys
+DEFAULT_MCP_SERVERS = {
+    "memory": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-memory"],
+        "description": "Persistent memory storage for AI context across sessions",
+        "enabled": os.getenv("REV_MCP_MEMORY", "true").lower() == "true"
+    },
+    "sequential-thinking": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+        "description": "Enable step-by-step reasoning for complex problem solving",
+        "enabled": os.getenv("REV_MCP_SEQUENTIAL_THINKING", "true").lower() == "true"
+    },
+    "fetch": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-fetch"],
+        "description": "Make HTTP requests to access documentation and APIs",
+        "enabled": os.getenv("REV_MCP_FETCH", "true").lower() == "true"
+    }
+}
+
+# Optional MCP servers (require API keys - user must enable manually)
+OPTIONAL_MCP_SERVERS = {
+    "brave-search": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+        "description": "Web search using Brave Search API (requires BRAVE_API_KEY)",
+        "env_required": ["BRAVE_API_KEY"],
+        "enabled": False
+    },
+    "github": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-github"],
+        "description": "Interact with GitHub repositories (requires GITHUB_TOKEN)",
+        "env_required": ["GITHUB_TOKEN"],
+        "enabled": False
+    }
+}
+
 # System information (cached)
 _SYSTEM_INFO: Optional[Dict[str, Any]] = None
 
