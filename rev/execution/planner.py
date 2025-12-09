@@ -43,7 +43,7 @@ PLANNING WORKFLOW:
 1. First, use tools to explore (list_dir, search_code, tree_view, read_file)
 2. For security audits: enumerate ALL relevant source files, search for unsafe patterns
 3. For multi-file changes: list all files that need modification
-4. For schema/database changes: MUST search for existing structures before creating new ones
+4. For ANY structural changes: MUST investigate existing structures before creating new ones
 5. Based on tool results, create detailed, file-specific tasks
 
 Example for security audit:
@@ -52,13 +52,14 @@ Example for security audit:
 - Create separate tasks for EACH file found
 - Add tasks for running security tools (Valgrind, AddressSanitizer, etc.)
 
-Example for schema/database changes:
-- Call list_dir to find schema files (*.prisma, schema.*, migrations/*)
-- Call search_code to find ALL existing enum definitions
-- Call read_file to review existing schema structure
-- Check for similar or duplicate enum/model names
+Example for structural changes (schemas, types, classes, enums, docs, config):
+- Call list_dir to find relevant files (*.prisma, *.ts, *.py, README*, config/*, etc.)
+- Call search_code to find ALL existing definitions (enum, class, interface, type, table)
+- Call read_file to review existing structures
+- Call analyze_code_structures to get comprehensive analysis
+- Check for similar or duplicate names
 - Create tasks to REUSE existing structures where possible
-- Only create new enums/models if they don't already exist
+- Only create new structures if they don't already exist
 
 IMPORTANT - System Context:
 You will be provided with the operating system information. Use this to:
@@ -451,15 +452,24 @@ IMPORTANT: Before creating the execution plan:
 1. Use available tools to explore the codebase
 2. For security audits: enumerate C/C++ files, search for unsafe functions
 3. For multi-file tasks: use list_dir to find all relevant files
-4. For schema/database tasks: MUST search for existing enums/models/types first
+4. For structural changes: MUST investigate existing definitions first
 5. Call tools as needed to gather information
 
-CRITICAL FOR SCHEMA CHANGES:
-- ALWAYS call search_code for "enum " to find existing enums
-- ALWAYS call list_dir to find schema files (*.prisma, schema.*, etc.)
-- ALWAYS call read_file on schema files to understand existing structure
-- NEVER create new enums/models without checking if they already exist
-- Reuse existing structures whenever possible
+CRITICAL FOR STRUCTURAL CHANGES (schemas, types, classes, docs, config):
+- ALWAYS call search_code to find existing definitions:
+  * For schemas: search "enum ", "model ", "table ", "CREATE TABLE"
+  * For types/classes: search "interface ", "type ", "class ", "struct "
+  * For docs: search existing README, documentation structure
+  * For config: search existing config files, environment variables
+- ALWAYS call list_dir with appropriate patterns:
+  * Schemas: *.prisma, schema.*, migrations/*, *.sql
+  * Code: *.ts, *.py, *.js, *.go, *.java
+  * Docs: README*, docs/*, *.md
+  * Config: config/*, .env*, settings.*
+- ALWAYS call read_file to understand existing structures
+- ALWAYS call analyze_code_structures for comprehensive analysis
+- NEVER create new structures without checking if they already exist
+- Reuse and extend existing structures whenever possible
 
 After gathering information with tools, generate a comprehensive execution plan as a JSON array."""}
     ]

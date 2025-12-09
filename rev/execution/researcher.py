@@ -280,40 +280,57 @@ def _extract_search_keywords(user_request: str) -> List[str]:
 
         return security_keywords[:15] if security_keywords else ['security', 'vulnerability']
 
-    # Schema/database detection - use schema-specific keywords
-    if any(keyword in request_lower for keyword in ['prisma', 'schema', 'database', 'enum', 'model',
-                                                      'migration', 'sequelize', 'typeorm', 'mongoose']):
-        # Return schema-focused search terms
-        schema_keywords = []
+    # Structure investigation detection - covers schemas, docs, code structures, config
+    structure_keywords = [
+        # Database/Schema
+        'prisma', 'schema', 'database', 'enum', 'model', 'migration',
+        'sequelize', 'typeorm', 'mongoose', 'sql', 'table', 'entity',
+        # Documentation
+        'readme', 'documentation', 'docs', 'api documentation', 'guide',
+        # Code structures
+        'class', 'interface', 'type', 'typedef', 'struct',
+        # Configuration
+        'config', 'configuration', 'settings', 'environment'
+    ]
 
-        # Prisma-specific patterns
-        if 'prisma' in request_lower:
-            schema_keywords.extend([
-                'enum', 'model', 'schema.prisma', 'prisma.schema',
-                '@db', '@relation', '@default', '@id', '@unique',
-                'generator', 'datasource'
+    if any(keyword in request_lower for keyword in structure_keywords):
+        # Return structure-focused search terms
+        investigation_keywords = []
+
+        # Database/Schema patterns
+        if any(word in request_lower for word in ['prisma', 'schema', 'database', 'sql', 'migration']):
+            investigation_keywords.extend([
+                'enum', 'model', 'table', 'schema', 'migration',
+                'CREATE TABLE', 'ALTER TABLE', '@db', '@relation',
+                'interface', 'type', 'class'
             ])
 
-        # Enum-specific search
-        if 'enum' in request_lower:
-            schema_keywords.extend([
-                'enum ', 'enum{', 'Enum ', 'type ',  # Different enum patterns
-                'values', 'options'
+        # Documentation patterns
+        if any(word in request_lower for word in ['readme', 'documentation', 'docs', 'guide']):
+            investigation_keywords.extend([
+                'README', 'DOCUMENTATION', 'docs/', 'documentation/',
+                '# ', '## ', 'API', 'guide', 'tutorial'
             ])
 
-        # Database model patterns
-        if any(word in request_lower for word in ['model', 'table', 'entity']):
-            schema_keywords.extend(['model ', 'type ', 'interface ', 'class '])
+        # Code structure patterns (enum, class, interface, type)
+        if any(word in request_lower for word in ['enum', 'class', 'interface', 'type', 'struct']):
+            investigation_keywords.extend([
+                'enum ', 'enum{', 'class ', 'interface ', 'type ',
+                'struct ', 'typedef ', 'def class', '@dataclass'
+            ])
 
-        # Migration patterns
-        if 'migration' in request_lower:
-            schema_keywords.extend(['migration', 'migrate', 'up()', 'down()'])
+        # Configuration patterns
+        if any(word in request_lower for word in ['config', 'configuration', 'settings', 'environment']):
+            investigation_keywords.extend([
+                'config.', 'settings.', '.env', 'environment',
+                'CONFIG', 'SETTINGS', 'dotenv'
+            ])
 
-        # Add any CamelCase identifiers (likely model/enum names)
+        # Add any CamelCase/PascalCase identifiers (likely type/class/enum names)
         words = re.findall(r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)*\b', user_request)
-        schema_keywords.extend([w for w in words if w not in ['This', 'Should', 'Add', 'Create']])
+        investigation_keywords.extend([w for w in words if w not in ['This', 'Should', 'Add', 'Create', 'Update', 'Modify']])
 
-        return schema_keywords[:15] if schema_keywords else ['schema', 'model', 'enum']
+        return investigation_keywords[:20] if investigation_keywords else ['structure', 'definition', 'existing']
 
     # Extract words (original logic for non-security requests)
     words = re.findall(r'\b\w+\b', request_lower)
