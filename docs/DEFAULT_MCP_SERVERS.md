@@ -8,10 +8,14 @@ These servers are automatically loaded when rev starts, providing immediate acce
 - **Persistent memory** across sessions
 - **Advanced reasoning** capabilities
 - **External documentation** access via HTTP
-- **Code search & analysis** across GitHub repositories
-- **Static code analysis** for security and quality
-- **Documentation access** for popular frameworks
-- **AI model discovery** via Hugging Face
+- **Code understanding** via GitHub repository RAG
+- **Security scanning** with static analysis
+- **Web and code search** capabilities
+
+### Two Types of Default Servers
+
+1. **Local NPM Servers** (3 servers) - Run locally via `npx`
+2. **Remote MCP Servers** (5 servers) - Publicly hosted SSE/HTTP endpoints
 
 ## Default Servers
 
@@ -130,22 +134,28 @@ result = mcp_call_tool("fetch", "get", {
 
 ---
 
-### 5. Exa Search 🔎
-**Endpoint**: https://mcp.exa.ai/mcp
+### 5. Exa Search Server 🔍
+**URL**: `https://mcp.exa.ai/mcp`
 
-**Purpose**: Search code, documentation, and web resources with AI-powered relevance.
+**Purpose**: Advanced code, documentation, and web search capabilities.
 
 **Key Features**:
-- Code search across multiple sources
+- Code search across repositories
 - Documentation search
-- Web resource discovery
-- AI-powered result ranking
+- Web search with developer focus
+- Filtered results for technical content
 
 **Use Cases**:
-- Finding relevant documentation
-- Code example discovery
-- Technical resource search
-- API documentation lookup
+- Finding code examples
+- Searching API documentation
+- Discovering best practices
+- Technical research
+
+**Benefits**:
+- Developer-focused search results
+- Code-aware ranking
+- Multiple search sources
+- High-quality technical content
 
 **Configuration**: Auto-enabled (disable with `REV_MCP_EXA_SEARCH=false`)
 
@@ -418,16 +428,19 @@ python -m rev
 ## Benefits of Default Servers
 
 ### For Users
-✅ **Zero configuration** - Works out of the box
-✅ **No API keys** - Completely free
-✅ **Enhanced capabilities** - Better memory, reasoning, and research
-✅ **Easy to disable** - Simple environment variables
+✅ **Zero configuration** - 8 servers work out of the box
+✅ **No API keys** - All default servers are completely free
+✅ **Enhanced capabilities** - Memory, reasoning, search, security, and documentation
+✅ **Easy to disable** - Simple environment variables or private mode
+✅ **Privacy control** - Private mode for confidential work
 
 ### For Developers
 ✅ **Standard toolset** - Consistent across installations
+✅ **Dual deployment** - Local (NPM) + Remote (SSE) servers
 ✅ **Extensible** - Easy to add more servers
 ✅ **Well-documented** - Clear usage patterns
 ✅ **Production-ready** - Tested and reliable
+✅ **Security-focused** - Includes Semgrep for code scanning
 
 ## Future Enhancements
 
