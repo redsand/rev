@@ -630,6 +630,14 @@ The agent has access to **41 powerful tools** across multiple categories:
 
 **New in v2.5:** MCP support allows the agent to connect to external tools and data sources through the Model Context Protocol, enabling integration with databases, APIs, and other development tools.
 
+**New in v2.0.2:** Rev now includes **9 default MCP servers** for enhanced coding capabilities:
+- 🧠 **Core**: memory, sequential-thinking, fetch
+- 🚀 **Coding & CI/CD**: DeepWiki (GitHub search), Exa Search (code search), Semgrep (static analysis)
+- 📚 **Docs**: Cloudflare Docs, Astro Docs
+- 🤖 **AI/ML**: Hugging Face
+
+**🔒 Private Mode:** Use `/private on` to disable all public MCP servers when working with secure/unsharable code. See [MCP_SERVERS.md](docs/MCP_SERVERS.md) for details.
+
 #### Advanced Code Analysis Tools (NEW!)
 
 **New in v2.0.1:** Five powerful analysis tools for improved development accuracy, review, and bug fixing:

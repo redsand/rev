@@ -57,6 +57,9 @@ REQUIRE_REUSE_JUSTIFICATION = os.getenv("REV_REQUIRE_JUSTIFICATION", "false").lo
 MAX_FILES_PER_FEATURE = int(os.getenv("REV_MAX_FILES", "5"))  # Encourage consolidation
 SIMILARITY_THRESHOLD = float(os.getenv("REV_SIMILARITY_THRESHOLD", "0.6"))  # For file name similarity
 
+# Private mode configuration - disables all public MCP servers
+PRIVATE_MODE = os.getenv("REV_PRIVATE_MODE", "false").lower() == "true"
+
 # Default MCP (Model Context Protocol) servers
 # These are public, free servers that enhance AI capabilities without requiring API keys
 DEFAULT_MCP_SERVERS = {
@@ -64,37 +67,91 @@ DEFAULT_MCP_SERVERS = {
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-memory"],
         "description": "Persistent memory storage for AI context across sessions",
-        "enabled": os.getenv("REV_MCP_MEMORY", "true").lower() == "true"
+        "enabled": os.getenv("REV_MCP_MEMORY", "true").lower() == "true",
+        "public": True
     },
     "sequential-thinking": {
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
         "description": "Enable step-by-step reasoning for complex problem solving",
-        "enabled": os.getenv("REV_MCP_SEQUENTIAL_THINKING", "true").lower() == "true"
+        "enabled": os.getenv("REV_MCP_SEQUENTIAL_THINKING", "true").lower() == "true",
+        "public": True
     },
     "fetch": {
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-fetch"],
         "description": "Make HTTP requests to access documentation and APIs",
-        "enabled": os.getenv("REV_MCP_FETCH", "true").lower() == "true"
+        "enabled": os.getenv("REV_MCP_FETCH", "true").lower() == "true",
+        "public": True
+    },
+    "deepwiki": {
+        "command": "curl",
+        "args": ["-X", "POST", "https://mcp.deepwiki.com/sse"],
+        "description": "RAG-as-a-Service for GitHub repositories - search and analyze code",
+        "enabled": os.getenv("REV_MCP_DEEPWIKI", "true").lower() == "true",
+        "public": True,
+        "type": "remote"
+    },
+    "exa-search": {
+        "command": "curl",
+        "args": ["-X", "POST", "https://mcp.exa.ai/mcp"],
+        "description": "Search code, documentation, and web resources",
+        "enabled": os.getenv("REV_MCP_EXA_SEARCH", "true").lower() == "true",
+        "public": True,
+        "type": "remote"
+    },
+    "semgrep": {
+        "command": "curl",
+        "args": ["-X", "POST", "https://mcp.semgrep.ai/sse"],
+        "description": "Static code analysis for security and quality",
+        "enabled": os.getenv("REV_MCP_SEMGREP", "true").lower() == "true",
+        "public": True,
+        "type": "remote"
+    },
+    "cloudflare-docs": {
+        "command": "curl",
+        "args": ["-X", "POST", "https://docs.mcp.cloudflare.com/sse"],
+        "description": "Access Cloudflare API and platform documentation",
+        "enabled": os.getenv("REV_MCP_CLOUDFLARE_DOCS", "true").lower() == "true",
+        "public": True,
+        "type": "remote"
+    },
+    "astro-docs": {
+        "command": "curl",
+        "args": ["-X", "POST", "https://mcp.docs.astro.build/mcp"],
+        "description": "Access Astro framework documentation",
+        "enabled": os.getenv("REV_MCP_ASTRO_DOCS", "true").lower() == "true",
+        "public": True,
+        "type": "remote"
+    },
+    "huggingface": {
+        "command": "curl",
+        "args": ["-X", "POST", "https://hf.co/mcp"],
+        "description": "Access Hugging Face models and repositories",
+        "enabled": os.getenv("REV_MCP_HUGGINGFACE", "true").lower() == "true",
+        "public": True,
+        "type": "remote"
     }
 }
 
 # Optional MCP servers (require API keys - user must enable manually)
+# These are considered private servers since they use personal API keys
 OPTIONAL_MCP_SERVERS = {
     "brave-search": {
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-brave-search"],
         "description": "Web search using Brave Search API (requires BRAVE_API_KEY)",
         "env_required": ["BRAVE_API_KEY"],
-        "enabled": False
+        "enabled": False,
+        "public": False
     },
     "github": {
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-github"],
         "description": "Interact with GitHub repositories (requires GITHUB_TOKEN)",
         "env_required": ["GITHUB_TOKEN"],
-        "enabled": False
+        "enabled": False,
+        "public": False
     }
 }
 
