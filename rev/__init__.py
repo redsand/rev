@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """rev - Autonomous AI Development System with Multi-Agent Orchestration."""
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 
 # Configuration
 from rev.config import ROOT
