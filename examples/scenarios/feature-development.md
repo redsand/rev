@@ -4,7 +4,7 @@ Learn how to develop new features iteratively using rev.py's **6-agent autonomou
 
 ## Agent-Assisted Development
 
-rev.py v5.0 uses 6 specialized agents that work together:
+rev.py v2.0.1 uses 6 specialized agents that work together:
 
 | Phase | Agent | What It Does |
 |-------|-------|--------------|
