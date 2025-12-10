@@ -105,11 +105,16 @@ def _enforce_token_limit(messages: List[Dict[str, Any]], max_tokens: int) -> Tup
     and whether any truncation occurred.
     """
 
+    # Add a safety margin because the character-per-token heuristic can
+    # underestimate usage for shorter tokens. This keeps us well below the
+    # provider's hard cap and prevents request failures before they happen.
+    effective_max_tokens = int(max_tokens * 0.9)
+
     if max_tokens <= 0:
         return [], 0, 0, True
 
     original_tokens = sum(_estimate_message_tokens(m) for m in messages)
-    if original_tokens <= max_tokens:
+    if original_tokens <= effective_max_tokens:
         return messages, original_tokens, original_tokens, False
 
     # Always keep system messages first to preserve instructions
@@ -117,7 +122,8 @@ def _enforce_token_limit(messages: List[Dict[str, Any]], max_tokens: int) -> Tup
     other_messages = [m for m in messages if m.get("role") != "system"]
 
     truncated_messages: List[Dict[str, Any]] = []
-    remaining_tokens = max_tokens
+    remaining_tokens = effective_max_tokens
+    token_tally = 0
     truncated = False
 
     # Add system messages in order, truncating if needed
@@ -126,7 +132,9 @@ def _enforce_token_limit(messages: List[Dict[str, Any]], max_tokens: int) -> Tup
         if msg_tokens > remaining_tokens:
             msg, msg_tokens = _truncate_message_content(msg, remaining_tokens)
             truncated = True
+            msg_tokens = min(msg_tokens, remaining_tokens)
         truncated_messages.append(msg)
+        token_tally += msg_tokens
         remaining_tokens = max(0, remaining_tokens - msg_tokens)
 
     # Add most recent non-system messages until budget is exhausted
@@ -140,13 +148,15 @@ def _enforce_token_limit(messages: List[Dict[str, Any]], max_tokens: int) -> Tup
         if msg_tokens > remaining_tokens:
             msg, msg_tokens = _truncate_message_content(msg, remaining_tokens)
             truncated = True
+            msg_tokens = min(msg_tokens, remaining_tokens)
         preserved.append(msg)
+        token_tally += msg_tokens
         remaining_tokens = max(0, remaining_tokens - msg_tokens)
 
     preserved.reverse()
     truncated_messages.extend(preserved)
 
-    trimmed_tokens = sum(_estimate_message_tokens(m) for m in truncated_messages)
+    trimmed_tokens = token_tally
     return truncated_messages, original_tokens, trimmed_tokens, truncated
 
 

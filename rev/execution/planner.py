@@ -169,6 +169,26 @@ Return ONLY a JSON array of subtasks:
 Keep subtasks focused and executable. Each should accomplish one clear goal."""
 
 
+TOOL_RESULT_CHAR_LIMIT = 6000
+
+
+def _truncate_tool_content(content: str, limit: int = TOOL_RESULT_CHAR_LIMIT) -> str:
+    """Trim tool output to avoid overloading LLM context."""
+
+    if content is None:
+        return ""
+
+    if len(content) <= limit:
+        return content
+
+    omitted = len(content) - limit
+    preview = content[:limit]
+    return (
+        f"[tool output truncated to {limit} characters; {omitted} omitted]\n"
+        f"{preview}"
+    )
+
+
 def _format_available_tools(tools: List[Dict[str, Any]]) -> str:
     """Format available tools for inclusion in planning prompt.
 
@@ -241,6 +261,7 @@ def _execute_tool_calls(tool_calls: List[Dict], verbose: bool = True) -> List[Di
         try:
             # Execute the tool
             result = execute_tool(tool_name, arguments)
+            result = _truncate_tool_content(result)
             tool_results.append({
                 "role": "tool",
                 "content": result

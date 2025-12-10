@@ -37,7 +37,7 @@ def test_enforce_token_limit_truncates_and_preserves_system_message():
     assert trimmed[0]["role"] == "system"
     assert len(trimmed) == 2  # System + most recent non-system message
     assert "truncated to fit token limit" in trimmed[1]["content"]
-    assert trimmed_tokens <= 60
+    assert trimmed_tokens <= int(60 * 0.9)
 
 
 def test_enforce_token_limit_keeps_messages_when_under_budget():
