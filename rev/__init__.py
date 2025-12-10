@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 """rev - Autonomous AI Development System with Multi-Agent Orchestration."""
 
-__version__ = "2.0.1"
+from rev.versioning import get_version
+
+__version__ = get_version()
 
 # Configuration
 from rev.config import ROOT

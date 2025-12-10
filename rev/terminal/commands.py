@@ -10,6 +10,7 @@ from typing import Dict, Any, List, Optional
 from abc import ABC, abstractmethod
 
 from rev import config
+from rev.versioning import build_version_output
 from rev.tools.registry import get_available_tools
 from rev.models.task import ExecutionPlan
 from rev.execution.reviewer import review_execution_plan, ReviewStrictness
@@ -18,6 +19,15 @@ from rev.execution import planning_mode, execution_mode
 from rev.terminal.formatting import (
     create_header, create_section, create_item, create_bullet_item,
     create_tree_item, create_panel, colorize, Colors, Symbols
+)
+from rev.settings_manager import (
+    MODE_PRESETS,
+    MODE_ALIASES,
+    DEFAULT_MODE_NAME,
+    get_mode_config,
+    get_default_mode,
+    save_settings,
+    reset_settings,
 )
 
 
@@ -71,7 +81,7 @@ class HelpCommand(CommandHandler):
 
         # Group commands by category
         categories = {
-            "Session Management": ["clear", "exit", "quit"],
+            "Session Management": ["clear", "save", "reset", "exit"],
             "Information": ["status", "cost", "config", "doctor", "version"],
             "Model & Configuration": ["model", "mode", "private", "add-dir"],
             "Code Review & Validation": ["review", "validate"],
@@ -171,7 +181,7 @@ class ModelCommand(CommandHandler):
     def __init__(self):
         super().__init__(
             "model",
-            "View or change the AI model (e.g., /model mistral-large-3:675b-cloud)"
+            "View or change the AI model (e.g., /model gpt-oss:120b-cloud)"
         )
 
     def execute(self, args: List[str], session_context: Dict[str, Any]) -> str:
@@ -286,6 +296,54 @@ class ClearCommand(CommandHandler):
         session_context["token_usage"] = {"total": 0, "prompt": 0, "completion": 0}
 
         return "Session memory cleared"
+
+
+class SaveCommand(CommandHandler):
+    """Persist the current session settings to disk."""
+
+    def __init__(self):
+        super().__init__(
+            "save",
+            "Save model, mode, and privacy settings for future sessions"
+        )
+
+    def execute(self, args: List[str], session_context: Dict[str, Any]) -> str:
+        saved_path = save_settings(session_context)
+
+        output = [create_header("Settings Saved", width=80)]
+        output.append(create_bullet_item(f"Model: {config.OLLAMA_MODEL}", 'check'))
+        output.append(create_bullet_item(f"Ollama URL: {config.OLLAMA_BASE_URL}", 'check'))
+        output.append(create_bullet_item(f"Mode: {session_context.get('execution_mode', DEFAULT_MODE_NAME)}", 'check'))
+        privacy_status = "Enabled" if config.get_private_mode() else "Disabled"
+        output.append(create_bullet_item(f"Private mode: {privacy_status}", 'check'))
+        output.append(f"\n  {colorize('Saved to', Colors.DIM)} {saved_path}")
+        output.append(f"  {colorize('Settings will auto-load next time you start rev', Colors.DIM)}")
+
+        return "\n".join(output)
+
+
+class ResetCommand(CommandHandler):
+    """Reset configuration to defaults and clear saved settings."""
+
+    def __init__(self):
+        super().__init__(
+            "reset",
+            "Reset model, mode, and privacy settings to defaults"
+        )
+
+    def execute(self, args: List[str], session_context: Dict[str, Any]) -> str:
+        reset_settings(session_context)
+        default_mode, _ = get_default_mode()
+
+        output = [create_header("Settings Reset", width=80)]
+        output.append(create_bullet_item(f"Model reset to {config.OLLAMA_MODEL}", 'check'))
+        output.append(create_bullet_item(f"Ollama URL reset to {config.OLLAMA_BASE_URL}", 'check'))
+        output.append(create_bullet_item(f"Mode reset to {default_mode}", 'check'))
+        privacy_status = "Enabled" if config.get_private_mode() else "Disabled"
+        output.append(create_bullet_item(f"Private mode: {privacy_status}", 'check'))
+        output.append(f"\n  {colorize('Saved settings cleared; defaults restored', Colors.DIM)}")
+
+        return "\n".join(output)
 
 
 class ExitCommand(CommandHandler):
@@ -548,20 +606,8 @@ class VersionCommand(CommandHandler):
         )
 
     def execute(self, args: List[str], session_context: Dict[str, Any]) -> str:
-        from rev import __version__
         system_info = config.get_system_info_cached()
-
-        output = ["\nRev - Autonomous AI Development System"]
-        output.append("=" * 60)
-        output.append(f"  Version:          {__version__}")
-        output.append("  Architecture:     Multi-Agent Orchestration")
-        output.append(f"  Model:            {config.OLLAMA_MODEL}")
-        output.append(f"\nSystem:")
-        output.append(f"  OS:               {system_info['os']} {system_info['os_release']}")
-        output.append(f"  Architecture:     {system_info['architecture']}")
-        output.append(f"  Python:           {system_info['python_version']}")
-
-        return "\n".join(output)
+        return build_version_output(config.OLLAMA_MODEL, system_info)
 
 
 class CompactCommand(CommandHandler):
@@ -671,7 +717,7 @@ Private servers (with API keys) remain enabled:
     def execute(self, args: List[str], session_context: Dict[str, Any]) -> str:
         if not args:
             # Show current status
-            current_status = config.PRIVATE_MODE
+            current_status = config.get_private_mode()
             output = [create_header("Private Mode Status", width=80)]
             status_text = "ENABLED" if current_status else "DISABLED"
             status_color = Colors.BRIGHT_RED if current_status else Colors.BRIGHT_GREEN
@@ -693,7 +739,7 @@ Private servers (with API keys) remain enabled:
         action = args[0].lower()
 
         if action == "on":
-            config.PRIVATE_MODE = True
+            config.set_private_mode(True)
             os.environ["REV_PRIVATE_MODE"] = "true"
 
             # Reload MCP client with new settings
@@ -711,7 +757,7 @@ Private servers (with API keys) remain enabled:
             return "\n".join(output)
 
         elif action == "off":
-            config.PRIVATE_MODE = False
+            config.set_private_mode(False)
             os.environ["REV_PRIVATE_MODE"] = "false"
 
             # Reload MCP client with new settings
@@ -736,7 +782,7 @@ class ModeCommand(CommandHandler):
     def __init__(self):
         super().__init__(
             "mode",
-            "Set execution mode: simple, standard, thorough, or max"
+            "Set execution mode: simple, advanced, or deep"
         )
 
     def get_help(self) -> str:
@@ -750,33 +796,31 @@ Available modes:
                 • Shallow codebase exploration
                 • Sequential execution
 
-  standard    - Balanced approach (default)
+  advanced    - Balanced approach (default)
                 • Medium research depth
                 • Moderate review strictness
                 • Validation enabled
                 • Parallel execution (2 workers)
 
-  thorough    - Comprehensive analysis and validation
-                • Deep research
-                • Strict review
+  deep        - Comprehensive analysis and validation
+                • Deep research + learning
+                • Strict review + action review
                 • Full validation with auto-fix
                 • Parallel execution (3 workers)
 
-  max         - Maximum capabilities (orchestrator mode)
-                • Full orchestration with all agents
-                • Deep research + learning enabled
-                • Strict review + action review
-                • Full validation + auto-fix
-                • Maximum parallelism (4 workers)
+Aliases:
+  standard -> advanced
+  thorough -> deep
+  max -> deep
 
 Usage: /mode <mode_name>
-Example: /mode thorough
+Example: /mode advanced
 """
 
     def execute(self, args: List[str], session_context: Dict[str, Any]) -> str:
         if not args:
             # Show current mode
-            current_mode = session_context.get("execution_mode", "standard")
+            current_mode = session_context.get("execution_mode", DEFAULT_MODE_NAME)
             output = [create_header("Current Execution Mode", width=80)]
             output.append(f"\n  {colorize(Symbols.ARROW, Colors.BRIGHT_GREEN)} {colorize(current_mode, Colors.BRIGHT_CYAN, bold=True)}")
             output.append(f"\n{self.get_help()}")
@@ -784,72 +828,17 @@ Example: /mode thorough
 
         mode = args[0].lower()
 
-        # Define mode configurations
-        modes = {
-            "simple": {
-                "orchestrate": False,
-                "research": False,
-                "learn": False,
-                "review": True,
-                "review_strictness": "lenient",
-                "research_depth": "shallow",
-                "validate": False,
-                "auto_fix": False,
-                "action_review": False,
-                "parallel": 1,
-                "description": "Fast execution with minimal overhead"
-            },
-            "standard": {
-                "orchestrate": True,  # Changed to True (default orchestration)
-                "research": True,
-                "learn": False,
-                "review": True,
-                "review_strictness": "moderate",
-                "research_depth": "medium",
-                "validate": True,
-                "auto_fix": False,
-                "action_review": False,
-                "parallel": 2,
-                "description": "Balanced approach with orchestration"
-            },
-            "thorough": {
-                "orchestrate": True,
-                "research": True,
-                "learn": True,
-                "review": True,
-                "review_strictness": "strict",
-                "research_depth": "deep",
-                "validate": True,
-                "auto_fix": True,
-                "action_review": False,
-                "parallel": 3,
-                "description": "Comprehensive analysis and validation"
-            },
-            "max": {
-                "orchestrate": True,
-                "research": True,
-                "learn": True,
-                "review": True,
-                "review_strictness": "strict",
-                "research_depth": "deep",
-                "validate": True,
-                "auto_fix": True,
-                "action_review": True,
-                "parallel": 4,
-                "description": "Maximum capabilities with all agents"
-            }
-        }
-
-        if mode not in modes:
+        if mode not in MODE_PRESETS and mode not in MODE_ALIASES:
             return f"\n{colorize('Unknown mode:', Colors.BRIGHT_RED)} {mode}\n{self.get_help()}"
 
+        normalized_mode, mode_config = get_mode_config(mode)
+
         # Apply mode configuration
-        mode_config = modes[mode]
-        session_context["execution_mode"] = mode
+        session_context["execution_mode"] = normalized_mode
         session_context["mode_config"] = mode_config
 
         # Build output
-        output = [create_header(f"Mode: {mode}", width=80)]
+        output = [create_header(f"Mode: {normalized_mode}", width=80)]
         output.append(f"\n  {colorize(mode_config['description'], Colors.BRIGHT_WHITE)}\n")
         output.append(create_section("Configuration Applied"))
 
@@ -879,6 +868,8 @@ def _build_command_registry() -> Dict[str, CommandHandler]:
         ModelCommand(),
         ConfigCommand(),
         ClearCommand(),
+        SaveCommand(),
+        ResetCommand(),
         ExitCommand(),
         DoctorCommand(),
         AddDirCommand(),

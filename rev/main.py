@@ -12,6 +12,7 @@ from .execution.reviewer import review_execution_plan, ReviewStrictness, ReviewD
 from .execution.validator import validate_execution, ValidationStatus
 from .execution.orchestrator import run_orchestrated
 from .terminal import repl_mode
+from .settings_manager import apply_saved_settings
 from .models.task import ExecutionPlan
 from .tools.registry import get_available_tools
 from .debug_logger import DebugLogger
@@ -19,6 +20,9 @@ from .debug_logger import DebugLogger
 
 def main():
     """Main entry point for the rev CLI."""
+    # Apply any saved configuration overrides before parsing arguments
+    apply_saved_settings()
+
     # Initialize cache system
     cache_dir = config.ROOT / ".rev_cache"
     initialize_caches(config.ROOT, cache_dir)
@@ -146,6 +150,13 @@ def main():
         action="store_true",
         help="Enable detailed debug logging to file for LLM review"
     )
+    parser.add_argument(
+        "-v",
+        "--version",
+        action="store_true",
+        help="Show rev version information and exit",
+    )
+
 
     args = parser.parse_args()
 
@@ -157,6 +168,13 @@ def main():
     # Update config globals for ollama_chat function
     config.OLLAMA_MODEL = args.model
     config.OLLAMA_BASE_URL = args.base_url
+
+    if args.version:
+        from rev.versioning import build_version_output
+
+        print(build_version_output(config.OLLAMA_MODEL, config.get_system_info_cached()))
+        sys.exit(0)
+
 
     # Log configuration
     debug_logger.log("main", "CONFIGURATION", {

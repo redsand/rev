@@ -17,8 +17,11 @@ except ImportError:
 
 # Configuration
 ROOT = pathlib.Path(os.getcwd()).resolve()
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:120b-cloud")  # default model
+DEFAULT_OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:120b-cloud")  # default model
+
+OLLAMA_BASE_URL = DEFAULT_OLLAMA_BASE_URL
+OLLAMA_MODEL = DEFAULT_OLLAMA_MODEL
 MAX_FILE_BYTES = 5 * 1024 * 1024
 READ_RETURN_LIMIT = 80_000
 SEARCH_MATCH_LIMIT = 2000
@@ -60,7 +63,8 @@ SIMILARITY_THRESHOLD = float(os.getenv("REV_SIMILARITY_THRESHOLD", "0.6"))  # Fo
 # MCP (Model Context Protocol) Configuration
 # PRIVATE_MODE: When enabled, disables all public MCP servers for secure/confidential code work
 # Set REV_PRIVATE_MODE=true or use /private command to enable
-PRIVATE_MODE = os.getenv("REV_PRIVATE_MODE", "false").lower() == "true"
+DEFAULT_PRIVATE_MODE = os.getenv("REV_PRIVATE_MODE", "false").lower() == "true"
+PRIVATE_MODE = DEFAULT_PRIVATE_MODE
 
 # Default MCP servers (local NPM packages)
 # These are public, free servers that enhance AI capabilities without requiring API keys
