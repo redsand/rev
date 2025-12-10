@@ -227,7 +227,11 @@ class Orchestrator:
             self.config.parallel_workers = route.parallel_workers
             self.config.enable_action_review = route.enable_action_review
             self.config.auto_approve = getattr(route, "auto_approve", self.config.auto_approve)
-            self.config.research_depth = route.research_depth or "deep"
+            selected_research_depth = route.research_depth or "deep"
+            if selected_research_depth != "deep":
+                print("   ℹ️  Research depth elevated to deep for comprehensive codebase understanding")
+                selected_research_depth = "deep"
+            self.config.research_depth = selected_research_depth
             self.config.max_retries = route.max_retries
             self.config.enable_auto_fix = getattr(route, "enable_auto_fix", self.config.enable_auto_fix)
 
@@ -261,6 +265,10 @@ class Orchestrator:
         # Display resource budgets
         print(f"\n📊 Resource Budgets:")
         print(f"   Steps: {budget.max_steps} | Tokens: {budget.max_tokens} | Time: {budget.max_seconds}s")
+
+        if self.config.research_depth != "deep":
+            print("   ℹ️  Research depth forced to deep to ensure full code and documentation coverage")
+            self.config.research_depth = "deep"
 
         try:
             # Phase 1: Learning Agent - Get historical insights
