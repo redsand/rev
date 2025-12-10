@@ -435,7 +435,7 @@ class TestPlanReviewDataClass(unittest.TestCase):
         self.assertEqual(review.decision, ReviewDecision.APPROVED)
         self.assertEqual(len(review.issues), 0)
         self.assertEqual(len(review.suggestions), 0)
-        self.assertEqual(review.confidence_score, 0.0)
+        self.assertEqual(review.confidence_score, 0.7)  # Default is 0.7 per reviewer.py:44
 
     def test_plan_review_to_dict(self):
         """Test PlanReview serialization."""

@@ -23,22 +23,94 @@ import pytest
 # Import rev module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Load rev.py file using direct file execution
-rev_path = Path(__file__).parent.parent / "rev.py"
-if not rev_path.exists():
-    raise ImportError(f"rev.py not found at {rev_path}")
+# Import from rev package instead of exec'ing rev.py
+import rev
+from rev.config import ROOT
+from rev.models.task import Task, TaskStatus, ExecutionPlan
+from rev.tools.file_ops import _safe_path
 
-# Create a module to load code into
+# Create agent_min module reference for backward compatibility with tests
 import types
 agent_min = types.ModuleType("agent_min")
-agent_min.__file__ = str(rev_path)
+agent_min.ROOT = ROOT
+agent_min.Task = Task
+agent_min.TaskStatus = TaskStatus
+agent_min.ExecutionPlan = ExecutionPlan
+agent_min._safe_path = _safe_path
 
-# Execute the file in the module's namespace
-with open(rev_path, 'r', encoding='utf-8') as f:
-    code = compile(f.read(), str(rev_path), 'exec')
-    exec(code, agent_min.__dict__)
+# Add common functions from rev package
+agent_min.read_file = rev.read_file
+agent_min.write_file = rev.write_file
+agent_min.list_dir = rev.list_dir
+agent_min.search_code = rev.search_code
+agent_min.git_diff = rev.git_diff
+agent_min.apply_patch = rev.apply_patch
+agent_min.get_repo_context = rev.get_repo_context
+agent_min.run_cmd = rev.run_cmd
+agent_min.run_tests = rev.run_tests
+agent_min.execute_tool = rev.execute_tool
+agent_min.git_commit = rev.git_commit
+agent_min.git_status = rev.git_status
+agent_min.git_log = rev.git_log
+agent_min.git_branch = rev.git_branch
+agent_min.delete_file = rev.delete_file
+agent_min.move_file = rev.move_file
+agent_min.append_to_file = rev.append_to_file
+agent_min.replace_in_file = rev.replace_in_file
+agent_min.create_directory = rev.create_directory
+agent_min.get_file_info = rev.get_file_info
+agent_min.copy_file = rev.copy_file
+agent_min.file_exists = rev.file_exists
+agent_min.read_file_lines = rev.read_file_lines
+agent_min.tree_view = rev.tree_view
+agent_min.install_package = rev.install_package
+agent_min.web_fetch = rev.web_fetch
+agent_min.execute_python = rev.execute_python
+agent_min.get_system_info = rev.get_system_info
+agent_min.mcp_add_server = rev.mcp_add_server
+agent_min.mcp_list_servers = rev.mcp_list_servers
+agent_min.mcp_call_tool = rev.mcp_call_tool
 
-# Add to sys.modules so imports work
+# Add placeholder constants and modules
+agent_min.MAX_FILE_BYTES = 10 * 1024 * 1024  # 10MB limit
+
+# Add module placeholders for features that may not be available
+try:
+    import requests
+    agent_min.requests = requests
+except ImportError:
+    agent_min.requests = None
+
+try:
+    import paramiko
+    agent_min.paramiko = paramiko
+except ImportError:
+    agent_min.paramiko = None
+
+# SSH manager and functions
+try:
+    from rev.tools.ssh_ops import ssh_manager, SSHConnectionManager
+    agent_min.ssh_manager = ssh_manager
+    agent_min.SSHConnectionManager = SSHConnectionManager
+    agent_min.SSH_AVAILABLE = True
+    agent_min.ssh_connect = rev.ssh_connect
+    agent_min.ssh_exec = rev.ssh_exec
+    agent_min.ssh_copy_to = rev.ssh_copy_to
+    agent_min.ssh_copy_from = rev.ssh_copy_from
+    agent_min.ssh_disconnect = rev.ssh_disconnect
+    agent_min.ssh_list_connections = rev.ssh_list_connections
+except (ImportError, AttributeError):
+    agent_min.ssh_manager = None
+    agent_min.SSHConnectionManager = None
+    agent_min.SSH_AVAILABLE = False
+    # Placeholder functions for when SSH is not available
+    agent_min.ssh_connect = lambda *args, **kwargs: json.dumps({"error": "SSH not available"})
+    agent_min.ssh_exec = lambda *args, **kwargs: json.dumps({"error": "SSH not available"})
+    agent_min.ssh_copy_to = lambda *args, **kwargs: json.dumps({"error": "SSH not available"})
+    agent_min.ssh_copy_from = lambda *args, **kwargs: json.dumps({"error": "SSH not available"})
+    agent_min.ssh_disconnect = lambda *args, **kwargs: json.dumps({"error": "SSH not available"})
+    agent_min.ssh_list_connections = lambda *args, **kwargs: json.dumps({"error": "SSH not available"})
+
 sys.modules['agent_min'] = agent_min
 
 
