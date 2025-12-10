@@ -137,6 +137,11 @@ def main():
         help="List all available checkpoints"
     )
     parser.add_argument(
+        "--list-sessions",
+        action="store_true",
+        help="List all available sessions for resume"
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable detailed debug logging to file for LLM review"
@@ -182,6 +187,54 @@ def main():
                 print(f"   Tasks: {cp['tasks_total']}")
                 print(f"   Status: {cp['summary']}")
                 print()
+        sys.exit(0)
+
+    # Handle list-sessions command
+    if args.list_sessions:
+        from pathlib import Path
+
+        sessions_dir = config.ROOT / ".rev_sessions"
+        print("rev - Available Sessions\n")
+
+        if not sessions_dir.exists():
+            print("No sessions found.")
+            print(f"Sessions are saved in .rev_sessions/ directory when execution completes.")
+        else:
+            session_files = sorted(sessions_dir.glob("session_*.json"), reverse=True)
+
+            if not session_files:
+                print("No sessions found.")
+                print(f"Sessions are saved in .rev_sessions/ directory when execution completes.")
+            else:
+                for i, session_file in enumerate(session_files, 1):
+                    try:
+                        import json
+                        with open(session_file, "r") as f:
+                            session_data = json.load(f)
+
+                        session_id = session_data.get("session_id", "unknown")
+                        start_time = session_data.get("start_time", "unknown")
+                        duration = session_data.get("duration_seconds", 0)
+                        tasks = session_data.get("tasks", {})
+                        total_tasks = tasks.get("total", 0)
+                        completed_tasks = tasks.get("completed", 0)
+
+                        # Format duration
+                        if duration > 0:
+                            minutes, seconds = divmod(int(duration), 60)
+                            duration_str = f"{minutes}m {seconds}s"
+                        else:
+                            duration_str = "unknown"
+
+                        print(f"{i}. {session_id}")
+                        print(f"   Started: {start_time}")
+                        print(f"   Duration: {duration_str}")
+                        print(f"   Tasks: {completed_tasks}/{total_tasks} completed")
+                        print()
+                    except Exception:
+                        print(f"{i}. {session_file.name} (error reading file)")
+                        print()
+
         sys.exit(0)
 
     print(f"rev - CI/CD Agent")

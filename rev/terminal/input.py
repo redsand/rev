@@ -123,10 +123,23 @@ def _get_input_unix(prompt: str) -> Tuple[str, bool]:
                     sys.stdout.flush()
                     break
 
-            elif char == '\r' or char == '\n':  # Enter key
+            elif char == '\r':  # Carriage return (Enter key)
                 sys.stdout.write('\n')
                 sys.stdout.flush()
                 break
+
+            elif char == '\n':  # Line feed - allow in multi-line paste, but also can submit
+                # Allow newlines in the buffer for multi-line paste support
+                # The next Enter (carriage return) will submit the full multi-line input
+                buffer.insert(cursor_pos, '\n')
+                cursor_pos += 1
+                navigating_history = False
+
+                # Display newline and continuation prompt
+                sys.stdout.write('\n')
+                if prompt:
+                    sys.stdout.write('...')  # Continuation prompt
+                sys.stdout.flush()
 
             elif char == '\x7f' or char == '\x08':  # Backspace/Delete
                 if cursor_pos > 0:
