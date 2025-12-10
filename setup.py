@@ -4,7 +4,12 @@
 from pathlib import Path
 from setuptools import find_packages, setup
 
-from rev._version import REV_VERSION
+# Avoid importing the package during setup to prevent dependency import errors
+version_ns = {}
+version_file = Path(__file__).parent / "rev" / "_version.py"
+if version_file.exists():
+    exec(version_file.read_text(encoding="utf-8"), version_ns)
+REV_VERSION = version_ns.get("REV_VERSION", "0.0.0")
 
 # Read the README file
 readme_file = Path(__file__).parent / "README.md"
