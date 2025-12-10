@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import from rev package instead of exec'ing rev.py
 import rev
-from rev.config import ROOT
+from rev.config import MAX_LLM_TOKENS_PER_RUN, ROOT
 from rev.models.task import Task, TaskStatus, ExecutionPlan
 from rev.tools.file_ops import _safe_path
 
@@ -612,6 +612,26 @@ class TestPlanningMode:
         assert isinstance(plan, agent_min.ExecutionPlan)
         assert len(plan.tasks) == 1
         assert plan.tasks[0].description == "Do something"
+
+    def test_planning_prompt_mentions_token_budget_and_chunking(self, monkeypatch):
+        """Ensure planning prompt instructs the LLM to manage token budgets and chunk work."""
+
+        captured = {}
+
+        def fake_call(messages, tools, max_iterations=5):
+            captured["messages"] = messages
+            return {"message": {"content": "[]"}}
+
+        monkeypatch.setattr(planner, "_call_llm_with_tools", fake_call)
+
+        agent_min.planning_mode("Check token handling in planner")
+
+        system_prompt = captured["messages"][0]["content"]
+        user_prompt = captured["messages"][1]["content"]
+
+        assert "TOKEN" in system_prompt.upper()
+        assert "target token count" in user_prompt
+        assert f"{MAX_LLM_TOKENS_PER_RUN:,}" in user_prompt
 
 
 # ========== Integration Tests: Execution Mode ==========

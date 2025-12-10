@@ -7,7 +7,7 @@ import json
 import signal
 import threading
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 import requests
 
@@ -18,6 +18,9 @@ from rev.debug_logger import get_logger
 
 # Debug mode - set to True to see API requests/responses
 OLLAMA_DEBUG = os.getenv("OLLAMA_DEBUG", "0") == "1"
+
+# Simple heuristic: average of ~4 characters per token for planning-sized prompts
+_CHARS_PER_TOKEN_ESTIMATE = 4
 
 # Retry configuration (can be overridden via environment variables)
 def _get_retry_config():
@@ -46,6 +49,105 @@ def _setup_signal_handlers():
     if threading.current_thread() is threading.main_thread():
         # Set up SIGINT handler (Ctrl+C)
         signal.signal(signal.SIGINT, _signal_handler)
+
+
+def _stringify_content(content: Any) -> str:
+    """Convert LLM message content to a string for estimation purposes."""
+
+    if content is None:
+        return ""
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        # Some chat providers support multi-part content; flatten any text fields
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and "text" in item:
+                parts.append(str(item.get("text", "")))
+            else:
+                parts.append(str(item))
+        return "".join(parts)
+
+    return str(content)
+
+
+def _estimate_message_tokens(message: Dict[str, Any]) -> int:
+    """Roughly estimate token usage for a single message."""
+
+    text = _stringify_content(message.get("content", ""))
+    return max(0, len(text) // _CHARS_PER_TOKEN_ESTIMATE)
+
+
+def _truncate_message_content(message: Dict[str, Any], remaining_tokens: int) -> Tuple[Dict[str, Any], int]:
+    """Trim message content to fit within the remaining token budget."""
+
+    if remaining_tokens <= 0:
+        return {**message, "content": ""}, 0
+
+    original_text = _stringify_content(message.get("content", ""))
+    max_chars = max(0, remaining_tokens * _CHARS_PER_TOKEN_ESTIMATE)
+
+    if len(original_text) <= max_chars:
+        return message, _estimate_message_tokens(message)
+
+    suffix = "\n...[truncated to fit token limit]..."
+    trimmed_text = original_text[: max(0, max_chars - len(suffix))] + suffix
+    truncated_message = {**message, "content": trimmed_text}
+    return truncated_message, _estimate_message_tokens(truncated_message)
+
+
+def _enforce_token_limit(messages: List[Dict[str, Any]], max_tokens: int) -> Tuple[List[Dict[str, Any]], int, int, bool]:
+    """Ensure messages stay within the configured token limit.
+
+    Returns the possibly trimmed messages, the estimated tokens before/after,
+    and whether any truncation occurred.
+    """
+
+    if max_tokens <= 0:
+        return [], 0, 0, True
+
+    original_tokens = sum(_estimate_message_tokens(m) for m in messages)
+    if original_tokens <= max_tokens:
+        return messages, original_tokens, original_tokens, False
+
+    # Always keep system messages first to preserve instructions
+    system_messages = [m for m in messages if m.get("role") == "system"]
+    other_messages = [m for m in messages if m.get("role") != "system"]
+
+    truncated_messages: List[Dict[str, Any]] = []
+    remaining_tokens = max_tokens
+    truncated = False
+
+    # Add system messages in order, truncating if needed
+    for msg in system_messages:
+        msg_tokens = _estimate_message_tokens(msg)
+        if msg_tokens > remaining_tokens:
+            msg, msg_tokens = _truncate_message_content(msg, remaining_tokens)
+            truncated = True
+        truncated_messages.append(msg)
+        remaining_tokens = max(0, remaining_tokens - msg_tokens)
+
+    # Add most recent non-system messages until budget is exhausted
+    preserved: List[Dict[str, Any]] = []
+    for msg in reversed(other_messages):
+        if remaining_tokens <= 0:
+            truncated = True
+            break
+
+        msg_tokens = _estimate_message_tokens(msg)
+        if msg_tokens > remaining_tokens:
+            msg, msg_tokens = _truncate_message_content(msg, remaining_tokens)
+            truncated = True
+        preserved.append(msg)
+        remaining_tokens = max(0, remaining_tokens - msg_tokens)
+
+    preserved.reverse()
+    truncated_messages.extend(preserved)
+
+    trimmed_tokens = sum(_estimate_message_tokens(m) for m in truncated_messages)
+    return truncated_messages, original_tokens, trimmed_tokens, truncated
 
 
 def _make_request_interruptible(url, json_payload, timeout):
@@ -97,6 +199,20 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
 
     # Clear any previous interrupt flags
     _interrupt_requested.clear()
+
+    # Enforce token limits to avoid exceeding provider constraints
+    trimmed_messages, original_tokens, trimmed_tokens, was_truncated = _enforce_token_limit(
+        messages,
+        config.MAX_LLM_TOKENS_PER_RUN,
+    )
+
+    if was_truncated:
+        print(
+            f"⚠️  Context trimmed from ~{original_tokens:,} to ~{trimmed_tokens:,} tokens "
+            f"(limit {config.MAX_LLM_TOKENS_PER_RUN:,})."
+        )
+
+    messages = trimmed_messages
 
     # Get the LLM cache
     llm_cache = get_llm_cache() or LLMResponseCache()
