@@ -70,12 +70,29 @@ from rev.tools import (
     convert_env_to_json,
     # Dependency management
     analyze_dependencies,
+    check_dependency_updates,
+    check_dependency_vulnerabilities,
     update_dependencies,
     scan_dependencies_vulnerabilities,
     # Security tools
-    scan_code_security,
     detect_secrets,
     check_license_compliance,
+    # Linting and type checks
+    run_linters,
+    run_type_checks,
+    # Test quality tools
+    run_property_tests,
+    generate_property_tests,
+    check_contracts,
+    detect_flaky_tests,
+    compare_behavior_with_baseline,
+    # Runtime analysis
+    analyze_runtime_logs,
+    analyze_performance_regression,
+    analyze_error_traces,
+    # Config / migrations
+    validate_ci_config,
+    verify_migrations,
     # SSH operations
     ssh_connect,
     ssh_exec,
@@ -165,12 +182,29 @@ __all__ = [
     "convert_env_to_json",
     # Dependency management
     "analyze_dependencies",
+    "check_dependency_updates",
+    "check_dependency_vulnerabilities",
     "update_dependencies",
     "scan_dependencies_vulnerabilities",
     # Security tools
-    "scan_code_security",
     "detect_secrets",
     "check_license_compliance",
+    # Linting and type checks
+    "run_linters",
+    "run_type_checks",
+    # Test quality tools
+    "run_property_tests",
+    "generate_property_tests",
+    "check_contracts",
+    "detect_flaky_tests",
+    "compare_behavior_with_baseline",
+    # Runtime analysis
+    "analyze_runtime_logs",
+    "analyze_performance_regression",
+    "analyze_error_traces",
+    # Config / migrations
+    "validate_ci_config",
+    "verify_migrations",
     # SSH operations
     "ssh_connect",
     "ssh_exec",

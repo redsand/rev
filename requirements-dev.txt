@@ -14,6 +14,7 @@ mypy>=1.7.0                # Static type checking
 bandit>=1.7.5              # Security vulnerability scanning
 radon>=6.0.1               # Code complexity metrics (cyclomatic, maintainability)
 vulture>=2.10              # Dead code detection
+pip-audit>=2.7.3           # Dependency vulnerability scanning
 
 # Additional security tools
 detect-secrets>=1.4.0      # Secret detection in code

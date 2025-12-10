@@ -640,16 +640,44 @@ simplify_conditionals(file_path: str) -> str
 
 ```python
 analyze_dependencies(language: str = "auto") -> str
+check_dependency_updates(language: str = "auto") -> str
+check_dependency_vulnerabilities(language: str = "auto") -> str
+# Legacy aliases:
 update_dependencies(language: str = "auto", major: bool = False) -> str
+scan_dependencies_vulnerabilities(language: str = "auto") -> str
 ```
 
 ### Security Scanning
 
 ```python
-scan_dependencies_vulnerabilities(language: str = "auto") -> str
 scan_code_security(path: str = ".", tool: str = "auto") -> str
 detect_secrets(path: str = ".") -> str
 check_license_compliance(path: str = ".") -> str
+scan_security_issues(paths: list[str] | None = None, severity_threshold: str = "MEDIUM") -> str
+check_contracts(paths: list[str] | None = None, timeout_seconds: int = 60) -> str
+```
+
+### Linting, Types, and Tests
+
+```python
+run_linters(paths: list[str] | None = None) -> str
+run_type_checks(paths: list[str] | None = None) -> str
+run_property_tests(test_paths: list[str] | None = None, max_examples: int = 200) -> str
+generate_property_tests(targets: list[str], max_examples: int = 200) -> str
+detect_flaky_tests(pattern: str | None = None, runs: int = 5) -> str
+bisect_test_failure(test_command: str, good_ref: str, bad_ref: str = "HEAD") -> str
+generate_repro_case(context: str, target_path: str = "tests/regressions/test_repro_case.py") -> str
+compare_behavior_with_baseline(baseline_ref: str = "origin/main", test_selector: str | None = None) -> str
+```
+
+### Runtime, CI, and Migrations
+
+```python
+analyze_runtime_logs(log_paths: list[str], since: str | None = None) -> str
+analyze_error_traces(log_paths: list[str], max_traces: int = 200) -> str
+analyze_performance_regression(benchmark_cmd: str, baseline_file: str = ".rev-metrics/perf-baseline.json", tolerance_pct: float = 10.0) -> str
+validate_ci_config(paths: list[str] | None = None) -> str
+verify_migrations(path: str = "migrations") -> str
 ```
 
 ## Next Steps

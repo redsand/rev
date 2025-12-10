@@ -27,11 +27,33 @@ from rev.tools.utils import (
 )
 from rev.tools.analysis import (
     analyze_ast_patterns, run_pylint, run_mypy, run_radon_complexity,
-    find_dead_code, run_all_analysis, analyze_code_structures
+    find_dead_code, run_all_analysis, analyze_code_structures,
+    analyze_static_types, check_structural_consistency
 )
 from rev.tools.advanced_analysis import (
     analyze_test_coverage, analyze_code_context, find_symbol_usages,
     analyze_dependencies, analyze_semantic_diff
+)
+from rev.tools.security import scan_security_issues
+from rev.tools.dependencies import check_dependency_vulnerabilities, check_dependency_updates
+from rev.tools.linting import run_linters, run_type_checks
+from rev.tools.test_quality import (
+    run_property_tests,
+    generate_property_tests,
+    check_contracts,
+    detect_flaky_tests,
+    compare_behavior_with_baseline,
+    bisect_test_failure,
+    generate_repro_case
+)
+from rev.tools.runtime_analysis import (
+    analyze_runtime_logs,
+    analyze_performance_regression,
+    analyze_error_traces
+)
+from rev.tools.config_checks import (
+    validate_ci_config,
+    verify_migrations
 )
 
 
@@ -98,6 +120,24 @@ _TIMEOUT_PROTECTED_TOOLS = {
     "ssh_exec",
     "run_pylint",
     "run_mypy",
+    "analyze_static_types",
+    "run_linters",
+    "run_type_checks",
+    "scan_security_issues",
+    "run_property_tests",
+    "generate_property_tests",
+    "check_contracts",
+    "detect_flaky_tests",
+    "compare_behavior_with_baseline",
+    "check_dependency_vulnerabilities",
+    "check_dependency_updates",
+    "analyze_runtime_logs",
+    "analyze_performance_regression",
+    "analyze_error_traces",
+    "bisect_test_failure",
+    "generate_repro_case",
+    "validate_ci_config",
+    "verify_migrations",
     "run_radon_complexity",
     "find_dead_code",
     "run_all_analysis"
@@ -165,10 +205,37 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         "analyze_ast_patterns": lambda args: analyze_ast_patterns(args.get("path", "."), args.get("patterns")),
         "run_pylint": lambda args: run_pylint(args.get("path", "."), args.get("config")),
         "run_mypy": lambda args: run_mypy(args.get("path", "."), args.get("config")),
+        "analyze_static_types": lambda args: analyze_static_types(
+            args.get("paths"),
+            args.get("config_file", "mypy.ini"),
+            args.get("strict", False)
+        ),
+        "run_linters": lambda args: run_linters(args.get("paths")),
+        "run_type_checks": lambda args: run_type_checks(args.get("paths")),
         "run_radon_complexity": lambda args: run_radon_complexity(args.get("path", "."), args.get("min_rank", "C")),
         "find_dead_code": lambda args: find_dead_code(args.get("path", ".")),
         "run_all_analysis": lambda args: run_all_analysis(args.get("path", ".")),
         "analyze_code_structures": lambda args: analyze_code_structures(args.get("path", ".")),
+        "check_structural_consistency": lambda args: check_structural_consistency(args.get("path", "."), args.get("entity")),
+        "scan_security_issues": lambda args: scan_security_issues(args.get("paths"), args.get("severity_threshold", "MEDIUM")),
+        "run_property_tests": lambda args: run_property_tests(args.get("test_paths"), args.get("max_examples", 200)),
+        "generate_property_tests": lambda args: generate_property_tests(args.get("targets", []), args.get("max_examples", 200)),
+        "check_contracts": lambda args: check_contracts(args.get("paths"), args.get("timeout_seconds", 60)),
+        "detect_flaky_tests": lambda args: detect_flaky_tests(args.get("pattern"), args.get("runs", 5)),
+        "compare_behavior_with_baseline": lambda args: compare_behavior_with_baseline(args.get("baseline_ref", "origin/main"), args.get("test_selector")),
+        "analyze_runtime_logs": lambda args: analyze_runtime_logs(args.get("log_paths", []), args.get("since")),
+        "analyze_performance_regression": lambda args: analyze_performance_regression(
+            args["benchmark_cmd"],
+            args.get("baseline_file", ".rev-metrics/perf-baseline.json"),
+            args.get("tolerance_pct", 10.0)
+        ),
+        "analyze_error_traces": lambda args: analyze_error_traces(args.get("log_paths", []), args.get("max_traces", 200)),
+        "check_dependency_vulnerabilities": lambda args: check_dependency_vulnerabilities(args.get("language", "auto")),
+        "check_dependency_updates": lambda args: check_dependency_updates(args.get("language", "auto")),
+        "bisect_test_failure": lambda args: bisect_test_failure(args["test_command"], args.get("good_ref"), args.get("bad_ref", "HEAD")),
+        "generate_repro_case": lambda args: generate_repro_case(args["context"], args.get("target_path", "tests/regressions/test_repro_case.py")),
+        "validate_ci_config": lambda args: validate_ci_config(args.get("paths")),
+        "verify_migrations": lambda args: verify_migrations(args.get("path", "migrations")),
 
         # Advanced analysis tools
         "analyze_test_coverage": lambda args: analyze_test_coverage(args.get("path", "."), args.get("show_untested", True)),
@@ -277,10 +344,29 @@ def _format_description(name: str, args: Dict[str, Any]) -> str:
         "analyze_ast_patterns": f"Analyzing AST patterns: {args.get('path', '.')}",
         "run_pylint": f"Running pylint on: {args.get('path', '.')}",
         "run_mypy": f"Running mypy type check on: {args.get('path', '.')}",
+        "analyze_static_types": f"Running static type checks on: {args.get('paths', args.get('path', '.'))}",
+        "run_linters": f"Running aggregated linters on: {args.get('paths', args.get('path', '.'))}",
+        "run_type_checks": f"Running aggregated type checks on: {args.get('paths', args.get('path', '.'))}",
+        "run_property_tests": f"Running property tests on: {args.get('test_paths', args.get('path', '.'))}",
+        "generate_property_tests": f"Generating property tests for: {args.get('targets', [])}",
+        "check_contracts": f"Checking contracts in: {args.get('paths', args.get('path', '.'))}",
+        "detect_flaky_tests": f"Detecting flaky tests (pattern: {args.get('pattern', '')})",
+        "compare_behavior_with_baseline": f"Comparing behavior vs {args.get('baseline_ref', 'origin/main')} on {args.get('test_selector', 'selected tests')}",
+        "analyze_runtime_logs": f"Analyzing runtime logs: {args.get('log_paths', [])}",
+        "analyze_performance_regression": f"Analyzing performance vs baseline using: {args.get('benchmark_cmd', '')}",
+        "analyze_error_traces": f"Analyzing error traces from: {args.get('log_paths', [])}",
+        "check_dependency_vulnerabilities": f"Scanning dependency vulnerabilities ({args.get('language', 'auto')})",
+        "check_dependency_updates": f"Checking dependency updates ({args.get('language', 'auto')})",
+        "bisect_test_failure": f"Bisecting failing test: {args.get('test_command', '')}",
+        "generate_repro_case": f"Generating repro case at: {args.get('target_path', 'tests/regressions/test_repro_case.py')}",
+        "validate_ci_config": f"Validating CI configs: {args.get('paths', [])}",
+        "verify_migrations": f"Verifying migrations at: {args.get('path', 'migrations')}",
         "run_radon_complexity": f"Analyzing code complexity: {args.get('path', '.')}",
         "find_dead_code": f"Finding dead code in: {args.get('path', '.')}",
         "run_all_analysis": f"Running full analysis suite on: {args.get('path', '.')}",
         "analyze_code_structures": f"Analyzing code structures: {args.get('path', '.')}",
+        "check_structural_consistency": f"Checking structural consistency: {args.get('path', '.')}",
+        "scan_security_issues": f"Scanning security issues in: {args.get('paths', args.get('path', '.'))}",
 
         # Advanced analysis tools
         "analyze_test_coverage": f"Analyzing test coverage: {args.get('path', '.')}",
@@ -959,6 +1045,247 @@ def get_available_tools() -> list:
         {
             "type": "function",
             "function": {
+                "name": "analyze_static_types",
+                "description": "Run mypy across one or more paths with optional strict mode. Returns structured issues and summary counts.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "paths": {"type": "array", "items": {"type": "string"}, "description": "Paths to analyze", "default": ["."]},
+                        "config_file": {"type": "string", "description": "Path to mypy config file", "default": "mypy.ini"},
+                        "strict": {"type": "boolean", "description": "Enable mypy strict mode", "default": False}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_linters",
+                "description": "Run aggregated linters (Ruff/flake8, ESLint, golangci-lint) across provided paths and return parsed issues.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "paths": {"type": "array", "items": {"type": "string"}, "description": "Paths to lint", "default": ["."]}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_type_checks",
+                "description": "Run aggregated type checkers (mypy/pyright/tsc) where configs exist, returning structured errors and summary.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "paths": {"type": "array", "items": {"type": "string"}, "description": "Paths to type-check", "default": ["."]}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_property_tests",
+                "description": "Run pytest suites that use Hypothesis with configurable max_examples.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "test_paths": {"type": "array", "items": {"type": "string"}, "description": "Test paths to run", "default": ["tests"]},
+                        "max_examples": {"type": "integer", "description": "Hypothesis max examples per test", "default": 200}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "generate_property_tests",
+                "description": "Generate Hypothesis property tests for target functions and run them.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "targets": {"type": "array", "items": {"type": "string"}, "description": "Targets like 'path/to/file.py::function'", "default": []},
+                        "max_examples": {"type": "integer", "description": "Hypothesis max examples per test", "default": 200}
+                    },
+                    "required": ["targets"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "check_contracts",
+                "description": "Run CrossHair contract checking to find counterexamples to annotated functions.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "paths": {"type": "array", "items": {"type": "string"}, "description": "Paths to check", "default": ["."]},
+                        "timeout_seconds": {"type": "integer", "description": "Per-path timeout seconds", "default": 60}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "detect_flaky_tests",
+                "description": "Run pytest multiple times to find tests that pass and fail intermittently.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {"type": "string", "description": "Pytest pattern to select tests"},
+                        "runs": {"type": "integer", "description": "Number of repetitions", "default": 5}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "compare_behavior_with_baseline",
+                "description": "Run selected tests on a baseline git ref vs current and report semantic differences.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "baseline_ref": {"type": "string", "description": "Git ref for baseline", "default": "origin/main"},
+                        "test_selector": {"type": "string", "description": "Pytest selector, e.g., tests/test_file.py::TestClass"}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "analyze_runtime_logs",
+                "description": "Parse runtime logs for warnings, errors, and tracebacks; cluster and summarize findings.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "log_paths": {"type": "array", "items": {"type": "string"}, "description": "Log file paths to analyze"},
+                        "since": {"type": "string", "description": "ISO timestamp; only include log entries after this time"}
+                    },
+                    "required": ["log_paths"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "analyze_performance_regression",
+                "description": "Run benchmarks and compare to stored baseline metrics with tolerance threshold.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "benchmark_cmd": {"type": "string", "description": "Command to run benchmarks (e.g., pytest ... --benchmark-only)"},
+                        "baseline_file": {"type": "string", "description": "Path to baseline metrics file", "default": ".rev-metrics/perf-baseline.json"},
+                        "tolerance_pct": {"type": "number", "description": "Allowed performance regression percentage", "default": 10.0}
+                    },
+                    "required": ["benchmark_cmd"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "analyze_error_traces",
+                "description": "Cluster stack traces from logs and identify suspected modules.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "log_paths": {"type": "array", "items": {"type": "string"}, "description": "Log files containing stack traces"},
+                        "max_traces": {"type": "integer", "description": "Maximum traces to analyze", "default": 200}
+                    },
+                    "required": ["log_paths"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "check_dependency_vulnerabilities",
+                "description": "Scan Python/Node dependencies for known vulnerabilities using pip-audit or npm audit.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "language": {"type": "string", "description": "Language/ecosystem (auto/python/javascript)", "default": "auto"}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "check_dependency_updates",
+                "description": "Identify outdated dependencies and group by impact (breaking/minor/patch).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "language": {"type": "string", "description": "Language/ecosystem (auto/python/javascript)", "default": "auto"}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "bisect_test_failure",
+                "description": "Use git bisect to locate the commit that causes a test failure.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "test_command": {"type": "string", "description": "Command to run the failing test"},
+                        "good_ref": {"type": "string", "description": "Known good git ref"},
+                        "bad_ref": {"type": "string", "description": "Known bad git ref", "default": "HEAD"}
+                    },
+                    "required": ["test_command", "good_ref"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "generate_repro_case",
+                "description": "Create a minimal regression test file from provided context/logs and run it.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "context": {"type": "string", "description": "Failing stack trace or description"},
+                        "target_path": {"type": "string", "description": "Path to write the repro test", "default": "tests/regressions/test_repro_case.py"}
+                    },
+                    "required": ["context"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "validate_ci_config",
+                "description": "Validate CI configuration files (GitHub Actions via actionlint/yamllint).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "paths": {"type": "array", "items": {"type": "string"}, "description": "Specific CI config paths to check"}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "verify_migrations",
+                "description": "Lightweight migration sanity checks (presence and optional Alembic dry-run).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to migration directory", "default": "migrations"}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "run_radon_complexity",
                 "description": "Analyze code complexity using radon (cross-platform). Measures cyclomatic complexity, maintainability index, and code metrics.",
                 "parameters": {
@@ -1005,6 +1332,34 @@ def get_available_tools() -> list:
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "description": "Path to file or directory to analyze for code structures", "default": "."}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "check_structural_consistency",
+                "description": "Cross-check schemas and models across DB, backend, and frontend layers. Highlights missing fields, type mismatches, and enum value drift.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to scan for schemas/models", "default": "."},
+                        "entity": {"type": "string", "description": "Optional entity name to focus on"}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "scan_security_issues",
+                "description": "Run Bandit/Ruff security checks to find hardcoded secrets, unsafe APIs, and injection patterns. Filter by severity threshold.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "paths": {"type": "array", "items": {"type": "string"}, "description": "Paths to scan for security issues", "default": ["."]},
+                        "severity_threshold": {"type": "string", "description": "Minimum severity to report (LOW/MEDIUM/HIGH/CRITICAL)", "default": "MEDIUM"}
                     }
                 }
             }
