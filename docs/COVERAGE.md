@@ -11,7 +11,7 @@ Test coverage for the rev autonomous CI/CD agent to ensure code quality and reli
 Module                  Statements    Covered    Coverage    Missing
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 rev                          478        404        85%         74
-tests/test_agent_min.py      629        622        99%          7
+tests/ (suite)               629        622        99%          7
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 TOTAL                       1107        1026       93%         81
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -51,7 +51,7 @@ The uncovered lines are primarily:
 
 ```bash
 # Run tests with coverage for rev package only
-pytest tests/test_agent_min.py --cov=agent_min --cov-report=term-missing
+pytest tests --cov=rev --cov-report=term-missing
 
 # Run tests with coverage for all code
 pytest tests/ --cov=. --cov-report=term
@@ -71,14 +71,14 @@ pytest tests/ --cov=. --cov-report=html
 
 ```bash
 # Show which lines are not covered
-pytest tests/test_agent_min.py --cov=agent_min --cov-report=term-missing -v
+pytest tests --cov=rev --cov-report=term-missing -v
 ```
 
 ### Coverage for Specific Test Class
 
 ```bash
 # Only run file operations tests with coverage
-pytest tests/test_agent_min.py::TestFileOperations --cov=agent_min --cov-report=term
+pytest tests/test_agent.py::TestFileOperations --cov=rev --cov-report=term
 ```
 
 ## Coverage Configuration Files
@@ -163,7 +163,7 @@ The HTML report (`htmlcov/index.html`) provides:
 Add to `.git/hooks/pre-commit`:
 ```bash
 #!/bin/bash
-pytest tests/test_agent_min.py --cov=agent_min --cov-fail-under=75 -q
+pytest tests --cov=rev --cov-fail-under=75 -q
 if [ $? -ne 0 ]; then
     echo "Coverage below 75% - commit rejected"
     exit 1

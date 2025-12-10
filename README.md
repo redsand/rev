@@ -432,6 +432,12 @@ Even in autonomous mode, the agent will **always prompt** for potentially destru
 export OLLAMA_BASE_URL="http://localhost:11434"  # Default
 export OLLAMA_MODEL="gpt-oss:120b-cloud"           # Default
 
+# Reliability tuning (optional)
+export OLLAMA_MAX_RETRIES=6                     # Retries for transient 5xx errors
+export OLLAMA_RETRY_BACKOFF_SECONDS=2           # Base backoff between retries
+export OLLAMA_RETRY_BACKOFF_MAX_SECONDS=30      # Cap for backoff delay
+export OLLAMA_TIMEOUT_MAX_MULTIPLIER=3          # Cap timeout growth (10m -> 30m)
+
 # Then run agent
 rev "Your task here"
 ```
@@ -809,13 +815,13 @@ rev --model deepseek-coder:33b "Your task"
 
 ```bash
 # Run all tests
-python -m pytest tests/test_agent_min.py -v
+python -m pytest tests -v
 
 # Run with coverage report
-python -m pytest tests/test_agent_min.py --cov=agent_min --cov-report=term-missing
+python -m pytest tests --cov=rev --cov-report=term-missing
 
 # Generate HTML coverage report
-python -m pytest tests/test_agent_min.py --cov=agent_min --cov-report=html
+python -m pytest tests --cov=rev --cov-report=html
 ```
 
 For detailed coverage information, see [COVERAGE.md](COVERAGE.md).
@@ -931,6 +937,14 @@ The Planning Agent will:
 - Identify dependencies between tasks
 - Assess risks for each task
 - **Handle recursive breakdown** for complex features
+
+**End-to-end flow (Planning ➜ Review ➜ Execution)**
+
+1. `rev "<task>"` kicks off the **planning phase** to draft a full execution plan.
+2. The **review phase** evaluates completeness, safety, and risk before any edits occur.
+3. The **execution phase** applies the approved steps with validations and tests, stopping on failures and surfacing actionable errors.
+
+This flow runs automatically for every request, ensuring the plan, review, and execution steps all complete instead of stopping after planning.
 
 For example, a high-level task like "Implement authentication system" will be automatically broken down into:
 - Design authentication architecture
@@ -1351,8 +1365,10 @@ For security, only these commands are permitted:
 .
 ├── rev/             # Package (CLI entry: `rev`)
 ├── requirements.txt       # Minimal dependencies (just requests)
-├── tests/                 # Comprehensive test suite
-│   └── test_agent_min.py  # 99% coverage tests
+├── tests/                 # Comprehensive test suite (planning, review, execution)
+│   ├── test_agent.py      # Core agent behavior
+│   ├── test_advanced_planning.py  # Multi-agent planning and validation
+│   └── ...                # Additional integration and tool tests
 ├── COVERAGE.md            # Detailed coverage report
 ├── RECOMMENDATIONS.md     # Future improvement suggestions
 └── README.md              # This file

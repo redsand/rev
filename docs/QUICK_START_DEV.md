@@ -65,7 +65,9 @@ rev/
 └── cache/               # Caching system
 
 tests/
-└── test_agent_min.py    # 136 tests, 80% coverage
+├── test_agent.py             # Agent behaviors and tools
+├── test_advanced_planning.py # Planning/review/execution coverage
+└── ...                       # Additional integration tests
 ```
 
 **Execution Flow:**
@@ -101,7 +103,7 @@ agent> task that triggers bug
 ### Step 3: Write a Test First (TDD)
 
 ```python
-# In tests/test_agent_min.py
+# In tests/test_agent.py
 
 def test_bug_reproduction():
     """Test that reproduces the bug."""
@@ -134,7 +136,7 @@ def function_that_has_bug(input):
 
 ```bash
 # Run the test
-pytest tests/test_agent_min.py::test_bug_reproduction -v
+pytest tests/test_agent.py::test_bug_reproduction -v
 
 # Run all tests to ensure no regressions
 pytest tests/ --cov=rev --cov-report=term-missing
@@ -221,7 +223,7 @@ def test_execution_completes_tasks(mock_chat):
 pytest tests/ -v
 
 # Run specific test
-pytest tests/test_agent_min.py::test_name -v
+pytest tests/test_agent.py::test_name -v
 
 # Run with coverage
 pytest tests/ --cov=rev --cov-report=term-missing
@@ -270,7 +272,7 @@ from .code_ops import my_new_tool
 __all__ = [..., "my_new_tool"]
 ```
 
-4. **Write tests** (`tests/test_agent_min.py`)
+4. **Write tests** (`tests/test_agent.py`)
 ```python
 def test_my_new_tool_success():
     """Test my_new_tool with valid input."""

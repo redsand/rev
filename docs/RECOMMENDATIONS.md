@@ -8,7 +8,7 @@ This document outlines suggestions for enhancing the rev autonomous CI/CD agent 
 - Add troubleshooting section for common Ollama installation issues
 - Include Docker-based setup option for easier deployment
 - Provide system requirements matrix (RAM, CPU, disk space recommendations)
-- Add migration guide from agent.py for existing users
+- Add migration guide for existing users upgrading to the `rev` CLI
 
 ### 1.2 Usage Examples Expansion
 - Create a dedicated examples/ directory with real-world scenarios

@@ -298,13 +298,13 @@ rev --model qwen3-coder:480b-cloud "task"
 
 **What's Happening:**
 - Complex task taking longer than 10 minutes
-- rev automatically retries with longer timeout (20m, then 30m)
+- rev automatically retries with longer timeouts (20m, then 30m), and keeps retrying with backoff when configured to do so
 - This is normal for large codebases or complex tasks
 
 **Timeout Schedule:**
 - Attempt 1: 10 minutes (600s)
 - Attempt 2: 20 minutes (1200s)
-- Attempt 3: 30 minutes (1800s)
+- Attempt 3+: 30 minutes (1800s, capped) with continued retries if `OLLAMA_MAX_RETRIES` > 3
 
 **Solutions:**
 
