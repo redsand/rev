@@ -298,6 +298,43 @@ class DebugLogger:
 
         self.log("main", "WORKFLOW_PHASE", data, "INFO")
 
+    def _log_plain(self, level: str, msg: str, *args: Any, **kwargs: Any) -> None:
+        """Support standard logging-style calls (info/warning/error/debug).
+
+        Some parts of the codebase expect a logger compatible with the standard
+        :mod:`logging` interface. These helpers forward those calls into the
+        structured logger when debug logging is enabled, and safely no-op
+        otherwise.
+
+        Args:
+            level: Log level name (e.g., "INFO", "ERROR").
+            msg: Message format string.
+            *args: Positional format arguments.
+            **kwargs: Keyword format arguments.
+        """
+        if not self._enabled:
+            return
+
+        logger = self.get_logger("general")
+        log_level = getattr(logging, level.upper(), logging.INFO)
+        logger.log(log_level, msg, *args, **kwargs)
+
+    def info(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        """Log an informational message when debug logging is enabled."""
+        self._log_plain("INFO", msg, *args, **kwargs)
+
+    def warning(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        """Log a warning message when debug logging is enabled."""
+        self._log_plain("WARNING", msg, *args, **kwargs)
+
+    def error(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        """Log an error message when debug logging is enabled."""
+        self._log_plain("ERROR", msg, *args, **kwargs)
+
+    def debug(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        """Log a debug message when debug logging is enabled."""
+        self._log_plain("DEBUG", msg, *args, **kwargs)
+
     @property
     def enabled(self) -> bool:
         """Check if debug logging is enabled."""
