@@ -15,6 +15,7 @@ from rev.terminal.commands import execute_command
 from rev.terminal.formatting import colorize, Colors, Symbols, get_color_status
 from rev.terminal.escape_monitor import escape_monitor_context
 from rev.tools.registry import get_available_tools
+from rev.settings_manager import get_default_mode, apply_saved_settings
 
 
 def repl_mode():
@@ -44,6 +45,8 @@ def repl_mode():
 
     print()
 
+    default_mode_name, default_mode_config = get_default_mode()
+
     # Session context to maintain memory across prompts
     session_context = {
         "tasks_completed": [],
@@ -51,20 +54,12 @@ def repl_mode():
         "files_reviewed": set(),
         "last_summary": "",
         "token_usage": {"total": 0, "prompt": 0, "completion": 0},
-        "execution_mode": "standard",
-        "mode_config": {
-            "orchestrate": True,
-            "research": True,
-            "learn": False,
-            "review": True,
-            "review_strictness": "moderate",
-            "research_depth": "medium",
-            "validate": True,
-            "auto_fix": False,
-            "action_review": False,
-            "parallel": 2,
-        },
+        "execution_mode": default_mode_name,
+        "mode_config": default_mode_config,
     }
+
+    # Apply saved settings if they exist
+    apply_saved_settings(session_context)
 
     while True:
         try:
