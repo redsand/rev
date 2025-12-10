@@ -9,10 +9,11 @@ Supports both symbolic search (keyword/regex) and semantic search (RAG/TF-IDF).
 
 import json
 import re
+import signal
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 
 from rev.tools.registry import execute_tool
 from rev.llm.client import ollama_chat
@@ -39,10 +40,29 @@ def get_rag_retriever():
 
             # Build index if not already built
             if not retriever.index_built:
-                print("  → Building RAG index (one-time setup)...")
-                retriever.build_index()
-                stats = retriever.get_index_stats()
-                print(f"    Indexed {stats.get('total_chunks', 0)} code chunks")
+                print("  → Building RAG index (one-time setup, max 5 minutes)...")
+
+                # Use timeout to prevent hanging on large codebases
+                def build_with_timeout():
+                    retriever.build_index()
+
+                # Build index with 600s (10 minute) timeout
+                try:
+                    # Run in a thread with timeout
+                    import threading
+                    build_thread = threading.Thread(target=build_with_timeout, daemon=True)
+                    build_thread.start()
+                    build_thread.join(timeout=600)
+
+                    if build_thread.is_alive():
+                        print(f"  ⚠️  RAG index building timed out after 600s - skipping RAG search")
+                        return None
+
+                    stats = retriever.get_index_stats()
+                    print(f"    Indexed {stats.get('total_chunks', 0)} code chunks")
+                except Exception as e:
+                    print(f"  ⚠️  RAG index building failed: {e}")
+                    return None
 
             _RAG_RETRIEVER = retriever
         except Exception as e:
@@ -212,11 +232,12 @@ def research_codebase(
         if not quick_mode and search_depth in ["medium", "deep"]:
             futures[executor.submit(_analyze_dependencies, keywords)] = "dependencies"
 
-        # Collect results
-        for future in as_completed(futures):
+        # Collect results with 600s timeout per task
+        # This prevents any single research task from hanging indefinitely
+        for future in as_completed(futures, timeout=600):
             task_name = futures[future]
             try:
-                result = future.result()
+                result = future.result(timeout=10)  # 10s to get already-completed result
                 if task_name == "code_search":
                     findings.relevant_files = result.get("files", [])
                     findings.code_patterns = result.get("patterns", [])
@@ -238,6 +259,8 @@ def research_codebase(
                 elif task_name == "dependencies":
                     findings.dependencies = result.get("dependencies", [])
                     findings.potential_conflicts = result.get("conflicts", [])
+            except FuturesTimeoutError:
+                print(f"  ⚠️  {task_name} research timed out (600s limit) - skipping")
             except Exception as e:
                 print(f"  ⚠️  {task_name} research failed: {e}")
 
