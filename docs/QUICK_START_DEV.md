@@ -349,7 +349,7 @@ Before committing:
 
 - [ ] All tests pass: `pytest tests/ -v`
 - [ ] Code is formatted: `black rev/`
-- [ ] Linting passes: `ruff check rev/`
+- [ ] Linting passes: `ruff check .`
 - [ ] Coverage maintained/improved: `pytest --cov=rev`
 - [ ] New functions have docstrings
 - [ ] Complex logic has comments

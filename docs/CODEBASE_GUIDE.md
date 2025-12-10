@@ -671,7 +671,7 @@ ollama pull llama3.1:latest
    pytest tests/ --cov=rev --cov-report=term-missing
 
    # Run linter
-   ruff check rev/
+   ruff check .
 
    # Run formatter
    black rev/

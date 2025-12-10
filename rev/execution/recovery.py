@@ -12,6 +12,8 @@ from typing import List, Dict, Any, Optional
 from enum import Enum
 
 from rev.models.task import Task
+from rev.execution.safety import prompt_scary_operation
+from rev.debug_logger import get_logger
 
 
 class RecoveryStrategy(Enum):
@@ -298,13 +300,36 @@ def apply_recovery_action(action: RecoveryAction, dry_run: bool = False) -> Dict
         "errors": []
     }
 
+    logger = get_logger()
+
     if dry_run:
         result["success"] = True
         result["dry_run"] = True
         return result
 
+    executed_any = False
+
     # Execute commands
     for cmd in action.commands:
+        # Skip placeholder-like commands to avoid accidental execution
+        if "<" in cmd and ">" in cmd:
+            skip_msg = {"command": cmd, "error": "Placeholder command skipped"}
+            result["errors"].append(skip_msg)
+            logger.log("recovery", "PLACEHOLDER_SKIPPED", skip_msg, "WARNING")
+            continue
+
+        # Approval gate for risky recovery actions
+        if action.requires_approval:
+            approved = prompt_scary_operation(
+                cmd,
+                f"Recovery action requires approval (strategy={action.strategy.value}, risk={action.risk_level})"
+            )
+            if not approved:
+                rejection = {"command": cmd, "error": "User rejected recovery action"}
+                result["errors"].append(rejection)
+                logger.log("recovery", "APPROVAL_REJECTED", rejection, "WARNING")
+                return result
+
         try:
             proc_result = subprocess.run(
                 cmd,
@@ -316,6 +341,7 @@ def apply_recovery_action(action: RecoveryAction, dry_run: bool = False) -> Dict
 
             result["commands_executed"].append(cmd)
             result["outputs"].append(proc_result.stdout)
+            executed_any = True
 
             if proc_result.returncode != 0:
                 result["errors"].append({
@@ -330,6 +356,7 @@ def apply_recovery_action(action: RecoveryAction, dry_run: bool = False) -> Dict
                         "warning": f"Recovery partially applied - {len(result['commands_executed'])} command(s) succeeded before failure",
                         "succeeded_commands": result["commands_executed"].copy()
                     })
+                logger.log("recovery", "COMMAND_FAILED", result["errors"][-1], "ERROR")
                 # Stop on first failure
                 return result
 
@@ -338,6 +365,7 @@ def apply_recovery_action(action: RecoveryAction, dry_run: bool = False) -> Dict
                 "command": cmd,
                 "error": "Command timeout"
             })
+            logger.log("recovery", "COMMAND_TIMEOUT", result["errors"][-1], "ERROR")
             # Mark as partial success if some commands succeeded
             if result["commands_executed"]:
                 result["partial_success"] = True
@@ -347,11 +375,16 @@ def apply_recovery_action(action: RecoveryAction, dry_run: bool = False) -> Dict
                 "command": cmd,
                 "error": str(e)
             })
+            logger.log("recovery", "COMMAND_EXCEPTION", result["errors"][-1], "ERROR")
             # Mark as partial success if some commands succeeded
             if result["commands_executed"]:
                 result["partial_success"] = True
             return result
 
     # All commands succeeded
-    result["success"] = True
+    if executed_any:
+        result["success"] = True
+    else:
+        result["success"] = False
+        result["errors"].append({"error": "No recovery commands executed"})
     return result

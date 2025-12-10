@@ -161,6 +161,7 @@ class Orchestrator:
             config: Orchestrator configuration
         """
         self.project_root = project_root
+        self._user_config_provided = config is not None
         self.config = config or OrchestratorConfig()
         self.current_phase = AgentPhase.LEARNING
         self.learning_agent = LearningAgent(project_root) if self.config.enable_learning else None
@@ -190,6 +191,18 @@ class Orchestrator:
 
         # Update config based on route (only if using default config)
         coding_mode = route.mode in ["full_feature", "refactor"]  # Enable coding mode for these routes
+        if not self._user_config_provided:
+            self.config.enable_learning = route.enable_learning
+            self.config.enable_research = route.enable_research
+            self.config.enable_review = route.enable_review
+            self.config.enable_validation = route.enable_validation
+            self.config.review_strictness = ReviewStrictness(route.review_strictness)
+            self.config.parallel_workers = route.parallel_workers
+            self.config.enable_action_review = route.enable_action_review
+            self.config.auto_approve = getattr(route, "auto_approve", self.config.auto_approve)
+            self.config.research_depth = route.research_depth
+            self.config.max_retries = route.max_retries
+            self.config.enable_auto_fix = getattr(route, "enable_auto_fix", self.config.enable_auto_fix)
 
         print(f"\nAgents enabled: ", end="")
         agents = []
@@ -491,11 +504,12 @@ IMPORTANT - Address the following review feedback:
                 )
 
             # Determine success
-            completed = sum(1 for t in plan.tasks if t.status == TaskStatus.COMPLETED)
-            result.success = completed > 0 and (
+            all_completed = all(t.status == TaskStatus.COMPLETED for t in plan.tasks) and len(plan.tasks) > 0
+            validation_ok = (
                 not self.config.enable_validation or
                 result.validation_status in [ValidationStatus.PASSED, ValidationStatus.PASSED_WITH_WARNINGS, None]
             )
+            result.success = all_completed and validation_ok
 
         except Exception as e:
             result.errors.append(str(e))

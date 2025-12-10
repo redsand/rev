@@ -174,6 +174,9 @@ class ExecutionPlan:
         if self.current_index < len(self.tasks):
             self.tasks[self.current_index].status = TaskStatus.FAILED
             self.tasks[self.current_index].error = error
+            # Advance to the next task so execution can continue instead of
+            # repeatedly retrying the same failed task.
+            self.current_index += 1
 
     def is_complete(self) -> bool:
         """Check if all tasks are done (completed or failed)."""

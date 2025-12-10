@@ -413,7 +413,7 @@ def _quick_security_check(tool_name: str, tool_args: Dict[str, Any], description
 
     # Check for command execution patterns
     if tool_name == "run_cmd":
-        cmd = tool_args.get("command", "")
+        cmd = tool_args.get("cmd") or tool_args.get("command", "")
         cmd_lower = cmd.lower()
 
         # Skip security checks for trusted build/dev tools
