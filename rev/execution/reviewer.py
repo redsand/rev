@@ -286,7 +286,11 @@ Provide a thorough review."""}
                 review.decision = ReviewDecision.APPROVED
 
             review.overall_assessment = review_data.get("overall_assessment", "")
-            review.confidence_score = float(review_data.get("confidence_score", 0.8))
+            # Handle non-numeric confidence scores gracefully
+            try:
+                review.confidence_score = float(review_data.get("confidence_score", 0.8))
+            except (ValueError, TypeError):
+                review.confidence_score = 0.7  # Default fallback for malformed LLM response
             review.issues = review_data.get("issues", [])
             review.suggestions = review_data.get("suggestions", [])
             review.security_concerns = review_data.get("security_concerns", [])

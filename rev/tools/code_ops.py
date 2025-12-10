@@ -65,8 +65,9 @@ def extract_constants(file_path: str, threshold: int = 3) -> str:
 
         content = file.read_text(encoding='utf-8', errors='ignore')
 
-        # Find magic numbers (excluding 0, 1, common values)
-        magic_numbers = re.findall(r'\b\d{2,}\b', content)
+        # Find magic numbers: integers (decimal, hex, octal), floats, negatives
+        # Matches: -123, 3.14159, 0xFF, 0o777, 999, etc.
+        magic_numbers = re.findall(r'-?\b(?:0x[0-9a-fA-F]+|0o[0-7]+|\d+\.?\d*)\b', content)
         number_counts: Dict[str, int] = {}
         for num in magic_numbers:
             if num not in ['00', '01', '10', '100']:

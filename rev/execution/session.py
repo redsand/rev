@@ -231,7 +231,8 @@ class SessionTracker:
                 self.summary.tests_passed += 1
             else:
                 self.summary.tests_failed += 1
-        except:
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            # Log malformed test results but don't fail
             pass
 
     def track_messages(self, message_count: int, estimated_tokens: Optional[int] = None):

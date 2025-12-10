@@ -365,6 +365,7 @@ def _search_relevant_code(keywords: List[str]) -> Dict[str, Any]:
     """Search for code relevant to the keywords."""
     files = []
     patterns = []
+    seen_paths = set()  # O(1) lookup instead of O(n) list membership
 
     for keyword in keywords[:5]:
         try:
@@ -374,13 +375,15 @@ def _search_relevant_code(keywords: List[str]) -> Dict[str, Any]:
 
             matches = result_data.get("matches", [])
             for match in matches:
-                file_info = {
-                    "path": match.get("file", ""),
-                    "relevance": "keyword_match",
-                    "keyword": keyword
-                }
-                if file_info not in files:
+                path = match.get("file", "")
+                if path not in seen_paths:
+                    file_info = {
+                        "path": path,
+                        "relevance": "keyword_match",
+                        "keyword": keyword
+                    }
                     files.append(file_info)
+                    seen_paths.add(path)
 
                 # Extract pattern from context
                 context = match.get("context", "")
@@ -495,7 +498,7 @@ def _synthesize_findings(user_request: str, findings: ResearchFindings) -> Dict[
     context_parts = []
 
     if findings.relevant_files:
-        context_parts.append(f"Relevant files: {', '.join(f['path'] for f in findings.relevant_files[:5])}")
+        context_parts.append(f"Relevant files: {', '.join(f.get('path', 'unknown') for f in findings.relevant_files[:5])}")
 
     if findings.code_patterns:
         context_parts.append(f"Patterns found: {'; '.join(findings.code_patterns[:3])}")
@@ -504,7 +507,7 @@ def _synthesize_findings(user_request: str, findings: ResearchFindings) -> Dict[
         context_parts.append(f"Architecture: {'; '.join(findings.architecture_notes[:3])}")
 
     if findings.similar_implementations:
-        context_parts.append(f"Similar code in: {', '.join(s['file'] for s in findings.similar_implementations[:3])}")
+        context_parts.append(f"Similar code in: {', '.join(s.get('file', 'unknown') for s in findings.similar_implementations[:3])}")
 
     messages = [
         {"role": "system", "content": RESEARCH_SYSTEM},

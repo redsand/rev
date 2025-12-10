@@ -488,8 +488,9 @@ After gathering information with tools, generate a comprehensive execution plan 
     response = _call_llm_with_tools(messages, tools, max_iterations=30)
 
     if "error" in response:
-        print(f"Error: {response['error']}")
-        sys.exit(1)
+        error_msg = f"Planning failed: {response['error']}"
+        print(f"Error: {error_msg}")
+        raise RuntimeError(error_msg)
 
     # Parse the plan
     plan = ExecutionPlan()
@@ -633,8 +634,10 @@ After gathering information with tools, generate a comprehensive execution plan 
 
         print(f"Total tasks: {len(plan.tasks)}")
         print(f"Risk distribution:")
-        for level, count in sorted(risk_counts.items(), key=lambda x: ["low", "medium", "high", "critical"].index(x[0].value)):
-            emoji = {"low": "🟢", "medium": "🟡", "high": "🟠", "critical": "🔴"}[level.value]
+        # Use dict for risk ordering to handle unknown values gracefully
+        risk_order = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+        for level, count in sorted(risk_counts.items(), key=lambda x: risk_order.get(x[0].value, 999)):
+            emoji = {"low": "🟢", "medium": "🟡", "high": "🟠", "critical": "🔴"}.get(level.value, "⚪")
             print(f"  {emoji} {level.value.upper()}: {count}")
 
         # Dependency insights
