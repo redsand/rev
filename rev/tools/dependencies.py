@@ -3,10 +3,15 @@
 """Dependency management and analysis utilities."""
 
 import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 from rev.config import ROOT
 from rev.tools.utils import _run_shell
+try:
+    from packaging.version import Version, InvalidVersion
+except ImportError:  # pragma: no cover
+    Version = None
+    InvalidVersion = Exception
 
 # Note: This module uses a dependency cache that should be initialized elsewhere
 # For now, we'll create a simple cache interface
@@ -127,57 +132,47 @@ def analyze_dependencies(language: str = "auto") -> str:
         return json.dumps({"error": f"Analysis failed: {type(e).__name__}: {e}"})
 
 
-def update_dependencies(language: str = "auto", major: bool = False) -> str:
-    """Update project dependencies to latest versions.
-
-    Args:
-        language: Language/ecosystem (python, javascript, auto)
-        major: Allow major version updates (default: False)
-
-    Returns:
-        JSON string with update results
-    """
+def check_dependency_updates(language: str = "auto") -> str:
+    """Identify outdated dependencies grouped by potential impact."""
     try:
         if language == "auto":
-            if (ROOT / "requirements.txt").exists():
+            if (ROOT / "requirements.txt").exists() or (ROOT / "pyproject.toml").exists():
                 language = "python"
             elif (ROOT / "package.json").exists():
                 language = "javascript"
 
         if language == "python":
-            # Update using pip-upgrader or similar
-            cmd = "pip list --outdated --format=json"
-            result = _run_shell(cmd)
+            proc = _run_shell("pip list --outdated --format=json", timeout=120)
+            if proc.returncode == 127:
+                return json.dumps({"error": "pip not available"})
 
-            if result.returncode == 0:
-                outdated = json.loads(result.stdout) if result.stdout else []
-                return json.dumps({
-                    "language": "python",
-                    "outdated": outdated,
-                    "count": len(outdated),
-                    "message": "Use 'pip install --upgrade <package>' to update"
-                })
-            else:
-                return json.dumps({"error": "Failed to check outdated packages"})
+            outdated = json.loads(proc.stdout) if proc.stdout else []
+            grouped = _group_versions(outdated, "name", "version", "latest_version")
+            return json.dumps({
+                "language": "python",
+                "updates": grouped,
+                "count": sum(len(v) for v in grouped.values())
+            }, indent=2)
 
-        elif language == "javascript":
-            # Check for npm updates
-            cmd = "npm outdated --json"
-            result = _run_shell(cmd, timeout=60)
+        if language == "javascript":
+            proc = _run_shell("npm outdated --json", timeout=120)
+            if proc.returncode == 127:
+                return json.dumps({"error": "npm not available"})
 
-            try:
-                outdated = json.loads(result.stdout) if result.stdout else {}
-                return json.dumps({
-                    "language": "javascript",
-                    "outdated": outdated,
-                    "count": len(outdated),
-                    "message": "Use 'npm update' to update dependencies"
+            data = json.loads(proc.stdout) if proc.stdout else {}
+            items = []
+            for pkg, info in data.items():
+                items.append({
+                    "name": pkg,
+                    "version": info.get("current"),
+                    "latest_version": info.get("latest")
                 })
-            except Exception:
-                return json.dumps({
-                    "language": "javascript",
-                    "message": "No outdated packages found or npm not available"
-                })
+            grouped = _group_versions(items, "name", "version", "latest_version")
+            return json.dumps({
+                "language": "javascript",
+                "updates": grouped,
+                "count": sum(len(v) for v in grouped.values())
+            }, indent=2)
 
         return json.dumps({"error": f"Language '{language}' not supported"})
 
@@ -185,84 +180,106 @@ def update_dependencies(language: str = "auto", major: bool = False) -> str:
         return json.dumps({"error": f"Update check failed: {type(e).__name__}: {e}"})
 
 
-def scan_dependencies_vulnerabilities(language: str = "auto") -> str:
-    """Scan dependencies for known vulnerabilities.
-
-    Args:
-        language: Language/ecosystem (python, javascript, auto)
-
-    Returns:
-        JSON string with vulnerability report
-    """
+def check_dependency_vulnerabilities(language: str = "auto") -> str:
+    """Scan dependencies for known vulnerabilities using pip-audit or npm audit."""
     try:
         if language == "auto":
-            if (ROOT / "requirements.txt").exists():
+            if (ROOT / "requirements.txt").exists() or (ROOT / "pyproject.toml").exists():
                 language = "python"
             elif (ROOT / "package.json").exists():
                 language = "javascript"
 
-        result: Dict[str, Any] = {
-            "language": language,
-            "vulnerabilities": [],
-            "tool": ""
-        }
-
         if language == "python":
-            # Try safety first
-            cmd = "safety check --json --file requirements.txt"
-            proc = _run_shell(cmd, timeout=60)
+            cmd = "pip-audit -f json"
+            if (ROOT / "requirements.txt").exists():
+                cmd = "pip-audit -r requirements.txt -f json"
 
-            if proc.returncode == 0 or proc.stdout:
-                try:
-                    safety_data = json.loads(proc.stdout) if proc.stdout else []
-                    result["tool"] = "safety"
-                    result["vulnerabilities"] = safety_data
-                    result["count"] = len(safety_data)
-                    return json.dumps(result)
-                except Exception:
-                    pass
+            proc = _run_shell(cmd, timeout=180)
+            if proc.returncode == 127:
+                return json.dumps({"error": "pip-audit not installed", "install": "pip install pip-audit"})
 
-            # Try pip-audit as fallback
-            cmd = "pip-audit --format json"
-            proc = _run_shell(cmd, timeout=60)
-
-            if proc.returncode == 0 or proc.stdout:
-                try:
-                    audit_data = json.loads(proc.stdout) if proc.stdout else {"dependencies": []}
-                    result["tool"] = "pip-audit"
-                    result["vulnerabilities"] = audit_data.get("dependencies", [])
-                    result["count"] = len(audit_data.get("dependencies", []))
-                    return json.dumps(result)
-                except Exception:
-                    pass
+            findings = json.loads(proc.stdout) if proc.stdout else []
+            issues = []
+            for f in findings:
+                dep = f.get("dependency", {})
+                for vuln in f.get("vulns", []):
+                    issues.append({
+                        "package": dep.get("name"),
+                        "version": dep.get("version"),
+                        "severity": vuln.get("severity") or vuln.get("severity_source"),
+                        "cves": vuln.get("id"),
+                        "fixed_version": (vuln.get("fix_versions") or [None])[0],
+                        "description": vuln.get("description", "")[:500]
+                    })
 
             return json.dumps({
-                "error": "No security scanning tool available",
-                "message": "Install safety or pip-audit: pip install safety pip-audit"
-            })
+                "language": "python",
+                "issues": issues,
+                "tool": "pip-audit",
+                "count": len(issues)
+            }, indent=2)
 
-        elif language == "javascript":
-            # Use npm audit
-            cmd = "npm audit --json"
-            proc = _run_shell(cmd, timeout=60)
+        if language == "javascript":
+            proc = _run_shell("npm audit --json", timeout=180)
+            if proc.returncode == 127:
+                return json.dumps({"error": "npm audit not available"})
 
-            try:
-                audit_data = json.loads(proc.stdout) if proc.stdout else {}
-                vulnerabilities = audit_data.get("vulnerabilities", {})
-
-                result["tool"] = "npm audit"
-                result["vulnerabilities"] = vulnerabilities
-                result["count"] = len(vulnerabilities)
-                result["summary"] = audit_data.get("metadata", {})
-
-                return json.dumps(result)
-            except Exception:
-                return json.dumps({
-                    "language": "javascript",
-                    "message": "npm audit not available or no vulnerabilities found"
+            audit = json.loads(proc.stdout) if proc.stdout else {}
+            issues = []
+            for advisory in audit.get("advisories", {}).values():
+                issues.append({
+                    "package": advisory.get("module_name"),
+                    "version": advisory.get("findings", [{}])[0].get("version"),
+                    "severity": advisory.get("severity"),
+                    "cves": advisory.get("cves"),
+                    "fixed_version": advisory.get("patched_versions"),
+                    "description": advisory.get("title", "")
                 })
+            return json.dumps({
+                "language": "javascript",
+                "issues": issues,
+                "tool": "npm audit",
+                "count": len(issues)
+            }, indent=2)
 
         return json.dumps({"error": f"Language '{language}' not supported"})
 
     except Exception as e:
-        return json.dumps({"error": f"Vulnerability scan failed: {type(e).__name__}: {e}"})
+        return json.dumps({"error": f"Dependency vulnerability scan failed: {type(e).__name__}: {e}"})
+
+
+def _group_versions(items: List[Dict[str, Any]], name_key: str, current_key: str, latest_key: str) -> Dict[str, List[Dict[str, Any]]]:
+    groups = {"breaking": [], "minor": [], "patch": []}
+    for item in items:
+        name = item.get(name_key)
+        current = item.get(current_key)
+        latest = item.get(latest_key)
+        if not Version:
+            groups["patch"].append({"package": name, "current": current, "latest": latest})
+            continue
+        try:
+            cur_v = Version(str(current))
+            lat_v = Version(str(latest))
+        except (InvalidVersion, TypeError):
+            groups["patch"].append({"package": name, "current": current, "latest": latest})
+            continue
+
+        bucket = "patch"
+        if lat_v.major > cur_v.major:
+            bucket = "breaking"
+        elif lat_v.minor > cur_v.minor:
+            bucket = "minor"
+
+        groups[bucket].append({"package": name, "current": current, "latest": latest})
+    return groups
+
+
+# Backward-compatible wrappers
+def update_dependencies(language: str = "auto", major: bool = False) -> str:
+    """Legacy wrapper for check_dependency_updates."""
+    return check_dependency_updates(language)
+
+
+def scan_dependencies_vulnerabilities(language: str = "auto") -> str:
+    """Legacy wrapper for check_dependency_vulnerabilities."""
+    return check_dependency_vulnerabilities(language)

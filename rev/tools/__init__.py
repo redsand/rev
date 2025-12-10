@@ -52,17 +52,42 @@ from rev.tools.conversion import (
 # Dependency management
 from rev.tools.dependencies import (
     analyze_dependencies,
+    check_dependency_updates,
+    check_dependency_vulnerabilities,
     update_dependencies,
     scan_dependencies_vulnerabilities,
 )
 
 # Security tools
 from rev.tools.security import (
-    scan_code_security,
+    scan_security_issues,
     detect_secrets,
     check_license_compliance,
 )
 
+# Linting and type checks
+from rev.tools.linting import (
+    run_linters,
+    run_type_checks,
+)
+
+# Test quality tools
+from rev.tools.test_quality import (
+    run_property_tests,
+    generate_property_tests,
+    check_contracts,
+    detect_flaky_tests,
+    compare_behavior_with_baseline,
+)
+from rev.tools.runtime_analysis import (
+    analyze_runtime_logs,
+    analyze_performance_regression,
+    analyze_error_traces,
+)
+from rev.tools.config_checks import (
+    validate_ci_config,
+    verify_migrations,
+)
 # SSH operations
 from rev.tools.ssh_ops import (
     ssh_connect,
@@ -133,12 +158,30 @@ __all__ = [
     "convert_env_to_json",
     # Dependency management
     "analyze_dependencies",
+    "check_dependency_updates",
+    "check_dependency_vulnerabilities",
     "update_dependencies",
     "scan_dependencies_vulnerabilities",
     # Security tools
-    "scan_code_security",
+    "scan_security_issues",
     "detect_secrets",
     "check_license_compliance",
+    # Linting and type checks
+    "run_linters",
+    "run_type_checks",
+    # Test quality tools
+    "run_property_tests",
+    "generate_property_tests",
+    "check_contracts",
+    "detect_flaky_tests",
+    "compare_behavior_with_baseline",
+    # Runtime analysis
+    "analyze_runtime_logs",
+    "analyze_performance_regression",
+    "analyze_error_traces",
+    # Config / migrations
+    "validate_ci_config",
+    "verify_migrations",
     # SSH operations
     "ssh_connect",
     "ssh_exec",
