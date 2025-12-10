@@ -19,8 +19,13 @@ from rev.debug_logger import get_logger
 # Debug mode - set to True to see API requests/responses
 OLLAMA_DEBUG = os.getenv("OLLAMA_DEBUG", "0") == "1"
 
-# Simple heuristic: average of ~4 characters per token for planning-sized prompts
-_CHARS_PER_TOKEN_ESTIMATE = 4
+# Simple heuristic: average of ~3 characters per token for planning-sized prompts
+# (intentionally conservative to avoid exceeding provider limits)
+_CHARS_PER_TOKEN_ESTIMATE = 3
+
+# Keep requests well below the provider cap to avoid hard failures when the
+# heuristic underestimates token usage.
+_TOKEN_BUDGET_MULTIPLIER = 0.7
 
 # Retry configuration (can be overridden via environment variables)
 def _get_retry_config():
@@ -105,11 +110,16 @@ def _enforce_token_limit(messages: List[Dict[str, Any]], max_tokens: int) -> Tup
     and whether any truncation occurred.
     """
 
+    # Add a generous safety margin because the character-per-token heuristic can
+    # underestimate usage for shorter tokens. This keeps us well below the
+    # provider's hard cap and prevents request failures before they happen.
+    effective_max_tokens = int(max_tokens * _TOKEN_BUDGET_MULTIPLIER)
+
     if max_tokens <= 0:
         return [], 0, 0, True
 
     original_tokens = sum(_estimate_message_tokens(m) for m in messages)
-    if original_tokens <= max_tokens:
+    if original_tokens <= effective_max_tokens:
         return messages, original_tokens, original_tokens, False
 
     # Always keep system messages first to preserve instructions
@@ -117,17 +127,26 @@ def _enforce_token_limit(messages: List[Dict[str, Any]], max_tokens: int) -> Tup
     other_messages = [m for m in messages if m.get("role") != "system"]
 
     truncated_messages: List[Dict[str, Any]] = []
-    remaining_tokens = max_tokens
+    token_tally = 0
     truncated = False
+
+    # Reserve a small slice of the budget for the most recent non-system
+    # messages so we never lose the user's latest intent entirely.
+    reserved_recent = max(1, effective_max_tokens // 10)
+    system_budget = max(0, effective_max_tokens - reserved_recent)
+    remaining_tokens = system_budget
 
     # Add system messages in order, truncating if needed
     for msg in system_messages:
         msg_tokens = _estimate_message_tokens(msg)
-        if msg_tokens > remaining_tokens:
-            msg, msg_tokens = _truncate_message_content(msg, remaining_tokens)
+        allowed_tokens = max(0, system_budget - token_tally)
+        if msg_tokens > allowed_tokens:
+            msg, msg_tokens = _truncate_message_content(msg, allowed_tokens)
             truncated = True
+            msg_tokens = min(msg_tokens, allowed_tokens)
         truncated_messages.append(msg)
-        remaining_tokens = max(0, remaining_tokens - msg_tokens)
+        token_tally += msg_tokens
+        remaining_tokens = max(0, effective_max_tokens - token_tally)
 
     # Add most recent non-system messages until budget is exhausted
     preserved: List[Dict[str, Any]] = []
@@ -140,13 +159,15 @@ def _enforce_token_limit(messages: List[Dict[str, Any]], max_tokens: int) -> Tup
         if msg_tokens > remaining_tokens:
             msg, msg_tokens = _truncate_message_content(msg, remaining_tokens)
             truncated = True
+            msg_tokens = min(msg_tokens, remaining_tokens)
         preserved.append(msg)
+        token_tally += msg_tokens
         remaining_tokens = max(0, remaining_tokens - msg_tokens)
 
     preserved.reverse()
     truncated_messages.extend(preserved)
 
-    trimmed_tokens = sum(_estimate_message_tokens(m) for m in truncated_messages)
+    trimmed_tokens = token_tally
     return truncated_messages, original_tokens, trimmed_tokens, truncated
 
 

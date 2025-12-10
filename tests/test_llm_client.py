@@ -22,7 +22,7 @@ def _make_response(status_code, payload=None, text="", reason="Server Error"):
 
 
 def test_enforce_token_limit_truncates_and_preserves_system_message():
-    # 200 characters is roughly 50 tokens with the 4 chars/token heuristic
+    # 200 characters is roughly 67 tokens with the 3 chars/token heuristic
     system_message = {"role": "system", "content": "s" * 200}
     user_message = {"role": "user", "content": "u" * 200}
     assistant_message = {"role": "assistant", "content": "a" * 200}
@@ -37,7 +37,7 @@ def test_enforce_token_limit_truncates_and_preserves_system_message():
     assert trimmed[0]["role"] == "system"
     assert len(trimmed) == 2  # System + most recent non-system message
     assert "truncated to fit token limit" in trimmed[1]["content"]
-    assert trimmed_tokens <= 60
+    assert trimmed_tokens <= int(60 * client._TOKEN_BUDGET_MULTIPLIER)
 
 
 def test_enforce_token_limit_keeps_messages_when_under_budget():
