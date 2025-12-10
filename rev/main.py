@@ -429,7 +429,16 @@ def main():
                     print("\n✅ Validation passed successfully.")
 
     except KeyboardInterrupt:
+        # Log the interrupt event
         debug_logger.log("main", "USER_INTERRUPT", {}, "WARNING")
+        # Attempt to persist state if a plan has been created
+        try:
+            from .execution.state_manager import StateManager
+            current_plan = locals().get("plan") or globals().get("plan")
+            if current_plan is not None:
+                StateManager(current_plan).on_interrupt()
+        except Exception as exc:  # pragma: no cover – ensure interrupt handling never fails
+            print(f"⚠️  Warning: could not save checkpoint on interrupt ({exc})")
         print("\n\nAborted by user")
         sys.exit(1)
     except Exception as e:
