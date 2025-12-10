@@ -780,7 +780,7 @@ def concurrent_execution_mode(
 
     Args:
         plan: ExecutionPlan with tasks to execute
-        max_workers: Maximum number of concurrent tasks (default: 2)
+        max_workers: Maximum number of concurrent tasks (default: 2, must be > 0)
         auto_approve: If True (default), runs autonomously without initial approval
         tools: List of available tools for LLM function calling (optional)
         enable_action_review: If True, review each action before execution (default: False)
@@ -789,6 +789,10 @@ def concurrent_execution_mode(
     Returns:
         True if all tasks completed successfully, False otherwise
     """
+    # Validate max_workers parameter
+    if max_workers <= 0:
+        raise ValueError(f"max_workers must be greater than 0, got {max_workers}")
+
     print("\n" + "=" * 60)
     print("CONCURRENT EXECUTION MODE")
     print("=" * 60)

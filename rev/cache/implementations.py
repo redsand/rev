@@ -32,11 +32,12 @@ class FileContentCache(IntelligentCache):
         if cached is not None:
             return cached
 
-        # Invalidate any old versions of this file
+        # Invalidate any old versions of this file (thread-safe)
         old_prefix = f"{file_path}:"
-        to_invalidate = [k for k in self._cache.keys() if k.startswith(old_prefix)]
-        for key in to_invalidate:
-            self.invalidate(key)
+        with self._lock:
+            to_invalidate = [k for k in self._cache.keys() if k.startswith(old_prefix)]
+            for key in to_invalidate:
+                self.invalidate(key)
 
         return None
 
@@ -61,6 +62,7 @@ class LLMResponseCache(IntelligentCache):
         super().__init__(name="llm_response", ttl=3600, **kwargs)  # 1 hour TTL
         self._tools_hash_cache = {}  # Cache for tools hash by object id
         self._lock = threading.Lock()  # Thread safety for concurrent access
+        self._tools_cache_max_size = 1000  # Limit cache growth to prevent memory leak
 
     def _hash_tools(self, tools: Optional[List[Dict]]) -> str:
         """Hash tools list with caching to avoid repeated JSON serialization.
@@ -81,7 +83,13 @@ class LLMResponseCache(IntelligentCache):
             if tools_id not in self._tools_hash_cache:
                 # Only serialize and hash if not cached
                 tools_json = json.dumps(tools, sort_keys=True)
-                self._tools_hash_cache[tools_id] = hashlib.sha256(tools_json.encode()).hexdigest()[:16]
+                tool_hash = hashlib.sha256(tools_json.encode()).hexdigest()[:16]
+
+                # Prevent unbounded growth - clear cache if it gets too large
+                if len(self._tools_hash_cache) >= self._tools_cache_max_size:
+                    self._tools_hash_cache.clear()
+
+                self._tools_hash_cache[tools_id] = tool_hash
 
             return self._tools_hash_cache[tools_id]
 
@@ -152,8 +160,8 @@ class RepoContextCache(IntelligentCache):
                 cwd=self.root
             )
             head_commit = proc.stdout.strip() if proc.returncode == 0 else "no-git"
-        except:
-            head_commit = "no-git"
+        except Exception:
+            head_commit = "no-git"  # Git not available or subprocess error
 
         cache_key = f"context:{head_commit}"
         return self.get(cache_key)
@@ -169,8 +177,8 @@ class RepoContextCache(IntelligentCache):
                 cwd=self.root
             )
             head_commit = proc.stdout.strip() if proc.returncode == 0 else "no-git"
-        except:
-            head_commit = "no-git"
+        except Exception:
+            head_commit = "no-git"  # Git not available or subprocess error
 
         cache_key = f"context:{head_commit}"
         self.set(cache_key, context, metadata={"commit": head_commit})

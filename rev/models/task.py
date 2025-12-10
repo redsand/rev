@@ -600,7 +600,7 @@ class ExecutionPlan:
                         "tasks_total": len(data["plan"]["tasks"]),
                         "summary": data["plan"].get("summary", "")
                     })
-                except:
-                    pass
+                except Exception:
+                    pass  # Skip malformed checkpoint files
 
         return checkpoints

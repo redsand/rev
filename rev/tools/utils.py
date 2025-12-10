@@ -114,7 +114,10 @@ def web_fetch(url: str) -> str:
 
 
 def execute_python(code: str) -> str:
-    """Execute Python code in a safe context.
+    """Execute Python code in a restricted context.
+
+    SECURITY WARNING: This function provides limited sandboxing and should only be used
+    with trusted code. The restricted namespace limits but does not eliminate security risks.
 
     Args:
         code: Python code to execute
@@ -126,13 +129,26 @@ def execute_python(code: str) -> str:
         import io
         import contextlib
 
-        # Create a restricted namespace
+        # Create a restricted namespace (limited builtins, safe modules only)
+        # WARNING: This is NOT a complete sandbox - use with caution
+        safe_builtins = {
+            'abs': abs, 'all': all, 'any': any, 'bin': bin, 'bool': bool,
+            'chr': chr, 'dict': dict, 'enumerate': enumerate, 'filter': filter,
+            'float': float, 'format': format, 'hex': hex, 'int': int,
+            'isinstance': isinstance, 'len': len, 'list': list, 'map': map,
+            'max': max, 'min': min, 'oct': oct, 'ord': ord, 'pow': pow,
+            'print': print, 'range': range, 'reversed': reversed, 'round': round,
+            'set': set, 'sorted': sorted, 'str': str, 'sum': sum, 'tuple': tuple,
+            'type': type, 'zip': zip,
+            # Allow limited exceptions
+            'Exception': Exception, 'ValueError': ValueError, 'TypeError': TypeError,
+        }
+
         namespace = {
-            '__builtins__': __builtins__,
+            '__builtins__': safe_builtins,
             'json': json,
-            'os': os,
             're': re,
-            'pathlib': pathlib
+            # DO NOT include 'os' or 'pathlib' - filesystem access removed
         }
 
         # Capture output

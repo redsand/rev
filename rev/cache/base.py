@@ -77,8 +77,8 @@ class IntelligentCache:
                 return len(json.dumps(value).encode('utf-8'))
             else:
                 return len(pickle.dumps(value))
-        except:
-            return 0
+        except Exception:
+            return 0  # Return 0 on serialization error (but allow KeyboardInterrupt)
 
     def _is_expired(self, entry: CacheEntry) -> bool:
         """Check if cache entry is expired."""
