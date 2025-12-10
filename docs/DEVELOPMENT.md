@@ -67,7 +67,7 @@ rev/
 ```
 ┌─────────────────────────────────────────────────┐
 │  1. Default Configuration (config.py:20-21)    │
-│     OLLAMA_MODEL = "codellama:latest"          │
+│     OLLAMA_MODEL = "gpt-oss:120b-cloud"          │
 │     OLLAMA_BASE_URL = "http://localhost:11434"│
 └────────────────────┬────────────────────────────┘
                      │
@@ -103,7 +103,7 @@ Python imports create **copies** of variables at import time. If you import a va
 from rev.config import OLLAMA_MODEL  # Captures default value at import
 
 # Later, even though main.py updates config.OLLAMA_MODEL,
-# this module still uses the old value "codellama:latest"
+# this module still uses the old value "gpt-oss:120b-cloud"
 payload = {"model": OLLAMA_MODEL}  # Always uses default!
 ```
 
@@ -214,7 +214,7 @@ curl http://localhost:11434/api/version
 ollama list
 
 # Pull a model if needed
-ollama pull codellama:latest
+ollama pull gpt-oss:120b-cloud
 ```
 
 ### 2. Model Parameter Not Honored
@@ -225,7 +225,7 @@ ollama pull codellama:latest
 ```bash
 rev --model qwen3-coder:480b-cloud "task"
 # Shows: Model: qwen3-coder:480b-cloud
-# But actually uses: codellama:latest
+# But actually uses: gpt-oss:120b-cloud
 ```
 
 **Root Cause:**
@@ -294,7 +294,7 @@ Model doesn't support function/tool calling.
 - Graceful degradation for older models
 
 **Models Without Tool Support:**
-- `codellama:latest` (7B, 13B, 34B)
+- `gpt-oss:120b-cloud` (7B, 13B, 34B)
 - `deepseek-coder:*` (some versions)
 - Legacy models
 
@@ -371,7 +371,7 @@ from rev.llm.client import ollama_chat
 class TestModelParameter:
     def test_default_model(self):
         """Test default model configuration"""
-        assert config.OLLAMA_MODEL == "codellama:latest"
+        assert config.OLLAMA_MODEL == "gpt-oss:120b-cloud"
 
     def test_model_override(self):
         """Test model can be changed at runtime"""
@@ -689,7 +689,7 @@ Changed from direct import to module import:
 
 **Verification:**
 ```bash
-# Before fix: Always used codellama:latest
+# Before fix: Always used gpt-oss:120b-cloud
 # After fix: Uses specified model
 rev --model qwen3-coder:480b-cloud "test"
 ```

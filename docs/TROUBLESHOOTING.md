@@ -12,7 +12,7 @@ curl http://localhost:11434/api/version
 ollama list
 
 # 3. Test rev with debug mode
-OLLAMA_DEBUG=1 rev --model codellama:latest "test task"
+OLLAMA_DEBUG=1 rev --model gpt-oss:120b-cloud "test task"
 
 # 4. Check Ollama logs (if running as service)
 # macOS:
@@ -104,7 +104,7 @@ ollama list
 
 # Expected output:
 # NAME                     ID              SIZE
-# codellama:latest         123abc...       3.8GB
+# gpt-oss:120b-cloud         123abc...       3.8GB
 # llama3.1:latest         456def...       4.7GB
 ```
 
@@ -135,7 +135,7 @@ If using a local model (not `-cloud` suffix):
 ```bash
 # Pull the model
 ollama pull qwen3-coder:latest
-ollama pull codellama:latest
+ollama pull gpt-oss:120b-cloud
 ollama pull llama3.1:70b
 
 # Verify it's available
@@ -348,7 +348,7 @@ rev --model qwen3-coder:480b-cloud "complex task"
 ```bash
 rev --model qwen3-coder:480b-cloud "task"
 # Shows: Model: qwen3-coder:480b-cloud
-# But actually uses: codellama:latest (wrong!)
+# But actually uses: gpt-oss:120b-cloud (wrong!)
 ```
 
 **Status:** **FIXED** in commit `3088c5d` (Nov 21, 2024)
@@ -395,7 +395,7 @@ from rev.config import OLLAMA_MODEL  # WRONG
 ```bash
 # Test exact endpoint rev uses
 curl -X POST http://localhost:11434/api/chat \
-  -d '{"model":"codellama:latest","messages":[{"role":"user","content":"test"}],"stream":false}'
+  -d '{"model":"gpt-oss:120b-cloud","messages":[{"role":"user","content":"test"}],"stream":false}'
 
 # Should return JSON response
 ```
@@ -515,7 +515,7 @@ rev --model qwen3-coder:480b-cloud "task"
 ```bash
 # Ollama Configuration
 export OLLAMA_BASE_URL="http://localhost:11434"  # Default
-export OLLAMA_MODEL="codellama:latest"           # Default
+export OLLAMA_MODEL="gpt-oss:120b-cloud"           # Default
 
 # Debug Mode
 export OLLAMA_DEBUG=1  # Enable verbose logging
@@ -589,7 +589,7 @@ OLLAMA_DEBUG=1 rev --model YOUR_MODEL "test task" 2>&1 | tee debug.log
 ### 4. Test Ollama Directly
 ```bash
 # Test without rev
-ollama run codellama:latest "Write a hello world function"
+ollama run gpt-oss:120b-cloud "Write a hello world function"
 
 # If this works but rev doesn't:
 # - Check rev configuration
@@ -625,7 +625,7 @@ ollama pull llama3.1:latest
 ollama serve
 
 # Test rev with debug
-OLLAMA_DEBUG=1 rev --model codellama:latest "test"
+OLLAMA_DEBUG=1 rev --model gpt-oss:120b-cloud "test"
 
 # Use custom Ollama URL
 rev --base-url http://remote:11434 "task"

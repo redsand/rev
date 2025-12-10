@@ -111,7 +111,7 @@ tests/
 ```python
 ROOT = pathlib.Path(os.getcwd()).resolve()  # Repository root
 OLLAMA_BASE_URL = "http://localhost:11434"   # Ollama API endpoint
-OLLAMA_MODEL = "codellama:latest"            # Default model
+OLLAMA_MODEL = "gpt-oss:120b-cloud"            # Default model
 MAX_FILE_BYTES = 5 MB                        # File size limit
 READ_RETURN_LIMIT = 80,000                   # Max characters returned
 SEARCH_MATCH_LIMIT = 2000                    # Max search results

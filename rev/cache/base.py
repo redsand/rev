@@ -51,7 +51,8 @@ class IntelligentCache:
 
         # OrderedDict for LRU tracking
         self._cache: OrderedDict[str, CacheEntry] = OrderedDict()
-        self._lock = threading.Lock()
+        # Use a re-entrant lock to allow nested locking (e.g., invalidate called from within other methods that already hold the lock). This prevents deadlocks when `invalidate` acquires the lock while another method such as `get_file` has already entered a `with self._lock:` block.
+        self._lock = threading.RLock()
 
         # Statistics
         self.stats = {

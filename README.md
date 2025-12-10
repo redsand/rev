@@ -248,7 +248,7 @@ ollama pull qwen2.5:7b              # Good for code (tool support)
 ollama pull mistral-nemo:latest     # Fast with tools
 
 # Legacy (no tool support - limited functionality)
-ollama pull codellama:latest        # ⚠️ No tool support
+ollama pull gpt-oss:120b-cloud        # ⚠️ No tool support
 ollama pull deepseek-coder:latest   # ⚠️ Check version for tool support
 ```
 
@@ -430,7 +430,7 @@ Even in autonomous mode, the agent will **always prompt** for potentially destru
 ```bash
 # Ollama configuration
 export OLLAMA_BASE_URL="http://localhost:11434"  # Default
-export OLLAMA_MODEL="codellama:latest"           # Default
+export OLLAMA_MODEL="gpt-oss:120b-cloud"           # Default
 
 # Then run agent
 rev "Your task here"
@@ -443,7 +443,7 @@ rev [OPTIONS] "task description"
 
 Options:
   --repl                       Interactive REPL mode
-  --model MODEL                Ollama model to use (default: codellama:latest)
+  --model MODEL                Ollama model to use (default: gpt-oss:120b-cloud)
   --base-url URL               Ollama API URL (default: http://localhost:11434)
   --prompt                     Prompt for approval before execution (default: auto-approve)
   -j N, --parallel N           Number of concurrent tasks (default: 2, use 1 for sequential)
@@ -688,7 +688,7 @@ ollama serve
 Pull the model first:
 
 ```bash
-ollama pull codellama:latest
+ollama pull gpt-oss:120b-cloud
 ```
 
 ### "401 Unauthorized" for Cloud Models
@@ -1311,7 +1311,7 @@ The agent detects test frameworks automatically, but you can customize:
 
 ```bash
 # For Python projects
-rev "Fix failing tests" --model codellama:latest
+rev "Fix failing tests" --model gpt-oss:120b-cloud
 
 # For Node.js projects
 rev "Add tests for new API endpoints"
