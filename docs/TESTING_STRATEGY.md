@@ -57,16 +57,9 @@ This guide provides comprehensive information on testing strategy, how to write 
 
 ```
 tests/
-└── test_agent_min.py    # Main test file (136 tests)
-    ├── File Operations Tests (25 tests)
-    ├── Git Operations Tests (18 tests)
-    ├── Code Operations Tests (12 tests)
-    ├── Task Management Tests (15 tests)
-    ├── Execution Mode Tests (10 tests)
-    ├── Caching Tests (20 tests)
-    ├── CLI/REPL Tests (10 tests)
-    ├── Safety Tests (8 tests)
-    └── Utility Tests (18 tests)
+├── test_agent.py             # Agent behaviors and tooling
+├── test_advanced_planning.py # Planning, review, and execution flow
+└── ...                       # Additional integration and utility coverage
 ```
 
 ### Test Naming Convention
@@ -209,10 +202,10 @@ def test_plan_completion(sample_execution_plan):
 
 ```bash
 # Run the new test
-pytest tests/test_agent_min.py::test_example_function -v
+pytest tests/test_agent.py::test_example_function -v
 
 # Check coverage
-pytest tests/test_agent_min.py::test_example_function --cov=rev --cov-report=term-missing
+pytest tests/test_agent.py::test_example_function --cov=rev --cov-report=term-missing
 ```
 
 ## Test Categories
@@ -788,10 +781,10 @@ def test_error_path_none_input():
 pytest tests/
 
 # Run specific test file
-pytest tests/test_agent_min.py
+pytest tests/test_agent.py
 
 # Run specific test
-pytest tests/test_agent_min.py::test_read_file_returns_content
+pytest tests/test_agent.py::test_read_file_returns_content
 
 # Run tests matching pattern
 pytest tests/ -k "file_operations"

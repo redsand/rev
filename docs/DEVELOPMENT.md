@@ -473,10 +473,10 @@ def test_llm_cache_hit():
 **Timeout Handling:**
 ```python
 def test_retry_timeout_progression():
-    """Timeouts should increase: 10m, 20m, 30m"""
-    # Mock timeout on attempts 1, 2
-    # Verify timeout values increase
-    # Verify max 3 attempts
+    """Timeouts should increase: 10m, 20m, 30m while honoring extra retries"""
+    # Mock timeout on early attempts
+    # Verify timeout values are capped at 30m even when OLLAMA_MAX_RETRIES is higher
+    # Verify retries keep going with backoff until the cap is reached
 ```
 
 ### Test Data Requirements

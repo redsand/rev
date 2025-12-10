@@ -6,17 +6,27 @@ import os
 import json
 import signal
 import threading
+import time
 from typing import Dict, Any, List, Optional
 
 import requests
 
 from rev import config
-from rev.cache import get_llm_cache
+from rev.cache import LLMResponseCache, get_llm_cache
 from rev.debug_logger import get_logger
 
 
 # Debug mode - set to True to see API requests/responses
 OLLAMA_DEBUG = os.getenv("OLLAMA_DEBUG", "0") == "1"
+
+# Retry configuration (can be overridden via environment variables)
+def _get_retry_config():
+    """Get retry/backoff configuration from environment variables."""
+    max_retries = max(1, int(os.getenv("OLLAMA_MAX_RETRIES", "6")))
+    backoff_seconds = max(0.0, float(os.getenv("OLLAMA_RETRY_BACKOFF_SECONDS", "2.0")))
+    max_backoff_seconds = max(0.0, float(os.getenv("OLLAMA_RETRY_BACKOFF_MAX_SECONDS", "30.0")))
+    timeout_multiplier_cap = max(1, int(os.getenv("OLLAMA_TIMEOUT_MAX_MULTIPLIER", "3")))
+    return max_retries, backoff_seconds, max_backoff_seconds, timeout_multiplier_cap
 
 
 # Global flag for interrupt handling
@@ -89,7 +99,7 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
     _interrupt_requested.clear()
 
     # Get the LLM cache
-    llm_cache = get_llm_cache()
+    llm_cache = get_llm_cache() or LLMResponseCache()
 
     # Try to get cached response first (include model in cache key)
     cached_response = llm_cache.get_response(messages, tools, config.OLLAMA_MODEL)
@@ -136,15 +146,29 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
         if tools:
             print(f"[DEBUG] Tools: {len(tools)} tools provided")
 
-    # Retry with increasing timeouts: 10m, 20m, 30m
-    max_retries = 3
+    # Retry with configurable limits and backoff
+    max_retries, retry_backoff, max_backoff, timeout_cap = _get_retry_config()
     base_timeout = 600  # 10 minutes
 
     # Track if we've already prompted for auth in this call
     auth_prompted = False
 
+    def _sleep_before_retry(reason: str):
+        """Sleep with capped backoff before a retry attempt."""
+        delay = min(max_backoff, retry_backoff * (attempt + 1))
+        if delay > 0:
+            debug_logger.log("llm", "LLM_RETRY_DELAY", {
+                "reason": reason,
+                "attempt": attempt + 1,
+                "delay_seconds": delay,
+            }, "INFO")
+            if OLLAMA_DEBUG:
+                print(f"[DEBUG] Sleeping {delay}s before retry ({reason})...")
+            time.sleep(delay)
+        return delay
+
     for attempt in range(max_retries):
-        timeout = base_timeout * (attempt + 1)  # 600, 1200, 1800
+        timeout = base_timeout * min(attempt + 1, timeout_cap)  # 600, 1200, 1800 (capped)
 
         if attempt > 0:
             debug_logger.log("llm", "LLM_RETRY", {
@@ -251,6 +275,7 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
             if attempt < max_retries - 1:
                 if OLLAMA_DEBUG:
                     print(f"[DEBUG] Request timed out after {timeout}s, will retry with longer timeout...")
+                _sleep_before_retry("timeout")
                 continue  # Retry with longer timeout
             else:
                 error_msg = f"Ollama API timeout after {max_retries} attempts (final timeout: {timeout}s)"
@@ -277,6 +302,7 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
             if 'resp' in locals() and resp.status_code >= 500 and attempt < max_retries - 1:
                 if OLLAMA_DEBUG:
                     print(f"[DEBUG] HTTP {resp.status_code} error, will retry (attempt {attempt + 1}/{max_retries})...")
+                _sleep_before_retry("http_error")
                 continue
 
             # For non-retryable errors or final attempt, return the error
@@ -295,6 +321,7 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
             if attempt < max_retries - 1:
                 if OLLAMA_DEBUG:
                     print(f"[DEBUG] Request error: {e}, will retry (attempt {attempt + 1}/{max_retries})...")
+                _sleep_before_retry("request_exception")
                 continue
             return {"error": f"Ollama API error: {e}"}
 

@@ -57,7 +57,9 @@ rev/
 └── mcp.py               # Model Context Protocol integration
 
 tests/
-└── test_agent_min.py    # Comprehensive test suite (136 tests, 80% coverage)
+├── test_agent.py        # Core agent behaviors
+├── test_advanced_planning.py  # Planning/review/execution coverage
+└── ...                  # Additional integration and tool tests
 ```
 
 ## Core Components
@@ -479,12 +481,11 @@ Return success/failure
 
 ## Testing Infrastructure
 
-### Test Suite (`tests/test_agent_min.py`)
+### Test Suite (`tests/`)
 
 **Stats:**
-- **136 tests**
-- **80% code coverage**
-- **99% test code coverage** (tests are well-tested)
+- **Hundreds of tests** spanning unit, integration, and workflow coverage
+- **Cross-cutting coverage** of planning, review, and execution paths
 
 **Test Categories:**
 
@@ -539,7 +540,7 @@ Return success/failure
 
 ### Test Fixtures
 
-Common fixtures in `tests/test_agent_min.py`:
+Common fixtures in the test suite:
 
 - `@pytest.fixture tmp_path`: Temporary directory for file operations
 - Mock objects for Ollama API, git commands, SSH connections
@@ -549,16 +550,16 @@ Common fixtures in `tests/test_agent_min.py`:
 
 ```bash
 # Run all tests
-pytest tests/test_agent_min.py -v
+pytest tests -v
 
 # Run with coverage
-pytest tests/test_agent_min.py --cov=rev --cov-report=term-missing
+pytest tests --cov=rev --cov-report=term-missing
 
 # Run specific test category
-pytest tests/test_agent_min.py -k "test_file_operations" -v
+pytest tests -k "test_file_operations" -v
 
 # Generate HTML coverage report
-pytest tests/test_agent_min.py --cov=rev --cov-report=html
+pytest tests --cov=rev --cov-report=html
 ```
 
 ## Common Bug Patterns
@@ -656,7 +657,7 @@ ollama pull llama3.1:latest
    - Add docstrings to new functions
 
 3. **Write tests**:
-   - Add tests to `tests/test_agent_min.py`
+   - Add tests under `tests/`
    - Ensure tests cover new functionality
    - Run tests: `pytest tests/ -v`
 
@@ -703,7 +704,7 @@ ollama pull llama3.1:latest
 
 4. **Test in isolation**:
    ```bash
-   pytest tests/test_agent_min.py::test_specific_function -v -s
+   pytest tests/test_agent.py::test_specific_function -v -s
    ```
 
 5. **Add print debugging**:

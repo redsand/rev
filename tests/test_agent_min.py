@@ -29,52 +29,19 @@ from rev.config import ROOT
 from rev.models.task import Task, TaskStatus, ExecutionPlan
 from rev.tools.file_ops import _safe_path
 
-# Create agent_min module reference for backward compatibility with tests
-import types
-agent_min = types.ModuleType("agent_min")
-agent_min.ROOT = ROOT
-agent_min.Task = Task
-agent_min.TaskStatus = TaskStatus
-agent_min.ExecutionPlan = ExecutionPlan
-agent_min._safe_path = _safe_path
+"""Legacy compatibility shim that routes legacy agent_min-style imports to rev."""
 
-# Add common functions from rev package
-agent_min.read_file = rev.read_file
-agent_min.write_file = rev.write_file
-agent_min.list_dir = rev.list_dir
-agent_min.search_code = rev.search_code
-agent_min.git_diff = rev.git_diff
-agent_min.apply_patch = rev.apply_patch
-agent_min.get_repo_context = rev.get_repo_context
-agent_min.run_cmd = rev.run_cmd
-agent_min.run_tests = rev.run_tests
-agent_min.execute_tool = rev.execute_tool
-agent_min.git_commit = rev.git_commit
-agent_min.git_status = rev.git_status
-agent_min.git_log = rev.git_log
-agent_min.git_branch = rev.git_branch
-agent_min.delete_file = rev.delete_file
-agent_min.move_file = rev.move_file
-agent_min.append_to_file = rev.append_to_file
-agent_min.replace_in_file = rev.replace_in_file
-agent_min.create_directory = rev.create_directory
-agent_min.get_file_info = rev.get_file_info
-agent_min.copy_file = rev.copy_file
-agent_min.file_exists = rev.file_exists
-agent_min.read_file_lines = rev.read_file_lines
-agent_min.tree_view = rev.tree_view
-agent_min.install_package = rev.install_package
-agent_min.web_fetch = rev.web_fetch
-agent_min.execute_python = rev.execute_python
-agent_min.get_system_info = rev.get_system_info
-agent_min.mcp_add_server = rev.mcp_add_server
-agent_min.mcp_list_servers = rev.mcp_list_servers
-agent_min.mcp_call_tool = rev.mcp_call_tool
-
-# Add placeholder constants and modules
+agent_min = rev
 agent_min.MAX_FILE_BYTES = 10 * 1024 * 1024  # 10MB limit
+agent_min.TOOLS = []
+agent_min.ollama_chat = rev.llm.ollama_chat
 
-# Add module placeholders for features that may not be available
+from rev.execution import planner, executor  # noqa: E402
+
+agent_min.planning_mode = planner.planning_mode
+agent_min.execution_mode = executor.execution_mode
+
+# Optional third-party dependencies used in patches
 try:
     import requests
     agent_min.requests = requests
@@ -604,7 +571,7 @@ class TestPlanningMode:
         mock_context.return_value = json.dumps({
             "status": "clean",
             "log": "commit 1\ncommit 2",
-            "top_level": [{"name": "agent.py", "type": "file"}]
+            "top_level": [{"name": "rev", "type": "package"}]
         })
 
         # Mock Ollama response with valid plan
