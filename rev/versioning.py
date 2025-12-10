@@ -8,6 +8,8 @@ import re
 from pathlib import Path
 from typing import Dict, Optional
 
+from rev._version import REV_VERSION
+
 
 def _version_from_setup() -> Optional[str]:
     """Extract the package version from setup.py if available."""
@@ -24,11 +26,14 @@ def _version_from_setup() -> Optional[str]:
 
 
 def get_version() -> str:
-    """Return the package version, preferring setup.py for accuracy."""
+    """Return the package version using the single source of truth."""
 
     setup_version = _version_from_setup()
-    if setup_version:
+    if setup_version and setup_version != REV_VERSION:
         return setup_version
+
+    if REV_VERSION:
+        return REV_VERSION
 
     try:
         from importlib.metadata import version  # type: ignore

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Setup script for rev - CI/CD Agent powered by Ollama."""
 
-from setuptools import setup, find_packages
 from pathlib import Path
+from setuptools import find_packages, setup
+
+from rev._version import REV_VERSION
 
 # Read the README file
 readme_file = Path(__file__).parent / "README.md"
@@ -20,7 +22,7 @@ if requirements_file.exists():
 
 setup(
     name="rev-agentic",
-    version="2.0.1",
+    version=REV_VERSION,
     description="Rev - Autonomous AI Development System with Multi-Agent Orchestration",
     long_description=long_description,
     long_description_content_type="text/markdown",
