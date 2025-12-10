@@ -6,9 +6,13 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rev.execution.orchestrator import Orchestrator, OrchestratorConfig
+from rev.execution.orchestrator import AgentPhase, Orchestrator, OrchestratorConfig
 from rev.execution.reviewer import _quick_security_check
 from rev.models.task import ExecutionPlan, TaskStatus
+
+
+def _dummy_research(*_args, **_kwargs):
+    return type("RF", (), {"relevant_files": [], "estimated_complexity": "low", "warnings": []})()
 
 
 def test_mark_failed_advances_current_index():
@@ -46,7 +50,7 @@ def test_orchestrator_success_requires_all_tasks_complete(monkeypatch):
     import rev.execution.router as router_mod
 
     monkeypatch.setattr(router_mod, "TaskRouter", lambda: type("R", (), {"route": lambda self, *a, **k: type("Route", (), {"mode": "quick_edit", "reasoning": "", "enable_learning": False, "enable_research": False, "enable_review": False, "enable_validation": False, "review_strictness": "lenient", "parallel_workers": 1, "auto_approve": True, "enable_action_review": False, "enable_auto_fix": False, "research_depth": "shallow", "max_retries": 1})()})())
-    monkeypatch.setattr(orch_mod, "research_codebase", lambda *a, **k: None)
+    monkeypatch.setattr(orch_mod, "research_codebase", _dummy_research)
     monkeypatch.setattr(orch_mod, "review_execution_plan", lambda *a, **k: None)
     monkeypatch.setattr(orch_mod, "validate_execution", lambda *a, **k: type("VR", (), {"overall_status": None, "results": [], "auto_fixed": []})())
 
@@ -72,6 +76,144 @@ def test_orchestrator_success_requires_all_tasks_complete(monkeypatch):
     plan.tasks[1].status = TaskStatus.FAILED
     result = orch.execute("do things")
     assert result.success is False
+
+
+def test_orchestrator_reports_failure_phase(monkeypatch):
+    def failing_planning_mode(*_, **__):
+        raise RuntimeError("planning blew up")
+
+    import rev.execution.orchestrator as orch_mod
+
+    monkeypatch.setattr(orch_mod, "planning_mode", failing_planning_mode)
+    monkeypatch.setattr(orch_mod, "execution_mode", lambda *a, **k: None)
+    monkeypatch.setattr(orch_mod, "concurrent_execution_mode", lambda *a, **k: None)
+    monkeypatch.setattr(orch_mod, "research_codebase", _dummy_research)
+    monkeypatch.setattr(orch_mod, "review_execution_plan", lambda *a, **k: None)
+    monkeypatch.setattr(orch_mod, "validate_execution", lambda *a, **k: None)
+
+    import rev.execution.router as router_mod
+
+    monkeypatch.setattr(
+        router_mod,
+        "TaskRouter",
+        lambda: type(
+            "R",
+            (),
+            {
+                "route": lambda self, *a, **k: type(
+                    "Route",
+                    (),
+                    {
+                        "mode": "quick_edit",
+                        "reasoning": "",
+                        "enable_learning": False,
+                        "enable_research": False,
+                        "enable_review": False,
+                        "enable_validation": False,
+                        "review_strictness": "lenient",
+                        "parallel_workers": 1,
+                        "auto_approve": True,
+                        "enable_action_review": False,
+                        "enable_auto_fix": False,
+                        "research_depth": "shallow",
+                        "max_retries": 1,
+                    },
+                )()
+            },
+        )(),
+    )
+
+    config = OrchestratorConfig(
+        enable_learning=False,
+        enable_research=False,
+        enable_review=False,
+        enable_validation=False,
+        auto_approve=True,
+        parallel_workers=1,
+    )
+
+    orch = Orchestrator(Path("."), config)
+    result = orch.execute("do things")
+
+    assert result.phase_reached == AgentPhase.PLANNING
+    assert result.success is False
+    assert any("planning blew up" in err for err in result.errors)
+
+
+def test_orchestrator_retries_failed_attempts(monkeypatch):
+    plan = ExecutionPlan()
+    plan.add_task("first")
+    plan.add_task("second")
+
+    call_counter = {"planning": 0}
+
+    def flaky_planning_mode(user_request, coding_mode=False):
+        call_counter["planning"] += 1
+        if call_counter["planning"] == 1:
+            raise RuntimeError("first failure")
+        return plan
+
+    def completing_execution_mode(plan_obj, **kwargs):
+        for task in plan_obj.tasks:
+            task.status = TaskStatus.COMPLETED
+
+    import rev.execution.orchestrator as orch_mod
+
+    monkeypatch.setattr(orch_mod, "planning_mode", flaky_planning_mode)
+    monkeypatch.setattr(orch_mod, "execution_mode", completing_execution_mode)
+    monkeypatch.setattr(orch_mod, "concurrent_execution_mode", completing_execution_mode)
+    monkeypatch.setattr(orch_mod, "research_codebase", _dummy_research)
+    monkeypatch.setattr(orch_mod, "review_execution_plan", lambda *a, **k: type("RR", (), {"decision": None})())
+    monkeypatch.setattr(orch_mod, "validate_execution", lambda *a, **k: type("VR", (), {"overall_status": None, "results": [], "auto_fixed": []})())
+
+    import rev.execution.router as router_mod
+
+    monkeypatch.setattr(
+        router_mod,
+        "TaskRouter",
+        lambda: type(
+            "R",
+            (),
+            {
+                "route": lambda self, *a, **k: type(
+                    "Route",
+                    (),
+                    {
+                        "mode": "quick_edit",
+                        "reasoning": "",
+                        "enable_learning": False,
+                        "enable_research": False,
+                        "enable_review": False,
+                        "enable_validation": False,
+                        "review_strictness": "lenient",
+                        "parallel_workers": 1,
+                        "auto_approve": True,
+                        "enable_action_review": False,
+                        "enable_auto_fix": False,
+                        "research_depth": "deep",
+                        "max_retries": 1,
+                    },
+                )()
+            },
+        )(),
+    )
+
+    config = OrchestratorConfig(
+        enable_learning=False,
+        enable_research=False,
+        enable_review=False,
+        enable_validation=False,
+        auto_approve=True,
+        parallel_workers=1,
+        max_retries=1,
+    )
+
+    orch = Orchestrator(Path("."), config)
+    result = orch.execute("do things")
+
+    assert call_counter["planning"] == 2
+    assert result.success is True
+    assert any("first failure" in err for err in result.errors)
 
 
 def test_quick_security_check_reads_cmd_argument():

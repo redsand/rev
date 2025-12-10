@@ -119,7 +119,7 @@ class OrchestratorConfig:
     enable_auto_fix: bool = False
     parallel_workers: int = 2
     auto_approve: bool = True
-    research_depth: str = "medium"  # shallow, medium, deep
+    research_depth: str = "deep"  # shallow, medium, deep
     max_retries: int = 2
 
 
@@ -175,6 +175,33 @@ class Orchestrator:
         Returns:
             OrchestratorResult with execution outcome
         """
+        aggregate_errors: List[str] = []
+        last_result: Optional[OrchestratorResult] = None
+
+        for attempt in range(self.config.max_retries + 1):
+            if attempt > 0:
+                print(f"\n🔄 Orchestrator retry {attempt}/{self.config.max_retries}")
+            result = self._run_single_attempt(user_request)
+            aggregate_errors.extend([f"Attempt {attempt + 1}: {err}" for err in result.errors])
+
+            if result.success:
+                result.errors = aggregate_errors
+                return result
+
+            last_result = result
+
+        if last_result:
+            last_result.errors = aggregate_errors
+            return last_result
+
+        return OrchestratorResult(
+            success=False,
+            phase_reached=AgentPhase.FAILED,
+            errors=["Unknown orchestrator failure"],
+        )
+
+    def _run_single_attempt(self, user_request: str) -> OrchestratorResult:
+        """Run a single orchestration attempt."""
         print("\n" + "=" * 60)
         print("ORCHESTRATOR - MULTI-AGENT COORDINATION")
         print("=" * 60)
@@ -200,7 +227,7 @@ class Orchestrator:
             self.config.parallel_workers = route.parallel_workers
             self.config.enable_action_review = route.enable_action_review
             self.config.auto_approve = getattr(route, "auto_approve", self.config.auto_approve)
-            self.config.research_depth = route.research_depth
+            self.config.research_depth = route.research_depth or "deep"
             self.config.max_retries = route.max_retries
             self.config.enable_auto_fix = getattr(route, "enable_auto_fix", self.config.enable_auto_fix)
 
@@ -222,6 +249,7 @@ class Orchestrator:
         print("=" * 60)
 
         # Initialize resource budget tracking
+        self.current_phase = AgentPhase.LEARNING
         budget = ResourceBudget()
         result = OrchestratorResult(
             success=False,
@@ -512,8 +540,10 @@ IMPORTANT - Address the following review feedback:
             result.success = all_completed and validation_ok
 
         except Exception as e:
-            result.errors.append(str(e))
-            result.phase_reached = AgentPhase.FAILED
+            failure_phase = self.current_phase if self.current_phase else AgentPhase.FAILED
+            result.errors.append(f"{failure_phase.value} phase error: {e}")
+            result.phase_reached = failure_phase
+            result.success = False
 
         result.execution_time = time.time() - start_time
 
