@@ -4,8 +4,9 @@
 1. [Architecture Overview](#architecture-overview)
 2. [Model Handling System](#model-handling-system)
 3. [Common Issues and Edge Cases](#common-issues-and-edge-cases)
-4. [Testing Strategy](#testing-strategy)
-5. [Bug Fixing Guide](#bug-fixing-guide)
+4. [Preserving Existing Code](#preserving-existing-code)
+5. [Testing Strategy](#testing-strategy)
+6. [Bug Fixing Guide](#bug-fixing-guide)
 
 ---
 
@@ -344,6 +345,27 @@ def test_timeout_retry():
 ```
 
 ---
+
+## Preserving Existing Code
+
+Large diffs that overwrite files can hide regressions. When extending functionality, prefer surgical edits that append to existing logic instead of wholesale rewrites.
+
+**Before coding**
+
+- Identify the smallest surface area you can change (functions, classes, or configuration blocks) and plan to append or wrap instead of replace.
+- Check for explicit registration lists (e.g., tool registries or agent catalogs) and add to them without reordering existing entries.
+
+**While editing**
+
+- Use incremental edits (`apply_patch`, editor snippets, or `git add -p`) to modify only the relevant sections.
+- Avoid deleting working code unless you have a clear, tested replacement; prefer extension points like helper functions or new classes.
+- Keep surrounding context intact to maintain readability and compatibility with future merges.
+
+**Before committing**
+
+- Review `git diff --stat` and `git diff` to confirm only intended sections changed and that existing functionality remains.
+- If you touched a registry or list, compare against the previous version to ensure no names were removed unintentionally.
+- Run the appropriate tests for the affected area to verify behavior is preserved.
 
 ## Testing Strategy
 

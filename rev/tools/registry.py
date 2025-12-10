@@ -4,6 +4,7 @@
 
 import json
 import os
+from pathlib import Path
 from typing import Dict, Any
 
 from rev.debug_logger import get_logger
@@ -103,11 +104,15 @@ def rag_search(query: str, k: int = 10, filters: dict = None) -> str:
         return json.dumps({"error": str(e)})
 
 
+logger = get_logger()
+
 # Cache for static descriptions (tools with no dynamic args)
 _DESCRIPTION_CACHE = {}
 
 # Global timeout manager instance (lazy initialization)
 _TIMEOUT_MANAGER = None
+
+_SNAPSHOT_PATH = Path(__file__).with_name("_tool_registry_snapshot.json")
 
 # Tools that should have timeout protection
 _TIMEOUT_PROTECTED_TOOLS = {
@@ -152,6 +157,42 @@ def _get_timeout_manager() -> TimeoutManager:
             return None
         _TIMEOUT_MANAGER = TimeoutManager(TimeoutConfig.from_env())
     return _TIMEOUT_MANAGER
+
+
+def _load_registry_snapshot() -> set[str]:
+    """Load the baseline tool registry snapshot for guardrails."""
+    try:
+        data = json.loads(_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+        names = data.get("tool_names", [])
+        return {name for name in names if isinstance(name, str)}
+    except FileNotFoundError:
+        logger.warning(
+            "Tool registry snapshot missing at %s; skipping guard check.", _SNAPSHOT_PATH
+        )
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.error("Failed to load tool registry snapshot: %s", exc)
+    return set()
+
+
+def _enforce_registry_guard(tools: list[dict]) -> None:
+    """Abort if any previously registered tools are missing.
+
+    The guard compares the current tool definitions against a snapshot to
+    ensure existing tool names are never removed unintentionally.
+    """
+
+    snapshot = _load_registry_snapshot()
+    if not snapshot:
+        return
+
+    current = {tool.get("function", {}).get("name") for tool in tools if tool.get("function")}
+    missing_tools = snapshot - current
+    if missing_tools:
+        missing_list = ", ".join(sorted(missing_tools))
+        raise RuntimeError(
+            "Tool registry guard failed: missing previously registered tools: "
+            f"{missing_list}. Update the snapshot after adding tools, but do not remove existing entries."
+        )
 
 
 # Tool dispatch table for O(1) lookup
@@ -441,7 +482,7 @@ def get_available_tools() -> list:
     Returns a list of tool definitions in OpenAI format that can be passed
     to language models that support function calling.
     """
-    return [
+    tools = [
         # File operations
         {
             "type": "function",
@@ -1441,3 +1482,6 @@ def get_available_tools() -> list:
             }
         }
     ]
+
+    _enforce_registry_guard(tools)
+    return tools
