@@ -67,7 +67,7 @@ This document summarizes the implementation of Agentic Design Patterns into Rev,
 - **Implementation**: Added resource budget configuration
 - **Features**:
   - `MAX_STEPS_PER_RUN`: Maximum steps per execution (default: 200)
-  - `MAX_LLM_TOKENS_PER_RUN`: Token budget (default: 100,000)
+  - `MAX_LLM_TOKENS_PER_RUN`: Token budget (default: 80,000)
   - `MAX_WALLCLOCK_SECONDS`: Time budget (default: 1800s / 30min)
   - Environment variable overrides
 
