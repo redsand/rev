@@ -277,6 +277,9 @@ class StateManager:
         Args:
             keep_last: Number of recent checkpoints to keep
         """
+        if keep_last < 0:
+            raise ValueError(f"keep_last must be non-negative, got {keep_last}")
+
         if not self.checkpoint_dir.exists():
             return
 

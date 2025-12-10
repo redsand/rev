@@ -13,7 +13,7 @@ Performance optimizations:
 import json
 import sys
 from typing import Dict, Any, List
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
 from rev.models.task import ExecutionPlan, Task, TaskStatus
 from rev.tools.registry import execute_tool
@@ -780,7 +780,7 @@ def concurrent_execution_mode(
 
     Args:
         plan: ExecutionPlan with tasks to execute
-        max_workers: Maximum number of concurrent tasks (default: 2)
+        max_workers: Maximum number of concurrent tasks (default: 2, must be > 0)
         auto_approve: If True (default), runs autonomously without initial approval
         tools: List of available tools for LLM function calling (optional)
         enable_action_review: If True, review each action before execution (default: False)
@@ -789,6 +789,10 @@ def concurrent_execution_mode(
     Returns:
         True if all tasks completed successfully, False otherwise
     """
+    # Validate max_workers parameter
+    if max_workers <= 0:
+        raise ValueError(f"max_workers must be greater than 0, got {max_workers}")
+
     print("\n" + "=" * 60)
     print("CONCURRENT EXECUTION MODE")
     print("=" * 60)
@@ -829,8 +833,8 @@ def concurrent_execution_mode(
 
             # Wait for at least one task to complete
             if futures:
-                done, _ = as_completed(futures.keys()), None
-                for future in list(done):
+                done, pending = wait(futures.keys(), return_when=FIRST_COMPLETED)
+                for future in done:
                     task = futures.pop(future)
                     try:
                         success = future.result()

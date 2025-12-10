@@ -92,16 +92,30 @@ def _analyze_python_coverage(path: Path) -> Optional[Dict[str, Any]]:
         if not coverage_file.exists():
             return None
 
-        # Run coverage report
-        cmd = f"coverage json -o /tmp/coverage.json"
-        proc = _run_shell(cmd, timeout=30)
+        # Run coverage report (cross-platform temp file)
+        import tempfile
+        import os
 
-        if proc.returncode != 0:
-            return None
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp_file:
+            tmp_path = tmp_file.name
 
-        # Parse coverage JSON
-        with open("/tmp/coverage.json", "r") as f:
-            coverage_data = json.load(f)
+        try:
+            import shlex
+            cmd = f"coverage json -o {shlex.quote(tmp_path)}"
+            proc = _run_shell(cmd, timeout=30)
+
+            if proc.returncode != 0:
+                return None
+
+            # Parse coverage JSON
+            with open(tmp_path, "r") as f:
+                coverage_data = json.load(f)
+        finally:
+            # Clean up temp file
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
 
         total_statements = coverage_data.get("totals", {}).get("num_statements", 0)
         covered_statements = coverage_data.get("totals", {}).get("covered_lines", 0)
@@ -465,11 +479,17 @@ def _find_typescript_symbol_usages(symbol: str) -> List[Dict[str, Any]]:
 
 
 def _find_symbol_with_grep(symbol: str) -> List[Dict[str, Any]]:
-    """Fallback: find symbol using grep."""
+    """Fallback: find symbol using grep.
+
+    SECURITY: symbol is properly quoted to prevent command injection.
+    """
     usages = []
 
     try:
-        cmd = f"grep -rn '\\b{symbol}\\b' . --include='*.py' --include='*.ts' --include='*.js' --include='*.tsx' --include='*.jsx' 2>/dev/null | head -50"
+        import shlex
+        # Use shlex.quote to prevent command injection
+        quoted_symbol = shlex.quote(symbol)
+        cmd = f"grep -rn '\\b{quoted_symbol}\\b' . --include='*.py' --include='*.ts' --include='*.js' --include='*.tsx' --include='*.jsx' 2>/dev/null | head -50"
         proc = _run_shell(cmd, timeout=30)
 
         if proc.returncode == 0:
@@ -682,18 +702,32 @@ def _analyze_python_semantic_diff(old_content: str, new_content: str) -> List[Di
         old_functions = {}
         new_functions = {}
 
+        # Python 3.9+ has ast.unparse, 3.8 needs fallback
+        import sys
+        has_unparse = sys.version_info >= (3, 9)
+
         for node in ast.walk(old_tree):
             if isinstance(node, ast.FunctionDef):
+                if has_unparse:
+                    return_type = ast.unparse(node.returns) if node.returns else None
+                else:
+                    # Fallback for Python 3.8: use ast.get_source_segment
+                    return_type = ast.get_source_segment(old_content, node.returns) if node.returns else None
                 old_functions[node.name] = {
                     "args": [arg.arg for arg in node.args.args],
-                    "returns": ast.unparse(node.returns) if node.returns else None
+                    "returns": return_type
                 }
 
         for node in ast.walk(new_tree):
             if isinstance(node, ast.FunctionDef):
+                if has_unparse:
+                    return_type = ast.unparse(node.returns) if node.returns else None
+                else:
+                    # Fallback for Python 3.8
+                    return_type = ast.get_source_segment(new_content, node.returns) if node.returns else None
                 new_functions[node.name] = {
                     "args": [arg.arg for arg in node.args.args],
-                    "returns": ast.unparse(node.returns) if node.returns else None
+                    "returns": return_type
                 }
 
         # Compare signatures

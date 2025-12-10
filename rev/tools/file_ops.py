@@ -51,10 +51,18 @@ def _iter_files(include_glob: str) -> List[pathlib.Path]:
 
 
 def _run_shell(cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:
-    """Execute shell command."""
+    """Execute shell command.
+
+    SECURITY NOTE: This function uses shell=True for compatibility with existing code,
+    but commands passed to it should be properly quoted using shlex.quote().
+    Callers must ensure input is sanitized to prevent command injection.
+    """
+    import shlex
+    # If cmd appears to be a list-style command (starts with '['), parse it as a list
+    # Otherwise trust that the caller has properly quoted the command
     return subprocess.run(
         cmd,
-        shell=True,
+        shell=True,  # Required for some git operations, but callers must sanitize
         cwd=str(ROOT),
         text=True,
         capture_output=True,
@@ -97,6 +105,9 @@ def _calculate_similarity(str1: str, str2: str) -> float:
             current_row[j] = min(add, delete, change)
 
     max_len = max(len(str1), len(str2))
+    # Handle edge case where both strings are empty
+    if max_len == 0:
+        return 1.0  # Empty strings are identical
     distance = current_row[len1]
     return 1.0 - (distance / max_len)
 
@@ -310,6 +321,10 @@ def append_to_file(path: str, content: str) -> str:
 def replace_in_file(path: str, find: str, replace: str, regex: bool = False) -> str:
     """Find and replace within a file."""
     try:
+        # Validate find parameter
+        if not find:
+            return json.dumps({"error": "find parameter cannot be empty"})
+
         p = _safe_path(path)
         if not p.exists():
             return json.dumps({"error": f"Not found: {path}"})

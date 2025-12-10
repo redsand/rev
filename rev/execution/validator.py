@@ -678,4 +678,5 @@ def quick_validate(plan: ExecutionPlan) -> bool:
         result_data = json.loads(result)
         return result_data.get("rc", 1) == 0
     except:
-        return True  # Assume valid if can't run tests
+        # If tests cannot run (syntax error, missing dependencies, etc), assume INVALID
+        return False

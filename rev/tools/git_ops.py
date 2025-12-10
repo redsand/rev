@@ -72,10 +72,15 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
 
         return json.dumps(result)
     finally:
+        # Clean up temporary file, but log if cleanup fails
         try:
             os.unlink(tfp)
-        except Exception:
-            pass
+        except FileNotFoundError:
+            pass  # File already deleted, no issue
+        except Exception as e:
+            # Log the error instead of silently swallowing it
+            import sys
+            print(f"Warning: Failed to clean up temporary patch file {tfp}: {e}", file=sys.stderr)
 
 
 def git_add(files: str = ".") -> str:

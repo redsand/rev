@@ -261,8 +261,8 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
             error_detail = ""
             try:
                 error_detail = f" - {resp.text}"
-            except:
-                pass
+            except Exception:
+                pass  # resp.text may not be available
 
             # Log HTTP error
             debug_logger.log("llm", "HTTP_ERROR", {
@@ -274,7 +274,7 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
             }, "ERROR")
 
             # For retryable HTTP errors (5xx server errors), continue to retry
-            if resp.status_code >= 500 and attempt < max_retries - 1:
+            if 'resp' in locals() and resp.status_code >= 500 and attempt < max_retries - 1:
                 if OLLAMA_DEBUG:
                     print(f"[DEBUG] HTTP {resp.status_code} error, will retry (attempt {attempt + 1}/{max_retries})...")
                 continue
