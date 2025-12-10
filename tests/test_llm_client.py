@@ -1,8 +1,9 @@
-"""Tests for the Ollama client retry and backoff behavior."""
+"""Tests for the Ollama client token safeguards and retry behavior."""
 
 from unittest.mock import Mock, patch
 
 import rev.llm.client as client
+from rev.llm.client import _CHARS_PER_TOKEN_ESTIMATE, _enforce_token_limit
 
 
 def _make_response(status_code, payload=None, text="", reason="Server Error"):
@@ -18,6 +19,41 @@ def _make_response(status_code, payload=None, text="", reason="Server Error"):
 
     response.raise_for_status = raise_for_status
     return response
+
+
+def test_enforce_token_limit_truncates_and_preserves_system_message():
+    # 200 characters is roughly 50 tokens with the 4 chars/token heuristic
+    system_message = {"role": "system", "content": "s" * 200}
+    user_message = {"role": "user", "content": "u" * 200}
+    assistant_message = {"role": "assistant", "content": "a" * 200}
+
+    # Limit to 60 tokens (~240 characters) so trimming is required after system message
+    trimmed, original_tokens, trimmed_tokens, truncated = _enforce_token_limit(
+        [system_message, user_message, assistant_message],
+        max_tokens=60,
+    )
+
+    assert truncated is True
+    assert trimmed[0]["role"] == "system"
+    assert len(trimmed) == 2  # System + most recent non-system message
+    assert "truncated to fit token limit" in trimmed[1]["content"]
+    assert trimmed_tokens <= 60
+
+
+def test_enforce_token_limit_keeps_messages_when_under_budget():
+    messages = [
+        {"role": "system", "content": "Keep me"},
+        {"role": "user", "content": "short"},
+    ]
+
+    trimmed, original_tokens, trimmed_tokens, truncated = _enforce_token_limit(
+        messages,
+        max_tokens=1_000 // _CHARS_PER_TOKEN_ESTIMATE,
+    )
+
+    assert truncated is False
+    assert trimmed == messages
+    assert original_tokens == trimmed_tokens
 
 
 @patch("rev.llm.client.time.sleep")

@@ -13,7 +13,7 @@ from typing import Dict, Any, List
 
 from rev.models.task import ExecutionPlan, RiskLevel, TaskStatus
 from rev.llm.client import ollama_chat
-from rev.config import get_system_info_cached
+from rev.config import MAX_LLM_TOKENS_PER_RUN, get_system_info_cached
 from rev.tools.git_ops import get_repo_context
 from rev.tools.registry import get_available_tools, execute_tool
 
@@ -27,6 +27,12 @@ Before creating ANY new file:
 3. ONLY create new files when absolutely necessary
 4. AVOID duplication - reuse existing functions, classes, utilities, patterns
 5. When creating new files, include justification in task description: "No existing X found - creating new"
+
+TOKEN DISCIPLINE:
+- Keep every response concise (aim for <= 1,200 tokens).
+- If the request/context would exceed the budget, explicitly ask for a target token cap (e.g., "Plan this in 800 tokens") or propose splitting into smaller batches.
+- Prefer breaking large analyses into sequential tool-assisted steps instead of emitting a single giant message.
+- Respect the configured maximum conversation budget and surface when additional iterations are safer than one long response.
 
 Your job is to:
 1. Understand the user's request
@@ -147,6 +153,11 @@ Consider:
 2. What are the logical steps to implement this?
 3. What dependencies exist between steps?
 4. What testing is needed?
+
+Token discipline:
+- Keep the subtask list concise and avoid long prose explanations.
+- If the user requests a token cap (e.g., "use 500 tokens"), honor it.
+- If the breakdown would be lengthy, propose splitting the subtasks into smaller batches instead of returning a huge list.
 
 Return ONLY a JSON array of subtasks:
 [
@@ -444,6 +455,12 @@ Use these tools when planning to:
 - Verify file existence before planning modifications
 """
 
+    token_guidance = (
+        "TOKEN BUDGET: Keep replies tight (aim for <=1,200 tokens). "
+        "If the task needs more, ask for a target token count or propose splitting into multiple smaller planning passes. "
+        f"Never exceed the ~{MAX_LLM_TOKENS_PER_RUN:,} token conversation budget; prefer multiple iterations over one long response."
+    )
+
     messages = [
         {"role": "system", "content": enhanced_system_prompt},
         {"role": "user", "content": f"""System Information:
@@ -457,6 +474,8 @@ Repository context:
 
 User request:
 {user_request}
+
+{token_guidance}
 
 IMPORTANT: Before creating the execution plan:
 1. Use available tools to explore the codebase
