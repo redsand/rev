@@ -138,6 +138,16 @@ def mock_ollama_response():
     return _make_response
 
 
+@pytest.fixture
+def prompt_decision_cache():
+    """Ensure scary-operation prompt cache is cleared around tests."""
+    from rev.execution import safety
+
+    safety.clear_prompt_decisions()
+    yield
+    safety.clear_prompt_decisions()
+
+
 # ========== Unit Tests: File Operations ==========
 
 class TestFileOperations:
@@ -284,6 +294,35 @@ class TestGitOperations:
 
         assert "dry_run" in data
         assert data["dry_run"] is True
+
+    def test_apply_patch_validates_once(self, temp_dir):
+        """Patch is validated before apply so failures do not change files."""
+        target = temp_dir / "file.txt"
+        target.write_text("original", encoding="utf-8")
+        rel = target.relative_to(agent_min.ROOT)
+
+        bad_patch = f"""--- a/{rel}\n+++ b/{rel}\n@@ -1 +1 @@\n-original\n+updated\nextra"""
+        result = agent_min.apply_patch(bad_patch)
+        data = json.loads(result)
+
+        assert data["success"] is False
+        assert data.get("phase") == "check"
+        assert target.read_text(encoding="utf-8") == "original"
+
+    def test_apply_patch_reports_already_applied(self, temp_dir):
+        """Reapplying the same patch should return an already_applied hint."""
+        target = temp_dir / "already.txt"
+        target.write_text("first", encoding="utf-8")
+        rel = target.relative_to(agent_min.ROOT)
+
+        patch = f"""--- a/{rel}\n+++ b/{rel}\n@@ -1 +1 @@\n-first\n+second"""
+
+        first = json.loads(agent_min.apply_patch(patch))
+        assert first["success"] is True
+
+        second = json.loads(agent_min.apply_patch(patch))
+        assert second["success"] is True
+        assert second.get("already_applied") is True
 
     def test_get_repo_context(self):
         """Test getting repository context."""
@@ -1183,28 +1222,39 @@ class TestScaryOperations:
         assert is_scary is False
 
     @patch('builtins.input', return_value='y')
-    def test_prompt_scary_operation_approve(self, mock_input):
+    def test_prompt_scary_operation_approve(self, mock_input, prompt_decision_cache):
         """Test user approves scary operation."""
         result = agent_min.prompt_scary_operation("rm file.txt", "delete command")
         assert result is True
 
     @patch('builtins.input', return_value='n')
-    def test_prompt_scary_operation_deny(self, mock_input):
+    def test_prompt_scary_operation_deny(self, mock_input, prompt_decision_cache):
         """Test user denies scary operation."""
         result = agent_min.prompt_scary_operation("rm file.txt", "delete command")
         assert result is False
 
     @patch('builtins.input', return_value='yes')
-    def test_prompt_scary_operation_yes_string(self, mock_input):
+    def test_prompt_scary_operation_yes_string(self, mock_input, prompt_decision_cache):
         """Test user types 'yes' to approve."""
         result = agent_min.prompt_scary_operation("rm file.txt", "delete command")
         assert result is True
 
     @patch('builtins.input', side_effect=KeyboardInterrupt())
-    def test_prompt_scary_operation_keyboard_interrupt(self, mock_input):
+    def test_prompt_scary_operation_keyboard_interrupt(self, mock_input, prompt_decision_cache):
         """Test Ctrl+C during scary operation prompt."""
         result = agent_min.prompt_scary_operation("rm file.txt", "delete command")
         assert result is False
+
+    @patch('builtins.input', return_value='y')
+    def test_prompt_scary_operation_reuses_decision(self, mock_input, prompt_decision_cache):
+        """Approve once and reuse decision without re-prompting for same action."""
+
+        first = agent_min.prompt_scary_operation("rm file.txt", "delete command")
+        second = agent_min.prompt_scary_operation("rm file.txt", "delete command")
+
+        assert first is True
+        assert second is True
+        mock_input.assert_called_once()
 
 
 # ========== Edge Case and Error Handling Tests ==========

@@ -43,34 +43,57 @@ def git_diff(pathspec: str = ".", staged: bool = False, context: int = 3) -> str
 
 
 def apply_patch(patch: str, dry_run: bool = False) -> str:
-    """Apply a unified diff patch."""
+    """Apply a unified diff patch.
+
+    The patch is first validated with ``git apply --check`` so we fail fast
+    without making any changes when the patch does not apply cleanly. If the
+    patch has already been applied, we report that fact instead of attempting
+    to apply it again.
+    """
+
     with tempfile.NamedTemporaryFile("w+", delete=False, encoding="utf-8") as tf:
         tf.write(patch)
         tf.flush()
         tfp = tf.name
-    try:
-        args = ["git", "apply"]
-        if dry_run:
-            args.append("--check")
-        args.extend(["--3way", "--reject", tfp])
-        proc = _run_shell(" ".join(shlex.quote(a) for a in args))
 
-        success = proc.returncode == 0
+    def _result(proc: subprocess.CompletedProcess, *, success: bool, already_applied: bool = False, phase: str) -> str:
         result = {
             "success": success,
             "rc": proc.returncode,
             "stdout": proc.stdout,
             "stderr": proc.stderr,
-            "dry_run": dry_run
+            "dry_run": dry_run,
+            "phase": phase,
         }
-
-        # Make failures explicit
-        if not success:
+        if already_applied:
+            result["already_applied"] = True
+        if not success and not already_applied:
             result["error"] = f"Patch failed to apply (exit code {proc.returncode})"
             if proc.stderr:
                 result["error"] += f": {proc.stderr[:500]}"
-
         return json.dumps(result)
+
+    try:
+        # Validate the patch before applying so we only attempt the actual apply once.
+        check_args = ["git", "apply", "--check", "--3way", tfp]
+        check_proc = _run_shell(" ".join(shlex.quote(a) for a in check_args))
+
+        # Treat "patch already applied" as a successful no-op so callers do not
+        # keep retrying the same patch.
+        combined_output = (check_proc.stdout + check_proc.stderr).lower()
+        already_applied = "patch already applied" in combined_output
+        if already_applied:
+            return _result(check_proc, success=True, already_applied=True, phase="check")
+
+        if check_proc.returncode != 0:
+            return _result(check_proc, success=False, phase="check")
+
+        if dry_run:
+            return _result(check_proc, success=True, phase="check")
+
+        apply_args = ["git", "apply", "--3way", tfp]
+        apply_proc = _run_shell(" ".join(shlex.quote(a) for a in apply_args))
+        return _result(apply_proc, success=apply_proc.returncode == 0, phase="apply")
     finally:
         # Clean up temporary file, but log if cleanup fails
         try:

@@ -7,6 +7,11 @@ destructive operations that require user approval.
 
 from typing import Dict, Any
 
+# Cache of user decisions for scary operations. This avoids repeatedly prompting
+# the user when the exact same potentially destructive action is attempted
+# multiple times in a session.
+_PROMPT_DECISIONS: Dict[tuple[str, str], bool] = {}
+
 
 # Destructive operations that require confirmation
 SCARY_OPERATIONS = {
@@ -53,6 +58,12 @@ def is_scary_operation(tool_name: str, args: Dict[str, Any], action_type: str = 
     return False, ""
 
 
+def clear_prompt_decisions() -> None:
+    """Clear cached scary-operation decisions (useful for tests)."""
+
+    _PROMPT_DECISIONS.clear()
+
+
 def prompt_scary_operation(operation: str, reason: str) -> bool:
     """
     Prompt user to confirm a scary operation.
@@ -64,6 +75,10 @@ def prompt_scary_operation(operation: str, reason: str) -> bool:
     Returns:
         True if user approves, False otherwise
     """
+    key = (operation, reason)
+    if key in _PROMPT_DECISIONS:
+        return _PROMPT_DECISIONS[key]
+
     print(f"\n{'='*60}")
     print(f"⚠️  POTENTIALLY DESTRUCTIVE OPERATION DETECTED")
     print(f"{'='*60}")
@@ -73,7 +88,10 @@ def prompt_scary_operation(operation: str, reason: str) -> bool:
 
     try:
         response = input("Continue with this operation? [y/N]: ").strip().lower()
-        return response in ["y", "yes"]
+        decision = response in ["y", "yes"]
+        _PROMPT_DECISIONS[key] = decision
+        return decision
     except (KeyboardInterrupt, EOFError):
         print("\n[Cancelled by user]")
+        _PROMPT_DECISIONS[key] = False
         return False

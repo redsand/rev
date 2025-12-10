@@ -17,6 +17,7 @@ from rev.execution.executor import (
 from rev.execution.safety import (
     is_scary_operation,
     prompt_scary_operation,
+    clear_prompt_decisions,
     SCARY_OPERATIONS
 )
 
@@ -32,5 +33,6 @@ __all__ = [
     # Safety
     "is_scary_operation",
     "prompt_scary_operation",
+    "clear_prompt_decisions",
     "SCARY_OPERATIONS",
 ]
