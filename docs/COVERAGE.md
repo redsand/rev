@@ -10,14 +10,14 @@ Test coverage for the rev autonomous CI/CD agent to ensure code quality and reli
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Module                  Statements    Covered    Coverage    Missing
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-rev.py                       478        404        85%         74
+rev                          478        404        85%         74
 tests/test_agent_min.py      629        622        99%          7
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 TOTAL                       1107        1026       93%         81
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-## rev.py Coverage Details
+## rev Coverage Details
 
 **Coverage: 85%** - Production Ready ✅
 
@@ -50,7 +50,7 @@ The uncovered lines are primarily:
 ### Quick Coverage Check
 
 ```bash
-# Run tests with coverage for rev.py only
+# Run tests with coverage for rev package only
 pytest tests/test_agent_min.py --cov=agent_min --cov-report=term-missing
 
 # Run tests with coverage for all code
@@ -106,10 +106,10 @@ To enable coverage by default, uncomment these lines in `pytest.ini`:
 ## Coverage Targets
 
 ### Current Goals
-- **rev.py**: Target 75%+ (✅ Achieved: 85%)
+- **rev**: Target 75%+ (✅ Achieved: 85%)
 - **Test suites**: Target 95%+ (✅ Achieved: 99%)
 
-### Why 85% is Excellent for rev.py
+### Why 85% is Excellent for rev
 
 1. **Core Logic**: 100% of critical paths covered
 2. **Edge Cases**: Comprehensive error handling tested
@@ -137,7 +137,7 @@ def test_repl_mode():
 
 ### 2. Test Main Function
 ```python
-@patch('sys.argv', ['rev.py', 'test task'])
+@patch('sys.argv', ['rev', 'test task'])
 def test_main_function():
     main()
 ```
@@ -200,7 +200,7 @@ pytest tests/ --cov=. --cov-report=xml --cov-report=term
 ✅ **Test coverage is fully available and functional**
 
 - **75 tests passing** (100% pass rate) - Added 30 new tests!
-- **85% code coverage** for rev.py (exceeds 75% target by 10%)
+- **85% code coverage** for rev (exceeds 75% target by 10%)
 - **99% test code coverage** (tests are well-tested themselves)
 - HTML reports generated for detailed analysis
 - Coverage configuration in place

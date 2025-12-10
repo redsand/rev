@@ -1,4 +1,4 @@
-# Documentation with rev.py
+# Documentation with rev
 
 Generate and maintain comprehensive documentation automatically.
 
@@ -9,7 +9,7 @@ Generate API documentation from code.
 
 ### Command
 ```bash
-python rev.py "Generate API documentation for all endpoints in routes/ directory"
+rev "Generate API documentation for all endpoints in routes/ directory"
 ```
 
 ### Generated Documentation
@@ -98,7 +98,7 @@ Add comprehensive docstrings to all functions.
 
 ### Command
 ```bash
-python rev.py "Add docstrings to all functions in services/ directory following Google style"
+rev "Add docstrings to all functions in services/ directory following Google style"
 ```
 
 ### Before
@@ -148,7 +148,7 @@ Create comprehensive README for a new project.
 
 ### Command
 ```bash
-python rev.py "Generate a comprehensive README.md with installation, usage, and examples"
+rev "Generate a comprehensive README.md with installation, usage, and examples"
 ```
 
 ### Generated README
@@ -254,7 +254,7 @@ Document system architecture and design decisions.
 
 ### Command
 ```bash
-python rev.py "Create ARCHITECTURE.md documenting the system design and key decisions"
+rev "Create ARCHITECTURE.md documenting the system design and key decisions"
 ```
 
 ### Generated Architecture Doc
@@ -343,7 +343,7 @@ Generate changelog from git commits.
 
 ### Command
 ```bash
-python rev.py "Update CHANGELOG.md with recent changes from git history"
+rev "Update CHANGELOG.md with recent changes from git history"
 ```
 
 ### Generated Changelog
@@ -395,7 +395,7 @@ Create step-by-step tutorial for new users.
 
 ### Command
 ```bash
-python rev.py "Create a tutorial in docs/TUTORIAL.md for getting started with the API"
+rev "Create a tutorial in docs/TUTORIAL.md for getting started with the API"
 ```
 
 ### Generated Tutorial
@@ -497,44 +497,44 @@ curl -X GET "http://localhost:5000/api/posts?page=1&per_page=10"
 
 ### 1. Keep Documentation Close to Code
 ```bash
-python rev.py "Add inline documentation to all public APIs"
+rev "Add inline documentation to all public APIs"
 ```
 
 ### 2. Include Examples
 ```bash
-python rev.py "Add code examples to all docstrings"
+rev "Add code examples to all docstrings"
 ```
 
 ### 3. Document Why, Not Just What
 ```bash
-python rev.py "Add comments explaining the rationale for complex algorithms"
+rev "Add comments explaining the rationale for complex algorithms"
 ```
 
 ### 4. Keep Documentation Updated
 ```bash
-python rev.py "Update API docs to reflect recent changes to user endpoints"
+rev "Update API docs to reflect recent changes to user endpoints"
 ```
 
 ## Documentation Types
 
 ### API Reference
 ```bash
-python rev.py "Generate OpenAPI/Swagger documentation"
+rev "Generate OpenAPI/Swagger documentation"
 ```
 
 ### User Guides
 ```bash
-python rev.py "Create user guide for admin features"
+rev "Create user guide for admin features"
 ```
 
 ### Developer Guides
 ```bash
-python rev.py "Create contributing guide for new developers"
+rev "Create contributing guide for new developers"
 ```
 
 ### Deployment Docs
 ```bash
-python rev.py "Document deployment process for AWS"
+rev "Document deployment process for AWS"
 ```
 
 ## Next Steps

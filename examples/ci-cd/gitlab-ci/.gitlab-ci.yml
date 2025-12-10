@@ -1,4 +1,4 @@
-# GitLab CI/CD Pipeline with rev.py Integration
+# GitLab CI/CD Pipeline with rev Integration
 
 stages:
   - test
@@ -88,7 +88,7 @@ fix:lint:
       # Check if linting failed
       if [ -f "flake8-report.json" ]; then
         echo "Attempting to auto-fix linting issues..."
-        python rev.py "Fix all linting errors in the codebase"
+        rev "Fix all linting errors in the codebase"
 
         # Commit fixes
         git config user.name "rev-bot"
@@ -120,7 +120,7 @@ fix:security:
     - |
       if [ -f "bandit-report.json" ]; then
         echo "Attempting to fix security vulnerabilities..."
-        python rev.py "Fix security vulnerabilities found in the codebase"
+        rev "Fix security vulnerabilities found in the codebase"
 
         # Commit fixes
         git config user.name "rev-bot"
@@ -160,7 +160,7 @@ fix:coverage:
 
       if (( $(echo "$COVERAGE < 80" | bc -l) )); then
         echo "Coverage below 80%, adding tests..."
-        python rev.py "Add tests to improve coverage to 80% (currently at $COVERAGE%)"
+        rev "Add tests to improve coverage to 80% (currently at $COVERAGE%)"
 
         # Commit new tests
         git config user.name "rev-bot"
@@ -186,8 +186,8 @@ docs:update:
   image: python:3.11
   extends: .ollama_service
   script:
-    - python rev.py "Update all documentation to reflect current codebase"
-    - python rev.py "Add docstrings to undocumented functions"
+    - rev "Update all documentation to reflect current codebase"
+    - rev "Add docstrings to undocumented functions"
 
     # Commit documentation updates
     - git config user.name "rev-docs-bot"
@@ -211,7 +211,7 @@ review:mr:
       CHANGED_FILES=$(git diff --name-only origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME...HEAD)
 
       echo "Reviewing changes..."
-      python rev.py "Review the merge request changes and provide feedback" > review.md
+      rev "Review the merge request changes and provide feedback" > review.md
 
       # Post review as MR comment
       curl --request POST \

@@ -1,6 +1,6 @@
-# Testing with rev.py
+# Testing with rev
 
-Improve test coverage and quality using rev.py's autonomous testing capabilities.
+Improve test coverage and quality using rev's autonomous testing capabilities.
 
 ## Scenario 1: Add Unit Tests
 
@@ -9,7 +9,7 @@ Add unit tests for a service class.
 
 ### Command
 ```bash
-python rev.py "Add comprehensive unit tests for UserService class"
+rev "Add comprehensive unit tests for UserService class"
 ```
 
 ### Generated Tests
@@ -68,7 +68,7 @@ Test coverage is only 45%.
 
 ### Command
 ```bash
-python rev.py "Analyze test coverage and add tests to reach 80% coverage"
+rev "Analyze test coverage and add tests to reach 80% coverage"
 ```
 
 ### Process
@@ -108,7 +108,7 @@ Add integration tests for API endpoints.
 
 ### Command
 ```bash
-python rev.py "Add integration tests for all /api/users endpoints"
+rev "Add integration tests for all /api/users endpoints"
 ```
 
 ### Generated Tests
@@ -185,7 +185,7 @@ Add a feature using TDD approach.
 
 ### Command
 ```bash
-python rev.py "Use TDD to add password reset functionality - write tests first"
+rev "Use TDD to add password reset functionality - write tests first"
 ```
 
 ### Process
@@ -252,7 +252,7 @@ Add E2E tests for critical user flows.
 
 ### Command
 ```bash
-python rev.py "Add E2E tests for user registration and login flow"
+rev "Add E2E tests for user registration and login flow"
 ```
 
 ### Generated E2E Tests
@@ -311,7 +311,7 @@ Add performance tests to ensure SLAs are met.
 
 ### Command
 ```bash
-python rev.py "Add performance tests to ensure API responds within 200ms"
+rev "Add performance tests to ensure API responds within 200ms"
 ```
 
 ### Performance Tests
@@ -352,7 +352,7 @@ Add tests that mock external API calls.
 
 ### Command
 ```bash
-python rev.py "Add tests for PaymentService with mocked Stripe API calls"
+rev "Add tests for PaymentService with mocked Stripe API calls"
 ```
 
 ### Mocked Tests
@@ -401,32 +401,32 @@ class TestPaymentService:
 ### 1. Test Pyramid
 ```bash
 # Many unit tests (fast, focused)
-python rev.py "Add unit tests for all service classes"
+rev "Add unit tests for all service classes"
 
 # Some integration tests (moderate speed)
-python rev.py "Add integration tests for API endpoints"
+rev "Add integration tests for API endpoints"
 
 # Few E2E tests (slow, comprehensive)
-python rev.py "Add E2E test for checkout flow"
+rev "Add E2E test for checkout flow"
 ```
 
 ### 2. Test Coverage Goals
 ```bash
 # Set clear coverage targets
-python rev.py "Add tests to reach 80% code coverage"
+rev "Add tests to reach 80% code coverage"
 
 # Focus on critical paths first
-python rev.py "Add tests for authentication and payment flows - aim for 95% coverage"
+rev "Add tests for authentication and payment flows - aim for 95% coverage"
 ```
 
 ### 3. Use Fixtures
 ```bash
-python rev.py "Create pytest fixtures for common test data and setup"
+rev "Create pytest fixtures for common test data and setup"
 ```
 
 ### 4. Test Edge Cases
 ```bash
-python rev.py "Add tests for edge cases: empty inputs, invalid data, boundary conditions"
+rev "Add tests for edge cases: empty inputs, invalid data, boundary conditions"
 ```
 
 ## Testing Patterns

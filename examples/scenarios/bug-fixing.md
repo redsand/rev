@@ -1,6 +1,6 @@
-# Bug Fixing with rev.py
+# Bug Fixing with rev
 
-Learn how to efficiently fix bugs using rev.py's autonomous capabilities.
+Learn how to efficiently fix bugs using rev's autonomous capabilities.
 
 ## Scenario 1: Fix a Specific Bug
 
@@ -9,10 +9,10 @@ Users report that the login function crashes when email is null.
 
 ### Solution
 ```bash
-python rev.py "Fix null pointer error in login function when email is null"
+rev "Fix null pointer error in login function when email is null"
 ```
 
-### What rev.py does:
+### What rev does:
 1. Searches for the login function
 2. Identifies the bug
 3. Adds null check
@@ -49,7 +49,7 @@ CI pipeline fails due to 23 ESLint errors.
 ### Solution
 ```bash
 # Run with parallel execution for speed
-python rev.py -j 4 "Fix all ESLint errors in src/ directory"
+rev -j 4 "Fix all ESLint errors in src/ directory"
 ```
 
 ### Generated Plan
@@ -64,7 +64,7 @@ python rev.py -j 4 "Fix all ESLint errors in src/ directory"
 
 ### Advanced: Auto-commit fixes
 ```bash
-python rev.py "Fix all ESLint errors"
+rev "Fix all ESLint errors"
 git add .
 git commit -m "Fix: Resolve all ESLint errors"
 ```
@@ -76,7 +76,7 @@ Bug report: "API returns 500 when user ID is invalid"
 
 ### Solution
 ```bash
-python rev.py "Add test for invalid user ID, then fix the bug to make test pass"
+rev "Add test for invalid user ID, then fix the bug to make test pass"
 ```
 
 ### What happens:
@@ -117,7 +117,7 @@ After a refactoring, 5 tests are failing.
 
 ### Solution
 ```bash
-python rev.py "Run tests, analyze failures, and fix all failing tests"
+rev "Run tests, analyze failures, and fix all failing tests"
 ```
 
 ### Process
@@ -150,7 +150,7 @@ API endpoint is slow (2+ seconds response time).
 
 ### Solution
 ```bash
-python rev.py "Profile the /users endpoint and fix performance issues"
+rev "Profile the /users endpoint and fix performance issues"
 ```
 
 ### Agent actions:
@@ -200,7 +200,7 @@ Security scanner found SQL injection vulnerability.
 
 ### Solution
 ```bash
-python rev.py "Fix SQL injection vulnerability in search function"
+rev "Fix SQL injection vulnerability in search function"
 ```
 
 ### Fix process:
@@ -231,30 +231,30 @@ def test_sql_injection_prevented():
 ### 1. Be Specific
 ```bash
 # Good: Specific file and function
-python rev.py "Fix null check in getUserById in src/services/user.js"
+rev "Fix null check in getUserById in src/services/user.js"
 
 # Less effective: Too vague
-python rev.py "Fix bugs"
+rev "Fix bugs"
 ```
 
 ### 2. Include Context
 ```bash
 # Good: Includes error message
-python rev.py "Fix TypeError: Cannot read property 'name' of undefined in user profile page"
+rev "Fix TypeError: Cannot read property 'name' of undefined in user profile page"
 
 # Good: Includes test failure
-python rev.py "Fix test_user_creation - AssertionError: expected 201, got 500"
+rev "Fix test_user_creation - AssertionError: expected 201, got 500"
 ```
 
 ### 3. Request Tests
 ```bash
 # Always verify fixes with tests
-python rev.py "Fix login bug and add test to prevent regression"
+rev "Fix login bug and add test to prevent regression"
 ```
 
 ### 4. Use REPL for Investigation
 ```bash
-python rev.py --repl
+rev --repl
 
 agent> Show me the test failure details
 agent> Find the function that's causing the error
@@ -267,27 +267,27 @@ agent> /exit
 
 ### Null/Undefined Checks
 ```bash
-python rev.py "Add null checks to all user input handling"
+rev "Add null checks to all user input handling"
 ```
 
 ### Type Errors
 ```bash
-python rev.py "Fix type errors - ensure user.id is always a number"
+rev "Fix type errors - ensure user.id is always a number"
 ```
 
 ### Race Conditions
 ```bash
-python rev.py "Fix race condition in async user creation"
+rev "Fix race condition in async user creation"
 ```
 
 ### Memory Leaks
 ```bash
-python rev.py "Fix memory leak - ensure event listeners are cleaned up"
+rev "Fix memory leak - ensure event listeners are cleaned up"
 ```
 
 ### Off-by-One Errors
 ```bash
-python rev.py "Fix off-by-one error in pagination logic"
+rev "Fix off-by-one error in pagination logic"
 ```
 
 ## Integration with CI/CD
@@ -308,7 +308,7 @@ jobs:
       - uses: actions/checkout@v3
       - name: Fix bug
         run: |
-          python rev.py "Fix: ${{ github.event.issue.title }}"
+          rev "Fix: ${{ github.event.issue.title }}"
           git config user.name "rev-bot"
           git commit -am "Auto-fix: ${{ github.event.issue.title }}"
           gh pr create --title "Fix: ${{ github.event.issue.title }}"

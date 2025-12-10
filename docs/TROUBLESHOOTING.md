@@ -1,4 +1,4 @@
-# Troubleshooting Guide for rev.py
+# Troubleshooting Guide for rev
 
 ## Quick Diagnostics
 
@@ -256,12 +256,12 @@ Model 'qwen3-coder:480b-cloud' requires authentication.
 [DEBUG] Got 400 with tools, retrying without tools...
 ```
 
-**This is Normal!** rev.py automatically handles this.
+**This is Normal!** rev automatically handles this.
 
 **What's Happening:**
-1. rev.py sends request with function calling tools (for better results)
+1. rev sends request with function calling tools (for better results)
 2. Older models don't support tools → return 400 error
-3. rev.py automatically retries **without** tools
+3. rev automatically retries **without** tools
 4. Task continues with limited functionality
 
 **Models Without Tool Support:**
@@ -285,7 +285,7 @@ rev --model llama3.1:latest "task"
 rev --model qwen3-coder:480b-cloud "task"
 ```
 
-**No Action Needed:** If you see this message, rev.py is handling it automatically. Your task will still complete.
+**No Action Needed:** If you see this message, rev is handling it automatically. Your task will still complete.
 
 ---
 
@@ -298,7 +298,7 @@ rev --model qwen3-coder:480b-cloud "task"
 
 **What's Happening:**
 - Complex task taking longer than 10 minutes
-- rev.py automatically retries with longer timeout (20m, then 30m)
+- rev automatically retries with longer timeout (20m, then 30m)
 - This is normal for large codebases or complex tasks
 
 **Timeout Schedule:**
@@ -309,7 +309,7 @@ rev --model qwen3-coder:480b-cloud "task"
 **Solutions:**
 
 #### A. Wait for Retry (Recommended)
-rev.py will automatically retry with longer timeout. Just wait.
+rev will automatically retry with longer timeout. Just wait.
 
 #### B. Use Faster Model
 ```bash
@@ -355,7 +355,7 @@ rev --model qwen3-coder:480b-cloud "task"
 
 **If You Still See This:**
 
-1. **Update rev.py:**
+1. **Update rev:**
    ```bash
    git pull origin main
    pip install -r requirements.txt
@@ -389,11 +389,11 @@ from rev.config import OLLAMA_MODEL  # WRONG
 **Symptoms:**
 - `ollama list` works
 - `ollama serve` is running
-- rev.py still can't connect
+- rev still can't connect
 
 **Diagnosis:**
 ```bash
-# Test exact endpoint rev.py uses
+# Test exact endpoint rev uses
 curl -X POST http://localhost:11434/api/chat \
   -d '{"model":"codellama:latest","messages":[{"role":"user","content":"test"}],"stream":false}'
 
@@ -429,7 +429,7 @@ rev --base-url http://localhost:8080 "task"
 #### C. VPN or Proxy Issues
 ```bash
 # Temporarily disable VPN/proxy
-# Or configure rev.py to use proxy:
+# Or configure rev to use proxy:
 export http_proxy=http://proxy:8080
 export https_proxy=http://proxy:8080
 rev "task"
@@ -572,7 +572,7 @@ ollama list
 curl http://localhost:11434/api/version
 ```
 
-### 2. Check rev.py Version
+### 2. Check rev Version
 ```bash
 git log --oneline -1
 # Should show recent commit with model fix
@@ -588,11 +588,11 @@ OLLAMA_DEBUG=1 rev --model YOUR_MODEL "test task" 2>&1 | tee debug.log
 
 ### 4. Test Ollama Directly
 ```bash
-# Test without rev.py
+# Test without rev
 ollama run codellama:latest "Write a hello world function"
 
-# If this works but rev.py doesn't:
-# - Check rev.py configuration
+# If this works but rev doesn't:
+# - Check rev configuration
 # - Verify Python dependencies
 # - Check for firewall/proxy
 ```
@@ -624,7 +624,7 @@ ollama pull llama3.1:latest
 # Start Ollama
 ollama serve
 
-# Test rev.py with debug
+# Test rev with debug
 OLLAMA_DEBUG=1 rev --model codellama:latest "test"
 
 # Use custom Ollama URL

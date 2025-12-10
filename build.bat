@@ -1,10 +1,10 @@
 @echo off
-:: Wrapper script to run the PowerShell build script for rev.py
+:: Wrapper script to run the PowerShell build script for rev
 
 setlocal
 
 echo =================================
-echo   rev.py Build Script Wrapper
+echo   rev Build Script Wrapper
 echo =================================
 echo.
 

@@ -1,10 +1,10 @@
 # Build System Documentation
 
-This document explains how to use the build scripts for the rev.py project.
+This document explains how to use the build scripts for the rev project.
 
 ## Overview
 
-The rev.py project provides multiple ways to set up and build the environment:
+The rev project provides multiple ways to set up and build the environment:
 
 1. **Shell Script** (`build.sh`) - For Unix-based systems (Linux, macOS)
 2. **PowerShell Script** (`build.ps1`) - For Windows systems
@@ -243,9 +243,9 @@ Coverage reports are generated in:
 
 ## Validation
 
-The build process validates that rev.py is properly set up:
+The build process validates that rev is properly set up:
 
-1. Checks that `rev.py` file exists
+1. Checks that the `rev` CLI is available (or `python -m rev`)
 2. Verifies that the script can execute (shows help)
 3. Confirms dependencies are installed correctly
 
@@ -316,8 +316,8 @@ fi
 After building:
 
 1. **Activate the virtual environment**
-2. **Run rev.py**: `python rev.py --help`
-3. **Start using rev.py**: `python rev.py "Your task description"`
+2. **Run rev**: `rev --help` (or `python -m rev --help`)
+3. **Start using rev**: `rev "Your task description"` (or `python -m rev "Your task description"`)
 
 For more information, see:
 - [README.md](README.md) - Main project documentation

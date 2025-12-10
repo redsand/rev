@@ -1,6 +1,6 @@
 # Advanced Planning Capabilities
 
-rev.py now includes sophisticated planning capabilities that go beyond simple task generation. These features help predict impact, assess risk, and prepare for potential issues before execution begins.
+rev now includes sophisticated planning capabilities that go beyond simple task generation. These features help predict impact, assess risk, and prepare for potential issues before execution begins.
 
 ## Overview
 
@@ -243,7 +243,7 @@ Validation Steps:
 By default, advanced planning is enabled automatically:
 
 ```bash
-python rev.py "Refactor authentication system"
+rev "Refactor authentication system"
 ```
 
 ### Planning Output
@@ -470,7 +470,7 @@ For critical operations, test rollback in a safe environment first:
 git checkout -b test-rollback
 
 # Run the operation
-python rev.py "Delete production database schema"
+rev "Delete production database schema"
 
 # Practice the rollback
 # Follow the generated rollback plan
@@ -492,7 +492,7 @@ Use the parallel execution mode for tasks that can run concurrently:
 
 ```bash
 # Use -j flag with the parallelization potential
-python rev.py -j 4 "Refactor all modules"
+rev -j 4 "Refactor all modules"
 ```
 
 ### 5. Document Risk Decisions
@@ -583,4 +583,4 @@ To enhance the advanced planning system:
 
 ## License
 
-Same as rev.py - MIT License
+Same as rev - MIT License

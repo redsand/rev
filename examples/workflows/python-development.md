@@ -1,12 +1,12 @@
 # Python Development Workflows
 
-Common workflows for Python projects using rev.py.
+Common workflows for Python projects using rev.
 
 ## Workflow 1: New Python Project Setup
 
 ### Command
 ```bash
-python rev.py "Setup new Python project with Flask, SQLAlchemy, and pytest"
+rev "Setup new Python project with Flask, SQLAlchemy, and pytest"
 ```
 
 ### Generated Structure
@@ -70,7 +70,7 @@ def create_app():
 
 ### Command
 ```bash
-python rev.py "Add FastAPI endpoint for user CRUD with Pydantic validation"
+rev "Add FastAPI endpoint for user CRUD with Pydantic validation"
 ```
 
 ### Generated Code
@@ -132,7 +132,7 @@ async def list_users(
 
 ### Command
 ```bash
-python rev.py "Create Alembic migration to add user_roles table with foreign key"
+rev "Create Alembic migration to add user_roles table with foreign key"
 ```
 
 ### Generated Migration
@@ -165,7 +165,7 @@ def downgrade():
 
 ### Command
 ```bash
-python rev.py "Add Celery task for sending email notifications with retry logic"
+rev "Add Celery task for sending email notifications with retry logic"
 ```
 
 ### Generated Task
@@ -212,7 +212,7 @@ def send_email_notification(self, user_id, template, context):
 
 ### Command
 ```bash
-python rev.py "Add type hints to all functions in services/ directory"
+rev "Add type hints to all functions in services/ directory"
 ```
 
 ### Before
@@ -252,7 +252,7 @@ def get_user_by_email(
 
 ### Command
 ```bash
-python rev.py "Add structured logging to all service methods"
+rev "Add structured logging to all service methods"
 ```
 
 ### Generated Code
@@ -316,7 +316,7 @@ def create_user(data: dict) -> User:
 
 ### Command
 ```bash
-python rev.py "Create pytest fixtures for database and sample data"
+rev "Create pytest fixtures for database and sample data"
 ```
 
 ### Generated Fixtures
@@ -370,7 +370,7 @@ def auth_token(sample_user):
 
 ### Command
 ```bash
-python rev.py "Add Dockerfile and docker-compose.yml for development"
+rev "Add Dockerfile and docker-compose.yml for development"
 ```
 
 ### Generated Files
@@ -432,27 +432,27 @@ volumes:
 
 ### Development Setup
 ```bash
-python rev.py "Setup Python development environment with virtualenv and pre-commit hooks"
+rev "Setup Python development environment with virtualenv and pre-commit hooks"
 ```
 
 ### Code Quality
 ```bash
-python rev.py "Run black, flake8, and mypy on entire codebase"
+rev "Run black, flake8, and mypy on entire codebase"
 ```
 
 ### Testing
 ```bash
-python rev.py "Add pytest tests for all services and achieve 80% coverage"
+rev "Add pytest tests for all services and achieve 80% coverage"
 ```
 
 ### Performance
 ```bash
-python rev.py "Add caching with Redis to frequently accessed endpoints"
+rev "Add caching with Redis to frequently accessed endpoints"
 ```
 
 ### Security
 ```bash
-python rev.py "Add input validation and rate limiting to all API endpoints"
+rev "Add input validation and rate limiting to all API endpoints"
 ```
 
 ## Best Practices

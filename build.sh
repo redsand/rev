@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build script for rev.py - Autonomous CI/CD Agent
+# Build script for rev - Autonomous CI/CD Agent
 # This script sets up the environment and runs the build process
 
 set -e  # Exit on any error
@@ -12,7 +12,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Script information
-SCRIPT_NAME="rev.py Build Script"
+SCRIPT_NAME="rev Build Script"
 SCRIPT_VERSION="1.0.0"
 
 echo -e "${BLUE}================================${NC}"
@@ -144,26 +144,20 @@ run_tests() {
 validate_build() {
     print_status "Validating build..."
     
-    # Check if rev.py exists and is executable
-    if [[ -f "rev.py" ]]; then
-        print_status "rev.py found"
-        
-        # Test basic import
-        if python -c "import sys; sys.path.insert(0, '.'); import rev" 2>/dev/null; then
-            print_status "Module imports successfully"
+    # Check if rev CLI is available; fallback to python -m rev
+    if command -v rev >/dev/null 2>&1; then
+        if rev --help >/dev/null 2>&1; then
+            print_status "rev CLI executes successfully"
         else
-            print_warning "Module import test failed (this is normal for rev.py)"
-        fi
-        
-        # Test basic execution
-        if python rev.py --help 2>/dev/null; then
-            print_status "rev.py executes successfully"
-        else
-            print_warning "rev.py help command failed (may require Ollama)"
+            print_warning "rev help command failed (may require Ollama)"
         fi
     else
-        print_error "rev.py not found"
-        exit 1
+        if python -m rev --help >/dev/null 2>&1; then
+            print_status "python -m rev executes successfully"
+        else
+            print_error "rev CLI not found and python -m rev failed"
+            exit 1
+        fi
     fi
 }
 
@@ -292,8 +286,8 @@ main() {
     
     echo
     echo -e "${BLUE}Quick start:${NC}"
-    echo -e "  python rev.py --help"
-    echo -e "  python rev.py \"Add error handling to API endpoints\""
+    echo -e "  rev --help"
+    echo -e "  rev \"Add error handling to API endpoints\""
     echo
 }
 

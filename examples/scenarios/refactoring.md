@@ -1,4 +1,4 @@
-# Code Refactoring with rev.py
+# Code Refactoring with rev
 
 Safely refactor code with automated testing to prevent regressions.
 
@@ -9,7 +9,7 @@ Large function with multiple responsibilities.
 
 ### Command
 ```bash
-python rev.py "Extract validation logic from createUser function into separate validator functions"
+rev "Extract validation logic from createUser function into separate validator functions"
 ```
 
 ### Before
@@ -71,7 +71,7 @@ Database queries scattered throughout controllers.
 
 ### Command
 ```bash
-python rev.py "Refactor to repository pattern - extract all database queries into repository classes"
+rev "Refactor to repository pattern - extract all database queries into repository classes"
 ```
 
 ### Before
@@ -133,7 +133,7 @@ Hard-coded dependencies make testing difficult.
 
 ### Command
 ```bash
-python rev.py "Refactor to use dependency injection for EmailService and PaymentService"
+rev "Refactor to use dependency injection for EmailService and PaymentService"
 ```
 
 ### Before
@@ -186,7 +186,7 @@ Same logic repeated in multiple places.
 
 ### Command
 ```bash
-python rev.py "Remove duplication in error handling across all API endpoints"
+rev "Remove duplication in error handling across all API endpoints"
 ```
 
 ### Before
@@ -243,7 +243,7 @@ Old callback-based code needs modernization.
 
 ### Command
 ```bash
-python rev.py "Refactor callback-based code to async/await in services/ directory"
+rev "Refactor callback-based code to async/await in services/ directory"
 ```
 
 ### Before (Callbacks)
@@ -279,7 +279,7 @@ Large monolithic file with mixed concerns.
 
 ### Command
 ```bash
-python rev.py "Split app.py into separate modules: models/, routes/, services/"
+rev "Split app.py into separate modules: models/, routes/, services/"
 ```
 
 ### Before
@@ -318,7 +318,7 @@ N+1 query problem slowing down API.
 
 ### Command
 ```bash
-python rev.py "Fix N+1 query problem in getUsersWithPosts endpoint"
+rev "Fix N+1 query problem in getUsersWithPosts endpoint"
 ```
 
 ### Before (N+1 Queries)
@@ -345,21 +345,21 @@ def get_users_with_posts():
 
 ### 1. Run Tests Before and After
 ```bash
-python rev.py "Run tests, then refactor auth service to use dependency injection, then run tests again"
+rev "Run tests, then refactor auth service to use dependency injection, then run tests again"
 ```
 
 ### 2. Refactor in Small Steps
 ```bash
 # Good: Small, focused refactoring
-python rev.py "Extract validation logic from UserController"
+rev "Extract validation logic from UserController"
 
 # Risky: Too much at once
-python rev.py "Completely rewrite the entire application"
+rev "Completely rewrite the entire application"
 ```
 
 ### 3. Use REPL for Exploratory Refactoring
 ```bash
-python rev.py --repl
+rev --repl
 
 agent> Show me the UserService class
 agent> Identify code duplication in UserService
@@ -370,34 +370,34 @@ agent> /exit
 
 ### 4. Document Major Refactorings
 ```bash
-python rev.py "Refactor to repository pattern and update ARCHITECTURE.md"
+rev "Refactor to repository pattern and update ARCHITECTURE.md"
 ```
 
 ## Common Refactoring Patterns
 
 ### Extract Method
 ```bash
-python rev.py "Extract repeated validation logic into separate methods"
+rev "Extract repeated validation logic into separate methods"
 ```
 
 ### Extract Class
 ```bash
-python rev.py "Extract payment logic from OrderService into PaymentService"
+rev "Extract payment logic from OrderService into PaymentService"
 ```
 
 ### Rename for Clarity
 ```bash
-python rev.py "Rename getData() to fetchUserProfile() for clarity"
+rev "Rename getData() to fetchUserProfile() for clarity"
 ```
 
 ### Inline Unnecessary Abstractions
 ```bash
-python rev.py "Inline single-use helper functions in utils.py"
+rev "Inline single-use helper functions in utils.py"
 ```
 
 ### Replace Conditionals with Polymorphism
 ```bash
-python rev.py "Replace payment type conditionals with strategy pattern"
+rev "Replace payment type conditionals with strategy pattern"
 ```
 
 ## Safety Checklist

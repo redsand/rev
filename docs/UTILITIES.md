@@ -1,6 +1,6 @@
 # Advanced Utilities
 
-rev.py includes powerful utilities for file conversion, code refactoring, dependency management, and security scanning.
+rev includes powerful utilities for file conversion, code refactoring, dependency management, and security scanning.
 
 ## File Format Conversion
 
@@ -447,7 +447,7 @@ npm install license-checker
 
 ```bash
 # Convert Kubernetes YAML to JSON for processing
-python rev.py "Convert k8s-deployment.yaml to JSON format"
+ rev "Convert k8s-deployment.yaml to JSON format"
 
 # Result: k8s-deployment.json created
 ```
@@ -456,17 +456,17 @@ python rev.py "Convert k8s-deployment.yaml to JSON format"
 
 ```bash
 # Remove unused imports from all Python files
-python rev.py "Remove unused imports from all files in src/ directory"
+ rev "Remove unused imports from all files in src/ directory"
 
 # Find and extract magic numbers to constants
-python rev.py "Analyze src/config.py and suggest constant extraction"
+ rev "Analyze src/config.py and suggest constant extraction"
 ```
 
 ### Example 3: Dependency Audit
 
 ```bash
 # Complete dependency audit
-python rev.py "Analyze dependencies, check for vulnerabilities, and suggest updates"
+ rev "Analyze dependencies, check for vulnerabilities, and suggest updates"
 
 # Steps performed:
 # 1. analyze_dependencies() - Check for issues
@@ -478,7 +478,7 @@ python rev.py "Analyze dependencies, check for vulnerabilities, and suggest upda
 
 ```bash
 # Comprehensive security audit
-python rev.py "Perform complete security audit: scan code, check dependencies, detect secrets"
+ rev "Perform complete security audit: scan code, check dependencies, detect secrets"
 
 # Steps performed:
 # 1. scan_code_security(".") - SAST analysis
@@ -491,10 +491,10 @@ python rev.py "Perform complete security audit: scan code, check dependencies, d
 
 ```bash
 # Before committing
-python rev.py "Remove unused imports, scan for secrets, and check dependencies"
+ rev "Remove unused imports, scan for secrets, and check dependencies"
 
 # Safe commit workflow
-python rev.py "Scan staged files for security issues and secrets"
+ rev "Scan staged files for security issues and secrets"
 ```
 
 ## Integration with CI/CD
@@ -520,11 +520,11 @@ jobs:
 
       - name: Run security scan
         run: |
-          python rev.py "Run security scan and dependency audit"
+           rev "Run security scan and dependency audit"
 
       - name: Check for secrets
         run: |
-          python rev.py "Scan for accidentally committed secrets"
+           rev "Scan for accidentally committed secrets"
 ```
 
 ### GitLab CI
@@ -535,7 +535,7 @@ security:scan:
   stage: test
   script:
     - pip install bandit safety detect-secrets
-    - python rev.py "Perform comprehensive security audit"
+     - rev "Perform comprehensive security audit"
   artifacts:
     reports:
       sast: security-report.json
@@ -688,4 +688,4 @@ verify_migrations(path: str = "migrations") -> str
 
 ## License
 
-Same as rev.py - MIT License
+Same as rev - MIT License

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Rev.py now includes comprehensive session summarization to keep context windows small in long-running sessions. This feature automatically tracks all activity during execution and generates concise summaries that preserve key information while dramatically reducing token usage.
+Rev now includes comprehensive session summarization to keep context windows small in long-running sessions. This feature automatically tracks all activity during execution and generates concise summaries that preserve key information while dramatically reducing token usage.
 
 ## Key Features
 

@@ -1,4 +1,4 @@
-# Makefile for rev.py - Autonomous CI/CD Agent
+# Makefile for rev - Autonomous CI/CD Agent
 
 # Variables
 PYTHON := python3
@@ -26,7 +26,7 @@ endif
 .PHONY: help
 help:
 	@echo "$(BLUE)================================$(NC)"
-	@echo "$(BLUE)  rev.py Build System$(NC)"
+	@echo "$(BLUE)  rev Build System$(NC)"
 	@echo "$(BLUE)================================$(NC)"
 	@echo ""
 	@echo "$(GREEN)Available targets:$(NC)"
@@ -143,16 +143,20 @@ coverage:
 .PHONY: validate
 validate:
 	@echo "$(BLUE)Validating build...$(NC)"
-	@if [ -f rev.py ]; then \
-		echo "$(GREEN)rev.py found$(NC)"; \
-		if $(VENV_PYTHON) rev.py --help >/dev/null 2>&1; then \
-			echo "$(GREEN)rev.py executes successfully$(NC)"; \
+	@if command -v rev >/dev/null 2>&1; then \
+		echo "$(GREEN)rev CLI found$(NC)"; \
+		if rev --help >/dev/null 2>&1; then \
+			echo "$(GREEN)rev executes successfully$(NC)"; \
 		else \
-			echo "$(YELLOW)rev.py help command failed (may require Ollama)$(NC)"; \
+			echo "$(YELLOW)rev help command failed (may require Ollama)$(NC)"; \
 		fi; \
 	else \
-		echo "$(RED)rev.py not found$(NC)"; \
-		exit 1; \
+		if $(VENV_PYTHON) -m rev --help >/dev/null 2>&1; then \
+			echo "$(GREEN)python -m rev executes successfully$(NC)"; \
+		else \
+			echo "$(RED)rev CLI not found and python -m rev failed$(NC)"; \
+			exit 1; \
+		fi; \
 	fi
 
 # Clean build artifacts

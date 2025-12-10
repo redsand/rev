@@ -283,11 +283,11 @@ Both directories are:
 - Configured via `ROOT = pathlib.Path(os.getcwd()).resolve()`
 - Git-ignored by default
 
-## Migration from Monolithic `rev.py`
+## Migration from Monolithic Script
 
-The original `rev.py` (4,870 lines) has been refactored into:
+The original monolithic script (4,870 lines) has been refactored into:
 - **30 module files** organized in 8 directories
-- **~3,500 lines** of modular code (excluding original rev.py)
+- **~3,500 lines** of modular code (excluding the original monolithic script)
 - **100% backwards compatible** - all functionality preserved
 - **Same CLI interface** - `rev` command works identically
 
