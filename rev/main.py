@@ -202,7 +202,7 @@ def main():
 
             # If resume is True (flag without value) or empty string, find latest checkpoint
             checkpoint_path = args.resume
-            if checkpoint_path == True or checkpoint_path == "latest" or not checkpoint_path:
+            if checkpoint_path is True or checkpoint_path == "latest" or not checkpoint_path:
                 checkpoint_path = StateManager.find_latest_checkpoint()
                 if not checkpoint_path:
                     print("✗ No checkpoints found.")
@@ -225,8 +225,8 @@ def main():
 
                 # Reset stopped tasks to pending so they can be executed
                 for task in plan.tasks:
-                    if task.status.value == "stopped":
-                        task.status = task.status.__class__("pending")
+                    if task.status == TaskStatus.STOPPED:
+                        task.status = TaskStatus.PENDING
 
                 # Use concurrent execution if parallel > 1, otherwise sequential
                 debug_logger.log_workflow_phase("execution", {

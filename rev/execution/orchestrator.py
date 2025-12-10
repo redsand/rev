@@ -64,9 +64,9 @@ class ResourceBudget:
         """Get remaining budget percentages."""
         self.update_time()
         return {
-            "steps": max(0, (self.max_steps - self.steps_used) / self.max_steps * 100),
-            "tokens": max(0, (self.max_tokens - self.tokens_used) / self.max_tokens * 100),
-            "time": max(0, (self.max_seconds - self.seconds_used) / self.max_seconds * 100)
+            "steps": max(0, (self.max_steps - self.steps_used) / self.max_steps * 100) if self.max_steps > 0 else 100,
+            "tokens": max(0, (self.max_tokens - self.tokens_used) / self.max_tokens * 100) if self.max_tokens > 0 else 100,
+            "time": max(0, (self.max_seconds - self.seconds_used) / self.max_seconds * 100) if self.max_seconds > 0 else 100
         }
 
     def get_usage_summary(self) -> str:
@@ -226,6 +226,11 @@ class Orchestrator:
             if self.config.enable_learning and self.learning_agent:
                 self._update_phase(AgentPhase.LEARNING)
                 budget.update_step()  # Track phase transition
+                if budget.is_exceeded():
+                    print(f"\n⚠️ Resource budget exceeded during learning phase!")
+                    result.errors.append("Resource budget exceeded during learning phase")
+                    result.phase_reached = AgentPhase.LEARNING
+                    return result
                 suggestions = self.learning_agent.get_suggestions(user_request)
                 if suggestions["similar_patterns"]:
                     display_learning_suggestions(suggestions, user_request)
@@ -235,6 +240,11 @@ class Orchestrator:
             if self.config.enable_research:
                 self._update_phase(AgentPhase.RESEARCH)
                 budget.update_step()
+                if budget.is_exceeded():
+                    print(f"\n⚠️ Resource budget exceeded during research phase!")
+                    result.errors.append("Resource budget exceeded during research phase")
+                    result.phase_reached = AgentPhase.RESEARCH
+                    return result
                 quick_mode = self.config.research_depth == "shallow"
                 research_findings = research_codebase(
                     user_request,
@@ -251,6 +261,11 @@ class Orchestrator:
             # Phase 3: Planning Agent - Create execution plan
             self._update_phase(AgentPhase.PLANNING)
             budget.update_step()
+            if budget.is_exceeded():
+                print(f"\n⚠️ Resource budget exceeded during planning phase!")
+                result.errors.append("Resource budget exceeded during planning phase")
+                result.phase_reached = AgentPhase.PLANNING
+                return result
             plan = planning_mode(user_request, coding_mode=coding_mode)
             result.plan = plan
 
@@ -264,6 +279,11 @@ class Orchestrator:
             if self.config.enable_review:
                 self._update_phase(AgentPhase.REVIEW)
                 budget.update_step()
+                if budget.is_exceeded():
+                    print(f"\n⚠️ Resource budget exceeded during review phase!")
+                    result.errors.append("Resource budget exceeded during review phase")
+                    result.phase_reached = AgentPhase.REVIEW
+                    return result
 
                 # Retry loop for plan regeneration
                 planning_retry_count = 0
@@ -344,8 +364,18 @@ IMPORTANT - Address the following review feedback:
             # Phase 5: Execution Agent - Execute the plan
             self._update_phase(AgentPhase.EXECUTION)
             budget.update_step()
+            if budget.is_exceeded():
+                print(f"\n⚠️ Resource budget exceeded before execution phase!")
+                result.errors.append("Resource budget exceeded before execution phase")
+                result.phase_reached = AgentPhase.EXECUTION
+                return result
             # Track task execution steps
             budget.update_step(len(plan.tasks))  # Count each task as a step
+            if budget.is_exceeded():
+                print(f"\n⚠️ Resource budget exceeded during execution phase!")
+                result.errors.append("Resource budget exceeded during execution phase")
+                result.phase_reached = AgentPhase.EXECUTION
+                return result
             tools = get_available_tools()
             if self.config.parallel_workers > 1:
                 concurrent_execution_mode(
@@ -369,6 +399,11 @@ IMPORTANT - Address the following review feedback:
             if self.config.enable_validation:
                 self._update_phase(AgentPhase.VALIDATION)
                 budget.update_step()
+                if budget.is_exceeded():
+                    print(f"\n⚠️ Resource budget exceeded during validation phase!")
+                    result.errors.append("Resource budget exceeded during validation phase")
+                    result.phase_reached = AgentPhase.VALIDATION
+                    return result
                 validation = validate_execution(
                     plan,
                     user_request,

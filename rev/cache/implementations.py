@@ -6,6 +6,7 @@ import json
 import hashlib
 import pathlib
 import subprocess
+import threading
 from typing import Dict, Any, List, Optional
 
 from .base import IntelligentCache
@@ -59,6 +60,7 @@ class LLMResponseCache(IntelligentCache):
     def __init__(self, **kwargs):
         super().__init__(name="llm_response", ttl=3600, **kwargs)  # 1 hour TTL
         self._tools_hash_cache = {}  # Cache for tools hash by object id
+        self._lock = threading.Lock()  # Thread safety for concurrent access
 
     def _hash_tools(self, tools: Optional[List[Dict]]) -> str:
         """Hash tools list with caching to avoid repeated JSON serialization.
@@ -75,12 +77,13 @@ class LLMResponseCache(IntelligentCache):
         # Use object id as cache key (same list object = same hash)
         tools_id = id(tools)
 
-        if tools_id not in self._tools_hash_cache:
-            # Only serialize and hash if not cached
-            tools_json = json.dumps(tools, sort_keys=True)
-            self._tools_hash_cache[tools_id] = hashlib.sha256(tools_json.encode()).hexdigest()[:16]
+        with self._lock:
+            if tools_id not in self._tools_hash_cache:
+                # Only serialize and hash if not cached
+                tools_json = json.dumps(tools, sort_keys=True)
+                self._tools_hash_cache[tools_id] = hashlib.sha256(tools_json.encode()).hexdigest()[:16]
 
-        return self._tools_hash_cache[tools_id]
+            return self._tools_hash_cache[tools_id]
 
     def _hash_messages(self, messages: List[Dict[str, str]], tools: Optional[List[Dict]] = None, model: Optional[str] = None) -> str:
         """Create hash of messages for cache key.

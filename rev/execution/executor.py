@@ -13,7 +13,7 @@ Performance optimizations:
 import json
 import sys
 from typing import Dict, Any, List
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
 from rev.models.task import ExecutionPlan, Task, TaskStatus
 from rev.tools.registry import execute_tool
@@ -829,8 +829,8 @@ def concurrent_execution_mode(
 
             # Wait for at least one task to complete
             if futures:
-                done, _ = as_completed(futures.keys()), None
-                for future in list(done):
+                done, pending = wait(futures.keys(), return_when=FIRST_COMPLETED)
+                for future in done:
                     task = futures.pop(future)
                     try:
                         success = future.result()

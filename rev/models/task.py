@@ -125,11 +125,15 @@ class ExecutionPlan:
                 if task.status not in [TaskStatus.PENDING, TaskStatus.STOPPED]:
                     continue
 
+                # Validate dependencies first
+                for dep_id in task.dependencies:
+                    if dep_id < 0 or dep_id >= len(self.tasks):
+                        raise ValueError(f"Task {task.task_id} has invalid dependency: {dep_id}")
+
                 # Check if all dependencies are completed
                 deps_met = all(
                     self.tasks[dep_id].status == TaskStatus.COMPLETED
                     for dep_id in task.dependencies
-                    if dep_id < len(self.tasks)
                 )
 
                 if deps_met:
