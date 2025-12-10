@@ -18,15 +18,16 @@ import pytest
 # Import rev module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Load rev.py
-import types
-rev_path = Path(__file__).parent.parent / "rev.py"
-agent_min = types.ModuleType("agent_min")
-agent_min.__file__ = str(rev_path)
+# Import the actual rev package modules
+from rev.models.task import Task, TaskStatus, ExecutionPlan, RiskLevel
 
-with open(rev_path, 'r', encoding='utf-8') as f:
-    code = compile(f.read(), str(rev_path), 'exec')
-    exec(code, agent_min.__dict__)
+# Create agent_min module reference for backward compatibility with tests
+import types
+agent_min = types.ModuleType("agent_min")
+agent_min.Task = Task
+agent_min.TaskStatus = TaskStatus
+agent_min.ExecutionPlan = ExecutionPlan
+agent_min.RiskLevel = RiskLevel
 
 sys.modules['agent_min'] = agent_min
 
