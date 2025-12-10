@@ -1,6 +1,6 @@
 # Model Context Protocol (MCP) Servers
 
-A curated list of publicly available MCP servers for use with rev.py.
+A curated list of publicly available MCP servers for use with rev.
 
 ## What is MCP?
 
@@ -123,7 +123,7 @@ REV_MCP_FETCH=false
 **Via Environment Variable** (before starting rev):
 ```bash
 export REV_PRIVATE_MODE=true
-python rev.py
+rev
 ```
 
 **Via .env File**:
@@ -241,7 +241,7 @@ Rev now includes **remote MCP servers** - publicly hosted SSE/HTTP endpoints tha
 # Install
 npm install -g @modelcontextprotocol/server-filesystem
 
-# Configure in rev.py
+# Configure in rev
 mcp_add_server "filesystem" "npx" "-y @modelcontextprotocol/server-filesystem /path/to/allowed/directory"
 ```
 
@@ -535,7 +535,7 @@ python my_mcp_server.py
 
 ---
 
-## Recommended MCP Servers for rev.py
+## Recommended MCP Servers for rev
 
 ### Essential Servers
 1. **Filesystem** - Core file operations
@@ -557,12 +557,12 @@ python my_mcp_server.py
 
 ---
 
-## How to Add MCP Servers to rev.py
+## How to Add MCP Servers to rev
 
-### Method 1: Using rev.py CLI
+### Method 1: Using rev CLI
 ```bash
-# Start rev.py
-python rev.py
+# Start rev
+rev
 
 # Add server interactively
 > mcp_add_server "github" "npx" "-y @modelcontextprotocol/server-github"
@@ -653,7 +653,7 @@ AWS_SECRET_ACCESS_KEY=your_secret_key
 AWS_REGION=us-east-1
 ```
 
-Load in rev.py:
+Load in rev:
 ```python
 from dotenv import load_dotenv
 load_dotenv()
@@ -734,7 +734,7 @@ server.setRequestHandler(/* ... */);
 
 1. Install essential MCP servers
 2. Configure authentication (API keys, tokens)
-3. Test servers with rev.py
+3. Test servers with rev
 4. Create custom servers for project-specific needs
 5. Set up automated MCP server management
 

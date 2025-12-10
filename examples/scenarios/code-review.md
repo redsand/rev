@@ -1,4 +1,4 @@
-# Code Review with rev.py
+# Code Review with rev
 
 Automate code review tasks and improve code quality.
 
@@ -9,7 +9,7 @@ Review changes before committing.
 
 ### Command
 ```bash
-python rev.py "Review uncommitted changes and suggest improvements"
+rev "Review uncommitted changes and suggest improvements"
 ```
 
 ### Review Output
@@ -46,7 +46,7 @@ Automated PR review and comments.
 
 ### Command
 ```bash
-python rev.py "Review pull request changes and create review comments"
+rev "Review pull request changes and create review comments"
 ```
 
 ### Generated Review
@@ -111,7 +111,7 @@ Identify code smells and anti-patterns.
 
 ### Command
 ```bash
-python rev.py "Analyze codebase for code smells and suggest refactoring"
+rev "Analyze codebase for code smells and suggest refactoring"
 ```
 
 ### Detected Issues
@@ -184,7 +184,7 @@ Scan for security vulnerabilities.
 
 ### Command
 ```bash
-python rev.py "Perform security audit and identify vulnerabilities"
+rev "Perform security audit and identify vulnerabilities"
 ```
 
 ### Security Report
@@ -245,7 +245,7 @@ Identify performance bottlenecks.
 
 ### Command
 ```bash
-python rev.py "Analyze code for performance issues and suggest optimizations"
+rev "Analyze code for performance issues and suggest optimizations"
 ```
 
 ### Performance Report
@@ -314,7 +314,7 @@ Ensure code follows style guidelines.
 
 ### Command
 ```bash
-python rev.py "Check code against PEP 8 style guide and fix violations"
+rev "Check code against PEP 8 style guide and fix violations"
 ```
 
 ### Style Report
@@ -350,31 +350,31 @@ Remaining issues:
 ### 1. Review Early and Often
 ```bash
 # Before committing
-python rev.py "Review uncommitted changes"
+rev "Review uncommitted changes"
 
 # Before pushing
-python rev.py "Review changes since last push"
+rev "Review changes since last push"
 ```
 
 ### 2. Automated PR Reviews
 ```yaml
 # .github/workflows/review.yml
 - name: Auto Review
-  run: python rev.py "Review PR changes and comment"
+  run: rev "Review PR changes and comment"
 ```
 
 ### 3. Focus Areas
 ```bash
 # Security focused
-python rev.py "Security review focusing on auth and data access"
+rev "Security review focusing on auth and data access"
 
 # Performance focused
-python rev.py "Performance review focusing on database queries"
+rev "Performance review focusing on database queries"
 ```
 
 ### 4. Use Review Checklists
 ```bash
-python rev.py "Review against checklist: security, performance, tests, docs"
+rev "Review against checklist: security, performance, tests, docs"
 ```
 
 ## Review Checklist

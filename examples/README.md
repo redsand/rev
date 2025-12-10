@@ -1,6 +1,6 @@
-# rev.py Examples
+# rev Examples
 
-This directory contains comprehensive examples, templates, and CI/CD integrations for rev.py.
+This directory contains comprehensive examples, templates, and CI/CD integrations for rev.
 
 ## Directory Structure
 
@@ -17,7 +17,7 @@ examples/
 
 ### 1. Real-World Scenarios
 
-Learn how to use rev.py for common development tasks:
+Learn how to use rev for common development tasks:
 
 - **[Bug Fixing](scenarios/bug-fixing.md)** - Fix bugs with test-driven development
 - **[Feature Development](scenarios/feature-development.md)** - Add new features iteratively
@@ -39,7 +39,7 @@ Ready-to-use templates for common tasks:
 
 ### 3. CI/CD Integration
 
-Integrate rev.py into your CI/CD pipelines:
+Integrate rev into your CI/CD pipelines:
 
 #### GitHub Actions
 - **[Automated Code Review](.github/workflows/review.yml)** - Review PRs automatically
@@ -52,13 +52,13 @@ Integrate rev.py into your CI/CD pipelines:
 - **[Pipeline Integration](ci-cd/gitlab-ci/.gitlab-ci.yml)** - Complete GitLab CI setup
 - **[Code Quality](ci-cd/gitlab-ci/code-quality.yml)** - Quality checks and fixes
 - **[Security Pipeline](ci-cd/gitlab-ci/security.yml)** - Security scanning
-- **[Auto-Deployment](ci-cd/gitlab-ci/auto-deploy.yml)** - Deploy with rev.py
+- **[Auto-Deployment](ci-cd/gitlab-ci/auto-deploy.yml)** - Deploy with rev
 
 ## Usage Examples
 
 ### 6-Agent System (v2.0.1)
 
-rev.py now features a **6-agent autonomous system**:
+rev now features a **6-agent autonomous system**:
 
 | Agent | Purpose | Flag |
 |-------|---------|------|
@@ -73,7 +73,7 @@ rev.py now features a **6-agent autonomous system**:
 
 ```bash
 # Enable orchestrator to coordinate all agents
-python rev.py --orchestrate --learn --research "Implement user authentication"
+rev --orchestrate --learn --research "Implement user authentication"
 
 # The orchestrator runs agents in sequence:
 # 1. Learning → recalls similar past tasks
@@ -89,7 +89,7 @@ python rev.py --orchestrate --learn --research "Implement user authentication"
 
 ```bash
 # Start interactive session
-python rev.py --repl
+rev --repl
 
 agent> Review the authentication module
 agent> Add input validation to all user endpoints
@@ -102,55 +102,55 @@ agent> /exit
 
 ```bash
 # Quick fixes
-python rev.py "Fix all ESLint errors"
+rev "Fix all ESLint errors"
 
 # Feature development with research
-python rev.py --research "Add rate limiting to API endpoints"
+rev --research "Add rate limiting to API endpoints"
 
 # Complex feature with full orchestration
-python rev.py --orchestrate "Build payment processing system"
+rev --orchestrate "Build payment processing system"
 
 # Refactoring with strict review
-python rev.py --review-strictness strict "Extract database logic into repository pattern"
+rev --review-strictness strict "Extract database logic into repository pattern"
 
 # Testing with auto-fix
-python rev.py --auto-fix "Add unit tests for the user service"
+rev --auto-fix "Add unit tests for the user service"
 ```
 
 ### Agent-Specific Options
 
 ```bash
 # Research agent options
-python rev.py --research "Find authentication code"
-python rev.py --research --research-depth deep "Analyze system architecture"
-python rev.py --research --research-depth shallow "Quick file search"
+rev --research "Find authentication code"
+rev --research --research-depth deep "Analyze system architecture"
+rev --research --research-depth shallow "Quick file search"
 
 # Review agent options
-python rev.py --review-strictness strict "Database migration"
-python rev.py --review-strictness lenient "Update README"
-python rev.py --action-review "Sensitive security changes"
-python rev.py --no-review "Trivial typo fix"
+rev --review-strictness strict "Database migration"
+rev --review-strictness lenient "Update README"
+rev --action-review "Sensitive security changes"
+rev --no-review "Trivial typo fix"
 
 # Validation agent options
-python rev.py --validate "Add new feature"  # default
-python rev.py --no-validate "Quick docs update"
-python rev.py --auto-fix "Add linting configuration"
+rev --validate "Add new feature"  # default
+rev --no-validate "Quick docs update"
+rev --auto-fix "Add linting configuration"
 
 # Learning agent
-python rev.py --learn "Add user preferences"
+rev --learn "Add user preferences"
 ```
 
 ### Parallel Execution
 
 ```bash
 # Run multiple tasks concurrently
-python rev.py -j 4 "Review all API endpoints and add tests"
+rev -j 4 "Review all API endpoints and add tests"
 
 # Sequential for dependencies
-python rev.py -j 1 "Refactor auth, update tests, then update docs"
+rev -j 1 "Refactor auth, update tests, then update docs"
 
 # Parallel with orchestration
-python rev.py --orchestrate -j 4 "Implement multiple features"
+rev --orchestrate -j 4 "Implement multiple features"
 ```
 
 ## Best Practices
@@ -159,26 +159,26 @@ python rev.py --orchestrate -j 4 "Implement multiple features"
 Begin with simple, focused tasks before tackling complex refactoring:
 ```bash
 # Good: Specific and focused
-python rev.py "Add null check to getUserById function"
+rev "Add null check to getUserById function"
 
 # Bad: Too broad
-python rev.py "Fix everything"
+rev "Fix everything"
 ```
 
 ### 2. Use Appropriate Models
 Match model size to task complexity:
 ```bash
 # Simple tasks (fast)
-python rev.py --model llama3.1:8b "Fix typo in README"
+rev --model llama3.1:8b "Fix typo in README"
 
 # Complex refactoring (powerful)
-python rev.py --model qwen3-coder:480b-cloud "Refactor auth system"
+rev --model qwen3-coder:480b-cloud "Refactor auth system"
 ```
 
 ### 3. Review Changes
 Always review changes before committing:
 ```bash
-python rev.py "Add feature X"
+rev "Add feature X"
 git diff           # Review changes
 git add .
 git commit -m "Add feature X"
@@ -188,10 +188,10 @@ git commit -m "Add feature X"
 Use parallelism for independent tasks:
 ```bash
 # Review multiple files in parallel
-python rev.py -j 4 "Review all components and add JSDoc comments"
+rev -j 4 "Review all components and add JSDoc comments"
 
 # Sequential when order matters
-python rev.py -j 1 "Fix bug, add test, update docs"
+rev -j 1 "Fix bug, add test, update docs"
 ```
 
 ## Environment Setup
@@ -212,7 +212,7 @@ pip install -r requirements.txt
 ### Cloud Models
 ```bash
 # Use powerful cloud models
-python rev.py --model qwen3-coder:480b-cloud "Complex task"
+rev --model qwen3-coder:480b-cloud "Complex task"
 
 # Authenticate (first use only)
 # Follow the URL provided and sign in
@@ -237,10 +237,10 @@ ollama pull llama3.1:latest
 **Task not completing:**
 ```bash
 # Use a more powerful model
-python rev.py --model llama3.1:70b "Complex task"
+rev --model llama3.1:70b "Complex task"
 
 # Or be more specific
-python rev.py "Add error handling to getUserById in src/services/user.js"
+rev "Add error handling to getUserById in src/services/user.js"
 ```
 
 **Cloud model authentication:**
@@ -265,4 +265,4 @@ Have a useful example or workflow? Contributions are welcome!
 
 ## License
 
-MIT - Same as rev.py
+MIT - Same as rev

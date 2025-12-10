@@ -1,10 +1,10 @@
-# Feature Development with rev.py
+# Feature Development with rev
 
-Learn how to develop new features iteratively using rev.py's **6-agent autonomous system**.
+Learn how to develop new features iteratively using rev's **6-agent autonomous system**.
 
 ## Agent-Assisted Development
 
-rev.py v2.0.1 uses 6 specialized agents that work together:
+rev v2.0.1 uses 6 specialized agents that work together:
 
 | Phase | Agent | What It Does |
 |-------|-------|--------------|
@@ -22,19 +22,19 @@ Add rate limiting to API endpoints.
 
 ### Command (Standard)
 ```bash
-python rev.py "Add rate limiting middleware to API with 100 requests per minute limit"
+ rev "Add rate limiting middleware to API with 100 requests per minute limit"
 ```
 
 ### Command (With Research Agent)
 ```bash
 # Research agent finds existing middleware patterns first
-python rev.py --research "Add rate limiting middleware to API with 100 requests per minute limit"
+ rev --research "Add rate limiting middleware to API with 100 requests per minute limit"
 ```
 
 ### Command (Full Orchestration)
 ```bash
 # All 6 agents coordinate for maximum autonomy
-python rev.py --orchestrate --learn --research "Add rate limiting middleware"
+ rev --orchestrate --learn --research "Add rate limiting middleware"
 ```
 
 ### Generated Plan
@@ -106,7 +106,7 @@ Add user authentication system with JWT.
 
 ### Command (Recommended: Full Orchestration)
 ```bash
-python rev.py --orchestrate --learn --research "Implement JWT authentication with login, register, and protected routes"
+ rev --orchestrate --learn --research "Implement JWT authentication with login, register, and protected routes"
 ```
 
 ### What Each Agent Does
@@ -175,7 +175,7 @@ Auto-fixed: 2 linting issues
 
 ### Alternative: Standard Mode
 ```bash
-python rev.py "Implement JWT authentication with login, register, and protected routes"
+ rev "Implement JWT authentication with login, register, and protected routes"
 ```
 
 ### Generated Plan
@@ -258,7 +258,7 @@ Add user profile fields (bio, avatar, location).
 
 ### Command
 ```bash
-python rev.py "Add user profile fields: bio, avatar_url, location with database migration"
+ rev "Add user profile fields: bio, avatar_url, location with database migration"
 ```
 
 ### Process
@@ -295,7 +295,7 @@ Create RESTful CRUD endpoints for blog posts.
 
 ### Command
 ```bash
-python rev.py "Create REST API for blog posts with CRUD operations and tests"
+ rev "Create REST API for blog posts with CRUD operations and tests"
 ```
 
 ### Generated Endpoints
@@ -388,7 +388,7 @@ Add multiple independent features simultaneously.
 
 ### Command
 ```bash
-python rev.py -j 4 "Add email notifications, search functionality, and export to CSV"
+ rev -j 4 "Add email notifications, search functionality, and export to CSV"
 ```
 
 ### Parallel Execution
@@ -423,7 +423,7 @@ Integrate with Stripe payment processing.
 
 ### Command
 ```bash
-python rev.py "Integrate Stripe payments with checkout, webhooks, and refunds"
+ rev "Integrate Stripe payments with checkout, webhooks, and refunds"
 ```
 
 ### Implementation
@@ -477,7 +477,7 @@ def refund_payment(payment_intent_id):
 ### 1. Use Orchestrator for Complex Features
 ```bash
 # Let the orchestrator coordinate all agents
-python rev.py --orchestrate --learn --research "Build payment processing system"
+ rev --orchestrate --learn --research "Build payment processing system"
 
 # This automatically:
 # - Checks past patterns (Learning Agent)
@@ -491,35 +491,35 @@ python rev.py --orchestrate --learn --research "Build payment processing system"
 ### 2. Enable Learning for Repeated Tasks
 ```bash
 # First time: Agent learns from execution
-python rev.py --learn "Add API endpoint for user preferences"
+ rev --learn "Add API endpoint for user preferences"
 
 # Next time: Agent recalls patterns and suggests faster approach
-python rev.py --learn "Add API endpoint for notifications"
+ rev --learn "Add API endpoint for notifications"
 ```
 
 ### 3. Use Research for Unfamiliar Codebases
 ```bash
 # Deep research for complex tasks
-python rev.py --research --research-depth deep "Refactor authentication module"
+ rev --research --research-depth deep "Refactor authentication module"
 
 # Quick research for simple context
-python rev.py --research --research-depth shallow "Fix login bug"
+ rev --research --research-depth shallow "Fix login bug"
 ```
 
 ### 4. Adjust Review Strictness by Risk
 ```bash
 # Strict for sensitive operations
-python rev.py --review-strictness strict "Database migration"
-python rev.py --review-strictness strict --action-review "Payment processing"
+ rev --review-strictness strict "Database migration"
+ rev --review-strictness strict --action-review "Payment processing"
 
 # Lenient for low-risk changes
-python rev.py --review-strictness lenient "Update documentation"
+ rev --review-strictness lenient "Update documentation"
 ```
 
 ### 5. Enable Auto-Fix for Validation
 ```bash
 # Auto-fix linting/formatting issues
-python rev.py --auto-fix "Add new feature with tests"
+ rev --auto-fix "Add new feature with tests"
 
 # This automatically fixes minor validation issues
 ```
@@ -527,17 +527,17 @@ python rev.py --auto-fix "Add new feature with tests"
 ### 6. Break Down Large Features
 ```bash
 # Instead of one huge task:
-python rev.py "Build entire e-commerce platform"
+ rev "Build entire e-commerce platform"
 
 # Break into smaller features (or let orchestrator handle):
-python rev.py --orchestrate "Add product catalog with CRUD operations"
-python rev.py --orchestrate "Add shopping cart functionality"
-python rev.py --orchestrate "Add checkout and payment"
+ rev --orchestrate "Add product catalog with CRUD operations"
+ rev --orchestrate "Add shopping cart functionality"
+ rev --orchestrate "Add checkout and payment"
 ```
 
 ### 7. Use REPL for Iterative Development
 ```bash
-python rev.py --repl
+ rev --repl
 
 agent> Create the User model
 agent> Now add authentication endpoints
@@ -550,27 +550,27 @@ agent> /exit
 ### 8. Specify Requirements Clearly
 ```bash
 # Good: Clear requirements
-python rev.py "Add pagination to /api/posts with page size 20, include total count"
+ rev "Add pagination to /api/posts with page size 20, include total count"
 
 # Less effective: Vague
-python rev.py "Make posts better"
+ rev "Make posts better"
 ```
 
 ## Integration Patterns
 
 ### Feature Flags
 ```bash
-python rev.py "Add feature flag system for gradual rollout of new features"
+ rev "Add feature flag system for gradual rollout of new features"
 ```
 
 ### A/B Testing
 ```bash
-python rev.py "Add A/B testing framework for experimenting with features"
+ rev "Add A/B testing framework for experimenting with features"
 ```
 
 ### Analytics Integration
 ```bash
-python rev.py "Add analytics tracking for feature usage"
+ rev "Add analytics tracking for feature usage"
 ```
 
 ## Next Steps

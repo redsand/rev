@@ -1,10 +1,10 @@
-# Static Analysis Tools for rev.py
+# Static Analysis Tools for rev
 
-This document describes the comprehensive cross-platform static analysis tools integrated into rev.py.
+This document describes the comprehensive cross-platform static analysis tools integrated into rev.
 
 ## Overview
 
-Rev.py now includes powerful AST-based and static analysis tools that work on **Windows, Linux, and macOS**. These tools help maintain code quality, catch bugs early, and improve security.
+Rev now includes powerful AST-based and static analysis tools that work on **Windows, Linux, and macOS**. These tools help maintain code quality, catch bugs early, and improve security.
 
 ## Available Tools
 
@@ -69,7 +69,7 @@ result = run_pylint("path/to/code", config=".pylintrc")
 make pylint    # Run pylint with project config
 ```
 
-**Configuration**: `.pylintrc` (already configured for rev.py)
+**Configuration**: `.pylintrc` (already configured for rev)
 
 ---
 
@@ -102,7 +102,7 @@ result = run_mypy("path/to/code", config="mypy.ini")
 make mypy      # Run mypy type checking
 ```
 
-**Configuration**: `mypy.ini` (already configured for rev.py)
+**Configuration**: `mypy.ini` (already configured for rev)
 
 ---
 
@@ -255,9 +255,9 @@ pip install pylint mypy bandit radon vulture
 
 ---
 
-## Integration with rev.py Agents
+## Integration with rev Agents
 
-All analysis tools are automatically available to rev.py agents through the tool registry:
+All analysis tools are automatically available to rev agents through the tool registry:
 
 ```python
 # Available tools for LLM agents:
@@ -282,7 +282,7 @@ Agents can call these tools during:
 ## Configuration Files
 
 ### `.pylintrc`
-Pylint configuration tuned for rev.py project standards:
+Pylint configuration tuned for rev project standards:
 - PEP 8 with 120 char line length
 - Relaxed docstring requirements
 - Balanced complexity limits

@@ -1,12 +1,12 @@
 # JavaScript/Node.js Development Workflows
 
-Common workflows for JavaScript and Node.js projects using rev.py.
+Common workflows for JavaScript and Node.js projects using rev.
 
 ## Workflow 1: Express.js API Setup
 
 ### Command
 ```bash
-python rev.py "Setup Express.js API with TypeScript, ESLint, and Jest"
+rev "Setup Express.js API with TypeScript, ESLint, and Jest"
 ```
 
 ### Generated Structure
@@ -84,7 +84,7 @@ project/
 
 ### Command
 ```bash
-python rev.py "Add TypeScript REST endpoint for user management with validation"
+rev "Add TypeScript REST endpoint for user management with validation"
 ```
 
 ### Generated Code
@@ -200,7 +200,7 @@ export default router;
 
 ### Command
 ```bash
-python rev.py "Add Joi validation middleware for all API endpoints"
+rev "Add Joi validation middleware for all API endpoints"
 ```
 
 ### Generated Validation
@@ -242,7 +242,7 @@ export const validateUser = (
 
 ### Command
 ```bash
-python rev.py "Add comprehensive Jest tests for user controller"
+rev "Add comprehensive Jest tests for user controller"
 ```
 
 ### Generated Tests
@@ -355,7 +355,7 @@ describe('UserController', () => {
 
 ### Command
 ```bash
-python rev.py "Create React component for user list with TypeScript and hooks"
+rev "Create React component for user list with TypeScript and hooks"
 ```
 
 ### Generated Component
@@ -432,7 +432,7 @@ export const UserList: React.FC<UserListProps> = ({ onUserClick }) => {
 
 ### Command
 ```bash
-python rev.py "Add Socket.io for real-time notifications"
+rev "Add Socket.io for real-time notifications"
 ```
 
 ### Generated Code
@@ -485,7 +485,7 @@ export class SocketService {
 
 ### Command
 ```bash
-python rev.py "Setup GraphQL with Apollo Server and type-safe resolvers"
+rev "Setup GraphQL with Apollo Server and type-safe resolvers"
 ```
 
 ### Generated GraphQL Setup
@@ -542,27 +542,27 @@ export const resolvers = {
 
 ### Setup
 ```bash
-python rev.py "Initialize Node.js project with TypeScript and Express"
+rev "Initialize Node.js project with TypeScript and Express"
 ```
 
 ### Testing
 ```bash
-python rev.py "Add Jest tests for all controllers and achieve 80% coverage"
+rev "Add Jest tests for all controllers and achieve 80% coverage"
 ```
 
 ### Code Quality
 ```bash
-python rev.py "Setup ESLint and Prettier with recommended configs"
+rev "Setup ESLint and Prettier with recommended configs"
 ```
 
 ### Performance
 ```bash
-python rev.py "Add Redis caching to frequently accessed endpoints"
+rev "Add Redis caching to frequently accessed endpoints"
 ```
 
 ### Security
 ```bash
-python rev.py "Add helmet, rate limiting, and input sanitization"
+rev "Add helmet, rate limiting, and input sanitization"
 ```
 
 ## Best Practices

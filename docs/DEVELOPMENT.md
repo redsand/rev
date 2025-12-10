@@ -1,4 +1,4 @@
-# Development Guide for rev.py
+# Development Guide for rev
 
 ## Table of Contents
 1. [Architecture Overview](#architecture-overview)
@@ -173,7 +173,7 @@ Cloud models are identified by:
 - `client.py:78-111` - Handles 401 responses
 - `client.py:84` - Prevents repeated auth prompts (`auth_prompted` flag)
 - `client.py:98-101` - Waits for user input (Ctrl+C to cancel)
-- Authentication state managed by Ollama, not rev.py
+- Authentication state managed by Ollama, not the CLI
 
 ---
 

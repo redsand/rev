@@ -1,4 +1,4 @@
-# rev.py — Production-Grade Agentic Development System
+# rev — Production-Grade Agentic Development System
 
 A **robust, pattern-based autonomous development system** powered by [Ollama](https://ollama.ai) for local LLM inference. Built on **21 Agentic Design Patterns** for production-grade code generation, testing, and validation.
 
@@ -238,7 +238,7 @@ curl -fsSL https://ollama.ai/install.sh | sh
 
 ### 2. Pull a Code Model
 
-**⚠️ Important:** rev.py requires a model with **function/tool calling support** for full functionality.
+**⚠️ Important:** rev requires a model with **function/tool calling support** for full functionality.
 
 **Recommended models with tool support:**
 ```bash
@@ -466,7 +466,7 @@ Options:
 
 **New in v2.0:** Concurrent task execution for faster completion!
 
-By default, rev.py now runs **2 tasks in parallel** when they don't have dependencies on each other. This dramatically speeds up execution for complex tasks.
+By default, rev now runs **2 tasks in parallel** when they don't have dependencies on each other. This dramatically speeds up execution for complex tasks.
 
 **Examples:**
 
@@ -757,7 +757,7 @@ The agent will automatically retry without tools if it detects the model doesn't
 
 ### "Path escapes repo"
 
-rev.py only operates within the current repository for safety. Use relative paths.
+rev only operates within the current repository for safety. Use relative paths.
 
 ### Tasks not completing
 
@@ -772,7 +772,7 @@ rev --model deepseek-coder:33b "Your task"
 **Test Coverage: 80%** - Production Ready ✅
 
 - **136 tests passing** (100% pass rate)
-- **800+ statements** in rev.py
+- **800+ statements** in the rev package
 - **Cross-platform tested** (Linux, macOS, Windows detection)
 - **SSH remote execution tested** (connection management, file transfer)
 - **99% test code coverage** (tests are well-tested themselves)
@@ -824,7 +824,7 @@ For future testing, quality, documentation, and security improvements, see [RECO
 
 ## Advanced Planning
 
-rev.py includes sophisticated planning capabilities that analyze your tasks before execution:
+rev includes sophisticated planning capabilities that analyze your tasks before execution:
 
 ### Features
 
@@ -887,7 +887,7 @@ Risk distribution:
 
 ## Multi-Agent Quorum System
 
-**New in v2.0.1:** rev.py now uses a **3-agent quorum system** that provides intelligent review and validation at multiple stages for more accurate and secure code changes.
+**New in v2.0.1:** rev now uses a **3-agent quorum system** that provides intelligent review and validation at multiple stages for more accurate and secure code changes.
 
 ### The Three Agents
 
@@ -1171,7 +1171,7 @@ rev \
    ```
 
 6. **Documentation First** — Review documentation before making changes
-   - Use `rev.py "Review all documentation files"` to understand the codebase
+   - Use `rev "Review all documentation files"` to understand the codebase
    - Keep documentation updated alongside code changes
    - Add docstrings and inline comments for complex logic
    - See [RECOMMENDATIONS.md](RECOMMENDATIONS.md) for documentation improvement ideas
@@ -1186,7 +1186,7 @@ rev \
 
 ## Built-in Utilities
 
-rev.py includes powerful utility functions for common development tasks:
+rev includes powerful utility functions for common development tasks:
 
 ### File Format Conversion
 
@@ -1255,7 +1255,7 @@ rev "Check dependency licenses for GPL and restrictive licenses"
 
 ## Intelligent Caching
 
-rev.py includes a high-performance caching system that dramatically improves speed by caching frequently accessed data:
+rev includes a high-performance caching system that dramatically improves speed by caching frequently accessed data:
 
 ### Cache Types
 
@@ -1349,7 +1349,7 @@ For security, only these commands are permitted:
 
 ```
 .
-├── rev.py           # Main agent script
+├── rev/             # Package (CLI entry: `rev`)
 ├── requirements.txt       # Minimal dependencies (just requests)
 ├── tests/                 # Comprehensive test suite
 │   └── test_agent_min.py  # 99% coverage tests

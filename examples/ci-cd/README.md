@@ -1,6 +1,6 @@
 # CI/CD Integration Examples
 
-Integrate rev.py into your CI/CD pipelines for automated code improvements, testing, security scanning, and deployments.
+Integrate rev into your CI/CD pipelines for automated code improvements, testing, security scanning, and deployments.
 
 ## Available Integrations
 
@@ -13,7 +13,7 @@ Automatically fix linting errors and code style issues.
 
 **Features:**
 - Detects linting errors (ESLint, flake8, etc.)
-- Uses rev.py to auto-fix issues
+- Uses rev to auto-fix issues
 - Creates PR with fixes or commits directly
 - Supports both Python and JavaScript projects
 
@@ -90,7 +90,7 @@ Auto-generate and update documentation.
 Located in `gitlab-ci/`:
 
 #### 1. Main Pipeline (`.gitlab-ci.yml`)
-Complete CI/CD pipeline with rev.py integration.
+Complete CI/CD pipeline with rev integration.
 
 **Features:**
 - Testing with coverage
@@ -239,7 +239,7 @@ ollama pull llama3.3:90b-cloud
 # In workflow file
 - name: Auto-fix with custom instructions
   run: |
-    python rev.py "Fix linting errors following our team's style guide at docs/STYLE.md"
+    rev "Fix linting errors following our team's style guide at docs/STYLE.md"
 ```
 
 **GitLab CI:**
@@ -247,7 +247,7 @@ ollama pull llama3.3:90b-cloud
 # In .gitlab-ci.yml
 fix:lint:
   script:
-    - python rev.py "Fix linting issues using black and our custom rules"
+    - rev "Fix linting issues using black and our custom rules"
 ```
 
 ### Adjusting Thresholds
@@ -401,7 +401,7 @@ Result: Fast response to security issues with automated remediation.
 
 - **[Scenarios](../scenarios/)** - See real-world usage examples
 - **[Workflows](../workflows/)** - Language-specific workflow templates
-- **Main [README](../../README.md)** - rev.py documentation
+- **Main [README](../../README.md)** - rev documentation
 
 ## Support
 

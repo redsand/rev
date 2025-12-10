@@ -1,4 +1,4 @@
-# GitLab CI - Auto-Deployment with rev.py
+# GitLab CI - Auto-Deployment with rev
 
 # Include in main .gitlab-ci.yml:
 # include:
@@ -44,14 +44,14 @@ prepare:config:
     - |
       echo "Generating deployment configuration..."
 
-      # Use rev.py to generate optimal deployment config
-      python3 rev.py "Generate Kubernetes deployment configuration optimized for this application" > k8s-deployment.yaml
+      # Use rev to generate optimal deployment config
+      rev "Generate Kubernetes deployment configuration optimized for this application" > k8s-deployment.yaml
 
       # Generate service configuration
-      python3 rev.py "Generate Kubernetes service configuration with load balancing" > k8s-service.yaml
+      rev "Generate Kubernetes service configuration with load balancing" > k8s-service.yaml
 
       # Generate Docker Compose for simpler deployments
-      python3 rev.py "Generate docker-compose.yml for production deployment" > docker-compose.prod.yml
+      rev "Generate docker-compose.yml for production deployment" > docker-compose.prod.yml
 
       # Validate configurations
       if command -v kubectl &> /dev/null; then
@@ -124,8 +124,8 @@ deploy:production:
       # Pre-deployment checks
       echo "Running pre-deployment checks..."
 
-      # Use rev.py for intelligent deployment validation
-      python3 rev.py "Analyze deployment readiness and check for potential issues" > deployment-check.md
+      # Use rev for intelligent deployment validation
+      rev "Analyze deployment readiness and check for potential issues" > deployment-check.md
 
       # Check if critical issues found
       if grep -i "critical\|blocker" deployment-check.md; then
@@ -155,7 +155,7 @@ deploy:production:
       kubectl rollout status deployment/app-$NEW_COLOR -n production --timeout=${DEPLOY_TIMEOUT}s
 
       # Run smoke tests
-      python3 rev.py "Run smoke tests against the new deployment" || (
+      rev "Run smoke tests against the new deployment" || (
         echo "❌ Smoke tests failed!"
         exit 1
       )
@@ -200,14 +200,14 @@ verify:health-check:
       done
 
       # Run comprehensive checks
-      python3 rev.py "Verify deployment health and run integration tests" > verification-report.md
+      rev "Verify deployment health and run integration tests" > verification-report.md
 
       # Check logs for errors
       kubectl logs -n $CI_ENVIRONMENT_SLUG deployment/app --tail=100 | \
-        python3 rev.py "Analyze these logs for errors or warnings" >> verification-report.md
+        rev "Analyze these logs for errors or warnings" >> verification-report.md
 
       # Performance check
-      python3 rev.py "Run performance tests and verify response times are acceptable" >> verification-report.md
+      rev "Run performance tests and verify response times are acceptable" >> verification-report.md
 
       cat verification-report.md
   needs:
@@ -249,7 +249,7 @@ verify:monitor:
         kubectl top pods -n production | tee metrics.txt
 
         # Analyze metrics with AI
-        python3 rev.py "Analyze these metrics for anomalies: $(cat metrics.txt)" > analysis-$i.txt
+        rev "Analyze these metrics for anomalies: $(cat metrics.txt)" > analysis-$i.txt
 
         if grep -i "anomaly\|issue\|warning" analysis-$i.txt; then
           echo "⚠️  Potential issue detected!"

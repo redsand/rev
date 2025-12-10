@@ -1,4 +1,4 @@
-# Build script for rev.py - Autonomous CI/CD Agent
+# Build script for rev - Autonomous CI/CD Agent
 # This script sets up the environment and runs the build process
 
 param(
@@ -19,7 +19,7 @@ $BLUE = "Blue"
 $WHITE = "White"
 
 # Script information
-$SCRIPT_NAME = "rev.py Build Script"
+$SCRIPT_NAME = "rev Build Script"
 $SCRIPT_VERSION = "1.0.0"
 
 function Write-Status {
@@ -187,27 +187,35 @@ function Run-Tests {
 # Function to validate build
 function Validate-Build {
     Write-Status "Validating build..."
-    
-    # Check if rev.py exists
-    if (Test-Path "rev.py") {
-        Write-Status "rev.py found"
-        
-        # Test basic execution
+    # Prefer installed rev CLI; fallback to python -m rev
+    $revCmd = Get-Command rev -ErrorAction SilentlyContinue
+    if ($revCmd) {
         try {
-            $output = & python rev.py --help 2>$null
+            & rev --help *> $null
             if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 2) {
-                Write-Status "rev.py executes successfully"
+                Write-Status "rev CLI executes successfully"
             }
             else {
-                Write-WarningMsg "rev.py help command failed (may require Ollama)"
+                Write-WarningMsg "rev help command failed (may require Ollama)"
             }
         }
         catch {
-            Write-WarningMsg "rev.py help command failed (may require Ollama)"
+            Write-WarningMsg "rev help command failed (may require Ollama)"
         }
     }
     else {
-        Write-ErrorExit "rev.py not found"
+        try {
+            & python -m rev --help *> $null
+            if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 2) {
+                Write-Status "python -m rev executes successfully"
+            }
+            else {
+                Write-ErrorExit "rev CLI not found and python -m rev failed"
+            }
+        }
+        catch {
+            Write-ErrorExit "rev CLI not found and python -m rev failed"
+        }
     }
 }
 
@@ -317,8 +325,8 @@ function Main {
     
     Write-Host ""
     Write-Host "Quick start:" -ForegroundColor $BLUE
-    Write-Host "  python rev.py --help" -ForegroundColor $WHITE
-    Write-Host "  python rev.py ""Add error handling to API endpoints""" -ForegroundColor $WHITE
+    Write-Host "  rev --help" -ForegroundColor $WHITE
+    Write-Host "  rev ""Add error handling to API endpoints""" -ForegroundColor $WHITE
     Write-Host ""
 }
 

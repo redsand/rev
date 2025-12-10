@@ -1,8 +1,8 @@
-# Test Plan for rev.py
+# Test Plan for rev
 
 ## Overview
 
-This document outlines a comprehensive test strategy for rev.py, focusing on model handling, Ollama integration, cloud authentication, and edge cases.
+This document outlines a comprehensive test strategy for rev, focusing on model handling, Ollama integration, cloud authentication, and edge cases.
 
 ## Test Categories
 

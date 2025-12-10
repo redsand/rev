@@ -1,4 +1,4 @@
-# GitLab CI - Code Quality Pipeline with rev.py
+# GitLab CI - Code Quality Pipeline with rev
 
 # Include this in your main .gitlab-ci.yml:
 # include:
@@ -128,7 +128,7 @@ improve:refactor:
   script:
     - |
       echo "Analyzing codebase for refactoring opportunities..."
-      python rev.py "Analyze the codebase and suggest refactoring improvements" > refactoring-suggestions.md
+      rev "Analyze the codebase and suggest refactoring improvements" > refactoring-suggestions.md
 
       # Check complexity report
       COMPLEX_FILES=$(python -c "
@@ -141,7 +141,7 @@ improve:refactor:
       if [ -n "$COMPLEX_FILES" ]; then
         echo "Found complex files, suggesting refactoring..."
         for file in $COMPLEX_FILES; do
-          python rev.py "Suggest refactoring for complex code in $file" >> refactoring-suggestions.md
+          rev "Suggest refactoring for complex code in $file" >> refactoring-suggestions.md
         done
       fi
   needs:
@@ -159,7 +159,7 @@ improve:remove-duplicates:
     - |
       if [ -s duplicates-report.txt ]; then
         echo "Removing code duplication..."
-        python rev.py "Identify and remove code duplication in the codebase"
+        rev "Identify and remove code duplication in the codebase"
 
         # Commit changes
         git config user.name "rev-bot"
@@ -185,7 +185,7 @@ improve:simplify:
   script:
     - |
       echo "Simplifying complex code..."
-      python rev.py "Refactor overly complex functions to improve readability and maintainability"
+      rev "Refactor overly complex functions to improve readability and maintainability"
 
       # Verify tests still pass
       pytest tests/ || (echo "Tests failed after refactoring!" && exit 1)

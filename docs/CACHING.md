@@ -1,6 +1,6 @@
 # Intelligent Caching System
 
-rev.py includes a comprehensive intelligent caching system that significantly improves performance by caching:
+rev includes a comprehensive intelligent caching system that significantly improves performance by caching:
 - File contents (with modification time tracking)
 - LLM responses (for identical queries)
 - Repository context (git status, logs, file tree)
@@ -125,7 +125,7 @@ deps2 = analyze_dependencies()  # Cache hit!
 Get detailed statistics for all caches:
 
 ```bash
-python rev.py "Show cache statistics"
+rev "Show cache statistics"
 ```
 
 **Output:**
@@ -171,11 +171,11 @@ Clear specific cache or all caches:
 
 ```bash
 # Clear specific cache
-python rev.py "Clear file content cache"
-python rev.py "Clear LLM response cache"
+ rev "Clear file content cache"
+ rev "Clear LLM response cache"
 
 # Clear all caches
-python rev.py "Clear all caches"
+ rev "Clear all caches"
 ```
 
 **When to Clear:**
@@ -189,7 +189,7 @@ python rev.py "Clear all caches"
 Manually save caches to disk (automatic on clean exit):
 
 ```bash
-python rev.py "Save caches to disk"
+ rev "Save caches to disk"
 ```
 
 **Cache Location:**
@@ -213,7 +213,7 @@ Configure cache behavior via environment variables:
 export OLLAMA_DEBUG=1
 
 # View cache performance
-python rev.py "Your task"
+ rev "Your task"
 # Logs will show: [DEBUG] Using cached LLM response
 ```
 
@@ -274,7 +274,7 @@ DependencyTreeCache(
 Check hit rates regularly:
 
 ```bash
-python rev.py "Show cache statistics"
+ rev "Show cache statistics"
 ```
 
 **Target Hit Rates:**
@@ -408,7 +408,7 @@ analyze_dependencies()  # Caches analysis
 - Old LLM responses for updated queries
 
 **Solutions:**
-1. Clear specific cache: `python rev.py "Clear file content cache"`
+1. Clear specific cache: `rev "Clear file content cache"`
 2. Wait for TTL expiration
 3. Modify files to trigger invalidation
 4. Reduce TTL values
@@ -437,14 +437,14 @@ analyze_dependencies()  # Caches analysis
 
 2. **Monitor cache performance during development**
    ```bash
-   python rev.py "Show cache statistics" | jq
+   rev "Show cache statistics" | jq
    ```
 
 3. **Clear caches before important operations**
    ```bash
    # Before release build
-   python rev.py "Clear all caches"
-   python rev.py "Run full test suite and build"
+   rev "Clear all caches"
+   rev "Run full test suite and build"
    ```
 
 4. **Use environment variables for debugging**
@@ -482,4 +482,4 @@ Real-world improvements with caching enabled:
 
 ## License
 
-Same as rev.py - MIT License
+Same as rev - MIT License

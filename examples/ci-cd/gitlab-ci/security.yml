@@ -1,4 +1,4 @@
-# GitLab CI - Security Pipeline with rev.py
+# GitLab CI - Security Pipeline with rev
 
 # Include in main .gitlab-ci.yml:
 # include:
@@ -164,7 +164,7 @@ analyze:vulnerabilities:
   script:
     - |
       echo "Analyzing security vulnerabilities..."
-      python rev.py "Analyze the security scan results and provide remediation recommendations" > security-analysis.md
+      rev "Analyze the security scan results and provide remediation recommendations" > security-analysis.md
 
       # Analyze each critical vulnerability
       if [ -f "bandit-report.json" ]; then
@@ -178,7 +178,7 @@ analyze:vulnerabilities:
         "
 
         if [ -s critical-vulns.txt ]; then
-          python rev.py "Provide detailed fix recommendations for these critical vulnerabilities: $(cat critical-vulns.txt)" >> security-analysis.md
+          rev "Provide detailed fix recommendations for these critical vulnerabilities: $(cat critical-vulns.txt)" >> security-analysis.md
         fi
       fi
   needs:
@@ -199,16 +199,16 @@ fix:code-vulnerabilities:
         echo "Auto-fixing code security vulnerabilities..."
 
         # Fix SQL injection
-        python rev.py "Fix all SQL injection vulnerabilities using parameterized queries"
+        rev "Fix all SQL injection vulnerabilities using parameterized queries"
 
         # Fix XSS vulnerabilities
-        python rev.py "Fix all XSS vulnerabilities with proper input sanitization"
+        rev "Fix all XSS vulnerabilities with proper input sanitization"
 
         # Fix insecure crypto
-        python rev.py "Replace insecure cryptographic functions with secure alternatives"
+        rev "Replace insecure cryptographic functions with secure alternatives"
 
         # Fix hardcoded secrets
-        python rev.py "Remove hardcoded secrets and replace with environment variables"
+        rev "Remove hardcoded secrets and replace with environment variables"
 
         # Run tests to ensure fixes don't break functionality
         pytest tests/ || echo "⚠️  Tests failed after security fixes"
@@ -243,8 +243,8 @@ fix:dependencies:
       if [ -f "safety-report.json" ]; then
         echo "Updating vulnerable dependencies..."
 
-        # Use rev.py to update dependencies intelligently
-        python rev.py "Update all vulnerable dependencies to secure versions while maintaining compatibility"
+        # Use rev to update dependencies intelligently
+        rev "Update all vulnerable dependencies to secure versions while maintaining compatibility"
 
         # For Python
         pip install --upgrade $(cat safety-report.json | python -c "
