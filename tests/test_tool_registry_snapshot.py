@@ -23,3 +23,19 @@ def test_registry_guard_blocks_missing_tool(monkeypatch):
 
     with pytest.raises(RuntimeError):
         registry.get_available_tools()
+
+
+def test_registry_snapshot_auto_updates(monkeypatch, tmp_path):
+    """Snapshot should auto-append new tools instead of requiring manual edits."""
+    fake_snapshot = tmp_path / "_tool_registry_snapshot.json"
+    fake_snapshot.write_text(json.dumps({"tool_names": ["read_file"]}))
+
+    monkeypatch.setattr(registry, "_SNAPSHOT_PATH", fake_snapshot)
+
+    tools = registry.get_available_tools()
+
+    snapshot = set(json.loads(fake_snapshot.read_text())['tool_names'])
+    current_tools = {tool.get('function', {}).get('name') for tool in tools}
+
+    assert "read_file" in snapshot  # original baseline preserved
+    assert current_tools.issubset(snapshot)  # snapshot expands to include new tools

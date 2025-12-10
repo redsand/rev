@@ -166,12 +166,21 @@ def _load_registry_snapshot() -> set[str]:
         names = data.get("tool_names", [])
         return {name for name in names if isinstance(name, str)}
     except FileNotFoundError:
-        logger.warning(
-            "Tool registry snapshot missing at %s; skipping guard check.", _SNAPSHOT_PATH
-        )
+        logger.info("Tool registry snapshot missing at %s; it will be created.", _SNAPSHOT_PATH)
     except Exception as exc:  # pragma: no cover - defensive logging
         logger.error("Failed to load tool registry snapshot: %s", exc)
     return set()
+
+
+def _write_registry_snapshot(tool_names: set[str]) -> None:
+    """Persist the given tool names to the snapshot file."""
+    try:
+        _SNAPSHOT_PATH.write_text(
+            json.dumps({"tool_names": sorted(tool_names)}, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.error("Failed to update tool registry snapshot: %s", exc)
 
 
 def _enforce_registry_guard(tools: list[dict]) -> None:
@@ -182,10 +191,12 @@ def _enforce_registry_guard(tools: list[dict]) -> None:
     """
 
     snapshot = _load_registry_snapshot()
+    current = {tool.get("function", {}).get("name") for tool in tools if tool.get("function")}
+
     if not snapshot:
+        _write_registry_snapshot(current)
         return
 
-    current = {tool.get("function", {}).get("name") for tool in tools if tool.get("function")}
     missing_tools = snapshot - current
     if missing_tools:
         missing_list = ", ".join(sorted(missing_tools))
@@ -193,6 +204,9 @@ def _enforce_registry_guard(tools: list[dict]) -> None:
             "Tool registry guard failed: missing previously registered tools: "
             f"{missing_list}. Update the snapshot after adding tools, but do not remove existing entries."
         )
+
+    if current != snapshot:
+        _write_registry_snapshot(current)
 
 
 # Tool dispatch table for O(1) lookup
