@@ -310,6 +310,10 @@ def append_to_file(path: str, content: str) -> str:
 def replace_in_file(path: str, find: str, replace: str, regex: bool = False) -> str:
     """Find and replace within a file."""
     try:
+        # Validate find parameter
+        if not find:
+            return json.dumps({"error": "find parameter cannot be empty"})
+
         p = _safe_path(path)
         if not p.exists():
             return json.dumps({"error": f"Not found: {path}"})

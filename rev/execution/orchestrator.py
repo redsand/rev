@@ -369,13 +369,8 @@ IMPORTANT - Address the following review feedback:
                 result.errors.append("Resource budget exceeded before execution phase")
                 result.phase_reached = AgentPhase.EXECUTION
                 return result
-            # Track task execution steps
-            budget.update_step(len(plan.tasks))  # Count each task as a step
-            if budget.is_exceeded():
-                print(f"\n⚠️ Resource budget exceeded during execution phase!")
-                result.errors.append("Resource budget exceeded during execution phase")
-                result.phase_reached = AgentPhase.EXECUTION
-                return result
+            # Note: Task execution steps are tracked inside execution_mode/concurrent_execution_mode
+            # per-task, not consumed upfront to allow accurate tracking of partial execution
             tools = get_available_tools()
             if self.config.parallel_workers > 1:
                 concurrent_execution_mode(

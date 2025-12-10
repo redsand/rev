@@ -290,6 +290,7 @@ def apply_recovery_action(action: RecoveryAction, dry_run: bool = False) -> Dict
 
     result = {
         "success": False,
+        "partial_success": False,  # Track if some commands succeeded before failure
         "action": action.description,
         "strategy": action.strategy.value,
         "commands_executed": [],
@@ -322,6 +323,13 @@ def apply_recovery_action(action: RecoveryAction, dry_run: bool = False) -> Dict
                     "stderr": proc_result.stderr,
                     "returncode": proc_result.returncode
                 })
+                # Mark as partial success if some commands succeeded
+                if result["commands_executed"]:
+                    result["partial_success"] = True
+                    result["errors"].append({
+                        "warning": f"Recovery partially applied - {len(result['commands_executed'])} command(s) succeeded before failure",
+                        "succeeded_commands": result["commands_executed"].copy()
+                    })
                 # Stop on first failure
                 return result
 
@@ -330,12 +338,18 @@ def apply_recovery_action(action: RecoveryAction, dry_run: bool = False) -> Dict
                 "command": cmd,
                 "error": "Command timeout"
             })
+            # Mark as partial success if some commands succeeded
+            if result["commands_executed"]:
+                result["partial_success"] = True
             return result
         except Exception as e:
             result["errors"].append({
                 "command": cmd,
                 "error": str(e)
             })
+            # Mark as partial success if some commands succeeded
+            if result["commands_executed"]:
+                result["partial_success"] = True
             return result
 
     # All commands succeeded
