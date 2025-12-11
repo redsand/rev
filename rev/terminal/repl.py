@@ -56,6 +56,7 @@ def repl_mode():
         "token_usage": {"total": 0, "prompt": 0, "completion": 0},
         "execution_mode": default_mode_name,
         "mode_config": default_mode_config,
+        "additional_dirs": [],
     }
 
     # Apply saved settings if they exist
