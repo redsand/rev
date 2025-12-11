@@ -35,6 +35,57 @@ def _run_shell(cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:
     )
 
 
+def _working_tree_snapshot() -> str:
+    """Return a lightweight snapshot of working tree changes.
+
+    We use ``git status --porcelain`` so we can detect when an apply operation
+    reports success but does not actually modify the tree (for example, when an
+    empty or already-applied patch slips through).
+    """
+
+    proc = _run_shell("git status --porcelain")
+    return proc.stdout
+
+
+def _extract_patch_paths(lines: list[str]) -> set[str]:
+    """Return the set of file paths referenced by a patch."""
+
+    paths: set[str] = set()
+    for line in lines:
+        if not line.startswith(("+++ ", "--- ")):
+            continue
+
+        try:
+            _, raw_path = line.split(" ", 1)
+        except ValueError:
+            continue
+
+        raw_path = raw_path.strip()
+        if raw_path in {"/dev/null", "dev/null", "a/dev/null", "b/dev/null"}:
+            continue
+
+        if raw_path.startswith(("a/", "b/")):
+            raw_path = raw_path[2:]
+
+        paths.add(raw_path)
+
+    return paths
+
+
+def _snapshot_paths(paths: set[str]) -> dict[str, Optional[bytes]]:
+    """Capture the current content for a set of files.
+
+    Missing files are represented by ``None`` so we can detect creations and
+    deletions in addition to modifications.
+    """
+
+    snapshot: dict[str, Optional[bytes]] = {}
+    for path in paths:
+        full_path = ROOT / path
+        snapshot[path] = full_path.read_bytes() if full_path.exists() else None
+    return snapshot
+
+
 # ========== Core Git Operations ==========
 
 def git_diff(pathspec: str = ".", staged: bool = False, context: int = 3) -> str:
@@ -89,6 +140,9 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
         return False
 
     patch_lines = normalized_patch.splitlines()
+    patch_paths = _extract_patch_paths(patch_lines)
+    pre_status = _working_tree_snapshot()
+    pre_contents = _snapshot_paths(patch_paths)
     if _has_malformed_hunks(patch_lines):
         return json.dumps(
             {
@@ -188,6 +242,34 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
             apply_proc = _run_shell(" ".join(shlex.quote(a) for a in apply_args))
         else:
             apply_proc = _run_shell(f"patch --batch --forward -p1 < {shlex.quote(tfp)}")
+
+        if apply_proc.returncode == 0:
+            post_status = _working_tree_snapshot()
+            post_contents = _snapshot_paths(patch_paths)
+
+            tree_changed = False
+            if patch_paths:
+                tree_changed = pre_contents != post_contents
+            else:
+                tree_changed = pre_status != post_status
+
+            if not tree_changed:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "rc": apply_proc.returncode,
+                        "stdout": apply_proc.stdout,
+                        "stderr": apply_proc.stderr,
+                        "dry_run": dry_run,
+                        "phase": "apply",
+                        "error": (
+                            "Patch command reported success, but no working tree changes were detected. "
+                            "The patch may already be applied, empty, or truncated; please verify the diff contents "
+                            "and file paths."
+                        ),
+                        "hint": large_patch_hint,
+                    }
+                )
 
         return _result(
             apply_proc,
