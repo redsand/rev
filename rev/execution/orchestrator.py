@@ -20,6 +20,7 @@ from rev.execution.validator import validate_execution, ValidationStatus, format
 from rev.execution.researcher import research_codebase, ResearchFindings
 from rev.execution.learner import LearningAgent, display_learning_suggestions
 from rev.execution.executor import execution_mode, concurrent_execution_mode, fix_validation_failures
+from rev.execution.state_manager import StateManager
 from rev.tools.registry import get_available_tools
 from rev.config import MAX_STEPS_PER_RUN, MAX_LLM_TOKENS_PER_RUN, MAX_WALLCLOCK_SECONDS
 
@@ -261,6 +262,9 @@ class Orchestrator:
             resource_budget=budget
         )
         start_time = time.time()
+
+        plan: Optional[ExecutionPlan] = None
+        state_manager: Optional[StateManager] = None
 
         # Display resource budgets
         print(f"\n📊 Resource Budgets:")
@@ -547,6 +551,19 @@ IMPORTANT - Address the following review feedback:
             )
             result.success = all_completed and validation_ok
 
+        except KeyboardInterrupt:
+            if plan is not None:
+                try:
+                    state_manager = state_manager or StateManager(plan)
+                    token_usage = {
+                        "total": budget.tokens_used,
+                        "prompt": 0,
+                        "completion": 0,
+                    }
+                    state_manager.on_interrupt(token_usage=token_usage)
+                except Exception as exc:  # pragma: no cover - best-effort resume handling
+                    print(f"⚠️  Warning: could not save checkpoint on interrupt ({exc})")
+            raise
         except Exception as e:
             failure_phase = self.current_phase if self.current_phase else AgentPhase.FAILED
             result.errors.append(f"{failure_phase.value} phase error: {e}")
@@ -654,6 +671,8 @@ IMPORTANT - Address the following review feedback:
                 print(f"   - {error}")
 
         print("=" * 60)
+
+        return result
 
 
 def run_orchestrated(
