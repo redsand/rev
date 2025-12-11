@@ -36,6 +36,79 @@ def _run_shell(cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:
     )
 
 
+def _create_log_file(prefix: str) -> pathlib.Path:
+    """Create a log file inside .rev_logs for streaming command output."""
+
+    log_dir = ROOT / ".rev_logs"
+    log_dir.mkdir(exist_ok=True)
+
+    fd, path_str = tempfile.mkstemp(prefix=prefix, suffix=".log", dir=log_dir)
+    os.close(fd)
+    return pathlib.Path(path_str)
+
+
+def _tail_file(path: pathlib.Path, limit: int) -> str:
+    """Read the last ``limit`` characters from ``path`` without loading the file."""
+
+    if limit <= 0 or not path.exists():
+        return ""
+
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        if size > limit:
+            handle.seek(size - limit)
+        else:
+            handle.seek(0)
+        return handle.read()
+
+
+def _run_shell_streamed(
+    cmd: str,
+    *,
+    timeout: int,
+    stdout_limit: int,
+    stderr_limit: int,
+) -> dict:
+    """Run a command while streaming output to disk to avoid memory spikes."""
+
+    stdout_path = _create_log_file("stdout_")
+    stderr_path = _create_log_file("stderr_")
+
+    with (
+        stdout_path.open("w", encoding="utf-8", errors="replace") as stdout_handle,
+        stderr_path.open("w", encoding="utf-8", errors="replace") as stderr_handle,
+    ):
+        proc = subprocess.Popen(
+            cmd,
+            shell=True,
+            cwd=str(ROOT),
+            text=True,
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+        )
+
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            return {
+                "cmd": cmd,
+                "timeout": timeout,
+                "stdout_log": str(stdout_path),
+                "stderr_log": str(stderr_path),
+            }
+
+    return {
+        "cmd": cmd,
+        "rc": proc.returncode,
+        "stdout": _tail_file(stdout_path, stdout_limit),
+        "stderr": _tail_file(stderr_path, stderr_limit),
+        "stdout_log": str(stdout_path),
+        "stderr_log": str(stderr_path),
+    }
+
+
 def _working_tree_snapshot() -> str:
     """Return a lightweight snapshot of working tree changes.
 
@@ -576,13 +649,13 @@ def run_cmd(cmd: str, timeout: int = 300) -> str:
     if not ok:
         return json.dumps({"blocked": parts0, "allow": sorted(ALLOW_CMDS)})
     try:
-        proc = _run_shell(cmd, timeout=timeout)
-        return json.dumps({
-            "cmd": cmd,
-            "rc": proc.returncode,
-            "stdout": proc.stdout[-8000:],
-            "stderr": proc.stderr[-8000:]
-        })
+        result = _run_shell_streamed(
+            cmd,
+            timeout=timeout,
+            stdout_limit=8000,
+            stderr_limit=8000,
+        )
+        return json.dumps(result)
     except subprocess.TimeoutExpired:
         return json.dumps({"timeout": timeout, "cmd": cmd})
 
@@ -593,13 +666,13 @@ def run_tests(cmd: str = "pytest -q", timeout: int = 600) -> str:
     if p0 not in ALLOW_CMDS and p0 != "npx":
         return json.dumps({"blocked": p0})
     try:
-        proc = _run_shell(cmd, timeout=timeout)
-        return json.dumps({
-            "cmd": cmd,
-            "rc": proc.returncode,
-            "stdout": proc.stdout[-12000:],
-            "stderr": proc.stderr[-4000:]
-        })
+        result = _run_shell_streamed(
+            cmd,
+            timeout=timeout,
+            stdout_limit=12000,
+            stderr_limit=4000,
+        )
+        return json.dumps(result)
     except subprocess.TimeoutExpired:
         return json.dumps({"timeout": timeout, "cmd": cmd})
 
