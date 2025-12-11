@@ -7,6 +7,16 @@ destructive operations that require user approval.
 
 from typing import Dict, Any
 
+# ANSI color codes for highlighting patch previews
+_COLOR_RED = "\033[31m"
+_COLOR_GREEN = "\033[32m"
+_COLOR_CYAN = "\033[36m"
+_COLOR_RESET = "\033[0m"
+
+# Patch preview configuration
+_PATCH_PREVIEW_LINES = 60
+_PATCH_INDENT = "    "
+
 # Cache of user decisions for scary operations. This avoids repeatedly prompting
 # the user when the exact same potentially destructive action is attempted
 # multiple times in a session.
@@ -19,6 +29,56 @@ SCARY_OPERATIONS = {
     "git_commands": ["reset --hard", "clean -f", "clean -fd", "push --force", "push -f"],
     "action_types": ["delete"]  # Task action types that are destructive
 }
+
+
+def _color_line(line: str) -> str:
+    """Apply simple coloring to diff lines for terminal display."""
+
+    if line.startswith("+++") or line.startswith("---"):
+        return f"{_COLOR_CYAN}{line}{_COLOR_RESET}"
+    if line.startswith("@@"):
+        return f"{_COLOR_CYAN}{line}{_COLOR_RESET}"
+    if line.startswith("+"):
+        return f"{_COLOR_GREEN}{line}{_COLOR_RESET}"
+    if line.startswith("-"):
+        return f"{_COLOR_RED}{line}{_COLOR_RESET}"
+    return line
+
+
+def _format_apply_patch_operation(args: Dict[str, Any]) -> str:
+    """Create a readable, colorized description for apply_patch operations."""
+
+    patch = str(args.get("patch", ""))
+    dry_run = args.get("dry_run", False)
+
+    if not patch.strip():
+        return "apply_patch(no patch content)"
+
+    lines = patch.splitlines()
+    preview = lines[:_PATCH_PREVIEW_LINES]
+    hidden = lines[_PATCH_PREVIEW_LINES:]
+
+    total_additions = sum(1 for l in lines if l.startswith("+"))
+    total_subtractions = sum(1 for l in lines if l.startswith("-"))
+    hidden_additions = sum(1 for l in hidden if l.startswith("+"))
+    hidden_subtractions = sum(1 for l in hidden if l.startswith("-"))
+
+    header = f"apply_patch{' (dry run)' if dry_run else ''}"
+    description = [f"{header} patch preview (showing {len(preview)} of {len(lines)} lines)"]
+
+    for line in preview:
+        description.append(f"{_PATCH_INDENT}{_color_line(line)}")
+
+    if hidden:
+        description.append(
+            f"{_PATCH_INDENT}… (hidden {len(hidden)} lines: +{hidden_additions}/-{hidden_subtractions})"
+        )
+
+    description.append(
+        f"{_PATCH_INDENT}Totals in patch: +{total_additions}/-{total_subtractions}"
+    )
+
+    return "\n".join(description)
 
 
 def is_scary_operation(tool_name: str, args: Dict[str, Any], action_type: str = "") -> tuple[bool, str]:
@@ -58,6 +118,16 @@ def is_scary_operation(tool_name: str, args: Dict[str, Any], action_type: str = 
     return False, ""
 
 
+def format_operation_description(tool_name: str, args: Dict[str, Any]) -> str:
+    """Generate a readable description for scary-operation prompts."""
+
+    if tool_name == "apply_patch":
+        return _format_apply_patch_operation(args)
+
+    # Fallback to a simple representation for other tools
+    return f"{tool_name}({', '.join(f'{k}={v!r}' for k, v in list(args.items())[:3])})"
+
+
 def clear_prompt_decisions() -> None:
     """Clear cached scary-operation decisions (useful for tests)."""
 
@@ -82,7 +152,8 @@ def prompt_scary_operation(operation: str, reason: str) -> bool:
     print(f"\n{'='*60}")
     print(f"⚠️  POTENTIALLY DESTRUCTIVE OPERATION DETECTED")
     print(f"{'='*60}")
-    print(f"Operation: {operation}")
+    operation_display = operation if "\n" not in operation else f"\n{operation}"
+    print(f"Operation: {operation_display}")
     print(f"Reason: {reason}")
     print(f"{'='*60}")
 
