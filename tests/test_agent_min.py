@@ -17,6 +17,7 @@ import uuid
 import sys
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
+from subprocess import CompletedProcess
 
 import pytest
 
@@ -291,6 +292,52 @@ class TestGitOperations:
         second = json.loads(agent_min.apply_patch(patch))
         assert second["success"] is True
         assert second.get("already_applied") is True
+
+    def test_apply_patch_large_patch_hint(self):
+        """Large, invalid patches should return a hint to split the diff."""
+
+        big_section = "\n".join("+line" for _ in range(25000))
+        patch = (
+            "--- a/nonexistent.txt\n"
+            "+++ b/nonexistent.txt\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new\n"
+            f"{big_section}\n"
+        )
+
+        data = json.loads(agent_min.apply_patch(patch))
+
+        assert data["success"] is False
+        assert "hint" in data
+        assert "large" in data["hint"].lower()
+
+    def test_apply_patch_reports_no_tree_change(self, monkeypatch):
+        """A zero-exit apply that changes nothing should be reported as a failure."""
+
+        import rev.tools.git_ops as git_ops
+
+        def fake_run(cmd, timeout=300):  # pragma: no cover - executed via apply_patch
+            if cmd.startswith("git status --porcelain"):
+                return CompletedProcess(cmd, 0, "", "")
+            if "git apply --check" in cmd or "patch --batch --forward --dry-run" in cmd:
+                return CompletedProcess(cmd, 0, "", "")
+            if "git apply --inaccurate-eof" in cmd:
+                return CompletedProcess(cmd, 0, "", "")
+            return CompletedProcess(cmd, 1, "", "")
+
+        monkeypatch.setattr(git_ops, "_run_shell", fake_run)
+
+        patch = """--- a/file.txt
++++ b/file.txt
+@@ -1 +1 @@
+-old
++new"""
+
+        data = json.loads(agent_min.apply_patch(patch))
+
+        assert data["success"] is False
+        assert "no working tree changes" in data["error"].lower()
 
     def test_get_repo_context(self):
         """Test getting repository context."""

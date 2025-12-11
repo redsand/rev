@@ -4,6 +4,7 @@
 
 import sys
 import argparse
+from typing import Optional
 
 from . import config
 from .cache import initialize_caches
@@ -16,6 +17,7 @@ from .settings_manager import apply_saved_settings
 from .models.task import ExecutionPlan
 from .tools.registry import get_available_tools
 from .debug_logger import DebugLogger
+from .execution.state_manager import StateManager
 
 
 def main():
@@ -265,12 +267,11 @@ def main():
         print("  [i] Autonomous mode: destructive operations will prompt for confirmation")
     print()
 
+    state_manager: Optional[StateManager] = None
+
     try:
         # Handle resume command
         if args.resume:
-            # Import StateManager for finding latest checkpoint
-            from .execution.state_manager import StateManager
-
             # If resume is True (flag without value) or empty string, find latest checkpoint
             checkpoint_path = args.resume
             if checkpoint_path is True or checkpoint_path == "latest" or not checkpoint_path:
@@ -286,6 +287,7 @@ def main():
             print(f"Resuming from checkpoint: {checkpoint_path}\n")
             try:
                 plan = ExecutionPlan.load_checkpoint(checkpoint_path)
+                state_manager = StateManager(plan)
                 print(f"✓ Checkpoint loaded successfully")
                 print(f"  {plan.get_summary()}\n")
                 debug_logger.log("main", "CHECKPOINT_LOADED", {
@@ -398,6 +400,7 @@ def main():
             # Standard mode - manual agent coordination
             debug_logger.log_workflow_phase("planning", {"task": task_description})
             plan = planning_mode(task_description)
+            state_manager = StateManager(plan)
             debug_logger.log("main", "PLAN_GENERATED", {
                 "task_count": len(plan.tasks),
                 "tasks": [{"id": t.id, "description": t.description[:100]} for t in plan.tasks]
@@ -504,10 +507,14 @@ def main():
         debug_logger.log("main", "USER_INTERRUPT", {}, "WARNING")
         # Attempt to persist state if a plan has been created
         try:
-            from .execution.state_manager import StateManager
+            current_manager = locals().get("state_manager") or globals().get("state_manager")
             current_plan = locals().get("plan") or globals().get("plan")
-            if current_plan is not None:
-                StateManager(current_plan).on_interrupt()
+
+            if current_manager is None and current_plan is not None:
+                current_manager = StateManager(current_plan)
+
+            if current_manager is not None:
+                current_manager.on_interrupt()
         except Exception as exc:  # pragma: no cover – ensure interrupt handling never fails
             print(f"⚠️  Warning: could not save checkpoint on interrupt ({exc})")
         print("\n\nAborted by user")

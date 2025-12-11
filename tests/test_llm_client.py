@@ -1,6 +1,10 @@
 """Tests for the Ollama client token safeguards and retry behavior."""
 
+import os
+import sys
 from unittest.mock import Mock, patch
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import rev.llm.client as client
 from rev.llm.client import _CHARS_PER_TOKEN_ESTIMATE, _enforce_token_limit
@@ -100,3 +104,25 @@ def test_returns_error_after_exhausting_retries(mock_sleep, monkeypatch):
     assert "error" in result
     assert mock_post.call_count == 4
     assert mock_sleep.call_count == 3
+
+
+@patch("rev.llm.client.requests.post")
+def test_sends_tools_mode_even_with_empty_tools(mock_post):
+    messages = [{"role": "user", "content": "test"}]
+    mock_post.return_value = _make_response(
+        200,
+        payload={"message": {"content": "ok", "tool_calls": []}},
+    )
+
+    cache = client.get_llm_cache()
+    if cache:
+        cache.clear()
+
+    result = client.ollama_chat(messages, tools=[])
+
+    assert result["message"]["content"] == "ok"
+    assert mock_post.call_count == 1
+
+    payload = mock_post.call_args.kwargs["json"]
+    assert payload["mode"] == "tools"
+    assert payload["tools"] == []

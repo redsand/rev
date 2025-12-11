@@ -252,11 +252,13 @@ ls -la .git
 **Symptoms:**
 - `apply_patch()` fails even with valid diff
 - "Patch does not apply" error
+ - Patches get truncated in the prompt because they are very large
 
 **Causes:**
 - File already modified
 - Line numbers don't match
 - Whitespace differences
+ - Patch is too large to reliably preview/apply in one go
 
 **Location:** `rev/tools/git_ops.py` - `apply_patch()`
 
@@ -274,6 +276,7 @@ git apply --whitespace=fix patch.diff
 - Use `git apply --reject` to apply partial patches
 - Regenerate patch from clean state
 - Fix whitespace: `--whitespace=fix`
+- Split the change into smaller, file-scoped patches so previews don't truncate
 
 ### 4. Concurrency Bugs
 

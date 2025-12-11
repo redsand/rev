@@ -10,6 +10,12 @@ import subprocess
 import tempfile
 from typing import Optional
 
+# Patches larger than this many characters often hit context limits in agent prompts
+# or produce opaque failures. When we detect a patch above this size that still
+# fails validation, we return a hint encouraging the caller to split the change
+# into smaller chunks.
+_LARGE_PATCH_HINT_THRESHOLD = 120_000
+
 from rev.config import ROOT, ALLOW_CMDS
 
 
@@ -27,6 +33,57 @@ def _run_shell(cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:
         encoding="utf-8",
         errors="replace",
     )
+
+
+def _working_tree_snapshot() -> str:
+    """Return a lightweight snapshot of working tree changes.
+
+    We use ``git status --porcelain`` so we can detect when an apply operation
+    reports success but does not actually modify the tree (for example, when an
+    empty or already-applied patch slips through).
+    """
+
+    proc = _run_shell("git status --porcelain")
+    return proc.stdout
+
+
+def _extract_patch_paths(lines: list[str]) -> set[str]:
+    """Return the set of file paths referenced by a patch."""
+
+    paths: set[str] = set()
+    for line in lines:
+        if not line.startswith(("+++ ", "--- ")):
+            continue
+
+        try:
+            _, raw_path = line.split(" ", 1)
+        except ValueError:
+            continue
+
+        raw_path = raw_path.strip()
+        if raw_path in {"/dev/null", "dev/null", "a/dev/null", "b/dev/null"}:
+            continue
+
+        if raw_path.startswith(("a/", "b/")):
+            raw_path = raw_path[2:]
+
+        paths.add(raw_path)
+
+    return paths
+
+
+def _snapshot_paths(paths: set[str]) -> dict[str, Optional[bytes]]:
+    """Capture the current content for a set of files.
+
+    Missing files are represented by ``None`` so we can detect creations and
+    deletions in addition to modifications.
+    """
+
+    snapshot: dict[str, Optional[bytes]] = {}
+    for path in paths:
+        full_path = ROOT / path
+        snapshot[path] = full_path.read_bytes() if full_path.exists() else None
+    return snapshot
 
 
 # ========== Core Git Operations ==========
@@ -55,6 +112,14 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
     # reject those as "corrupt patch" even though the intent is clear, so we
     # normalize to ensure a newline terminates the patch content.
     normalized_patch = patch if patch.endswith("\n") else f"{patch}\n"
+    patch_size = len(normalized_patch)
+    large_patch_hint: Optional[str] = None
+    if patch_size > _LARGE_PATCH_HINT_THRESHOLD:
+        large_patch_hint = (
+            "Patch is quite large; consider splitting it by file or feature "
+            "so apply_patch can work reliably. For very large diffs you can also "
+            "apply them locally with 'git apply --reject' and commit the result."
+        )
 
     def _has_malformed_hunks(lines: list[str]) -> bool:
         """Detect obvious malformed hunk lines (missing +/-/space prefixes)."""
@@ -75,6 +140,9 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
         return False
 
     patch_lines = normalized_patch.splitlines()
+    patch_paths = _extract_patch_paths(patch_lines)
+    pre_status = _working_tree_snapshot()
+    pre_contents = _snapshot_paths(patch_paths)
     if _has_malformed_hunks(patch_lines):
         return json.dumps(
             {
@@ -93,7 +161,14 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
         tf.flush()
         tfp = tf.name
 
-    def _result(proc: subprocess.CompletedProcess, *, success: bool, already_applied: bool = False, phase: str) -> str:
+    def _result(
+        proc: subprocess.CompletedProcess,
+        *,
+        success: bool,
+        already_applied: bool = False,
+        phase: str,
+        hint: Optional[str] = None,
+    ) -> str:
         result = {
             "success": success,
             "rc": proc.returncode,
@@ -108,6 +183,8 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
             result["error"] = f"Patch failed to apply (exit code {proc.returncode})"
             if proc.stderr:
                 result["error"] += f": {proc.stderr[:500]}"
+            if hint:
+                result["hint"] = hint
         return json.dumps(result)
 
     try:
@@ -152,7 +229,7 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
                 return _result(reverse_proc, success=True, already_applied=True, phase="check")
 
             # Otherwise, report the last failure
-            return _result(check_proc, success=False, phase="check")
+            return _result(check_proc, success=False, phase="check", hint=large_patch_hint)
 
         if dry_run:
             return _result(check_proc, success=True, phase="check")
@@ -166,7 +243,40 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
         else:
             apply_proc = _run_shell(f"patch --batch --forward -p1 < {shlex.quote(tfp)}")
 
-        return _result(apply_proc, success=apply_proc.returncode == 0, phase="apply")
+        if apply_proc.returncode == 0:
+            post_status = _working_tree_snapshot()
+            post_contents = _snapshot_paths(patch_paths)
+
+            tree_changed = False
+            if patch_paths:
+                tree_changed = pre_contents != post_contents
+            else:
+                tree_changed = pre_status != post_status
+
+            if not tree_changed:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "rc": apply_proc.returncode,
+                        "stdout": apply_proc.stdout,
+                        "stderr": apply_proc.stderr,
+                        "dry_run": dry_run,
+                        "phase": "apply",
+                        "error": (
+                            "Patch command reported success, but no working tree changes were detected. "
+                            "The patch may already be applied, empty, or truncated; please verify the diff contents "
+                            "and file paths."
+                        ),
+                        "hint": large_patch_hint,
+                    }
+                )
+
+        return _result(
+            apply_proc,
+            success=apply_proc.returncode == 0,
+            phase="apply",
+            hint=large_patch_hint if apply_proc.returncode != 0 else None,
+        )
     finally:
         # Clean up temporary file, but log if cleanup fails
         try:
