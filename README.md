@@ -160,10 +160,10 @@ rev "Add OAuth2 authentication"
 ```bash
 # Resource budgets prevent runaway execution:
 # - Max steps: 200 (configurable via REV_MAX_STEPS)
-# - Max tokens: 80,000 (REV_MAX_TOKENS)
+# - Max tokens: 120,000 (REV_MAX_TOKENS)
 # - Max time: 1800s / 30min (REV_MAX_SECONDS)
 rev "Refactor entire authentication system"
-# Output: "📊 Resource Usage: Steps: 45/200 | Tokens: 12000/80000 | Time: 120s/1800s"
+# Output: "📊 Resource Usage: Steps: 45/200 | Tokens: 12000/120000 | Time: 120s/1800s"
 ```
 
 **🎯 Goal-Oriented Validation**
