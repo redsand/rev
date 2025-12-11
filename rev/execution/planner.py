@@ -87,6 +87,31 @@ Complexity levels:
 Be thorough but concise. Each task should be independently executable."""
 
 
+CODING_PLANNING_SUFFIX = """
+You are planning a CODE + TEST change to this repository.
+
+In addition to the general planning rules above, you MUST:
+1. Identify the specific files and modules you will touch.
+2. For every non-trivial code change (action_type: edit/add):
+   - Add at least one task to CREATE or UPDATE automated tests.
+   - Add at least one task to RUN the relevant test command.
+3. Prefer many small, atomic tasks over a few large ones.
+
+Use these action_type values:
+- "review"  → analyzing existing code or architecture
+- "edit"    → modifying existing code
+- "add"     → creating new code or tests
+- "delete"  → deleting code or files
+- "test"    → running tests (pytest, npm test, go test, etc.)
+- "doc"     → updating docs, READMEs, or comments
+
+When possible, include hints in the description about:
+- which test file or directory is affected
+- which test command should be used (e.g. "pytest tests/api", "npm test").
+
+Your goal is to produce a PLAN that explicitly couples code changes with tests and docs."""
+
+
 BREAKDOWN_SYSTEM = """You are an expert at breaking down complex tasks into smaller, actionable subtasks.
 
 Given a high-level task, break it down into specific, atomic subtasks that can be executed independently.
@@ -309,7 +334,36 @@ Provide detailed subtasks."""}
         return [{"description": task_description, "action_type": action_type, "complexity": "medium"}]
 
 
-def planning_mode(user_request: str, enable_advanced_analysis: bool = True, enable_recursive_breakdown: bool = True) -> ExecutionPlan:
+def _ensure_test_and_doc_coverage(plan: ExecutionPlan, user_request: str) -> None:
+    """Ensure plans for code changes include corresponding test/doc tasks.
+
+    Args:
+        plan: Current execution plan to adjust
+        user_request: Original user request for context (currently informational)
+    """
+    has_code_change = any(
+        task.action_type in {"edit", "add"} for task in plan.tasks
+    )
+
+    if not has_code_change:
+        return
+
+    has_test_task = any(task.action_type == "test" for task in plan.tasks)
+    if not has_test_task:
+        plan.add_task(
+            "Run automated tests relevant to the planned code changes",
+            "test",
+        )
+
+    has_doc_task = any(task.action_type == "doc" for task in plan.tasks)
+    if not has_doc_task:
+        plan.add_task(
+            "Update documentation or README to reflect code changes",
+            "doc",
+        )
+
+
+def planning_mode(user_request: str, enable_advanced_analysis: bool = True, enable_recursive_breakdown: bool = True, coding_mode: bool = False) -> ExecutionPlan:
     """Generate execution plan from user request with advanced analysis.
 
     This function analyzes the user's request and repository context to create
@@ -320,6 +374,7 @@ def planning_mode(user_request: str, enable_advanced_analysis: bool = True, enab
         user_request: The user's task request
         enable_advanced_analysis: Enable dependency, impact, and risk analysis
         enable_recursive_breakdown: Enable recursive breakdown of complex tasks
+        coding_mode: Enable coding-focused planning that requires tests and docs
 
     Returns:
         ExecutionPlan with comprehensive task breakdown and analysis
@@ -340,7 +395,11 @@ def planning_mode(user_request: str, enable_advanced_analysis: bool = True, enab
     tools_description = _format_available_tools(tools)
 
     # Enhanced system prompt with available tools
-    enhanced_system_prompt = f"""{PLANNING_SYSTEM}
+    system_prompt = PLANNING_SYSTEM
+    if coding_mode:
+        system_prompt = f"{system_prompt}\n{CODING_PLANNING_SUFFIX}"
+
+    enhanced_system_prompt = f"""{system_prompt}
 
 AVAILABLE TOOLS AND CAPABILITIES:
 {tools_description}
@@ -429,6 +488,10 @@ After gathering information with tools, generate a comprehensive execution plan 
     except Exception as e:
         print(f"Warning: Error parsing plan: {e}")
         plan.add_task(user_request, "general")
+
+    # Ensure coding plans include validation tasks
+    if coding_mode:
+        _ensure_test_and_doc_coverage(plan, user_request)
 
     # Advanced planning analysis
     if enable_advanced_analysis and len(plan.tasks) > 0:
