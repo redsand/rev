@@ -127,6 +127,7 @@ def _enforce_token_limit(messages: List[Dict[str, Any]], max_tokens: int) -> Tup
     other_messages = [m for m in messages if m.get("role") != "system"]
 
     truncated_messages: List[Dict[str, Any]] = []
+    remaining_tokens = effective_max_tokens
     token_tally = 0
     truncated = False
 
