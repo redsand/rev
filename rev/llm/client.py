@@ -25,7 +25,7 @@ _CHARS_PER_TOKEN_ESTIMATE = 3
 
 # Keep requests well below the provider cap to avoid hard failures when the
 # heuristic underestimates token usage.
-_TOKEN_BUDGET_MULTIPLIER = 0.7
+_TOKEN_BUDGET_MULTIPLIER = 0.9
 
 # Retry configuration (can be overridden via environment variables)
 def _get_retry_config():
