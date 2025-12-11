@@ -292,6 +292,25 @@ class TestGitOperations:
         assert second["success"] is True
         assert second.get("already_applied") is True
 
+    def test_apply_patch_large_patch_hint(self):
+        """Large, invalid patches should return a hint to split the diff."""
+
+        big_section = "\n".join("+line" for _ in range(25000))
+        patch = (
+            "--- a/nonexistent.txt\n"
+            "+++ b/nonexistent.txt\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new\n"
+            f"{big_section}\n"
+        )
+
+        data = json.loads(agent_min.apply_patch(patch))
+
+        assert data["success"] is False
+        assert "hint" in data
+        assert "large" in data["hint"].lower()
+
     def test_get_repo_context(self):
         """Test getting repository context."""
         result = agent_min.get_repo_context(commits=3)

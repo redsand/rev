@@ -10,6 +10,12 @@ import subprocess
 import tempfile
 from typing import Optional
 
+# Patches larger than this many characters often hit context limits in agent prompts
+# or produce opaque failures. When we detect a patch above this size that still
+# fails validation, we return a hint encouraging the caller to split the change
+# into smaller chunks.
+_LARGE_PATCH_HINT_THRESHOLD = 120_000
+
 from rev.config import ROOT, ALLOW_CMDS
 
 
@@ -55,6 +61,14 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
     # reject those as "corrupt patch" even though the intent is clear, so we
     # normalize to ensure a newline terminates the patch content.
     normalized_patch = patch if patch.endswith("\n") else f"{patch}\n"
+    patch_size = len(normalized_patch)
+    large_patch_hint: Optional[str] = None
+    if patch_size > _LARGE_PATCH_HINT_THRESHOLD:
+        large_patch_hint = (
+            "Patch is quite large; consider splitting it by file or feature "
+            "so apply_patch can work reliably. For very large diffs you can also "
+            "apply them locally with 'git apply --reject' and commit the result."
+        )
 
     def _has_malformed_hunks(lines: list[str]) -> bool:
         """Detect obvious malformed hunk lines (missing +/-/space prefixes)."""
@@ -93,7 +107,14 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
         tf.flush()
         tfp = tf.name
 
-    def _result(proc: subprocess.CompletedProcess, *, success: bool, already_applied: bool = False, phase: str) -> str:
+    def _result(
+        proc: subprocess.CompletedProcess,
+        *,
+        success: bool,
+        already_applied: bool = False,
+        phase: str,
+        hint: Optional[str] = None,
+    ) -> str:
         result = {
             "success": success,
             "rc": proc.returncode,
@@ -108,6 +129,8 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
             result["error"] = f"Patch failed to apply (exit code {proc.returncode})"
             if proc.stderr:
                 result["error"] += f": {proc.stderr[:500]}"
+            if hint:
+                result["hint"] = hint
         return json.dumps(result)
 
     try:
@@ -152,7 +175,7 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
                 return _result(reverse_proc, success=True, already_applied=True, phase="check")
 
             # Otherwise, report the last failure
-            return _result(check_proc, success=False, phase="check")
+            return _result(check_proc, success=False, phase="check", hint=large_patch_hint)
 
         if dry_run:
             return _result(check_proc, success=True, phase="check")
@@ -166,7 +189,12 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
         else:
             apply_proc = _run_shell(f"patch --batch --forward -p1 < {shlex.quote(tfp)}")
 
-        return _result(apply_proc, success=apply_proc.returncode == 0, phase="apply")
+        return _result(
+            apply_proc,
+            success=apply_proc.returncode == 0,
+            phase="apply",
+            hint=large_patch_hint if apply_proc.returncode != 0 else None,
+        )
     finally:
         # Clean up temporary file, but log if cleanup fails
         try:
