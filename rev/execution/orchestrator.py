@@ -321,6 +321,7 @@ class Orchestrator:
                 return result
             plan = planning_mode(user_request, coding_mode=coding_mode)
             result.plan = plan
+            state_manager = StateManager(plan)
 
             if not plan.tasks:
                 result.errors.append("Planning agent produced no tasks")
@@ -432,7 +433,8 @@ IMPORTANT - Address the following review feedback:
                     auto_approve=self.config.auto_approve,
                     tools=tools,
                     enable_action_review=self.config.enable_action_review,
-                    coding_mode=coding_mode
+                    coding_mode=coding_mode,
+                    state_manager=state_manager,
                 )
             else:
                 execution_mode(
@@ -440,7 +442,8 @@ IMPORTANT - Address the following review feedback:
                     auto_approve=self.config.auto_approve,
                     tools=tools,
                     enable_action_review=self.config.enable_action_review,
-                    coding_mode=coding_mode
+                    coding_mode=coding_mode,
+                    state_manager=state_manager,
                 )
 
             # Phase 6: Validation Agent - Verify results

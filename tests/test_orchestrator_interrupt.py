@@ -17,7 +17,7 @@ from rev.execution.validator import ValidationStatus
 def test_orchestrator_interrupt_shows_resume(monkeypatch, capsys):
     """Keyboard interrupts in orchestrated mode should surface resume info."""
 
-    calls = {"on_interrupt": False, "created": False}
+    calls = {"on_interrupt": False, "created": False, "state_manager_in_executor": False}
 
     class DummyStateManager:
         def __init__(self, plan):
@@ -28,6 +28,7 @@ def test_orchestrator_interrupt_shows_resume(monkeypatch, capsys):
             print("rev --resume dummy-checkpoint")
 
     def raise_interrupt(*_args, **_kwargs):
+        calls["state_manager_in_executor"] = isinstance(_kwargs.get("state_manager"), DummyStateManager)
         raise KeyboardInterrupt
 
     plan = ExecutionPlan()
@@ -59,4 +60,5 @@ def test_orchestrator_interrupt_shows_resume(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert calls["created"] is True
     assert calls["on_interrupt"] is True
+    assert calls["state_manager_in_executor"] is True
     assert "rev --resume" in output

@@ -12,10 +12,11 @@ Performance optimizations:
 
 import json
 import sys
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
 from rev.models.task import ExecutionPlan, Task, TaskStatus
+from rev.execution.state_manager import StateManager
 from rev.tools.registry import execute_tool
 from rev.llm.client import ollama_chat
 from rev.config import get_system_info_cached, get_escape_interrupt, set_escape_interrupt
@@ -235,7 +236,8 @@ def execution_mode(
     auto_approve: bool = True,
     tools: list = None,
     enable_action_review: bool = False,
-    coding_mode: bool = False
+    coding_mode: bool = False,
+    state_manager: Optional[StateManager] = None,
 ) -> bool:
     """Execute all tasks in the plan iteratively.
 
@@ -296,13 +298,16 @@ def execution_mode(
             if current_task and current_task.status == TaskStatus.IN_PROGRESS:
                 plan.mark_task_stopped(current_task)
 
-            # Save checkpoint for resume
-            try:
-                checkpoint_path = plan.save_checkpoint()
-                print(f"✓ Checkpoint saved to: {checkpoint_path}")
-                print(f"  Use 'rev resume {checkpoint_path}' to continue")
-            except Exception as e:
-                print(f"✗ Failed to save checkpoint: {e}")
+            if state_manager:
+                state_manager.on_interrupt(current_task)
+            else:
+                # Save checkpoint for resume
+                try:
+                    checkpoint_path = plan.save_checkpoint()
+                    print(f"✓ Checkpoint saved to: {checkpoint_path}")
+                    print(f"  Use 'rev resume {checkpoint_path}' to continue")
+                except Exception as e:
+                    print(f"✗ Failed to save checkpoint: {e}")
 
             return False
 
@@ -313,6 +318,8 @@ def execution_mode(
         print(f"[Type: {current_task.action_type}]")
 
         current_task.status = TaskStatus.IN_PROGRESS
+        if state_manager:
+            state_manager.on_task_started(current_task)
 
         # Log task start
         debug_logger = get_logger()
@@ -353,13 +360,16 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                 # Mark current task as stopped
                 plan.mark_task_stopped(current_task)
 
-                # Save checkpoint for resume
-                try:
-                    checkpoint_path = plan.save_checkpoint()
-                    print(f"✓ Checkpoint saved to: {checkpoint_path}")
-                    print(f"  Use 'rev resume {checkpoint_path}' to continue")
-                except Exception as e:
-                    print(f"✗ Failed to save checkpoint: {e}")
+                if state_manager:
+                    state_manager.on_interrupt(current_task)
+                else:
+                    # Save checkpoint for resume
+                    try:
+                        checkpoint_path = plan.save_checkpoint()
+                        print(f"✓ Checkpoint saved to: {checkpoint_path}")
+                        print(f"  Use 'rev resume {checkpoint_path}' to continue")
+                    except Exception as e:
+                        print(f"✗ Failed to save checkpoint: {e}")
 
                 return False
 
@@ -379,6 +389,8 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
 
                 if "error" in response:
                     plan.mark_failed(error_msg)
+                    if state_manager:
+                        state_manager.on_task_failed(current_task)
                     break
 
             msg = response.get("message", {})
@@ -432,6 +444,8 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         if not prompt_scary_operation(operation_desc, scary_reason):
                             print(f"  ✗ Operation cancelled by user")
                             plan.mark_failed("User cancelled destructive operation")
+                            if state_manager:
+                                state_manager.on_task_failed(current_task)
                             task_complete = True
                             break
 
@@ -510,6 +524,8 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             if "TASK_COMPLETE" in content or "task complete" in content.lower():
                 print(f"  ✓ Task completed")
                 plan.mark_completed(content)
+                if state_manager:
+                    state_manager.on_task_completed(current_task)
                 session_tracker.track_task_completed(current_task.description)
                 task_complete = True
                 break
@@ -524,6 +540,8 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                     error_msg = "Model does not support tool calling. Consider using a model with tool support."
                     print(f"  ⚠ Model not using tools. Marking task as needs manual intervention.")
                     plan.mark_failed(error_msg)
+                    if state_manager:
+                        state_manager.on_task_failed(current_task)
                     session_tracker.track_task_failed(current_task.description, error_msg)
                     break
 
@@ -531,6 +549,8 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             error_msg = "Exceeded iteration limit"
             print(f"  ✗ Task exceeded iteration limit")
             plan.mark_failed(error_msg)
+            if state_manager:
+                state_manager.on_task_failed(current_task)
             session_tracker.track_task_failed(current_task.description, error_msg)
 
         # OPTIMIZATION: Manage message history to prevent unbounded growth
@@ -593,7 +613,8 @@ def execute_single_task(
     auto_approve: bool = True,
     tools: list = None,
     enable_action_review: bool = False,
-    coding_mode: bool = False
+    coding_mode: bool = False,
+    state_manager: Optional[StateManager] = None,
 ) -> bool:
     """Execute a single task (for concurrent execution).
 
@@ -616,6 +637,8 @@ def execute_single_task(
     print(f"[Type: {task.action_type}]")
 
     plan.mark_task_in_progress(task)
+    if state_manager:
+        state_manager.on_task_started(task)
 
     system_context = _build_execution_system_context(sys_info, coding_mode)
 
@@ -652,6 +675,8 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
 
             if "error" in response:
                 plan.mark_task_failed(task, error_msg)
+                if state_manager:
+                    state_manager.on_task_failed(task)
                 return False
 
         msg = response.get("message", {})
@@ -686,6 +711,8 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                     if not prompt_scary_operation(operation_desc, scary_reason):
                         print(f"  ✗ Operation cancelled by user")
                         plan.mark_task_failed(task, "User cancelled destructive operation")
+                        if state_manager:
+                            state_manager.on_task_failed(task)
                         return False
 
                 # Action review (if enabled)
@@ -747,6 +774,8 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
         if "TASK_COMPLETE" in content or "task complete" in content.lower():
             print(f"  ✓ Task completed")
             plan.mark_task_completed(task, content)
+            if state_manager:
+                state_manager.on_task_completed(task)
             return True
 
         # If model responds but doesn't use tools and doesn't complete task
@@ -758,11 +787,15 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             if task_iterations >= 3:
                 print(f"  ⚠ Model not using tools. Marking task as needs manual intervention.")
                 plan.mark_task_failed(task, "Model does not support tool calling. Consider using a model with tool support.")
+                if state_manager:
+                    state_manager.on_task_failed(task)
                 return False
 
     if not task_complete:
         print(f"  ✗ Task exceeded iteration limit")
         plan.mark_task_failed(task, "Exceeded iteration limit")
+        if state_manager:
+            state_manager.on_task_failed(task)
         return False
 
     return True
@@ -774,7 +807,8 @@ def concurrent_execution_mode(
     auto_approve: bool = True,
     tools: list = None,
     enable_action_review: bool = False,
-    coding_mode: bool = False
+    coding_mode: bool = False,
+    state_manager: Optional[StateManager] = None,
 ) -> bool:
     """Execute tasks in the plan concurrently with dependency tracking.
 
@@ -831,7 +865,7 @@ def concurrent_execution_mode(
                 for task in executable_tasks:
                     future = executor.submit(
                         execute_single_task, task, plan, sys_info,
-                        auto_approve, tools, enable_action_review, coding_mode
+                        auto_approve, tools, enable_action_review, coding_mode, state_manager
                     )
                     futures[future] = task
 
