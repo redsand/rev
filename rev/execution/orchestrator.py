@@ -16,13 +16,19 @@ from pathlib import Path
 from rev.models.task import ExecutionPlan, TaskStatus
 from rev.execution.planner import planning_mode
 from rev.execution.reviewer import review_execution_plan, ReviewStrictness, ReviewDecision
-from rev.execution.validator import validate_execution, ValidationStatus, format_validation_feedback_for_llm
+from rev.execution.validator import (
+    validate_execution,
+    ValidationStatus,
+    ValidationReport,
+    format_validation_feedback_for_llm,
+)
 from rev.execution.researcher import research_codebase, ResearchFindings
 from rev.execution.learner import LearningAgent, display_learning_suggestions
 from rev.execution.executor import execution_mode, concurrent_execution_mode, fix_validation_failures
 from rev.execution.state_manager import StateManager
 from rev.tools.registry import get_available_tools
 from rev.config import MAX_STEPS_PER_RUN, MAX_LLM_TOKENS_PER_RUN, MAX_WALLCLOCK_SECONDS
+from rev.llm.client import get_token_usage
 
 
 @dataclass
@@ -265,6 +271,7 @@ class Orchestrator:
 
         plan: Optional[ExecutionPlan] = None
         state_manager: Optional[StateManager] = None
+        checkpoint_path: Optional[str] = None
 
         # Display resource budgets
         print(f"\n📊 Resource Budgets:")
@@ -531,11 +538,41 @@ IMPORTANT - Address the following review feedback:
                         print(f"\n❌ Validation failed after {retry_count} retry attempt(s)")
                         result.errors.append(f"Validation failed after {retry_count} retry attempts")
 
-            # Complete
-            self._update_phase(AgentPhase.COMPLETE)
-            result.phase_reached = AgentPhase.COMPLETE
+                        # Persist checkpoint before blocking for manual intervention
+                        if state_manager:
+                            checkpoint_path = state_manager.save_checkpoint(reason="validation_failed", force=True)
+                            if checkpoint_path:
+                                print(f"  ✓ Checkpoint saved to: {checkpoint_path}")
+                                print("  The run will pause until you confirm a retry.")
 
-            # Learn from execution
+                        # Enter an interactive hold so we do not fail forward. Users can
+                        # manually address issues and type a resume keyword to continue
+                        # validation from the same phase.
+                        validation = self._hold_and_retry_validation(
+                            plan,
+                            user_request,
+                            validation,
+                        )
+                        result.validation_status = validation.overall_status
+                        result.agent_insights["validation"]["interactive_retries"] = result.agent_insights["validation"].get("interactive_retries", 0)
+                        if validation.overall_status != ValidationStatus.FAILED:
+                            result.agent_insights["validation"]["interactive_retries"] += 1
+                            result.errors = [e for e in result.errors if "Validation failed" in e and "retry attempts" in e]
+
+            # Complete (only mark complete when final phase succeeded)
+            all_completed = all(t.status == TaskStatus.COMPLETED for t in plan.tasks) and len(plan.tasks) > 0
+            validation_ok = (
+                not self.config.enable_validation or
+                result.validation_status in [ValidationStatus.PASSED, ValidationStatus.PASSED_WITH_WARNINGS, None]
+            )
+
+            if all_completed and validation_ok:
+                self._update_phase(AgentPhase.COMPLETE)
+                result.phase_reached = AgentPhase.COMPLETE
+            else:
+                # Stay on the current phase to prevent failing forward
+                result.phase_reached = self.current_phase
+            # Learn from execution only when we reached a valid stopping point
             if self.config.enable_learning and self.learning_agent:
                 execution_time = time.time() - start_time
                 validation_passed = result.validation_status in [ValidationStatus.PASSED, ValidationStatus.PASSED_WITH_WARNINGS] if result.validation_status else True
@@ -547,17 +584,13 @@ IMPORTANT - Address the following review feedback:
                 )
 
             # Determine success
-            all_completed = all(t.status == TaskStatus.COMPLETED for t in plan.tasks) and len(plan.tasks) > 0
-            validation_ok = (
-                not self.config.enable_validation or
-                result.validation_status in [ValidationStatus.PASSED, ValidationStatus.PASSED_WITH_WARNINGS, None]
-            )
             result.success = all_completed and validation_ok
 
         except KeyboardInterrupt:
             if plan is not None:
                 try:
                     state_manager = state_manager or StateManager(plan)
+                    budget.tokens_used = get_token_usage().get("total", budget.tokens_used)
                     token_usage = {
                         "total": budget.tokens_used,
                         "prompt": 0,
@@ -574,6 +607,9 @@ IMPORTANT - Address the following review feedback:
             result.success = False
 
         result.execution_time = time.time() - start_time
+
+        # Refresh token usage from the LLM tracker before displaying summary
+        budget.tokens_used = get_token_usage().get("total", budget.tokens_used)
 
         # Display final resource budget summary
         budget.update_time()
@@ -602,6 +638,64 @@ IMPORTANT - Address the following review feedback:
         }
         icon = phase_icons.get(phase, "▶️")
         print(f"\n{icon} Phase: {phase.value.upper()}")
+
+    def _hold_and_retry_validation(
+        self,
+        plan: ExecutionPlan,
+        user_request: str,
+        last_validation: ValidationReport,
+    ) -> ValidationReport:
+        """Block on validation failure until the user signals to continue."""
+
+        print("\n⏸️  Validation halted. The orchestrator will not proceed until you confirm.")
+        print("   Type 'go', 'continue', 'resume', or 'do stuff' to retry validation.")
+        print("   Type 'abort' to stop this run while keeping the current checkpoint.")
+
+        while True:
+            if not self._wait_for_user_resume():
+                print("\n🚫 User opted to stop at validation phase.")
+                self.current_phase = AgentPhase.VALIDATION
+                return last_validation
+
+            print("\n▶️  Retrying validation from current state...")
+            validation = validate_execution(
+                plan,
+                user_request,
+                run_tests=True,
+                run_linter=True,
+                check_syntax=True,
+                enable_auto_fix=self.config.enable_auto_fix,
+            )
+
+            self.current_phase = AgentPhase.VALIDATION
+
+            if validation.overall_status == ValidationStatus.FAILED:
+                print("⚠️  Validation still failing. Waiting for further instructions.")
+                last_validation = validation
+                continue
+
+            print("✅ Validation passed after manual resume signal.")
+            return validation
+
+    def _wait_for_user_resume(self) -> bool:
+        """Wait for explicit user confirmation to continue after a failure."""
+
+        accepted = {"go", "continue", "resume", "c", "do stuff", "do it", "yes", "y"}
+        abort = {"abort", "stop", "quit", "exit", "n", "no"}
+
+        while True:
+            try:
+                response = input("→ Awaiting input [go/continue/resume/do stuff/abort]: ").strip().lower()
+            except (KeyboardInterrupt, EOFError):
+                print("\nInput interrupted; stopping execution.")
+                return False
+
+            if response in accepted:
+                return True
+            if response in abort:
+                return False
+
+            print("Please type 'go' to continue or 'abort' to stop.")
 
     def _format_review_feedback_for_planning(self, review, user_request: str) -> str:
         """Format review feedback for the planning agent to incorporate.

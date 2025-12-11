@@ -5,10 +5,11 @@
 import json
 import os
 import pathlib
+import re
 import shlex
 import subprocess
 import tempfile
-from typing import Optional
+from typing import Optional, Iterable
 
 # Patches larger than this many characters often hit context limits in agent prompts
 # or produce opaque failures. When we detect a patch above this size that still
@@ -70,6 +71,51 @@ def _extract_patch_paths(lines: list[str]) -> set[str]:
         paths.add(raw_path)
 
     return paths
+
+
+def _split_patch_into_chunks(patch: str) -> list[str]:
+    """Split a multi-file patch into file-scoped chunks.
+
+    We attempt to keep ``diff --git`` and header lines attached to each file so
+    downstream apply calls have the necessary context. Chunks without both
+    ``---`` and ``+++`` headers are ignored to avoid sending malformed diffs to
+    the apply routines.
+    """
+
+    # Prefer diff --git boundaries when available; otherwise fall back to the
+    # first --- header for simple patches.
+    if "diff --git" in patch:
+        parts = re.split(r"(?m)^diff --git ", patch)
+        # ``re.split`` drops the delimiter; put it back.
+        chunks = [f"diff --git {p}" for p in parts if p.strip()]
+    else:
+        chunks = re.split(r"(?m)(?=^--- )", patch)
+        chunks = [c for c in chunks if c.strip()]
+
+    formatted: list[str] = []
+    for chunk in chunks:
+        if "--- " not in chunk or "+++ " not in chunk:
+            continue
+        formatted.append(chunk if chunk.endswith("\n") else f"{chunk}\n")
+
+    return formatted
+
+
+def _retry_plan_message(chunk_count: int) -> str:
+    """Return guidance for retrying a failed patch application.
+
+    The message encourages callers to keep engaging the LLM until it delivers a
+    workable patch and to split the change into smaller, sequentially applied
+    chunks when necessary.
+    """
+
+    target_chunks = max(2, chunk_count)
+    return (
+        "Patch failed to apply cleanly. Ask the model to retry until it returns "
+        "a valid diff, and if failures persist, split the update into "
+        f"~{target_chunks} smaller chunk(s) (for example, by file) and apply them "
+        "one at a time."
+    )
 
 
 def _snapshot_paths(paths: set[str]) -> dict[str, Optional[bytes]]:
@@ -145,7 +191,7 @@ def git_diff(pathspec: str = ".", staged: bool = False, context: int = 3) -> str
 
 
 
-def apply_patch(patch: str, dry_run: bool = False) -> str:
+def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = True) -> str:
     """Apply a unified diff patch with resilient validation.
 
     The previous implementation proved too brittle for the kinds of diffs that
@@ -161,6 +207,7 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
         normalized_patch = f"{normalized_patch}\n"
 
     patch_size = len(normalized_patch)
+    chunked_parts = _split_patch_into_chunks(normalized_patch)
     large_patch_hint: Optional[str] = None
     if patch_size > _LARGE_PATCH_HINT_THRESHOLD:
         large_patch_hint = (
@@ -191,6 +238,8 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
     patch_lines = normalized_patch.splitlines()
     patch_paths = _extract_patch_paths(patch_lines)
 
+    retry_plan = _retry_plan_message(len(chunked_parts))
+
     if _has_malformed_hunks(patch_lines):
         proc = subprocess.CompletedProcess("apply_patch", 1, "", "patch validation failed: unexpected hunk line")
         return json.dumps(
@@ -220,6 +269,7 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
         already_applied: bool = False,
         phase: str,
         hint: Optional[str] = None,
+        retry_plan: Optional[str] = None,
     ) -> str:
         result = {
             "success": success,
@@ -237,7 +287,56 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
                 result["error"] += f": {proc.stderr[:500]}"
             if hint:
                 result["hint"] = hint
+            if retry_plan:
+                result["retry_plan"] = retry_plan
         return json.dumps(result)
+
+    def _apply_patch_in_chunks(chunks: Iterable[str], dry_run: bool = False) -> Optional[str]:
+        """Attempt to apply each file chunk independently."""
+
+        if not chunks:
+            return None
+
+        applied = 0
+        last_stdout = ""
+        last_stderr = ""
+
+        for idx, chunk in enumerate(chunks, start=1):
+            chunk_result = json.loads(apply_patch(chunk, dry_run=dry_run, _allow_chunking=False))
+
+            last_stdout = chunk_result.get("stdout", "")
+            last_stderr = chunk_result.get("stderr", "")
+
+            if not chunk_result.get("success"):
+                return json.dumps(
+                    {
+                        "success": False,
+                        "rc": chunk_result.get("rc", 1),
+                        "stdout": last_stdout,
+                        "stderr": last_stderr,
+                        "dry_run": dry_run,
+                        "phase": "chunked",
+                        "failed_chunk_index": idx,
+                        "failed_chunk": chunk_result,
+                        "chunks_attempted": len(chunked_parts),
+                        "error": chunk_result.get("error", "Patch chunk failed to apply"),
+                        "hint": chunk_result.get("hint"),
+                        "retry_plan": _retry_plan_message(len(chunked_parts)),
+                    }
+                )
+
+            applied += 1
+
+        return json.dumps(
+            {
+                "success": True,
+                "dry_run": dry_run,
+                "phase": "chunked",
+                "chunks_applied": applied,
+                "stdout": last_stdout,
+                "stderr": last_stderr,
+            }
+        )
 
     try:
         strategies = [
@@ -275,7 +374,18 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
             if reverse_proc.returncode == 0 or "reversed" in reverse_output:
                 return _result(reverse_proc, success=True, already_applied=True, phase="check")
 
-            return _result(check_proc, success=False, phase="check", hint=large_patch_hint)
+            if _allow_chunking and not dry_run and len(chunked_parts) > 1:
+                chunk_result = _apply_patch_in_chunks(chunked_parts, dry_run=dry_run)
+                if chunk_result:
+                    return chunk_result
+
+            return _result(
+                check_proc,
+                success=False,
+                phase="check",
+                hint=large_patch_hint,
+                retry_plan=retry_plan,
+            )
 
         if dry_run:
             return _result(check_proc, success=True, phase="check")
@@ -313,14 +423,21 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
                             "and file paths."
                         ),
                         "hint": large_patch_hint,
+                        "retry_plan": retry_plan,
                     }
                 )
+
+        if apply_proc.returncode != 0 and _allow_chunking and not dry_run and len(chunked_parts) > 1:
+            chunk_result = _apply_patch_in_chunks(chunked_parts, dry_run=dry_run)
+            if chunk_result:
+                return chunk_result
 
         return _result(
             apply_proc,
             success=apply_proc.returncode == 0,
             phase="apply",
             hint=large_patch_hint if apply_proc.returncode != 0 else None,
+            retry_plan=retry_plan if apply_proc.returncode != 0 else None,
         )
     finally:
         try:
