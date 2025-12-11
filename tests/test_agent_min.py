@@ -28,6 +28,7 @@ import rev
 from rev.config import MAX_LLM_TOKENS_PER_RUN, ROOT
 from rev.models.task import Task, TaskStatus, ExecutionPlan
 from rev.tools.file_ops import _safe_path
+from rev.execution import planner, executor, safety  # noqa: E402
 
 """Legacy compatibility shim that routes legacy agent_min-style imports to rev."""
 
@@ -35,8 +36,8 @@ agent_min = rev
 agent_min.MAX_FILE_BYTES = 10 * 1024 * 1024  # 10MB limit
 agent_min.TOOLS = []
 agent_min.ollama_chat = rev.llm.ollama_chat
-
-from rev.execution import planner, executor  # noqa: E402
+agent_min.is_scary_operation = safety.is_scary_operation
+agent_min.prompt_scary_operation = safety.prompt_scary_operation
 
 agent_min.planning_mode = planner.planning_mode
 agent_min.execution_mode = executor.execution_mode
@@ -1225,6 +1226,15 @@ class TestScaryOperations:
         """Test user types 'yes' to approve."""
         result = agent_min.prompt_scary_operation("rm file.txt", "delete command")
         assert result is True
+
+    @patch('builtins.input', side_effect=['', 'y'])
+    def test_prompt_scary_operation_reprompts_on_invalid(self, mock_input, prompt_decision_cache):
+        """Invalid responses should trigger a reprompt instead of defaulting to no."""
+
+        result = agent_min.prompt_scary_operation("rm file.txt", "delete command")
+
+        assert result is True
+        assert mock_input.call_count == 2
 
     @patch('builtins.input', side_effect=KeyboardInterrupt())
     def test_prompt_scary_operation_keyboard_interrupt(self, mock_input, prompt_decision_cache):

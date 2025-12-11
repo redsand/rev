@@ -127,6 +127,9 @@ class StatusCommand(CommandHandler):
         output.append(create_item("Model", config.OLLAMA_MODEL))
         output.append(create_item("Ollama URL", config.OLLAMA_BASE_URL))
         output.append(create_item("Working directory", str(config.ROOT)))
+        additional_dirs = session_context.get("additional_dirs", [])
+        if additional_dirs:
+            output.append(create_item("Additional directories", ", ".join(additional_dirs)))
 
         if session_context.get("token_usage"):
             output.append(create_section("Token Usage"))
@@ -438,16 +441,21 @@ class AddDirCommand(CommandHandler):
             return "Usage: /add-dir <directory> [<directory> ...]"
 
         added_dirs = []
+        tracked_dirs = session_context.setdefault("additional_dirs", [])
         for dir_path in args:
-            path = Path(dir_path).resolve()
+            path = Path(dir_path).expanduser().resolve()
             if path.exists() and path.is_dir():
-                # In a real implementation, you'd track these in session context
-                # For now, just acknowledge
-                added_dirs.append(str(path))
+                path_str = str(path)
+                if path_str not in tracked_dirs:
+                    tracked_dirs.append(path_str)
+                    added_dirs.append(path_str)
             else:
                 return f"Error: Directory not found: {dir_path}"
 
-        return f"Added directories: {', '.join(added_dirs)}\n(Note: Implementation pending - directories tracked in session)"
+        if added_dirs:
+            return f"Added directories: {', '.join(added_dirs)}"
+
+        return "No new directories added (already tracked)"
 
 
 class InitCommand(CommandHandler):

@@ -158,8 +158,18 @@ def prompt_scary_operation(operation: str, reason: str) -> bool:
     print(f"{'='*60}")
 
     try:
-        response = input("Continue with this operation? [y/N]: ").strip().lower()
-        decision = response in ["y", "yes"]
+        while True:
+            response = input("Continue with this operation? [y/N]: ").strip().lower()
+
+            if response in {"y", "yes"}:
+                decision = True
+                break
+            if response in {"n", "no"}:
+                decision = False
+                break
+
+            print("Please respond with 'y' or 'n'.")
+
         _PROMPT_DECISIONS[key] = decision
         return decision
     except (KeyboardInterrupt, EOFError):
