@@ -51,8 +51,45 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
     to apply it again.
     """
 
+    # Some callers provide minimal patches without a trailing newline. Git may
+    # reject those as "corrupt patch" even though the intent is clear, so we
+    # normalize to ensure a newline terminates the patch content.
+    normalized_patch = patch if patch.endswith("\n") else f"{patch}\n"
+
+    def _has_malformed_hunks(lines: list[str]) -> bool:
+        """Detect obvious malformed hunk lines (missing +/-/space prefixes)."""
+        in_hunk = False
+        for line in lines:
+            if line.startswith("@@"):
+                in_hunk = True
+                continue
+
+            if in_hunk:
+                if line.startswith("@@"):
+                    continue
+                if line.startswith("--- ") or line.startswith("+++ "):
+                    in_hunk = False
+                    continue
+                if line.strip() and not line.startswith(("+", "-", " ", "\\")):
+                    return True
+        return False
+
+    patch_lines = normalized_patch.splitlines()
+    if _has_malformed_hunks(patch_lines):
+        return json.dumps(
+            {
+                "success": False,
+                "rc": 1,
+                "stdout": "",
+                "stderr": "patch validation failed: unexpected hunk line",
+                "dry_run": dry_run,
+                "phase": "check",
+                "error": "Patch failed basic validation",
+            }
+        )
+
     with tempfile.NamedTemporaryFile("w+", delete=False, encoding="utf-8") as tf:
-        tf.write(patch)
+        tf.write(normalized_patch)
         tf.flush()
         tfp = tf.name
 
@@ -75,24 +112,60 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
 
     try:
         # Validate the patch before applying so we only attempt the actual apply once.
-        check_args = ["git", "apply", "--check", "--3way", tfp]
-        check_proc = _run_shell(" ".join(shlex.quote(a) for a in check_args))
+        check_attempts = [
+            (["git", "apply", "--check", "--inaccurate-eof", tfp], False, "git"),
+            (["git", "apply", "--check", "--inaccurate-eof", "--3way", tfp], True, "git"),
+            (f"patch --batch --forward --dry-run -p1 < {shlex.quote(tfp)}", False, "patch"),
+        ]
 
-        # Treat "patch already applied" as a successful no-op so callers do not
-        # keep retrying the same patch.
-        combined_output = (check_proc.stdout + check_proc.stderr).lower()
-        already_applied = "patch already applied" in combined_output
-        if already_applied:
-            return _result(check_proc, success=True, already_applied=True, phase="check")
+        check_proc: Optional[subprocess.CompletedProcess] = None
+        use_three_way = False
+        apply_mode: Optional[str] = None
 
-        if check_proc.returncode != 0:
+        for check_args, use_three_way_flag, runner in check_attempts:
+            if runner == "git":
+                check_proc = _run_shell(" ".join(shlex.quote(a) for a in check_args))
+            else:
+                check_proc = _run_shell(check_args)
+
+            # Treat "patch already applied" as a successful no-op so callers do not
+            # keep retrying the same patch.
+            combined_output = (check_proc.stdout + check_proc.stderr).lower()
+            if "patch already applied" in combined_output or "previously applied" in combined_output:
+                return _result(check_proc, success=True, already_applied=True, phase="check")
+
+            if check_proc.returncode == 0:
+                use_three_way = use_three_way_flag
+                apply_mode = runner
+                break
+        else:
+            # If all checks failed, see if the reverse patch would apply cleanly.
+            # That indicates the original patch has already been applied.
+            reverse_proc = _run_shell(
+                " ".join(
+                    shlex.quote(a)
+                    for a in ["git", "apply", "--check", "--reverse", "--inaccurate-eof", tfp]
+                )
+            )
+            reverse_output = (reverse_proc.stdout + reverse_proc.stderr).lower()
+            if reverse_proc.returncode == 0 or "reversed" in reverse_output:
+                return _result(reverse_proc, success=True, already_applied=True, phase="check")
+
+            # Otherwise, report the last failure
             return _result(check_proc, success=False, phase="check")
 
         if dry_run:
             return _result(check_proc, success=True, phase="check")
 
-        apply_args = ["git", "apply", "--3way", tfp]
-        apply_proc = _run_shell(" ".join(shlex.quote(a) for a in apply_args))
+        if apply_mode == "git":
+            apply_args = ["git", "apply", "--inaccurate-eof"]
+            if use_three_way:
+                apply_args.append("--3way")
+            apply_args.append(tfp)
+            apply_proc = _run_shell(" ".join(shlex.quote(a) for a in apply_args))
+        else:
+            apply_proc = _run_shell(f"patch --batch --forward -p1 < {shlex.quote(tfp)}")
+
         return _result(apply_proc, success=apply_proc.returncode == 0, phase="apply")
     finally:
         # Clean up temporary file, but log if cleanup fails
