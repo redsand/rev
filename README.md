@@ -759,6 +759,18 @@ Some Ollama models don't support function/tool calling. This is normal for older
    OLLAMA_DEBUG=1 rev "Your task"
    ```
 
+3. If you're using the OpenAI-hosted **gpt-oss** models (e.g., `gpt-oss-20b`) via the Chat Completions API, explicitly request **tools mode** in your payload and always include a `tools` array. An empty array is fine if you aren't defining any functions, but the field must be present so the model knows to stay in tools mode. Example request body:
+   ```json
+   {
+   "model": "gpt-oss-20b",
+   "mode": "tools",
+   "messages": [{"role": "user", "content": "test"}],
+   "tools": []
+  }
+  ```
+
+If your request defines functions, replace the empty `tools` array with your tool definitions. Each subsequent request should keep `mode: "tools"` and include the `tools` array (empty or populated) to prevent tool-calling failures.
+
 The agent will automatically retry without tools if it detects the model doesn't support them, but tool support is highly recommended for best results.
 
 ### "Path escapes repo"

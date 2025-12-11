@@ -239,6 +239,8 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
     # Get the LLM cache
     llm_cache = get_llm_cache() or LLMResponseCache()
 
+    tools_provided = tools is not None
+
     # Try to get cached response first (include model in cache key)
     cached_response = llm_cache.get_response(messages, tools, config.OLLAMA_MODEL)
     if cached_response is not None:
@@ -269,9 +271,10 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
         "stream": False
     }
 
-    # Try with tools first if provided
-    if tools:
-        payload["tools"] = tools
+    # Try with tools first if provided (including an empty array to force tools mode)
+    if tools_provided:
+        payload["mode"] = "tools"
+        payload["tools"] = tools or []
 
     # Log the LLM request
     debug_logger = get_logger()
@@ -281,8 +284,8 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
         print(f"[DEBUG] Ollama request to {url}")
         print(f"[DEBUG] Model: {config.OLLAMA_MODEL}")
         print(f"[DEBUG] Messages: {json.dumps(messages, indent=2)}")
-        if tools:
-            print(f"[DEBUG] Tools: {len(tools)} tools provided")
+        if tools_provided:
+            print(f"[DEBUG] Tools: {len(tools or [])} tools provided")
 
     # Retry with configurable limits and backoff
     max_retries, retry_backoff, max_backoff, timeout_cap = _get_retry_config()
@@ -373,7 +376,7 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
                     return {"error": f"Ollama API error: {resp.status_code} {resp.reason}"}
 
             # If we get a 400 and we sent tools, try again without tools
-            if resp.status_code == 400 and tools:
+            if resp.status_code == 400 and tools_provided:
                 if OLLAMA_DEBUG:
                     print("[DEBUG] Got 400 with tools, retrying without tools...")
 
