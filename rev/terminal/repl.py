@@ -16,6 +16,7 @@ from rev.terminal.formatting import colorize, Colors, Symbols, get_color_status
 from rev.terminal.escape_monitor import escape_monitor_context
 from rev.tools.registry import get_available_tools
 from rev.settings_manager import get_default_mode, apply_saved_settings
+from rev.llm.client import get_token_usage
 
 
 def repl_mode():
@@ -133,3 +134,4 @@ def repl_mode():
                         files = re.findall(r'[\w\-./]+\.\w+', task.description)
                         session_context["files_modified"].update(files)
             session_context["last_summary"] = plan.get_summary()
+            session_context["token_usage"] = get_token_usage()

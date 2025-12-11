@@ -27,6 +27,34 @@ _CHARS_PER_TOKEN_ESTIMATE = 3
 # heuristic underestimates token usage.
 _TOKEN_BUDGET_MULTIPLIER = 0.9
 
+
+class _TokenUsageTracker:
+    """Lightweight in-memory tracker for estimated token usage."""
+
+    def __init__(self):
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+
+    def record(self, prompt: int, completion: int) -> None:
+        self.prompt_tokens += max(0, int(prompt))
+        self.completion_tokens += max(0, int(completion))
+
+    def reset(self) -> None:
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+
+    def snapshot(self) -> Dict[str, int]:
+        prompt = self.prompt_tokens
+        completion = self.completion_tokens
+        return {
+            "prompt": prompt,
+            "completion": completion,
+            "total": prompt + completion,
+        }
+
+
+_token_usage_tracker = _TokenUsageTracker()
+
 # Retry configuration (can be overridden via environment variables)
 def _get_retry_config():
     """Get retry/backoff configuration from environment variables."""
@@ -35,6 +63,18 @@ def _get_retry_config():
     max_backoff_seconds = max(0.0, float(os.getenv("OLLAMA_RETRY_BACKOFF_MAX_SECONDS", "30.0")))
     timeout_multiplier_cap = max(1, int(os.getenv("OLLAMA_TIMEOUT_MAX_MULTIPLIER", "3")))
     return max_retries, backoff_seconds, max_backoff_seconds, timeout_multiplier_cap
+
+
+def get_token_usage() -> Dict[str, int]:
+    """Return a snapshot of estimated token usage for the current session."""
+
+    return _token_usage_tracker.snapshot()
+
+
+def reset_token_usage() -> None:
+    """Reset the token usage tracker (mainly for tests)."""
+
+    _token_usage_tracker.reset()
 
 
 # Global flag for interrupt handling
@@ -228,6 +268,8 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
         config.MAX_LLM_TOKENS_PER_RUN,
     )
 
+    prompt_tokens_estimate = trimmed_tokens
+
     if was_truncated:
         print(
             f"⚠️  Context trimmed from ~{original_tokens:,} to ~{trimmed_tokens:,} tokens "
@@ -246,6 +288,8 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
     if cached_response is not None:
         if OLLAMA_DEBUG:
             print("[DEBUG] Using cached LLM response")
+
+        cached_response.setdefault("usage", _token_usage_tracker.snapshot())
 
         # Log cache hit
         debug_logger = get_logger()
@@ -390,6 +434,14 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
 
             resp.raise_for_status()
             response = resp.json()
+
+            completion_tokens = _estimate_message_tokens(response.get("message", {}))
+            _token_usage_tracker.record(prompt_tokens_estimate, completion_tokens)
+            response["usage"] = {
+                "prompt": prompt_tokens_estimate,
+                "completion": completion_tokens,
+                "total": prompt_tokens_estimate + completion_tokens,
+            }
 
             # Log successful response
             debug_logger.log_llm_response(config.OLLAMA_MODEL, response, cached=False)

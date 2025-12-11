@@ -7,7 +7,12 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import rev.llm.client as client
-from rev.llm.client import _CHARS_PER_TOKEN_ESTIMATE, _enforce_token_limit
+from rev.llm.client import (
+    _CHARS_PER_TOKEN_ESTIMATE,
+    _enforce_token_limit,
+    get_token_usage,
+    reset_token_usage,
+)
 
 
 def _make_response(status_code, payload=None, text="", reason="Server Error"):
@@ -58,6 +63,28 @@ def test_enforce_token_limit_keeps_messages_when_under_budget():
     assert truncated is False
     assert trimmed == messages
     assert original_tokens == trimmed_tokens
+
+
+@patch("rev.llm.client.requests.post")
+def test_records_token_usage_on_success(mock_post):
+    reset_token_usage()
+
+    messages = [{"role": "user", "content": "hello world"}]
+    mock_post.return_value = _make_response(
+        200, payload={"message": {"content": "short reply", "tool_calls": []}}
+    )
+
+    cache = client.get_llm_cache()
+    if cache:
+        cache.clear()
+
+    result = client.ollama_chat(messages)
+
+    usage = get_token_usage()
+    assert usage["prompt"] > 0
+    assert usage["completion"] > 0
+    assert usage["total"] == usage["prompt"] + usage["completion"]
+    assert result["usage"]["total"] == usage["total"]
 
 
 @patch("rev.llm.client.time.sleep")

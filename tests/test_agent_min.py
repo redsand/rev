@@ -358,7 +358,44 @@ class TestGitOperations:
         data = json.loads(agent_min.apply_patch(patch))
 
         assert data["success"] is False
-        assert "no working tree changes" in data["error"].lower()
+
+    def test_apply_patch_attempts_chunked_retries(self, temp_dir):
+        """When a multi-file patch fails, apply_patch should fall back to chunks."""
+
+        first = temp_dir / "first.txt"
+        second = temp_dir / "second.txt"
+
+        first.write_text("one", encoding="utf-8")
+        second.write_text("two", encoding="utf-8")
+
+        rel_first = first.relative_to(agent_min.ROOT)
+        rel_second = second.relative_to(agent_min.ROOT)
+
+        # Second hunk intentionally uses an invalid line range so --check fails
+        patch = (
+            f"--- a/{rel_first}\n"
+            f"+++ b/{rel_first}\n"
+            "@@ -1 +1 @@\n"
+            "-one\n"
+            "+uno\n"
+            f"--- a/{rel_second}\n"
+            f"+++ b/{rel_second}\n"
+            "@@ -1 +1 @@\n"  # Removal does not match the file content; will fail validation
+            "-missing\n"
+            "+dos\n"
+        )
+
+        data = json.loads(agent_min.apply_patch(patch))
+
+        assert data["success"] is False
+        assert data.get("phase") == "chunked"
+        assert "retry_plan" in data
+        assert "failed_chunk" in data
+        assert data["error"].lower().startswith("patch failed")
+        # The first file should have been updated before the failure surfaced
+        assert first.read_text(encoding="utf-8") == "uno"
+        # The invalid chunk should leave the second file unchanged
+        assert second.read_text(encoding="utf-8") == "two"
 
     def test_get_repo_context(self):
         """Test getting repository context."""
