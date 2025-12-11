@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from typing import Literal, Dict, Any, Optional
 from enum import Enum
 
+from rev.debug_logger import get_logger
+
 
 # Route modes - different execution strategies
 RouteMode = Literal["quick_edit", "focused_feature", "full_feature"]
@@ -40,6 +42,7 @@ class RouteDecision:
     parallel_workers: int = 2
     enable_action_review: bool = False
     research_depth: str = "medium"  # shallow, medium, deep
+    validation_mode: str = "targeted"  # none, smoke, targeted, full
     max_retries: int = 2
     max_plan_tasks: Optional[int] = None
     priority: RoutePriority = RoutePriority.NORMAL
@@ -57,6 +60,7 @@ class RouteDecision:
             "parallel_workers": self.parallel_workers,
             "enable_action_review": self.enable_action_review,
             "research_depth": self.research_depth,
+            "validation_mode": self.validation_mode,
             "max_retries": self.max_retries,
             "max_plan_tasks": self.max_plan_tasks,
             "priority": self.priority.value,
@@ -85,12 +89,31 @@ class TaskRouter:
         repo_stats = repo_stats or {}
 
         if self._is_full_feature(text, repo_stats):
-            return self._full_feature_decision(text)
+            decision = self._full_feature_decision(text)
+        elif self._is_quick_edit(text):
+            decision = self._quick_edit_decision(text)
+        else:
+            decision = self._focused_feature_decision(text)
 
-        if self._is_quick_edit(text):
-            return self._quick_edit_decision(text)
+        # Log routing decision and enabled agents
+        logger = get_logger()
+        agents = {
+            "learning": decision.enable_learning,
+            "research": decision.enable_research,
+            "planning": True,
+            "review": decision.enable_review,
+            "execution": True,
+            "validation": decision.enable_validation,
+        }
+        logger.log("router", "ROUTE_DECISION", {
+            "mode": decision.mode,
+            "research_depth": decision.research_depth,
+            "validation_mode": getattr(decision, "validation_mode", None),
+            "agents": {k: v for k, v in agents.items() if v},
+            "reason": decision.reasoning,
+        }, "INFO")
 
-        return self._focused_feature_decision(text)
+        return decision
 
     def _quick_edit_decision(self, text: str) -> RouteDecision:
         """Quick edit mode for small, localized changes."""
@@ -102,7 +125,8 @@ class TaskRouter:
             enable_validation=True,
             review_strictness="lenient",
             parallel_workers=2,
-            research_depth="shallow",
+            research_depth="off",
+            validation_mode="smoke",
             max_plan_tasks=8,
             max_retries=2,
             priority=RoutePriority.NORMAL,
@@ -121,6 +145,7 @@ class TaskRouter:
             review_strictness="moderate",
             parallel_workers=3,
             research_depth="medium",
+            validation_mode="targeted",
             max_plan_tasks=20,
             max_retries=3,
             priority=RoutePriority.NORMAL,
@@ -140,6 +165,7 @@ class TaskRouter:
             parallel_workers=2 if is_security else 3,
             enable_action_review=is_security,
             research_depth="deep",
+            validation_mode="full",
             max_plan_tasks=30,
             max_retries=3,
             priority=RoutePriority.CRITICAL if is_security else RoutePriority.HIGH,
@@ -152,20 +178,33 @@ class TaskRouter:
             "architecture", "system-wide", "system wide", "major refactor", "large refactor",
             "schema", "migration", "database", "core module", "rewrite", "re-architect",
             "security audit", "penetration", "vulnerability", "performance audit", "scalability",
-            "across the codebase", "multiple modules", "many files",
+            "across the codebase", "multiple modules", "many files", "entire codebase",
+            "all services", "all modules",
         ]
         if any(keyword in text for keyword in architecture_keywords):
             return True
 
-        # Heuristic: explicit mention of touching many files/modules
-        mentions_multiple_files = " files" in text or "modules" in text or "subsystems" in text
-        return mentions_multiple_files
+        # Heuristic: explicit mention of touching many modules/subsystems
+        mentions_many = any(phrase in text for phrase in [
+            "many files",
+            "multiple modules",
+            "multiple services",
+            "whole project",
+            "entire project",
+            "across modules",
+            "across services",
+            "system wide",
+            "system-wide",
+            "large refactor",
+        ])
+        return mentions_many
 
     def _is_quick_edit(self, text: str) -> bool:
         """Check if the request is a small, localized change."""
         quick_keywords = [
-            "fix", "typo", "rename", "update this", "change this", "adjust", "small tweak",
-            "minor", "one file", "single file", "line", "import", "config flag",
+            "fix", "bug", "typo", "rename", "update this", "change this", "adjust", "small tweak",
+            "minor", "one file", "single file", "line", "import", "config flag", "syntax error",
+            "compile error", "linter", "formatting",
         ]
         heavy_keywords = [
             "architecture", "schema", "system-wide", "system wide", "security", "audit",

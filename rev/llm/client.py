@@ -247,7 +247,12 @@ def _make_request_interruptible(url, json_payload, timeout):
     return result["response"]
 
 
-def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dict[str, Any]:
+def ollama_chat(
+    messages: List[Dict[str, str]],
+    tools: List[Dict] = None,
+    model: Optional[str] = None,
+    supports_tools: Optional[bool] = None,
+) -> Dict[str, Any]:
     """Send chat request to Ollama.
 
     Note: Ollama's tool/function calling support varies by model and version.
@@ -278,13 +283,16 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
 
     messages = trimmed_messages
 
+    model_name = model or config.OLLAMA_MODEL
+    supports_tools = config.DEFAULT_SUPPORTS_TOOLS if supports_tools is None else supports_tools
+
     # Get the LLM cache
     llm_cache = get_llm_cache() or LLMResponseCache()
 
-    tools_provided = tools is not None
+    tools_provided = tools is not None and supports_tools
 
     # Try to get cached response first (include model in cache key)
-    cached_response = llm_cache.get_response(messages, tools, config.OLLAMA_MODEL)
+    cached_response = llm_cache.get_response(messages, tools if tools_provided else None, model_name)
     if cached_response is not None:
         if OLLAMA_DEBUG:
             print("[DEBUG] Using cached LLM response")
@@ -293,7 +301,7 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
 
         # Log cache hit
         debug_logger = get_logger()
-        debug_logger.log_llm_response(config.OLLAMA_MODEL, cached_response, cached=True)
+        debug_logger.log_llm_response(model_name, cached_response, cached=True)
 
         return cached_response
 
@@ -303,14 +311,14 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
     url = f"{base_url}/api/chat"
 
     # Notify user if using a cloud model
-    is_cloud_model = config.OLLAMA_MODEL.endswith("-cloud")
+    is_cloud_model = model_name.endswith("-cloud")
     if is_cloud_model and (OLLAMA_DEBUG or not hasattr(ollama_chat, '_cloud_model_notified')):
-        print(f"ℹ️  Using cloud model: {config.OLLAMA_MODEL} (proxied through local Ollama)")
+        print(f"ℹ️  Using cloud model: {model_name} (proxied through local Ollama)")
         ollama_chat._cloud_model_notified = True
 
     # Build base payload
     payload = {
-        "model": config.OLLAMA_MODEL,
+        "model": model_name,
         "messages": messages,
         "stream": False
     }
@@ -322,14 +330,16 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
 
     # Log the LLM request
     debug_logger = get_logger()
-    debug_logger.log_llm_request(config.OLLAMA_MODEL, messages, tools)
+    debug_logger.log_llm_request(model_name, messages, tools if tools_provided else None)
 
     if OLLAMA_DEBUG:
         print(f"[DEBUG] Ollama request to {url}")
-        print(f"[DEBUG] Model: {config.OLLAMA_MODEL}")
+        print(f"[DEBUG] Model: {model_name}")
         print(f"[DEBUG] Messages: {json.dumps(messages, indent=2)}")
         if tools_provided:
             print(f"[DEBUG] Tools: {len(tools or [])} tools provided")
+        elif tools is not None and not supports_tools:
+            print(f"[DEBUG] Tools suppressed (supports_tools=False) for model {model_name}")
 
     # Retry with configurable limits and backoff
     max_retries, retry_backoff, max_backoff, timeout_cap = _get_retry_config()
@@ -377,7 +387,7 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
             if resp.status_code == 401:
                 debug_logger.log("llm", "AUTH_REQUIRED", {
                     "status_code": 401,
-                    "model": config.OLLAMA_MODEL
+                    "model": model_name
                 }, "WARNING")
 
                 try:
@@ -393,7 +403,7 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
                         print("\n" + "=" * 60)
                         print("OLLAMA CLOUD AUTHENTICATION REQUIRED")
                         print("=" * 60)
-                        print(f"\nModel '{config.OLLAMA_MODEL}' requires authentication.")
+                        print(f"\nModel '{model_name}' requires authentication.")
                         print(f"\nTo authenticate:")
                         print(f"1. Visit this URL in your browser:")
                         print(f"   {signin_url}")
@@ -426,7 +436,7 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
 
                 # Retry without tools
                 payload_no_tools = {
-                    "model": config.OLLAMA_MODEL,
+                    "model": model_name,
                     "messages": messages,
                     "stream": False
                 }
@@ -444,10 +454,10 @@ def ollama_chat(messages: List[Dict[str, str]], tools: List[Dict] = None) -> Dic
             }
 
             # Log successful response
-            debug_logger.log_llm_response(config.OLLAMA_MODEL, response, cached=False)
+            debug_logger.log_llm_response(model_name, response, cached=False)
 
             # Cache the successful response (include model in cache key)
-            llm_cache.set_response(messages, response, tools, config.OLLAMA_MODEL)
+            llm_cache.set_response(messages, response, tools if tools_provided else None, model_name)
 
             return response
 

@@ -11,15 +11,24 @@ Performance optimizations:
 """
 
 import json
-import sys
-from typing import Dict, Any, List, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
+import re
+import threading
+from typing import Dict, Any, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 from rev.models.task import ExecutionPlan, Task, TaskStatus
 from rev.execution.state_manager import StateManager
 from rev.tools.registry import execute_tool
 from rev.llm.client import ollama_chat
-from rev.config import get_system_info_cached, get_escape_interrupt, set_escape_interrupt
+from rev.config import (
+    get_system_info_cached,
+    get_escape_interrupt,
+    set_escape_interrupt,
+    MAX_READ_FILE_PER_TASK,
+    MAX_SEARCH_CODE_PER_TASK,
+    EXECUTION_MODEL,
+    EXECUTION_SUPPORTS_TOOLS,
+)
 from rev.execution.safety import (
     format_operation_description,
     is_scary_operation,
@@ -110,6 +119,333 @@ When you create or update tests, explain briefly:
 Do not change production code in this mode unless it is required to fix a
 test that cannot be executed otherwise.
 """
+
+DEFAULT_SNIPPET_WINDOW = 20  # ~40-50 lines of context per match
+MAX_SNIPPETS_FOR_CONTEXT = 5
+
+
+def _summarize_plan(plan: ExecutionPlan, max_items: int = 5) -> str:
+    """Create a short summary of the execution plan."""
+    if not plan or not plan.tasks:
+        return "No tasks provided."
+
+    parts = []
+    for idx, task in enumerate(plan.tasks[:max_items], 1):
+        parts.append(f"{idx}. {task.description} ({task.action_type})")
+
+    if len(plan.tasks) > max_items:
+        parts.append(f"... {len(plan.tasks) - max_items} more tasks not shown")
+
+    return "\n".join(parts)
+
+
+class ExecutionContext:
+    """Per-run caches and context helpers for the executor."""
+
+    def __init__(self, plan: ExecutionPlan):
+        self.plan_summary = _summarize_plan(plan)
+        self.code_cache: Dict[str, str] = {}
+        self.search_cache: Dict[Tuple[Any, ...], str] = {}
+        self.snippet_cache: List[Dict[str, Any]] = []
+        self._lock = threading.Lock()
+
+    def get_code(self, path: Optional[str]) -> Optional[str]:
+        """Return cached code for a path if available."""
+        if not path:
+            return None
+        with self._lock:
+            return self.code_cache.get(path)
+
+    def set_code(self, path: Optional[str], content: str):
+        """Cache code content for a path."""
+        if not path:
+            return
+        with self._lock:
+            self.code_cache[path] = content
+
+    def get_search(self, key: Tuple[Any, ...]) -> Optional[str]:
+        """Return cached search results if available."""
+        with self._lock:
+            return self.search_cache.get(key)
+
+    def set_search(self, key: Tuple[Any, ...], result: str):
+        """Cache search results."""
+        with self._lock:
+            self.search_cache[key] = result
+
+    def add_snippet(self, path: str, start_line: Optional[int], end_line: Optional[int], content: str, max_snippets: int = 8):
+        """Store a trimmed snippet for later prompt context."""
+        snippet_text = _trim_snippet_content(content)
+        snippet = {
+            "path": path,
+            "start_line": start_line,
+            "end_line": end_line,
+            "content": snippet_text,
+        }
+        with self._lock:
+            self.snippet_cache.append(snippet)
+            self.snippet_cache = self.snippet_cache[-max_snippets:]
+
+    def get_snippets(self) -> List[Dict[str, Any]]:
+        """Return a copy of cached snippets."""
+        with self._lock:
+            return list(self.snippet_cache)
+
+
+def _make_search_cache_key(args: Dict[str, Any]) -> Tuple[Any, ...]:
+    """Build a stable cache key for search_code calls."""
+    return (
+        args.get("pattern", ""),
+        args.get("include", "**/*"),
+        bool(args.get("regex", True)),
+        bool(args.get("case_sensitive", False)),
+    )
+
+
+def _has_error_result(result: str) -> bool:
+    """Detect if a tool result is an error payload."""
+    try:
+        data = json.loads(result)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(data, dict) and "error" in data
+
+
+def _consume_tool_budget(tool_name: str, counters: Dict[str, int], limits: Dict[str, int]) -> Tuple[bool, str]:
+    """Enforce per-task tool budgets."""
+    limit = limits.get(tool_name)
+    if limit is None:
+        return True, ""
+
+    used = counters.get(tool_name, 0)
+    if used >= limit:
+        return False, f"You've already used the maximum number of {tool_name} calls for this task; continue using the code you have."
+
+    counters[tool_name] = used + 1
+    return True, ""
+
+
+def _trim_snippet_content(content: str, max_chars: int = 2000) -> str:
+    """Trim snippet content to a manageable size."""
+    if content is None:
+        return ""
+    if len(content) <= max_chars:
+        return content
+    return content[:max_chars] + "\n...[truncated]..."
+
+
+def _extract_snippet(content: str, line_number: int, window: int = DEFAULT_SNIPPET_WINDOW) -> Tuple[int, int, str]:
+    """Return a snippet window around a line number."""
+    lines = content.splitlines()
+    if not lines:
+        return 1, 1, ""
+
+    center = max(1, line_number)
+    start_idx = max(center - window - 1, 0)
+    end_idx = min(center + window, len(lines))
+    snippet_text = "\n".join(lines[start_idx:end_idx])
+    return start_idx + 1, end_idx, _trim_snippet_content(snippet_text)
+
+
+def _format_snippet_context(exec_context: Optional[ExecutionContext]) -> str:
+    """Format cached snippets for inclusion in the LLM prompt."""
+    if not exec_context:
+        return ""
+
+    snippets = exec_context.get_snippets()
+    if not snippets:
+        return ""
+
+    snippets = snippets[-MAX_SNIPPETS_FOR_CONTEXT:]
+    parts = []
+    for snippet in snippets:
+        path = snippet.get("path", "")
+        start = snippet.get("start_line")
+        end = snippet.get("end_line")
+        location = path
+        if start and end:
+            location = f"{path}:{start}-{end}"
+        parts.append(f"{location}\n{snippet.get('content', '')}")
+
+    return "\n\n".join(parts)
+
+
+def _prepare_llm_messages(
+    messages: List[Dict],
+    exec_context: ExecutionContext,
+    tracker: Optional[SessionTracker] = None,
+    max_recent: int = 10,
+) -> List[Dict]:
+    """Prepare a trimmed, context-rich message list for the LLM."""
+    trimmed = _manage_message_history(messages, max_recent=max_recent, tracker=tracker)
+    prepared: List[Dict[str, Any]] = []
+
+    if not trimmed:
+        return prepared
+
+    system_msg = trimmed[0] if trimmed and trimmed[0].get("role") == "system" else None
+    if system_msg:
+        prepared.append({"role": "system", "content": system_msg.get("content", "")})
+
+    context_blocks = []
+    if exec_context and exec_context.plan_summary:
+        context_blocks.append(f"Plan summary:\n{exec_context.plan_summary}")
+
+    snippet_text = _format_snippet_context(exec_context)
+    if snippet_text:
+        context_blocks.append(f"Cached code snippets:\n{snippet_text}")
+
+    if context_blocks:
+        prepared.append({"role": "user", "content": "\n\n".join(context_blocks)})
+
+    start_idx = 1 if system_msg else 0
+    for msg in trimmed[start_idx:]:
+        content = msg.get("content", "")
+        if msg.get("role") == "tool":
+            content = _trim_snippet_content(str(content))
+        prepared.append({
+            "role": msg.get("role"),
+            "content": content,
+            "name": msg.get("name")
+        })
+
+    if tracker:
+        tracker.track_messages(len(prepared))
+
+    return prepared
+
+
+def _augment_search_results(
+    search_result: str,
+    tool_args: Dict[str, Any],
+    exec_context: ExecutionContext,
+    tool_limits: Dict[str, int],
+    tool_counters: Dict[str, int],
+    session_tracker: Optional[SessionTracker],
+    debug_logger,
+    max_context_matches: int = 5,
+) -> str:
+    """Add contextual code snippets around search hits."""
+    try:
+        parsed = json.loads(search_result)
+    except json.JSONDecodeError:
+        return search_result
+
+    matches = parsed.get("matches", []) or []
+    snippets: List[Dict[str, Any]] = []
+
+    for match in matches[:max_context_matches]:
+        path = match.get("file")
+        line = match.get("line")
+
+        if not path or not isinstance(line, int):
+            continue
+
+        content = exec_context.get_code(path)
+        used_cache = content is not None
+
+        if content is None:
+            allowed, budget_msg = _consume_tool_budget("read_file", tool_counters, tool_limits)
+            if not allowed:
+                snippets.append({"file": path, "note": budget_msg})
+                continue
+
+            content = execute_tool("read_file", {"path": path})
+            if session_tracker:
+                session_tracker.track_tool_call("read_file", {"path": path})
+            if _has_error_result(content):
+                snippets.append({"file": path, "note": content})
+                continue
+
+            exec_context.set_code(path, content)
+
+        start_line, end_line, snippet_text = _extract_snippet(content, line)
+        exec_context.add_snippet(path, start_line, end_line, snippet_text)
+        snippets.append({
+            "file": path,
+            "start_line": start_line,
+            "end_line": end_line,
+            "snippet": snippet_text,
+            "source": "cache" if used_cache else "fresh"
+        })
+
+    payload = {
+        "pattern": tool_args.get("pattern"),
+        "include": tool_args.get("include", "**/*"),
+        "truncated": parsed.get("truncated", False),
+        "matches": matches[:max_context_matches],
+        "context_snippets": snippets,
+    }
+
+    if debug_logger:
+        debug_logger.log("executor", "SEARCH_CONTEXT", {
+            "pattern": tool_args.get("pattern"),
+            "matches_considered": min(len(matches), max_context_matches),
+            "snippets": len(snippets),
+        }, "DEBUG")
+
+    return json.dumps(payload)
+
+
+def _extract_patch_from_text(content: str) -> Optional[str]:
+    """Try to extract a unified diff/patch from free-form text."""
+    if not content:
+        return None
+
+    # Look for Begin/End Patch blocks
+    begin_idx = content.find("*** Begin Patch")
+    end_idx = content.find("*** End Patch")
+    if begin_idx != -1 and end_idx != -1 and end_idx > begin_idx:
+        return content[begin_idx:end_idx + len("*** End Patch")].strip()
+
+    # Look for ```diff ... ``` fences
+    diff_match = re.search(r"```diff\s+(.*?)```", content, re.DOTALL | re.IGNORECASE)
+    if diff_match:
+        return diff_match.group(1).strip()
+
+    # Look for raw unified diff markers
+    raw_match = re.search(r"^diff --git.*", content, re.DOTALL | re.MULTILINE)
+    if raw_match:
+        return raw_match.group(0).strip()
+
+    return None
+
+
+def _apply_patch_fallback(
+    patch_text: str,
+    messages: List[Dict[str, Any]],
+    session_tracker: Optional[SessionTracker],
+    debug_logger,
+) -> bool:
+    """Execute an apply_patch fallback when the model emits text patches."""
+    if not patch_text:
+        return False
+
+    try:
+        result = execute_tool("apply_patch", {"patch": patch_text, "dry_run": False})
+        if session_tracker:
+            session_tracker.track_tool_call("apply_patch", {"patch": "[text-fallback]"})
+        if _has_error_result(result):
+            messages.append({
+                "role": "tool",
+                "name": "apply_patch",
+                "content": result
+            })
+            if debug_logger:
+                debug_logger.log("executor", "TEXT_PATCH_APPLIED", {"status": "error"}, "WARNING")
+            return False
+        messages.append({
+            "role": "tool",
+            "name": "apply_patch",
+            "content": result
+        })
+        if debug_logger:
+            debug_logger.log("executor", "TEXT_PATCH_APPLIED", {"status": "ok"}, "INFO")
+        return True
+    except Exception as exc:  # pragma: no cover - defensive
+        if debug_logger:
+            debug_logger.log("executor", "TEXT_PATCH_FAILED", {"error": str(exc)}, "ERROR")
+        return False
 
 
 def _build_execution_system_context(sys_info: Dict[str, Any], coding_mode: bool = False) -> str:
@@ -278,6 +614,8 @@ def execution_mode(
     # Get system info and build context
     sys_info = get_system_info_cached()
     system_context = _build_execution_system_context(sys_info, coding_mode)
+    model_name = EXECUTION_MODEL
+    model_supports_tools = EXECUTION_SUPPORTS_TOOLS
 
     messages = [{"role": "system", "content": system_context}]
     max_iterations = 10000  # Very high limit to effectively remove restriction
@@ -286,6 +624,11 @@ def execution_mode(
     # Initialize session tracker for comprehensive summarization
     session_tracker = SessionTracker()
     print(f"  📊 Session tracking enabled (ID: {session_tracker.session_id})\n")
+    exec_context = ExecutionContext(plan)
+    tool_limits = {
+        "read_file": MAX_READ_FILE_PER_TASK,
+        "search_code": MAX_SEARCH_CODE_PER_TASK,
+    }
 
     while not plan.is_complete() and iteration < max_iterations:
         # Check for escape key interrupt
@@ -350,6 +693,8 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
         task_iterations = 0
         max_task_iterations = 10000  # Very high limit to effectively remove restriction
         task_complete = False
+        tool_counters = {name: 0 for name in tool_limits}
+        prompt_tokens_used = 0
 
         while task_iterations < max_task_iterations and not task_complete:
             # Check for escape key interrupt during task execution
@@ -376,7 +721,10 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             task_iterations += 1
 
             # Try with tools, fall back to no-tools if needed
-            response = ollama_chat(messages, tools=tools)
+            llm_messages = _prepare_llm_messages(messages, exec_context, session_tracker)
+            response = ollama_chat(llm_messages, tools=tools, model=model_name, supports_tools=model_supports_tools)
+            if "usage" in response:
+                prompt_tokens_used += response.get("usage", {}).get("prompt", 0) or 0
 
             if "error" in response:
                 error_msg = response['error']
@@ -385,7 +733,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                 # If we keep getting errors, try without tools
                 if "400" in error_msg and task_iterations < 3:
                     print(f"  → Retrying without tool support...")
-                    response = ollama_chat(messages, tools=None)
+                    response = ollama_chat(llm_messages, tools=None, model=model_name, supports_tools=model_supports_tools)
 
                 if "error" in response:
                     plan.mark_failed(error_msg)
@@ -431,6 +779,16 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                             tool_args = json.loads(tool_args)
                         except:
                             tool_args = {}
+
+                    # Enforce per-task tool budgets
+                    allowed, budget_msg = _consume_tool_budget(tool_name, tool_counters, tool_limits)
+                    if not allowed:
+                        messages.append({
+                            "role": "tool",
+                            "name": tool_name,
+                            "content": budget_msg
+                        })
+                        continue
 
                     # Check if this is a scary operation
                     is_scary, scary_reason = is_scary_operation(
@@ -478,7 +836,38 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         elif action_review.security_warnings or action_review.concerns:
                             display_action_review(action_review, action_desc)
 
-                    result = execute_tool(tool_name, tool_args)
+                    # Serve from cache when possible
+                    if tool_name == "read_file":
+                        path = tool_args.get("path")
+                        cached_content = exec_context.get_code(path)
+                        if cached_content is not None:
+                            result = cached_content
+                        else:
+                            result = execute_tool(tool_name, tool_args)
+                            if not _has_error_result(result):
+                                exec_context.set_code(path, result)
+                                exec_context.add_snippet(path, 1, None, result)
+                    elif tool_name == "search_code":
+                        cached_search = exec_context.get_search(_make_search_cache_key(tool_args))
+                        if cached_search is not None:
+                            result = cached_search
+                        else:
+                            result = execute_tool(tool_name, tool_args)
+                            if not _has_error_result(result):
+                                exec_context.set_search(_make_search_cache_key(tool_args), result)
+
+                        if not _has_error_result(result):
+                            result = _augment_search_results(
+                                result,
+                                tool_args,
+                                exec_context,
+                                tool_limits,
+                                tool_counters,
+                                session_tracker,
+                                debug_logger,
+                            )
+                    else:
+                        result = execute_tool(tool_name, tool_args)
 
                     # Track tool usage
                     session_tracker.track_tool_call(tool_name, tool_args)
@@ -495,6 +884,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                     # Add tool result to conversation
                     messages.append({
                         "role": "tool",
+                        "name": tool_name,
                         "content": result
                     })
 
@@ -535,9 +925,20 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                 # Model is thinking/responding without tool calls
                 print(f"  → {content[:200]}")
 
+                text_patch = _extract_patch_from_text(content)
+                applied_fallback = False
+                if text_patch:
+                    applied_fallback = _apply_patch_fallback(text_patch, messages, session_tracker, debug_logger)
+
+                if applied_fallback:
+                    continue
+
                 # If model keeps responding without tools or completion, it might not support them
                 if task_iterations >= 3:
-                    error_msg = "Model does not support tool calling. Consider using a model with tool support."
+                    error_msg = (
+                        f"Model {model_name} did not call tools (tools_enabled={model_supports_tools}); "
+                        f"text_fallback={'yes' if text_patch else 'no'}."
+                    )
                     print(f"  ⚠ Model not using tools. Marking task as needs manual intervention.")
                     plan.mark_failed(error_msg)
                     if state_manager:
@@ -552,6 +953,14 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             if state_manager:
                 state_manager.on_task_failed(current_task)
             session_tracker.track_task_failed(current_task.description, error_msg)
+
+        debug_logger.log("executor", "TASK_USAGE", {
+            "task_id": current_task.task_id,
+            "description": current_task.description,
+            "read_file_calls": tool_counters.get("read_file", 0),
+            "search_code_calls": tool_counters.get("search_code", 0),
+            "prompt_tokens": prompt_tokens_used,
+        }, "INFO")
 
         # OPTIMIZATION: Manage message history to prevent unbounded growth
         # Trim every 10 messages or when it exceeds 30 messages
@@ -615,6 +1024,8 @@ def execute_single_task(
     enable_action_review: bool = False,
     coding_mode: bool = False,
     state_manager: Optional[StateManager] = None,
+    exec_context: Optional[ExecutionContext] = None,
+    tool_limits: Optional[Dict[str, int]] = None,
 ) -> bool:
     """Execute a single task (for concurrent execution).
 
@@ -640,6 +1051,16 @@ def execute_single_task(
     if state_manager:
         state_manager.on_task_started(task)
 
+    model_name = EXECUTION_MODEL
+    model_supports_tools = EXECUTION_SUPPORTS_TOOLS
+
+    exec_context = exec_context or ExecutionContext(plan)
+    tool_limits = tool_limits or {
+        "read_file": MAX_READ_FILE_PER_TASK,
+        "search_code": MAX_SEARCH_CODE_PER_TASK,
+    }
+    debug_logger = get_logger()
+
     system_context = _build_execution_system_context(sys_info, coding_mode)
 
     messages = [{"role": "system", "content": system_context}]
@@ -657,27 +1078,43 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
     task_iterations = 0
     max_task_iterations = 10000
     task_complete = False
+    tool_counters = {name: 0 for name in tool_limits}
+    prompt_tokens_used = 0
+
+    def _log_usage(success: bool):
+        debug_logger.log("executor", "TASK_USAGE", {
+            "task_id": task.task_id,
+            "description": task.description,
+            "read_file_calls": tool_counters.get("read_file", 0),
+            "search_code_calls": tool_counters.get("search_code", 0),
+            "prompt_tokens": prompt_tokens_used,
+            "success": success,
+        }, "INFO")
 
     while task_iterations < max_task_iterations and not task_complete:
         task_iterations += 1
 
         # Try with tools, fall back to no-tools if needed
-        response = ollama_chat(messages, tools=tools)
-
-        if "error" in response:
-            error_msg = response['error']
-            print(f"  ✗ Error: {error_msg}")
-
-            # If we keep getting errors, try without tools
-            if "400" in error_msg and task_iterations < 3:
-                print(f"  → Retrying without tool support...")
-                response = ollama_chat(messages, tools=None)
+        llm_messages = _prepare_llm_messages(messages, exec_context)
+        response = ollama_chat(llm_messages, tools=tools, model=model_name, supports_tools=model_supports_tools)
+        if "usage" in response:
+            prompt_tokens_used += response.get("usage", {}).get("prompt", 0) or 0
 
             if "error" in response:
-                plan.mark_task_failed(task, error_msg)
-                if state_manager:
-                    state_manager.on_task_failed(task)
-                return False
+                error_msg = response['error']
+                print(f"  ✗ Error: {error_msg}")
+
+                # If we keep getting errors, try without tools
+                if "400" in error_msg and task_iterations < 3:
+                    print(f"  → Retrying without tool support...")
+                response = ollama_chat(llm_messages, tools=None, model=model_name, supports_tools=model_supports_tools)
+
+                if "error" in response:
+                    plan.mark_task_failed(task, error_msg)
+                    if state_manager:
+                        state_manager.on_task_failed(task)
+                    _log_usage(False)
+                    return False
 
         msg = response.get("message", {})
         content = msg.get("content", "")
@@ -699,6 +1136,15 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                     except:
                         tool_args = {}
 
+                allowed, budget_msg = _consume_tool_budget(tool_name, tool_counters, tool_limits)
+                if not allowed:
+                    messages.append({
+                        "role": "tool",
+                        "name": tool_name,
+                        "content": budget_msg
+                    })
+                    continue
+
                 # Check if this is a scary operation
                 is_scary, scary_reason = is_scary_operation(
                     tool_name,
@@ -713,6 +1159,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         plan.mark_task_failed(task, "User cancelled destructive operation")
                         if state_manager:
                             state_manager.on_task_failed(task)
+                        _log_usage(False)
                         return False
 
                 # Action review (if enabled)
@@ -744,7 +1191,38 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                     elif action_review.security_warnings or action_review.concerns:
                         display_action_review(action_review, action_desc)
 
-                result = execute_tool(tool_name, tool_args)
+                if tool_name == "read_file":
+                    path = tool_args.get("path")
+                    cached_content = exec_context.get_code(path)
+                    if cached_content is not None:
+                        result = cached_content
+                    else:
+                        result = execute_tool(tool_name, tool_args)
+                        if not _has_error_result(result):
+                            exec_context.set_code(path, result)
+                            exec_context.add_snippet(path, 1, None, result)
+                elif tool_name == "search_code":
+                    cache_key = _make_search_cache_key(tool_args)
+                    cached_search = exec_context.get_search(cache_key)
+                    if cached_search is not None:
+                        result = cached_search
+                    else:
+                        result = execute_tool(tool_name, tool_args)
+                        if not _has_error_result(result):
+                            exec_context.set_search(cache_key, result)
+
+                    if not _has_error_result(result):
+                        result = _augment_search_results(
+                            result,
+                            tool_args,
+                            exec_context,
+                            tool_limits,
+                            tool_counters,
+                            None,
+                            debug_logger,
+                        )
+                else:
+                    result = execute_tool(tool_name, tool_args)
 
                 # Inject review feedback into conversation (if any concerns/warnings)
                 if enable_action_review and action_review:
@@ -758,6 +1236,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                 # Add tool result to conversation
                 messages.append({
                     "role": "tool",
+                    "name": tool_name,
                     "content": result
                 })
 
@@ -776,6 +1255,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             plan.mark_task_completed(task, content)
             if state_manager:
                 state_manager.on_task_completed(task)
+            _log_usage(True)
             return True
 
         # If model responds but doesn't use tools and doesn't complete task
@@ -783,12 +1263,25 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             # Model is thinking/responding without tool calls
             print(f"  → {content[:200]}")
 
+            text_patch = _extract_patch_from_text(content)
+            applied_fallback = False
+            if text_patch:
+                applied_fallback = _apply_patch_fallback(text_patch, messages, None, debug_logger)
+
+            if applied_fallback:
+                continue
+
             # If model keeps responding without tools or completion, it might not support them
             if task_iterations >= 3:
                 print(f"  ⚠ Model not using tools. Marking task as needs manual intervention.")
-                plan.mark_task_failed(task, "Model does not support tool calling. Consider using a model with tool support.")
+                plan.mark_task_failed(
+                    task,
+                    f"Model {model_name} did not call tools (tools_enabled={model_supports_tools}); "
+                    f"text_fallback={'yes' if text_patch else 'no'}.",
+                )
                 if state_manager:
                     state_manager.on_task_failed(task)
+                _log_usage(False)
                 return False
 
     if not task_complete:
@@ -796,8 +1289,10 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
         plan.mark_task_failed(task, "Exceeded iteration limit")
         if state_manager:
             state_manager.on_task_failed(task)
+        _log_usage(False)
         return False
 
+    _log_usage(True)
     return True
 
 
@@ -850,6 +1345,11 @@ def concurrent_execution_mode(
 
     # Get system info for context
     sys_info = get_system_info_cached()
+    exec_context = ExecutionContext(plan)
+    tool_limits = {
+        "read_file": MAX_READ_FILE_PER_TASK,
+        "search_code": MAX_SEARCH_CODE_PER_TASK,
+    }
 
     # Use ThreadPoolExecutor for concurrent execution
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -865,7 +1365,8 @@ def concurrent_execution_mode(
                 for task in executable_tasks:
                     future = executor.submit(
                         execute_single_task, task, plan, sys_info,
-                        auto_approve, tools, enable_action_review, coding_mode, state_manager
+                        auto_approve, tools, enable_action_review, coding_mode, state_manager,
+                        exec_context, tool_limits
                     )
                     futures[future] = task
 

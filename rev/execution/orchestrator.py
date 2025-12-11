@@ -27,7 +27,14 @@ from rev.execution.learner import LearningAgent, display_learning_suggestions
 from rev.execution.executor import execution_mode, concurrent_execution_mode, fix_validation_failures
 from rev.execution.state_manager import StateManager
 from rev.tools.registry import get_available_tools
-from rev.config import MAX_PLAN_TASKS, MAX_STEPS_PER_RUN, MAX_LLM_TOKENS_PER_RUN, MAX_WALLCLOCK_SECONDS
+from rev.config import (
+    MAX_PLAN_TASKS,
+    MAX_STEPS_PER_RUN,
+    MAX_LLM_TOKENS_PER_RUN,
+    MAX_WALLCLOCK_SECONDS,
+    RESEARCH_DEPTH_DEFAULT,
+    VALIDATION_MODE_DEFAULT,
+)
 from rev.llm.client import get_token_usage
 
 
@@ -126,7 +133,8 @@ class OrchestratorConfig:
     enable_auto_fix: bool = False
     parallel_workers: int = 2
     auto_approve: bool = True
-    research_depth: Literal["off", "shallow", "medium", "deep"] = "medium"
+    research_depth: Literal["off", "shallow", "medium", "deep"] = RESEARCH_DEPTH_DEFAULT
+    validation_mode: Literal["none", "smoke", "targeted", "full"] = VALIDATION_MODE_DEFAULT
     max_retries: int = 2
     max_plan_tasks: int = MAX_PLAN_TASKS
 
@@ -144,6 +152,8 @@ class OrchestratorResult:
     resource_budget: Optional[ResourceBudget] = None
     agent_insights: Dict[str, Any] = field(default_factory=dict)
     errors: List[str] = field(default_factory=list)
+    no_retry: bool = False
+    run_mode: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -195,6 +205,9 @@ class Orchestrator:
             if result.success:
                 result.errors = aggregate_errors
                 return result
+            if result.no_retry:
+                result.errors = aggregate_errors
+                return result
 
             last_result = result
 
@@ -219,21 +232,26 @@ class Orchestrator:
         from rev.execution.router import TaskRouter
         router = TaskRouter()
         route = router.route(user_request, repo_stats={})
+        run_mode = route.mode
 
         # Apply routing decision to config (if not explicitly overridden)
         print(f"\n🔀 Routing Decision: {route.mode}")
         print(f"   Reasoning: {route.reasoning}")
 
-        base_research_depth = self.config.research_depth or "medium"
         elevated_for_mode = False
+        selected_research_depth = (
+            route.research_depth
+            or self.config.research_depth
+            or RESEARCH_DEPTH_DEFAULT
+            or "medium"
+        )
+        high_risk_modes = {"full_feature"}
+        if route.mode in high_risk_modes and selected_research_depth == "medium":
+            print("   ℹ️  Elevating research depth to deep for high-risk mode")
+            selected_research_depth = "deep"
+            elevated_for_mode = True
         if not self._user_config_provided:
-            selected_research_depth = route.research_depth or base_research_depth
-            if route.mode in {"full_feature"} and selected_research_depth in {"shallow", "medium"}:
-                print("   ℹ️  Elevating research depth to deep for high-risk mode")
-                selected_research_depth = "deep"
-                elevated_for_mode = True
-        else:
-            selected_research_depth = base_research_depth
+            self.config.validation_mode = getattr(route, "validation_mode", self.config.validation_mode)
 
         # Update config based on route (only if using default config)
         coding_mode = route.mode != "quick_edit"  # Enable coding mode for more involved routes
@@ -258,6 +276,7 @@ class Orchestrator:
             f"{' (elevated)' if elevated_for_mode else ''}"
         )
         print(f"   Plan task cap: {self.config.max_plan_tasks}")
+        print(f"   Validation mode: {self.config.validation_mode}")
 
         route_agents = []
         if route.enable_learning:
@@ -295,7 +314,8 @@ class Orchestrator:
         result = OrchestratorResult(
             success=False,
             phase_reached=AgentPhase.LEARNING,
-            resource_budget=budget
+            resource_budget=budget,
+            run_mode=run_mode,
         )
         start_time = time.time()
 
@@ -485,22 +505,38 @@ IMPORTANT - Address the following review feedback:
                 )
 
             # Phase 6: Validation Agent - Verify results
+            validation = None
             if self.config.enable_validation:
                 self._update_phase(AgentPhase.VALIDATION)
                 budget.update_step()
                 if budget.is_exceeded():
-                    print(f"\n⚠️ Resource budget exceeded during validation phase!")
-                    result.errors.append("Resource budget exceeded during validation phase")
+                    print(f"\n⚠️ Resource budget exceeded during validation phase! Skipping validation.")
+                    result.errors.append("Resource budget exceeded during validation phase (validation skipped)")
                     result.phase_reached = AgentPhase.VALIDATION
-                    return result
-                validation = validate_execution(
-                    plan,
-                    user_request,
-                    run_tests=True,
-                    run_linter=True,
-                    check_syntax=True,
-                    enable_auto_fix=self.config.enable_auto_fix
-                )
+                    result.validation_status = ValidationStatus.SKIPPED
+                    result.agent_insights["validation"] = {
+                        "status": ValidationStatus.SKIPPED.value,
+                        "reason": "resource_budget_exceeded",
+                    }
+                    result.no_retry = True
+                else:
+                    validation = validate_execution(
+                        plan,
+                        user_request,
+                        run_tests=True,
+                        run_linter=True,
+                        check_syntax=True,
+                        enable_auto_fix=self.config.enable_auto_fix,
+                        validation_mode=self.config.validation_mode,
+                    )
+                    result.validation_status = validation.overall_status
+                    result.agent_insights["validation"] = {
+                        "status": validation.overall_status.value,
+                        "checks_passed": sum(1 for r in validation.results if r.status == ValidationStatus.PASSED),
+                        "checks_failed": sum(1 for r in validation.results if r.status == ValidationStatus.FAILED),
+                        "auto_fixed": validation.auto_fixed,
+                        "commands": validation.details.get("commands_run", []),
+                    }
                 result.validation_status = validation.overall_status
                 result.agent_insights["validation"] = {
                     "status": validation.overall_status.value,
@@ -510,7 +546,7 @@ IMPORTANT - Address the following review feedback:
                 }
 
                 # Auto-fix loop for validation failures
-                if validation.overall_status == ValidationStatus.FAILED:
+                if validation and validation.overall_status == ValidationStatus.FAILED:
                     result.errors.append("Initial validation failed")
 
                     retry_count = 0
@@ -548,7 +584,8 @@ IMPORTANT - Address the following review feedback:
                             run_tests=True,
                             run_linter=True,
                             check_syntax=True,
-                            enable_auto_fix=False  # Don't auto-fix during retry validation
+                            enable_auto_fix=False,  # Don't auto-fix during retry validation
+                            validation_mode=self.config.validation_mode,
                         )
 
                         result.validation_status = validation.overall_status
@@ -594,7 +631,7 @@ IMPORTANT - Address the following review feedback:
             all_completed = all(t.status == TaskStatus.COMPLETED for t in plan.tasks) and len(plan.tasks) > 0
             validation_ok = (
                 not self.config.enable_validation or
-                result.validation_status in [ValidationStatus.PASSED, ValidationStatus.PASSED_WITH_WARNINGS, None]
+                result.validation_status in [ValidationStatus.PASSED, ValidationStatus.PASSED_WITH_WARNINGS, ValidationStatus.SKIPPED, None]
             )
 
             if all_completed and validation_ok:
@@ -651,6 +688,7 @@ IMPORTANT - Address the following review feedback:
         if budget.is_exceeded():
             print(f"   ⚠️  Budget exceeded!")
 
+        self._emit_run_metrics(plan, result, budget)
         self._display_summary(result)
         return result
 
@@ -669,6 +707,39 @@ IMPORTANT - Address the following review feedback:
         }
         icon = phase_icons.get(phase, "▶️")
         print(f"\n{icon} Phase: {phase.value.upper()}")
+
+    def _emit_run_metrics(self, plan: Optional[ExecutionPlan], result: OrchestratorResult, budget: ResourceBudget):
+        """Emit lightweight run metrics for observability."""
+        try:
+            from pathlib import Path
+            import json
+
+            metrics_dir = Path.cwd() / ".rev-metrics"
+            metrics_dir.mkdir(exist_ok=True)
+            metrics_path = metrics_dir / "run-metrics.jsonl"
+
+            planned = len(plan.tasks) if plan and plan.tasks else 0
+            completed = sum(1 for t in (plan.tasks if plan else []) if t.status == TaskStatus.COMPLETED)
+            failed = sum(1 for t in (plan.tasks if plan else []) if t.status == TaskStatus.FAILED)
+            token_usage = get_token_usage()
+
+            metrics = {
+                "mode": result.run_mode,
+                "validation_mode": getattr(self.config, "validation_mode", None),
+                "planned_tasks": planned,
+                "completed_tasks": completed,
+                "failed_tasks": failed,
+                "success": result.success,
+                "validation_status": result.validation_status.value if result.validation_status else None,
+                "tokens": token_usage,
+                "budget": budget.to_dict(),
+            }
+
+            with open(metrics_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(metrics) + "\n")
+        except Exception:
+            # Metrics are best-effort; do not fail the run
+            pass
 
     def _hold_and_retry_validation(
         self,
@@ -696,6 +767,7 @@ IMPORTANT - Address the following review feedback:
                 run_linter=True,
                 check_syntax=True,
                 enable_auto_fix=self.config.enable_auto_fix,
+                validation_mode=self.config.validation_mode,
             )
 
             self.current_phase = AgentPhase.VALIDATION
@@ -784,6 +856,10 @@ IMPORTANT - Address the following review feedback:
         print(f"{status_icon} Status: {'SUCCESS' if result.success else 'FAILED'}")
         print(f"⏱️  Total time: {result.execution_time:.1f}s")
         print(f"📍 Phase reached: {result.phase_reached.value}")
+        if result.validation_status:
+            print(f"🧪 Validation: {result.validation_status.value}")
+        if result.run_mode:
+            print(f"🎛️  Mode: {result.run_mode}")
 
         if result.agent_insights:
             print("\n📊 Agent Insights:")
@@ -815,7 +891,8 @@ def run_orchestrated(
     enable_auto_fix: bool = False,
     parallel_workers: int = 2,
     auto_approve: bool = True,
-    research_depth: Literal["off", "shallow", "medium", "deep"] = "medium"
+    research_depth: Literal["off", "shallow", "medium", "deep"] = "medium",
+    validation_mode: Literal["none", "smoke", "targeted", "full"] = "targeted",
 ) -> OrchestratorResult:
     """Run a task through the orchestrated multi-agent pipeline.
 
@@ -848,7 +925,8 @@ def run_orchestrated(
         enable_auto_fix=enable_auto_fix,
         parallel_workers=parallel_workers,
         auto_approve=auto_approve,
-        research_depth=research_depth
+        research_depth=research_depth,
+        validation_mode=validation_mode,
     )
 
     orchestrator = Orchestrator(project_root, config)

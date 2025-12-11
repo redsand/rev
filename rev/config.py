@@ -22,10 +22,20 @@ DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:120b-cloud")  # defaul
 
 OLLAMA_BASE_URL = DEFAULT_OLLAMA_BASE_URL
 OLLAMA_MODEL = DEFAULT_OLLAMA_MODEL
+EXECUTION_MODEL = os.getenv("REV_EXECUTION_MODEL", OLLAMA_MODEL)
+PLANNING_MODEL = os.getenv("REV_PLANNING_MODEL", OLLAMA_MODEL)
+RESEARCH_MODEL = os.getenv("REV_RESEARCH_MODEL", OLLAMA_MODEL)
+DEFAULT_SUPPORTS_TOOLS = os.getenv("REV_MODEL_SUPPORTS_TOOLS", "true").lower() == "true"
+EXECUTION_SUPPORTS_TOOLS = os.getenv("REV_EXECUTION_SUPPORTS_TOOLS", str(DEFAULT_SUPPORTS_TOOLS)).lower() == "true"
+PLANNING_SUPPORTS_TOOLS = os.getenv("REV_PLANNING_SUPPORTS_TOOLS", str(DEFAULT_SUPPORTS_TOOLS)).lower() == "true"
+RESEARCH_SUPPORTS_TOOLS = os.getenv("REV_RESEARCH_SUPPORTS_TOOLS", str(DEFAULT_SUPPORTS_TOOLS)).lower() == "true"
+VALIDATION_MODE_DEFAULT = os.getenv("REV_VALIDATION_MODE", "targeted").lower()
 MAX_FILE_BYTES = 5 * 1024 * 1024
 READ_RETURN_LIMIT = 80_000
 SEARCH_MATCH_LIMIT = 2000
 LIST_LIMIT = 2000
+MAX_READ_FILE_PER_TASK = int(os.getenv("REV_MAX_READ_FILE_PER_TASK", "5"))
+MAX_SEARCH_CODE_PER_TASK = int(os.getenv("REV_MAX_SEARCH_CODE_PER_TASK", "5"))
 
 EXCLUDE_DIRS = {
     ".git", ".hg", ".svn", ".idea", ".vscode", "__pycache__", ".pytest_cache",
@@ -45,6 +55,7 @@ MAX_STEPS_PER_RUN = int(os.getenv("REV_MAX_STEPS", "200"))
 MAX_LLM_TOKENS_PER_RUN = int(os.getenv("REV_MAX_TOKENS", "120000"))
 MAX_WALLCLOCK_SECONDS = int(os.getenv("REV_MAX_SECONDS", "1800"))  # 30 minutes default
 MAX_PLAN_TASKS = int(os.getenv("REV_MAX_PLAN_TASKS", "20"))
+RESEARCH_DEPTH_DEFAULT = os.getenv("REV_RESEARCH_DEPTH", "medium").lower()
 
 # History configuration
 HISTORY_SIZE = int(os.getenv("REV_HISTORY_SIZE", "100"))  # Number of history entries to keep

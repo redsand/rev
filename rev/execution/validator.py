@@ -51,6 +51,7 @@ class ValidationReport:
     summary: str = ""
     rollback_recommended: bool = False
     auto_fixed: List[str] = field(default_factory=list)
+    details: Dict[str, Any] = field(default_factory=dict)
 
     def add_result(self, result: ValidationResult):
         self.results.append(result)
@@ -67,7 +68,8 @@ class ValidationReport:
             "overall_status": self.overall_status.value,
             "summary": self.summary,
             "rollback_recommended": self.rollback_recommended,
-            "auto_fixed": self.auto_fixed
+            "auto_fixed": self.auto_fixed,
+            "details": self.details,
         }
 
 
@@ -97,7 +99,8 @@ def validate_execution(
     run_tests: bool = True,
     run_linter: bool = True,
     check_syntax: bool = True,
-    enable_auto_fix: bool = False
+    enable_auto_fix: bool = False,
+    validation_mode: str = "targeted",
 ) -> ValidationReport:
     """Validate the results of plan execution.
 
@@ -149,6 +152,36 @@ def validate_execution(
         )
         report.add_result(result)
 
+    # Normalize validation mode
+    validation_mode = (validation_mode or "targeted").lower()
+
+    commands_run: List[Dict[str, str]] = []
+
+    if validation_mode == "none":
+        report.summary = "Validation skipped (mode=none)"
+        _display_validation_report(report)
+        return report
+
+    # Configure validation scope
+    if validation_mode == "smoke":
+        check_syntax = True
+        run_tests = True
+        run_linter = False
+        test_cmd = "python -m compileall ."
+        lint_cmd = None
+    elif validation_mode == "targeted":
+        check_syntax = True
+        run_tests = True
+        run_linter = True
+        test_cmd = "pytest -q tests/ --maxfail=1"
+        lint_cmd = "ruff check . --select E9,F63,F7,F82 --output-format=json"
+    else:  # full
+        check_syntax = True
+        run_tests = True
+        run_linter = True
+        test_cmd = "pytest -q tests/"
+        lint_cmd = "ruff check . --output-format=json"
+
     # 0. Goal Validation (if goals were set)
     if hasattr(plan, 'goals') and plan.goals:
         print("→ Validating execution goals...")
@@ -160,12 +193,14 @@ def validate_execution(
         print("→ Running syntax checks...")
         syntax_result = _check_syntax()
         report.add_result(syntax_result)
+        commands_run.append({"name": "syntax_check", "command": "python -m compileall ."})
 
     # 2. Run Tests
     if run_tests:
         print("→ Running test suite...")
-        test_result = _run_test_suite()
+        test_result = _run_test_suite(test_cmd)
         report.add_result(test_result)
+        commands_run.append({"name": "tests", "command": test_cmd})
 
         # Auto-fix attempt if tests failed
         if test_result.status == ValidationStatus.FAILED and enable_auto_fix:
@@ -174,15 +209,16 @@ def validate_execution(
             if fixed:
                 report.auto_fixed.append("test_failures")
                 # Re-run tests
-                test_result = _run_test_suite()
+                test_result = _run_test_suite(test_cmd)
                 test_result.name = "tests_after_autofix"
                 report.add_result(test_result)
 
     # 3. Run Linter
-    if run_linter:
+    if run_linter and lint_cmd:
         print("→ Running linter checks...")
-        lint_result = _run_linter()
+        lint_result = _run_linter(lint_cmd)
         report.add_result(lint_result)
+        commands_run.append({"name": "linter", "command": lint_cmd})
 
         # Auto-fix linting issues
         if lint_result.status in [ValidationStatus.FAILED, ValidationStatus.PASSED_WITH_WARNINGS] and enable_auto_fix:
@@ -212,6 +248,8 @@ def validate_execution(
         report.summary = f"{passed} passed, {warnings} with warnings"
     else:
         report.summary = f"Validation failed: {failed} check(s) failed, {passed} passed"
+
+    report.details = {"commands_run": commands_run}
 
     _display_validation_report(report)
     return report
@@ -344,10 +382,10 @@ def _check_syntax() -> ValidationResult:
         )
 
 
-def _run_test_suite() -> ValidationResult:
+def _run_test_suite(cmd: str) -> ValidationResult:
     """Run the project's test suite."""
     try:
-        result = execute_tool("run_tests", {"cmd": "pytest -q tests/", "timeout": 600})
+        result = execute_tool("run_tests", {"cmd": cmd, "timeout": 600})
         result_data = json.loads(result)
 
         rc = result_data.get("rc", 1)
@@ -380,11 +418,10 @@ def _run_test_suite() -> ValidationResult:
         )
 
 
-def _run_linter() -> ValidationResult:
+def _run_linter(cmd: str) -> ValidationResult:
     """Run linter checks (ruff/flake8/pylint)."""
     try:
-        # Try ruff first (fastest). Avoid shell redirection for portability.
-        result = execute_tool("run_cmd", {"cmd": "ruff check . --output-format=json", "timeout": 600})
+        result = execute_tool("run_cmd", {"cmd": cmd, "timeout": 600})
         result_data = json.loads(result)
         output = result_data.get("stdout", "[]")
 

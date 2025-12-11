@@ -13,7 +13,13 @@ from typing import Dict, Any, List, Optional
 
 from rev.models.task import ExecutionPlan, RiskLevel, Task, TaskStatus
 from rev.llm.client import ollama_chat
-from rev.config import MAX_LLM_TOKENS_PER_RUN, MAX_PLAN_TASKS, get_system_info_cached
+from rev.config import (
+    MAX_LLM_TOKENS_PER_RUN,
+    MAX_PLAN_TASKS,
+    get_system_info_cached,
+    PLANNING_MODEL,
+    PLANNING_SUPPORTS_TOOLS,
+)
 from rev.tools.git_ops import get_repo_context
 from rev.tools.registry import get_available_tools, execute_tool
 
@@ -278,7 +284,13 @@ def _execute_tool_calls(tool_calls: List[Dict], verbose: bool = True) -> List[Di
     return tool_results
 
 
-def _call_llm_with_tools(messages: List[Dict], tools: List[Dict], max_iterations: int = 5) -> Dict[str, Any]:
+def _call_llm_with_tools(
+    messages: List[Dict],
+    tools: List[Dict],
+    max_iterations: int = 5,
+    model_name: Optional[str] = None,
+    model_supports_tools: Optional[bool] = None,
+) -> Dict[str, Any]:
     """Call LLM with tools, handling tool calling loop.
 
     Args:
@@ -292,7 +304,12 @@ def _call_llm_with_tools(messages: List[Dict], tools: List[Dict], max_iterations
     conversation = messages.copy()
 
     for iteration in range(max_iterations):
-        response = ollama_chat(conversation, tools=tools)
+        response = ollama_chat(
+            conversation,
+            tools=tools if (model_supports_tools is not False) else None,
+            model=model_name,
+            supports_tools=model_supports_tools,
+        )
 
         if "error" in response:
             return response
@@ -319,7 +336,7 @@ def _call_llm_with_tools(messages: List[Dict], tools: List[Dict], max_iterations
 
     # Max iterations reached
     print(f"  Warning: Max planning iterations ({max_iterations}) reached")
-    return ollama_chat(conversation, tools=None)  # Final call without tools
+    return ollama_chat(conversation, tools=None, model=model_name, supports_tools=model_supports_tools)  # Final call without tools
 
 
 def _recursive_breakdown(task_description: str, action_type: str, context: str, max_depth: int = 2, current_depth: int = 0, tools: list = None) -> List[Dict[str, Any]]:
@@ -523,6 +540,8 @@ def planning_mode(
     print("=" * 60)
 
     task_limit = max_plan_tasks or MAX_PLAN_TASKS
+    model_name = PLANNING_MODEL
+    model_supports_tools = PLANNING_SUPPORTS_TOOLS
 
     # Get available tools for LLM function calling
     tools = get_available_tools()
@@ -609,7 +628,13 @@ After gathering information with tools, generate a comprehensive execution plan 
     ]
 
     print("→ Generating execution plan...")
-    response = _call_llm_with_tools(messages, tools, max_iterations=30)
+    response = _call_llm_with_tools(
+        messages,
+        tools,
+        max_iterations=30,
+        model_name=model_name,
+        model_supports_tools=model_supports_tools,
+    )
 
     if "error" in response:
         error_msg = f"Planning failed: {response['error']}"
