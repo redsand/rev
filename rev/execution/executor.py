@@ -19,7 +19,11 @@ from rev.models.task import ExecutionPlan, Task, TaskStatus
 from rev.tools.registry import execute_tool
 from rev.llm.client import ollama_chat
 from rev.config import get_system_info_cached, get_escape_interrupt, set_escape_interrupt
-from rev.execution.safety import is_scary_operation, prompt_scary_operation
+from rev.execution.safety import (
+    format_operation_description,
+    is_scary_operation,
+    prompt_scary_operation,
+)
 from rev.execution.reviewer import review_action, display_action_review, format_review_feedback_for_llm
 from rev.execution.session import SessionTracker, create_message_summary_from_history
 from rev.debug_logger import get_logger
@@ -424,7 +428,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                     )
 
                     if is_scary:
-                        operation_desc = f"{tool_name}({', '.join(f'{k}={v!r}' for k, v in list(tool_args.items())[:3])})"
+                        operation_desc = format_operation_description(tool_name, tool_args)
                         if not prompt_scary_operation(operation_desc, scary_reason):
                             print(f"  ✗ Operation cancelled by user")
                             plan.mark_failed("User cancelled destructive operation")
@@ -678,7 +682,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                 )
 
                 if is_scary:
-                    operation_desc = f"{tool_name}({', '.join(f'{k}={v!r}' for k, v in list(tool_args.items())[:3])})"
+                    operation_desc = format_operation_description(tool_name, tool_args)
                     if not prompt_scary_operation(operation_desc, scary_reason):
                         print(f"  ✗ Operation cancelled by user")
                         plan.mark_task_failed(task, "User cancelled destructive operation")

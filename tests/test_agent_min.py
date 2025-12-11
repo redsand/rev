@@ -1244,6 +1244,33 @@ class TestScaryOperations:
         mock_input.assert_called_once()
 
 
+class TestSafetyFormatting:
+    """Safety-related formatting helpers."""
+
+    def test_format_apply_patch_operation_truncates_and_counts(self):
+        """apply_patch prompt should preview with truncation details."""
+
+        from rev.execution import safety
+
+        patch_lines = [
+            "*** Begin Patch",
+            "*** Update File: demo.txt",
+            "@@ -1,1 +1,1 @@",
+        ] + ["-old" if i % 2 == 0 else "+new" for i in range(70)]
+
+        preview_limit = safety._PATCH_PREVIEW_LINES
+        formatted = safety.format_operation_description("apply_patch", {"patch": "\n".join(patch_lines)})
+
+        hidden_lines = patch_lines[preview_limit:]
+        hidden_adds = sum(1 for line in hidden_lines if line.startswith("+"))
+        hidden_subs = sum(1 for line in hidden_lines if line.startswith("-"))
+
+        assert f"showing {preview_limit} of {len(patch_lines)} lines" in formatted
+        assert f"hidden {len(hidden_lines)} lines: +{hidden_adds}/-{hidden_subs}" in formatted
+        assert "\x1b[32m+new" in formatted  # green additions
+        assert "\x1b[31m-old" in formatted  # red removals
+
+
 # ========== Edge Case and Error Handling Tests ==========
 
 class TestEdgeCases:
