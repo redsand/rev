@@ -312,6 +312,27 @@ class TestGitOperations:
         assert "hint" in data
         assert "large" in data["hint"].lower()
 
+    def test_apply_patch_normalizes_invisible_whitespace(self, temp_dir):
+        """Unicode whitespace in patch headers should be normalized before apply."""
+
+        target = temp_dir / "normalize.txt"
+        target.write_text("alpha", encoding="utf-8")
+        rel = target.relative_to(agent_min.ROOT)
+
+        nbsp = "\u00A0"
+        patch = (
+            f"---{nbsp}a/{rel}\n"
+            f"+++{nbsp}b/{rel}\n"
+            "@@ -1 +1 @@\n"
+            "-alpha\n"
+            "+beta\n"
+        )
+
+        data = json.loads(agent_min.apply_patch(patch))
+
+        assert data["success"] is True
+        assert target.read_text(encoding="utf-8") == "beta"
+
     def test_apply_patch_reports_no_tree_change(self, monkeypatch):
         """A zero-exit apply that changes nothing should be reported as a failure."""
 

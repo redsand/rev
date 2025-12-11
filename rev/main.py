@@ -314,14 +314,16 @@ def main():
                         max_workers=args.parallel,
                         auto_approve=not args.prompt,
                         tools=tools,
-                        enable_action_review=args.action_review
+                        enable_action_review=args.action_review,
+                        state_manager=state_manager,
                     )
                 else:
                     execution_mode(
                         plan,
                         auto_approve=not args.prompt,
                         tools=tools,
-                        enable_action_review=args.action_review
+                        enable_action_review=args.action_review,
+                        state_manager=state_manager,
                     )
 
                 # Validation phase
@@ -464,14 +466,16 @@ def main():
                     max_workers=args.parallel,
                     auto_approve=not args.prompt,
                     tools=tools,
-                    enable_action_review=args.action_review
+                    enable_action_review=args.action_review,
+                    state_manager=state_manager,
                 )
             else:
                 execution_mode(
                     plan,
                     auto_approve=not args.prompt,
                     tools=tools,
-                    enable_action_review=args.action_review
+                    enable_action_review=args.action_review,
+                    state_manager=state_manager,
                 )
 
             # Validation phase - Validation Agent verifies results
