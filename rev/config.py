@@ -44,6 +44,7 @@ MAX_STEPS_PER_RUN = int(os.getenv("REV_MAX_STEPS", "200"))
 # token estimates differ from true usage.
 MAX_LLM_TOKENS_PER_RUN = int(os.getenv("REV_MAX_TOKENS", "120000"))
 MAX_WALLCLOCK_SECONDS = int(os.getenv("REV_MAX_SECONDS", "1800"))  # 30 minutes default
+MAX_PLAN_TASKS = int(os.getenv("REV_MAX_PLAN_TASKS", "20"))
 
 # History configuration
 HISTORY_SIZE = int(os.getenv("REV_HISTORY_SIZE", "100"))  # Number of history entries to keep

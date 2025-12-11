@@ -8,7 +8,7 @@ Implements Resource-Aware Optimization pattern to track and enforce budgets.
 """
 
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Literal
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -27,7 +27,7 @@ from rev.execution.learner import LearningAgent, display_learning_suggestions
 from rev.execution.executor import execution_mode, concurrent_execution_mode, fix_validation_failures
 from rev.execution.state_manager import StateManager
 from rev.tools.registry import get_available_tools
-from rev.config import MAX_STEPS_PER_RUN, MAX_LLM_TOKENS_PER_RUN, MAX_WALLCLOCK_SECONDS
+from rev.config import MAX_PLAN_TASKS, MAX_STEPS_PER_RUN, MAX_LLM_TOKENS_PER_RUN, MAX_WALLCLOCK_SECONDS
 from rev.llm.client import get_token_usage
 
 
@@ -126,8 +126,9 @@ class OrchestratorConfig:
     enable_auto_fix: bool = False
     parallel_workers: int = 2
     auto_approve: bool = True
-    research_depth: str = "deep"  # shallow, medium, deep
+    research_depth: Literal["off", "shallow", "medium", "deep"] = "medium"
     max_retries: int = 2
+    max_plan_tasks: int = MAX_PLAN_TASKS
 
 
 @dataclass
@@ -223,8 +224,19 @@ class Orchestrator:
         print(f"\n🔀 Routing Decision: {route.mode}")
         print(f"   Reasoning: {route.reasoning}")
 
+        base_research_depth = self.config.research_depth or "medium"
+        elevated_for_mode = False
+        if not self._user_config_provided:
+            selected_research_depth = route.research_depth or base_research_depth
+            if route.mode in {"full_feature"} and selected_research_depth in {"shallow", "medium"}:
+                print("   ℹ️  Elevating research depth to deep for high-risk mode")
+                selected_research_depth = "deep"
+                elevated_for_mode = True
+        else:
+            selected_research_depth = base_research_depth
+
         # Update config based on route (only if using default config)
-        coding_mode = route.mode in ["full_feature", "refactor"]  # Enable coding mode for these routes
+        coding_mode = route.mode != "quick_edit"  # Enable coding mode for more involved routes
         if not self._user_config_provided:
             self.config.enable_learning = route.enable_learning
             self.config.enable_research = route.enable_research
@@ -234,13 +246,31 @@ class Orchestrator:
             self.config.parallel_workers = route.parallel_workers
             self.config.enable_action_review = route.enable_action_review
             self.config.auto_approve = getattr(route, "auto_approve", self.config.auto_approve)
-            selected_research_depth = route.research_depth or "deep"
-            if selected_research_depth != "deep":
-                print("   ℹ️  Research depth elevated to deep for comprehensive codebase understanding")
-                selected_research_depth = "deep"
-            self.config.research_depth = selected_research_depth
             self.config.max_retries = route.max_retries
             self.config.enable_auto_fix = getattr(route, "enable_auto_fix", self.config.enable_auto_fix)
+            route_plan_cap = getattr(route, "max_plan_tasks", None)
+            if route_plan_cap:
+                self.config.max_plan_tasks = route_plan_cap
+
+        self.config.research_depth = selected_research_depth
+        print(
+            f"   Mode: {route.mode} | Research depth: {self.config.research_depth}"
+            f"{' (elevated)' if elevated_for_mode else ''}"
+        )
+        print(f"   Plan task cap: {self.config.max_plan_tasks}")
+
+        route_agents = []
+        if route.enable_learning:
+            route_agents.append("Learning")
+        if route.enable_research:
+            route_agents.append("Research")
+        route_agents.append("Planning")
+        if route.enable_review:
+            route_agents.append("Review")
+        route_agents.append("Execution")
+        if route.enable_validation:
+            route_agents.append("Validation")
+        print(f"   Router agents: {', '.join(route_agents)}")
 
         print(f"\nAgents enabled: ", end="")
         agents = []
@@ -276,10 +306,6 @@ class Orchestrator:
         # Display resource budgets
         print(f"\n📊 Resource Budgets:")
         print(f"   Steps: {budget.max_steps} | Tokens: {budget.max_tokens} | Time: {budget.max_seconds}s")
-
-        if self.config.research_depth != "deep":
-            print("   ℹ️  Research depth forced to deep to ensure full code and documentation coverage")
-            self.config.research_depth = "deep"
 
         try:
             # Phase 1: Learning Agent - Get historical insights
@@ -326,7 +352,11 @@ class Orchestrator:
                 result.errors.append("Resource budget exceeded during planning phase")
                 result.phase_reached = AgentPhase.PLANNING
                 return result
-            plan = planning_mode(user_request, coding_mode=coding_mode)
+            plan = planning_mode(
+                user_request,
+                coding_mode=coding_mode,
+                max_plan_tasks=self.config.max_plan_tasks,
+            )
             result.plan = plan
             state_manager = StateManager(plan)
 
@@ -403,7 +433,8 @@ class Orchestrator:
 
 IMPORTANT - Address the following review feedback:
 {feedback}""",
-                            coding_mode=coding_mode
+                            coding_mode=coding_mode,
+                            max_plan_tasks=self.config.max_plan_tasks,
                         )
                         result.plan = plan
 
@@ -784,7 +815,7 @@ def run_orchestrated(
     enable_auto_fix: bool = False,
     parallel_workers: int = 2,
     auto_approve: bool = True,
-    research_depth: str = "medium"
+    research_depth: Literal["off", "shallow", "medium", "deep"] = "medium"
 ) -> OrchestratorResult:
     """Run a task through the orchestrated multi-agent pipeline.
 
@@ -802,7 +833,7 @@ def run_orchestrated(
         enable_auto_fix: Enable auto-fix in validation
         parallel_workers: Number of parallel execution workers
         auto_approve: Auto-approve plans with warnings
-        research_depth: Research depth (shallow/medium/deep)
+        research_depth: Research depth (off/shallow/medium/deep)
 
     Returns:
         OrchestratorResult with execution outcome
