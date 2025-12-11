@@ -86,6 +86,51 @@ def _snapshot_paths(paths: set[str]) -> dict[str, Optional[bytes]]:
     return snapshot
 
 
+def _normalize_patch_text(patch: str) -> str:
+    """Normalize non-standard whitespace that can break patch parsing.
+
+    Agents sometimes produce diffs that contain Unicode whitespace characters
+    that look like regular spaces or tabs but are not interpreted the same way
+    by ``git apply`` or ``patch`` (for example, non-breaking spaces or
+    zero-width joiners). Converting these characters up front makes the patch
+    parser more forgiving while preserving the intended formatting.
+    """
+
+    # Standardize newline handling first so replacements do not miss Windows
+    # line endings.
+    normalized = patch.replace("\r\n", "\n").replace("\r", "\n")
+
+    # Common invisible/alternate whitespace characters that should be treated
+    # as normal spaces. Zero-width characters are removed entirely.
+    whitespace_map = {
+        # Non-breaking spaces and width variants
+        ord("\u00A0"): " ",  # NBSP
+        ord("\u1680"): " ",  # Ogham space mark
+        ord("\u180E"): " ",  # Mongolian vowel separator (deprecated)
+        ord("\u2000"): " ",  # En quad
+        ord("\u2001"): " ",  # Em quad
+        ord("\u2002"): " ",  # En space
+        ord("\u2003"): " ",  # Em space
+        ord("\u2004"): " ",  # Three-per-em space
+        ord("\u2005"): " ",  # Four-per-em space
+        ord("\u2006"): " ",  # Six-per-em space
+        ord("\u2007"): " ",  # Figure space
+        ord("\u2008"): " ",  # Punctuation space
+        ord("\u2009"): " ",  # Thin space
+        ord("\u200A"): " ",  # Hair space
+        ord("\u202F"): " ",  # Narrow no-break space
+        ord("\u205F"): " ",  # Medium mathematical space
+        ord("\u3000"): " ",  # Ideographic space
+        # Zero-width characters that should be stripped
+        ord("\u200B"): None,  # Zero width space
+        ord("\u200C"): None,  # Zero width non-joiner
+        ord("\u200D"): None,  # Zero width joiner
+        ord("\uFEFF"): None,  # Zero width no-break space / BOM
+    }
+
+    return normalized.translate(whitespace_map)
+
+
 # ========== Core Git Operations ==========
 
 def git_diff(pathspec: str = ".", staged: bool = False, context: int = 3) -> str:
@@ -108,10 +153,13 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
     to apply it again.
     """
 
+    # Normalize to remove invisible whitespace and ensure expected line endings.
+    normalized_patch = _normalize_patch_text(patch)
     # Some callers provide minimal patches without a trailing newline. Git may
     # reject those as "corrupt patch" even though the intent is clear, so we
     # normalize to ensure a newline terminates the patch content.
-    normalized_patch = patch if patch.endswith("\n") else f"{patch}\n"
+    if not normalized_patch.endswith("\n"):
+        normalized_patch = f"{normalized_patch}\n"
     patch_size = len(normalized_patch)
     large_patch_hint: Optional[str] = None
     if patch_size > _LARGE_PATCH_HINT_THRESHOLD:
