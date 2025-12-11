@@ -37,6 +37,7 @@ def _route_stub(enable_validation: bool = False, parallel_workers: int = 1, max_
             "enable_auto_fix": False,
             "research_depth": "deep",
             "max_retries": max_retries,
+            "max_plan_tasks": None,
         },
     )()
 

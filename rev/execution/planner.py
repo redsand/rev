@@ -9,11 +9,11 @@ assessment, and validation steps.
 import re
 import json
 import sys
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
-from rev.models.task import ExecutionPlan, RiskLevel, TaskStatus
+from rev.models.task import ExecutionPlan, RiskLevel, Task, TaskStatus
 from rev.llm.client import ollama_chat
-from rev.config import MAX_LLM_TOKENS_PER_RUN, get_system_info_cached
+from rev.config import MAX_LLM_TOKENS_PER_RUN, MAX_PLAN_TASKS, get_system_info_cached
 from rev.tools.git_ops import get_repo_context
 from rev.tools.registry import get_available_tools, execute_tool
 
@@ -421,11 +421,87 @@ def _ensure_test_and_doc_coverage(plan: ExecutionPlan, user_request: str) -> Non
             )
 
 
+def _cap_plan_tasks(plan: ExecutionPlan, max_plan_tasks: Optional[int]) -> int:
+    """Apply deterministic post-processing to keep plans within task limits.
+
+    Args:
+        plan: Execution plan with tasks populated
+        max_plan_tasks: Maximum allowed tasks (None disables capping)
+
+    Returns:
+        The original task count before capping
+    """
+
+    if not max_plan_tasks or len(plan.tasks) <= max_plan_tasks:
+        return len(plan.tasks)
+
+    original_count = len(plan.tasks)
+    print(
+        f"→ Plan exceeds max of {max_plan_tasks} tasks (got {original_count}); merging validation tasks and trimming."
+    )
+
+    lint_keywords = ["lint", "ruff", "flake8", "format", "black", "isort", "mypy", "type check"]
+    test_keywords = ["pytest", "test", "unit test", "integration test", "coverage", "radon"]
+    low_value_actions = {"doc", "test", "review", "general"}
+
+    merged_lint = False
+    merged_tests = False
+    kept_tasks: List[Task] = []
+
+    for task in plan.tasks:
+        text = task.description.lower()
+        if any(keyword in text for keyword in lint_keywords):
+            merged_lint = True
+            continue
+        if any(keyword in text for keyword in test_keywords):
+            merged_tests = True
+            continue
+        kept_tasks.append(task)
+
+    protected_tasks = set()
+    if merged_lint:
+        lint_task = Task(
+            "Run lint/format/type checks and address findings",
+            action_type="test",
+        )
+        protected_tasks.add(lint_task)
+        kept_tasks.append(lint_task)
+
+    if merged_tests:
+        test_task = Task(
+            "Run automated tests (pytest/coverage) and resolve failures",
+            action_type="test",
+        )
+        protected_tasks.add(test_task)
+        kept_tasks.append(test_task)
+
+    while len(kept_tasks) > max_plan_tasks:
+        removed = False
+        for idx in range(len(kept_tasks) - 1, -1, -1):
+            task = kept_tasks[idx]
+            if task in protected_tasks:
+                continue
+            if task.action_type in low_value_actions:
+                kept_tasks.pop(idx)
+                removed = True
+                break
+        if not removed:
+            kept_tasks.pop()
+
+    for idx, task in enumerate(kept_tasks):
+        task.task_id = idx
+
+    plan.tasks = kept_tasks
+    print(f"  → Final task count after capping: {len(plan.tasks)}")
+    return original_count
+
+
 def planning_mode(
     user_request: str,
     enable_advanced_analysis: bool = True,
     enable_recursive_breakdown: bool = True,
-    coding_mode: bool = False
+    coding_mode: bool = False,
+    max_plan_tasks: Optional[int] = None
 ) -> ExecutionPlan:
     """Generate execution plan from user request with advanced analysis.
 
@@ -445,6 +521,8 @@ def planning_mode(
     print("=" * 60)
     print("PLANNING MODE")
     print("=" * 60)
+
+    task_limit = max_plan_tasks or MAX_PLAN_TASKS
 
     # Get available tools for LLM function calling
     tools = get_available_tools()
@@ -481,6 +559,10 @@ Use these tools when planning to:
         "If the task needs more, ask for a target token count or propose splitting into multiple smaller planning passes. "
         f"Never exceed the ~{MAX_LLM_TOKENS_PER_RUN:,} token conversation budget; prefer multiple iterations over one long response."
     )
+    plan_size_guidance = (
+        f"PLAN SIZE LIMIT: Produce at most {task_limit} tasks. Group validation actions (lint, mypy, tests, coverage) into 1–2 tasks near the end. "
+        "Avoid creating separate incremental test/lint loops unless explicitly requested."
+    )
 
     messages = [
         {"role": "system", "content": enhanced_system_prompt},
@@ -497,6 +579,8 @@ User request:
 {user_request}
 
 {token_guidance}
+
+{plan_size_guidance}
 
 IMPORTANT: Before creating the execution plan:
 1. Use available tools to explore the codebase
@@ -578,6 +662,16 @@ After gathering information with tools, generate a comprehensive execution plan 
     except Exception as e:
         print(f"Warning: Error parsing plan: {e}")
         plan.add_task(user_request, "general")
+
+    original_task_count = len(plan.tasks)
+    capped_from = _cap_plan_tasks(plan, task_limit)
+    if not plan.tasks:
+        raise RuntimeError("Planning produced zero tasks after applying task limits")
+
+    if capped_from > len(plan.tasks):
+        print(f"→ Tasks capped from {capped_from} to {len(plan.tasks)} (max {task_limit})")
+    else:
+        print(f"→ Final task count: {len(plan.tasks)} (max {task_limit})")
 
     # Advanced planning analysis
     if enable_advanced_analysis and len(plan.tasks) > 0:

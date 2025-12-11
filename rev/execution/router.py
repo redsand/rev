@@ -13,7 +13,7 @@ from enum import Enum
 
 
 # Route modes - different execution strategies
-RouteMode = Literal["quick_edit", "full_feature", "refactor", "test_focus", "exploration", "security_audit"]
+RouteMode = Literal["quick_edit", "focused_feature", "full_feature"]
 
 
 class RoutePriority(Enum):
@@ -41,6 +41,7 @@ class RouteDecision:
     enable_action_review: bool = False
     research_depth: str = "medium"  # shallow, medium, deep
     max_retries: int = 2
+    max_plan_tasks: Optional[int] = None
     priority: RoutePriority = RoutePriority.NORMAL
     reasoning: str = ""  # Why this route was chosen
 
@@ -57,6 +58,7 @@ class RouteDecision:
             "enable_action_review": self.enable_action_review,
             "research_depth": self.research_depth,
             "max_retries": self.max_retries,
+            "max_plan_tasks": self.max_plan_tasks,
             "priority": self.priority.value,
             "reasoning": self.reasoning
         }
@@ -82,187 +84,138 @@ class TaskRouter:
         text = user_request.lower()
         repo_stats = repo_stats or {}
 
-        # Security audit mode
-        if self._is_security_audit(text):
-            return RouteDecision(
-                mode="security_audit",
-                enable_learning=True,
-                enable_research=True,
-                enable_review=True,
-                enable_validation=True,
-                review_strictness="strict",
-                parallel_workers=1,  # Sequential for security
-                enable_action_review=True,
-                research_depth="deep",
-                max_retries=3,
-                priority=RoutePriority.CRITICAL,
-                reasoning="Security audit requires thorough analysis and strict review"
-            )
+        if self._is_full_feature(text, repo_stats):
+            return self._full_feature_decision(text)
 
-        # Structural change mode - requires deep investigation
-        # Covers: schemas, types, classes, documentation, configuration
-        if self._is_structural_change(text):
-            return RouteDecision(
-                mode="full_feature",
-                enable_learning=True,
-                enable_research=True,  # Critical: must research existing structures
-                enable_review=True,
-                enable_validation=True,
-                review_strictness="strict",
-                parallel_workers=1,  # Sequential to avoid conflicts
-                enable_action_review=True,
-                research_depth="deep",  # Deep search for existing structures
-                max_retries=3,
-                priority=RoutePriority.HIGH,
-                reasoning="Structural changes require deep investigation of existing definitions to avoid duplication"
-            )
+        if self._is_quick_edit(text):
+            return self._quick_edit_decision(text)
 
-        # Test-focused mode
-        if self._is_test_focus(text):
-            return RouteDecision(
-                mode="test_focus",
-                enable_learning=False,
-                enable_research=False,
-                enable_review=True,
-                enable_validation=True,
-                review_strictness="moderate",
-                parallel_workers=2,
-                research_depth="shallow",
-                max_retries=2,
-                priority=RoutePriority.HIGH,
-                reasoning="Test-focused task requires validation but minimal research"
-            )
+        return self._focused_feature_decision(text)
 
-        # Refactor mode
-        if self._is_refactor(text):
-            return RouteDecision(
-                mode="refactor",
-                enable_learning=True,
-                enable_research=True,
-                enable_review=True,
-                enable_validation=True,
-                review_strictness="strict",
-                parallel_workers=1,  # Sequential for refactoring
-                research_depth="deep",
-                max_retries=3,
-                priority=RoutePriority.HIGH,
-                reasoning="Refactoring requires deep analysis and careful review"
-            )
-
-        # Full feature mode
-        if self._is_full_feature(text):
-            return RouteDecision(
-                mode="full_feature",
-                enable_learning=True,
-                enable_research=True,
-                enable_review=True,
-                enable_validation=True,
-                review_strictness="moderate",
-                parallel_workers=3,  # More parallelism for features
-                research_depth="medium",
-                max_retries=3,
-                priority=RoutePriority.NORMAL,
-                reasoning="Full feature implementation with all agents enabled"
-            )
-
-        # Exploration mode
-        if self._is_exploration(text):
-            return RouteDecision(
-                mode="exploration",
-                enable_learning=True,
-                enable_research=True,
-                enable_review=False,  # Exploratory, no need for strict review
-                enable_validation=False,
-                parallel_workers=1,
-                research_depth="deep",
-                max_retries=1,
-                priority=RoutePriority.LOW,
-                reasoning="Exploratory task focused on research and learning"
-            )
-
-        # Default: quick edit mode
+    def _quick_edit_decision(self, text: str) -> RouteDecision:
+        """Quick edit mode for small, localized changes."""
         return RouteDecision(
             mode="quick_edit",
             enable_learning=False,
             enable_research=False,
-            enable_review=True,
+            enable_review=False,
             enable_validation=True,
             review_strictness="lenient",
             parallel_workers=2,
             research_depth="shallow",
+            max_plan_tasks=8,
             max_retries=2,
             priority=RoutePriority.NORMAL,
-            reasoning="Simple quick edit with minimal overhead"
+            reasoning=self._quick_edit_reason(text),
         )
 
-    def _is_security_audit(self, text: str) -> bool:
-        """Check if request is a security audit."""
+    def _focused_feature_decision(self, text: str) -> RouteDecision:
+        """Focused feature mode for multi-file but contained work."""
+        enable_review = self._needs_review(text)
+        return RouteDecision(
+            mode="focused_feature",
+            enable_learning=False,
+            enable_research=True,
+            enable_review=enable_review,
+            enable_validation=True,
+            review_strictness="moderate",
+            parallel_workers=3,
+            research_depth="medium",
+            max_plan_tasks=20,
+            max_retries=3,
+            priority=RoutePriority.NORMAL,
+            reasoning=self._focused_feature_reason(text, enable_review),
+        )
+
+    def _full_feature_decision(self, text: str) -> RouteDecision:
+        """Full feature mode for large or high-risk changes."""
+        is_security = self._is_security_heavy(text)
+        return RouteDecision(
+            mode="full_feature",
+            enable_learning=True,
+            enable_research=True,
+            enable_review=True,
+            enable_validation=True,
+            review_strictness="strict" if is_security else "moderate",
+            parallel_workers=2 if is_security else 3,
+            enable_action_review=is_security,
+            research_depth="deep",
+            max_plan_tasks=30,
+            max_retries=3,
+            priority=RoutePriority.CRITICAL if is_security else RoutePriority.HIGH,
+            reasoning=self._full_feature_reason(text, is_security),
+        )
+
+    def _is_full_feature(self, text: str, repo_stats: Dict[str, Any]) -> bool:
+        """Check if request implies architectural or wide-ranging impact."""
+        architecture_keywords = [
+            "architecture", "system-wide", "system wide", "major refactor", "large refactor",
+            "schema", "migration", "database", "core module", "rewrite", "re-architect",
+            "security audit", "penetration", "vulnerability", "performance audit", "scalability",
+            "across the codebase", "multiple modules", "many files",
+        ]
+        if any(keyword in text for keyword in architecture_keywords):
+            return True
+
+        # Heuristic: explicit mention of touching many files/modules
+        mentions_multiple_files = " files" in text or "modules" in text or "subsystems" in text
+        return mentions_multiple_files
+
+    def _is_quick_edit(self, text: str) -> bool:
+        """Check if the request is a small, localized change."""
+        quick_keywords = [
+            "fix", "typo", "rename", "update this", "change this", "adjust", "small tweak",
+            "minor", "one file", "single file", "line", "import", "config flag",
+        ]
+        heavy_keywords = [
+            "architecture", "schema", "system-wide", "system wide", "security", "audit",
+            "refactor", "redesign", "rewrite", "migration", "large",
+        ]
+
+        mentions_file = ".py" in text or ".ts" in text or ".js" in text or ".md" in text
+        looks_small = any(keyword in text for keyword in quick_keywords) or mentions_file
+        looks_heavy = any(keyword in text for keyword in heavy_keywords)
+        return looks_small and not looks_heavy
+
+    def _needs_review(self, text: str) -> bool:
+        """Enable review for focused features when complexity is hinted."""
+        complexity_keywords = [
+            "security", "auth", "authentication", "authorization", "performance", "concurrency",
+            "thread", "locking", "compliance", "payment", "billing", "race condition", "data loss",
+        ]
+        return any(keyword in text for keyword in complexity_keywords)
+
+    def _is_security_heavy(self, text: str) -> bool:
+        """Check for security-focused tasks that require stricter handling."""
         security_keywords = [
-            "security audit", "vulnerability", "cve", "exploit",
-            "penetration test", "security scan", "threat"
+            "security", "vulnerability", "cve", "exploit", "penetration", "threat", "audit",
+            "harden", "encrypt", "xss", "csrf", "sql injection",
         ]
         return any(keyword in text for keyword in security_keywords)
 
-    def _is_structural_change(self, text: str) -> bool:
-        """Check if request involves structural changes to code, schemas, docs, or config."""
-        structure_keywords = [
-            # Database/Schema structures
-            "prisma", "schema", "database", "enum", "model",
-            "migration", "sequelize", "typeorm", "mongoose",
-            "table", "entity", "sql",
-            # Code structures
-            "class", "interface", "type", "typedef", "struct",
-            "enum", "dataclass",
-            # Documentation structures
-            "readme", "documentation", "docs", "api documentation",
-            "guide", "tutorial",
-            # Configuration structures
-            "config", "configuration", "settings", "environment",
-            ".env", "config file"
-        ]
+    def _quick_edit_reason(self, text: str) -> str:
+        if "typo" in text:
+            return "Detected typo or minor wording request"
+        if "import" in text:
+            return "Single-file import tweak detected"
+        if "." in text and (".py" in text or ".ts" in text or ".js" in text or ".md" in text):
+            return "File-specific edit requested"
+        return "Small, localized change"
 
-        # Action verbs that indicate creation/modification
-        action_verbs = [
-            "add", "create", "update", "modify", "change",
-            "define", "implement", "build", "generate"
-        ]
+    def _focused_feature_reason(self, text: str, enable_review: bool) -> str:
+        reason = "Feature work across limited components"
+        if enable_review:
+            reason += " with review enabled due to complexity cues"
+        return reason
 
-        # Must have structure keyword AND an action verb
-        has_structure = any(keyword in text for keyword in structure_keywords)
-        has_action = any(action in text for action in action_verbs)
-
-        return has_structure and has_action
-
-    def _is_test_focus(self, text: str) -> bool:
-        """Check if request is test-focused."""
-        # Must have "test" and NOT be adding features
-        has_test = any(word in text for word in ["test", "testing", "coverage", "pytest"])
-        not_feature = not any(word in text for word in ["add", "build", "implement", "create", "feature"])
-        return has_test and not_feature
-
-    def _is_refactor(self, text: str) -> bool:
-        """Check if request is a refactoring task."""
-        refactor_keywords = [
-            "refactor", "cleanup", "restructure", "reorganize",
-            "simplify", "optimize code", "improve structure"
-        ]
-        return any(keyword in text for keyword in refactor_keywords)
-
-    def _is_full_feature(self, text: str) -> bool:
-        """Check if request is a full feature implementation."""
-        feature_keywords = [
-            "add", "build", "implement", "create", "feature",
-            "functionality", "new capability", "integrate"
-        ]
-        return any(keyword in text for keyword in feature_keywords)
-
-    def _is_exploration(self, text: str) -> bool:
-        """Check if request is exploratory/research."""
-        exploration_keywords = [
-            "explore", "investigate", "analyze", "research",
-            "understand", "how does", "what is", "explain"
-        ]
-        return any(keyword in text for keyword in exploration_keywords)
+    def _full_feature_reason(self, text: str, is_security: bool) -> str:
+        if is_security:
+            return "Security-sensitive request triggers full feature mode"
+        if "architecture" in text or "system" in text:
+            return "Architecture or system-wide language detected"
+        if "schema" in text or "migration" in text:
+            return "Schema-level change detected"
+        return "Large-scale feature or refactor"
 
 
 def get_default_router() -> TaskRouter:
