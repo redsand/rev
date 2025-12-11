@@ -144,22 +144,22 @@ def git_diff(pathspec: str = ".", staged: bool = False, context: int = 3) -> str
     return json.dumps({"rc": proc.returncode, "diff": proc.stdout[-120000:], "stderr": proc.stderr[-4000:]})
 
 
-def apply_patch(patch: str, dry_run: bool = False) -> str:
-    """Apply a unified diff patch.
 
-    The patch is first validated with ``git apply --check`` so we fail fast
-    without making any changes when the patch does not apply cleanly. If the
-    patch has already been applied, we report that fact instead of attempting
-    to apply it again.
+def apply_patch(patch: str, dry_run: bool = False) -> str:
+    """Apply a unified diff patch with resilient validation.
+
+    The previous implementation proved too brittle for the kinds of diffs that
+    are produced in practice. This version mirrors common CLI workflows by
+    validating with ``git apply --check`` first, falling back to a standard
+    ``patch`` invocation, and only performing the apply step after validation
+    succeeds. We also normalize problematic whitespace up front and provide
+    clearer error reporting so callers can correct issues quickly.
     """
 
-    # Normalize to remove invisible whitespace and ensure expected line endings.
     normalized_patch = _normalize_patch_text(patch)
-    # Some callers provide minimal patches without a trailing newline. Git may
-    # reject those as "corrupt patch" even though the intent is clear, so we
-    # normalize to ensure a newline terminates the patch content.
     if not normalized_patch.endswith("\n"):
         normalized_patch = f"{normalized_patch}\n"
+
     patch_size = len(normalized_patch)
     large_patch_hint: Optional[str] = None
     if patch_size > _LARGE_PATCH_HINT_THRESHOLD:
@@ -171,6 +171,7 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
 
     def _has_malformed_hunks(lines: list[str]) -> bool:
         """Detect obvious malformed hunk lines (missing +/-/space prefixes)."""
+
         in_hunk = False
         for line in lines:
             if line.startswith("@@"):
@@ -189,20 +190,23 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
 
     patch_lines = normalized_patch.splitlines()
     patch_paths = _extract_patch_paths(patch_lines)
-    pre_status = _working_tree_snapshot()
-    pre_contents = _snapshot_paths(patch_paths)
+
     if _has_malformed_hunks(patch_lines):
+        proc = subprocess.CompletedProcess("apply_patch", 1, "", "patch validation failed: unexpected hunk line")
         return json.dumps(
             {
                 "success": False,
-                "rc": 1,
-                "stdout": "",
-                "stderr": "patch validation failed: unexpected hunk line",
+                "rc": proc.returncode,
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
                 "dry_run": dry_run,
                 "phase": "check",
                 "error": "Patch failed basic validation",
             }
         )
+
+    pre_status = _working_tree_snapshot()
+    pre_contents = _snapshot_paths(patch_paths)
 
     with tempfile.NamedTemporaryFile("w+", delete=False, encoding="utf-8") as tf:
         tf.write(normalized_patch)
@@ -236,25 +240,22 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
         return json.dumps(result)
 
     try:
-        # Validate the patch before applying so we only attempt the actual apply once.
-        check_attempts = [
-            (["git", "apply", "--check", "--inaccurate-eof", tfp], False, "git"),
-            (["git", "apply", "--check", "--inaccurate-eof", "--3way", tfp], True, "git"),
-            (f"patch --batch --forward --dry-run -p1 < {shlex.quote(tfp)}", False, "patch"),
+        strategies = [
+            ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", tfp], False),
+            ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", "--3way", tfp], True),
+            ("patch", f"patch --batch --forward --dry-run -p1 < {shlex.quote(tfp)}", False),
         ]
 
         check_proc: Optional[subprocess.CompletedProcess] = None
         use_three_way = False
         apply_mode: Optional[str] = None
 
-        for check_args, use_three_way_flag, runner in check_attempts:
+        for runner, check_args, use_three_way_flag in strategies:
             if runner == "git":
                 check_proc = _run_shell(" ".join(shlex.quote(a) for a in check_args))
             else:
                 check_proc = _run_shell(check_args)
 
-            # Treat "patch already applied" as a successful no-op so callers do not
-            # keep retrying the same patch.
             combined_output = (check_proc.stdout + check_proc.stderr).lower()
             if "patch already applied" in combined_output or "previously applied" in combined_output:
                 return _result(check_proc, success=True, already_applied=True, phase="check")
@@ -264,8 +265,6 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
                 apply_mode = runner
                 break
         else:
-            # If all checks failed, see if the reverse patch would apply cleanly.
-            # That indicates the original patch has already been applied.
             reverse_proc = _run_shell(
                 " ".join(
                     shlex.quote(a)
@@ -276,14 +275,13 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
             if reverse_proc.returncode == 0 or "reversed" in reverse_output:
                 return _result(reverse_proc, success=True, already_applied=True, phase="check")
 
-            # Otherwise, report the last failure
             return _result(check_proc, success=False, phase="check", hint=large_patch_hint)
 
         if dry_run:
             return _result(check_proc, success=True, phase="check")
 
         if apply_mode == "git":
-            apply_args = ["git", "apply", "--inaccurate-eof"]
+            apply_args = ["git", "apply", "--inaccurate-eof", "--whitespace=nowarn"]
             if use_three_way:
                 apply_args.append("--3way")
             apply_args.append(tfp)
@@ -295,7 +293,6 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
             post_status = _working_tree_snapshot()
             post_contents = _snapshot_paths(patch_paths)
 
-            tree_changed = False
             if patch_paths:
                 tree_changed = pre_contents != post_contents
             else:
@@ -326,13 +323,11 @@ def apply_patch(patch: str, dry_run: bool = False) -> str:
             hint=large_patch_hint if apply_proc.returncode != 0 else None,
         )
     finally:
-        # Clean up temporary file, but log if cleanup fails
         try:
             os.unlink(tfp)
         except FileNotFoundError:
-            pass  # File already deleted, no issue
+            pass
         except Exception as e:
-            # Log the error instead of silently swallowing it
             import sys
             print(f"Warning: Failed to clean up temporary patch file {tfp}: {e}", file=sys.stderr)
 
