@@ -34,14 +34,11 @@ MAX_FILE_BYTES = 5 * 1024 * 1024
 READ_RETURN_LIMIT = 80_000
 SEARCH_MATCH_LIMIT = 2000
 LIST_LIMIT = 2000
-MAX_READ_FILE_PER_TASK = int(os.getenv("REV_MAX_READ_FILE_PER_TASK", "35"))
-MAX_SEARCH_CODE_PER_TASK = int(os.getenv("REV_MAX_SEARCH_CODE_PER_TASK", "35"))
-MAX_RUN_CMD_PER_TASK = int(os.getenv("REV_MAX_RUN_CMD_PER_TASK", "20"))
-MAX_EXECUTION_ITERATIONS = int(os.getenv("REV_MAX_EXEC_ITER", "15"))
-MAX_TASK_ITERATIONS = int(os.getenv("REV_MAX_TASK_ITER", "20"))
-MAX_RUN_CMD_PER_TASK = int(os.getenv("REV_MAX_RUN_CMD_PER_TASK", "20"))
-MAX_EXECUTION_ITERATIONS = int(os.getenv("REV_MAX_EXEC_ITER", "40"))
-MAX_TASK_ITERATIONS = int(os.getenv("REV_MAX_TASK_ITER", "30"))
+MAX_READ_FILE_PER_TASK = int(os.getenv("REV_MAX_READ_FILE_PER_TASK", "15"))
+MAX_SEARCH_CODE_PER_TASK = int(os.getenv("REV_MAX_SEARCH_CODE_PER_TASK", "15"))
+MAX_RUN_CMD_PER_TASK = int(os.getenv("REV_MAX_RUN_CMD_PER_TASK", "15"))
+MAX_EXECUTION_ITERATIONS = int(os.getenv("REV_MAX_EXEC_ITER", "25"))
+MAX_TASK_ITERATIONS = int(os.getenv("REV_MAX_TASK_ITER", "25"))
 
 EXCLUDE_DIRS = {
     ".git", ".hg", ".svn", ".idea", ".vscode", "__pycache__", ".pytest_cache",
@@ -55,16 +52,17 @@ ALLOW_CMDS = {
 }
 
 # Resource budgets (for resource-aware optimization pattern)
-MAX_STEPS_PER_RUN = int(os.getenv("REV_MAX_STEPS", "200"))
+MAX_STEPS_PER_RUN = int(os.getenv("REV_MAX_STEPS", "500"))
 # Keep token budget comfortably below the provider cap to avoid hard failures when the heuristic
 # token estimates differ from true usage.
-MAX_LLM_TOKENS_PER_RUN = int(os.getenv("REV_MAX_TOKENS", str(1_500_000)))
-MAX_WALLCLOCK_SECONDS = int(os.getenv("REV_MAX_SECONDS", "1800"))  # 30 minutes default
-MAX_PLAN_TASKS = int(os.getenv("REV_MAX_PLAN_TASKS", "20"))
+MAX_LLM_TOKENS_PER_RUN = int(os.getenv("REV_MAX_TOKENS", str(2_000_000)))
+MAX_WALLCLOCK_SECONDS = int(os.getenv("REV_MAX_SECONDS", "3600"))  # 60 minutes default
+MAX_PLAN_TASKS = int(os.getenv("REV_MAX_PLAN_TASKS", "12"))
 RESEARCH_DEPTH_DEFAULT = os.getenv("REV_RESEARCH_DEPTH", "medium").lower()
 MAX_ORCHESTRATOR_RETRIES = int(os.getenv("REV_MAX_ORCH_RETRIES", "2"))
 MAX_PLAN_REGEN_RETRIES = int(os.getenv("REV_MAX_PLAN_REGEN_RETRIES", "2"))
 MAX_VALIDATION_RETRIES = int(os.getenv("REV_MAX_VALIDATION_RETRIES", "2"))
+MAX_ADAPTIVE_REPLANS = int(os.getenv("REV_MAX_ADAPTIVE_REPLANS", "1"))
 VALIDATION_TIMEOUT_SECONDS = int(os.getenv("REV_VALIDATION_TIMEOUT", "180"))
 
 # History configuration

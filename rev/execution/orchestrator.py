@@ -39,6 +39,7 @@ from rev.config import (
     VALIDATION_MODE_DEFAULT,
     MAX_ORCHESTRATOR_RETRIES,
     MAX_PLAN_REGEN_RETRIES,
+    MAX_ADAPTIVE_REPLANS,
     MAX_VALIDATION_RETRIES,
 )
 from rev.llm.client import get_token_usage
@@ -144,6 +145,7 @@ class OrchestratorConfig:
     orchestrator_retries: int = MAX_ORCHESTRATOR_RETRIES
     plan_regen_retries: int = MAX_PLAN_REGEN_RETRIES
     validation_retries: int = MAX_VALIDATION_RETRIES
+    adaptive_replan_attempts: int = MAX_ADAPTIVE_REPLANS
     # Back-compat shim (legacy)
     max_retries: Optional[int] = None
     max_plan_tasks: int = MAX_PLAN_TASKS
@@ -154,6 +156,7 @@ class OrchestratorConfig:
             self.orchestrator_retries = self.max_retries
             self.plan_regen_retries = self.max_retries
             self.validation_retries = self.max_retries
+            self.adaptive_replan_attempts = self.max_retries
 
 
 @dataclass
@@ -486,35 +489,58 @@ IMPORTANT - Address the following review feedback:
                             print(f"\n✓ Plan approved after {planning_retry_count} regeneration attempt(s)!")
                         break
 
-            # Phase 5: Execution Agent - Execute the plan
-            self._update_phase(AgentPhase.EXECUTION)
-            budget.update_step()
-            if budget.is_exceeded():
-                print(f"\n⚠️ Resource budget exceeded before execution phase! Usage: {budget.get_usage_summary()}")
-            # Note: Task execution steps are tracked inside execution_mode/concurrent_execution_mode
-            # per-task, not consumed upfront to allow accurate tracking of partial execution
-            tools = get_available_tools()
-            if self.config.parallel_workers > 1:
-                concurrent_execution_mode(
+            adaptive_attempt = 0
+            while True:
+                # Phase 5: Execution Agent - Execute the plan
+                self._update_phase(AgentPhase.EXECUTION)
+                budget.update_step()
+                if budget.is_exceeded():
+                    print(f"\n⚠️ Resource budget exceeded before execution phase! Usage: {budget.get_usage_summary()}")
+                # Note: Task execution steps are tracked inside execution_mode/concurrent_execution_mode
+                # per-task, not consumed upfront to allow accurate tracking of partial execution
+                tools = get_available_tools()
+                if self.config.parallel_workers > 1:
+                    execution_success = concurrent_execution_mode(
+                        plan,
+                        max_workers=self.config.parallel_workers,
+                        auto_approve=self.config.auto_approve,
+                        tools=tools,
+                        enable_action_review=self.config.enable_action_review,
+                        coding_mode=coding_mode,
+                        state_manager=state_manager,
+                        budget=budget,
+                    )
+                else:
+                    execution_success = execution_mode(
+                        plan,
+                        auto_approve=self.config.auto_approve,
+                        tools=tools,
+                        enable_action_review=self.config.enable_action_review,
+                        coding_mode=coding_mode,
+                        state_manager=state_manager,
+                        budget=budget,
+                    )
+
+                if not self._should_adaptively_replan(plan, execution_success, budget, adaptive_attempt):
+                    break
+
+                adaptive_attempt += 1
+                print(f"\n🔄 Adaptive plan regeneration ({adaptive_attempt}/{self.config.adaptive_replan_attempts})")
+                followup_plan = self._regenerate_followup_plan(
+                    user_request,
                     plan,
-                    max_workers=self.config.parallel_workers,
-                    auto_approve=self.config.auto_approve,
-                    tools=tools,
-                    enable_action_review=self.config.enable_action_review,
-                    coding_mode=coding_mode,
-                    state_manager=state_manager,
-                    budget=budget,
+                    coding_mode,
                 )
-            else:
-                execution_mode(
-                    plan,
-                    auto_approve=self.config.auto_approve,
-                    tools=tools,
-                    enable_action_review=self.config.enable_action_review,
-                    coding_mode=coding_mode,
-                    state_manager=state_manager,
-                    budget=budget,
-                )
+
+                if not followup_plan or not followup_plan.tasks:
+                    print("  ✗ Adaptive regeneration did not produce a usable plan")
+                    break
+
+                plan = followup_plan
+                result.plan = plan
+                state_manager = StateManager(plan)
+                # Continue loop to execute regenerated plan
+                continue
 
             # Phase 6: Validation Agent - Verify results
             validation = None
@@ -752,6 +778,66 @@ IMPORTANT - Address the following review feedback:
         except Exception:
             # Metrics are best-effort; do not fail the run
             pass
+
+    def _should_adaptively_replan(
+        self,
+        plan: ExecutionPlan,
+        execution_success: bool,
+        budget: ResourceBudget,
+        adaptive_attempt: int,
+    ) -> bool:
+        """Decide whether to trigger adaptive plan regeneration after execution."""
+
+        if execution_success:
+            return False
+
+        if adaptive_attempt >= self.config.adaptive_replan_attempts:
+            return False
+
+        if budget and budget.is_exceeded():
+            return False
+
+        if not plan or not plan.tasks:
+            return False
+
+        return any(task.status == TaskStatus.FAILED for task in plan.tasks)
+
+    def _regenerate_followup_plan(
+        self,
+        user_request: str,
+        previous_plan: ExecutionPlan,
+        coding_mode: bool,
+    ) -> Optional[ExecutionPlan]:
+        """Regenerate a follow-up plan that addresses failed tasks."""
+
+        failed_tasks = [task for task in previous_plan.tasks if task.status == TaskStatus.FAILED]
+        completed_tasks = [task for task in previous_plan.tasks if task.status == TaskStatus.COMPLETED]
+
+        failure_summary = "\n".join(
+            f"- {task.description} (error: {task.error or 'unknown error'})" for task in failed_tasks
+        ) or "- None recorded"
+
+        completed_summary = "\n".join(
+            f"- {task.description}" for task in completed_tasks
+        ) or "- None yet"
+
+        followup_prompt = f"""{user_request}
+
+Recent execution progress:
+Completed tasks:
+{completed_summary}
+
+Failed tasks blocking progress:
+{failure_summary}
+
+Regenerate a focused, minimal follow-up plan that avoids repeating completed work and directly
+addresses the failures so the goals can still be met. Keep tasks concise and execution-ready."""
+
+        return planning_mode(
+            followup_prompt,
+            coding_mode=coding_mode,
+            max_plan_tasks=self.config.max_plan_tasks,
+        )
 
     def _hold_and_retry_validation(
         self,

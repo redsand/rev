@@ -459,6 +459,59 @@ class TestValidationHoldBehavior(unittest.TestCase):
         self.assertFalse(result.success)
 
 
+class TestOrchestratorAdaptivePlanning(unittest.TestCase):
+    """Test adaptive plan regeneration during execution."""
+
+    @patch('rev.execution.orchestrator.concurrent_execution_mode')
+    @patch('rev.execution.orchestrator.execution_mode')
+    @patch('rev.execution.router.TaskRouter')
+    @patch('rev.execution.orchestrator.planning_mode')
+    def test_adaptive_replan_after_failure(
+        self, mock_planning, mock_router, mock_execution, mock_concurrent
+    ):
+        """Ensure execution failures trigger a focused follow-up plan."""
+
+        initial_plan = ExecutionPlan()
+        initial_plan.add_task("Apply schema change", "edit")
+
+        followup_plan = ExecutionPlan()
+        followup_plan.add_task("Retry schema change with migration script", "edit")
+
+        mock_planning.side_effect = [initial_plan, followup_plan]
+
+        mock_router.return_value = type(
+            "R", (), {"route": lambda *_a, **_k: _route_stub(enable_validation=False)}
+        )()
+
+        def execution_side_effect(plan_obj, **_kwargs):
+            if plan_obj is initial_plan:
+                plan_obj.tasks[0].status = TaskStatus.FAILED
+                plan_obj.tasks[0].error = "migration lock timeout"
+                return False
+            for task in plan_obj.tasks:
+                task.status = TaskStatus.COMPLETED
+            return True
+
+        mock_execution.side_effect = execution_side_effect
+        mock_concurrent.side_effect = execution_side_effect
+
+        config = OrchestratorConfig(
+            enable_learning=False,
+            enable_research=False,
+            enable_review=False,
+            enable_validation=False,
+            auto_approve=True,
+            adaptive_replan_attempts=1,
+        )
+
+        orchestrator = Orchestrator(Path("/test"), config)
+        result = orchestrator.execute("migrate database")
+
+        self.assertEqual(mock_planning.call_count, 2)
+        self.assertTrue(result.success)
+        self.assertEqual(result.plan, followup_plan)
+
+
 class TestOrchestratorConfig(unittest.TestCase):
     """Test orchestrator configuration."""
 

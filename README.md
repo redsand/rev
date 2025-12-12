@@ -159,11 +159,19 @@ rev "Add OAuth2 authentication"
 **📊 Controlled Execution**
 ```bash
 # Resource budgets prevent runaway execution:
-# - Max steps: 200 (configurable via REV_MAX_STEPS)
-# - Max tokens: 120,000 (REV_MAX_TOKENS)
-# - Max time: 1800s / 30min (REV_MAX_SECONDS)
+# - Max steps: 500 (configurable via REV_MAX_STEPS)
+# - Max tokens: 2,000,000 (REV_MAX_TOKENS)
+# - Max time: 3600s / 60min (REV_MAX_SECONDS)
 rev "Refactor entire authentication system"
-# Output: "📊 Resource Usage: Steps: 45/200 | Tokens: 12000/120000 | Time: 120s/1800s"
+# Output: "📊 Resource Usage: Steps: 45/500 | Tokens: 12000/2000000 | Time: 120s/3600s"
+```
+
+**🤖 Agent-Directed Adaptation**
+```bash
+# Planner adapts steps dynamically and regenerates plans when needed:
+rev "Migrate to Postgres with minimal downtime"
+# → Planner creates a focused sequence of tasks, regroups if a step fails,
+#   and continues until goals are met or budgets are reached.
 ```
 
 **🎯 Goal-Oriented Validation**
