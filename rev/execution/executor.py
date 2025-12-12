@@ -76,6 +76,12 @@ CRITICAL - AVOID LOOPS AND DUPLICATE ACTIONS:
 - After 5 exploration actions (read/search/list), you MUST make an edit.
 - If you cannot find the exact location, CREATE the file/class anyway with best-effort code.
 
+CRITICAL - ACTION TYPE REQUIREMENTS:
+- For "edit" or "add" tasks: You MUST use write_file or apply_patch to make changes. A task is NOT complete until you have actually created or modified files.
+- For "review" tasks: You may explore without editing, but summarize findings.
+- For "test" tasks: You MUST run tests using run_cmd or run_tests.
+- If exploration is blocked, immediately create the code with your current knowledge.
+
 Progress discipline for autonomous runs:
 - Move from discovery to editing quickly; make a concrete edit after your initial inspection.
 - Avoid repeatedly listing directories or re-reading the same file unless it changed.
@@ -174,6 +180,8 @@ class ExecutionContext:
         self.recent_actions: List[str] = []  # Human-readable recent actions
         self.exploration_count = 0  # Count of read/search/list calls
         self.edit_count = 0  # Count of write/patch calls
+        self.force_edit_warnings = 0  # Count of "force edit" warnings given
+        self.exploration_blocked = False  # If True, block exploration tools for edit tasks
 
     def get_code(self, path: Optional[str]) -> Optional[str]:
         """Return cached code for a path if available."""
@@ -331,6 +339,32 @@ class ExecutionContext:
             self.recent_actions.clear()
             self.exploration_count = 0
             self.edit_count = 0
+            self.force_edit_warnings = 0
+            self.exploration_blocked = False
+
+    def should_block_exploration(self, action_type: str) -> bool:
+        """Check if exploration calls should be blocked for edit/add tasks.
+
+        After multiple warnings to make edits, block further exploration
+        to force the LLM to take action.
+        """
+        with self._lock:
+            # Only block for edit/add action types
+            if action_type not in {"edit", "add"}:
+                return False
+            return self.exploration_blocked
+
+    def increment_force_edit_warning(self, action_type: str) -> int:
+        """Track force edit warnings and enable blocking after enough warnings.
+
+        Returns the current warning count.
+        """
+        with self._lock:
+            self.force_edit_warnings += 1
+            # After 2 warnings, block further exploration for edit/add tasks
+            if self.force_edit_warnings >= 2 and action_type in {"edit", "add"}:
+                self.exploration_blocked = True
+            return self.force_edit_warnings
 
 
 def _make_search_cache_key(args: Dict[str, Any]) -> Tuple[Any, ...]:
@@ -1102,14 +1136,33 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                             "content": f"WARNING: {loop_warning}. Stop exploring and make a concrete edit using write_file or apply_patch NOW."
                         })
 
+                    # Check if exploration should be blocked for edit/add tasks
+                    exploration_tools = {"read_file", "search_code", "list_dir", "tree_view", "get_repo_context"}
+                    if tool_name in exploration_tools and exec_context.should_block_exploration(current_task.action_type):
+                        print(f"  🚫 Blocking {tool_name} - exploration disabled for this task, make an edit now")
+                        messages.append({
+                            "role": "tool",
+                            "name": tool_name,
+                            "content": f"BLOCKED: Exploration is disabled. You MUST use write_file or apply_patch to make changes now. The task is '{current_task.description}'. Create the implementation with your current knowledge."
+                        })
+                        continue
+
                     # Check if too much exploration without editing
                     if exec_context.is_exploration_heavy(threshold=8):
-                        print(f"  ⚠️ Exploration budget exhausted - forcing edit mode")
-                        messages.append({
-                            "role": "user",
-                            "content": "You have done extensive exploration without making any edits. STOP searching/reading and create the code change NOW using write_file or apply_patch. If you cannot find the exact location, create the best-effort implementation."
-                        })
-                        exec_context.exploration_count = 0  # Reset to allow some more exploration after warning
+                        warning_count = exec_context.increment_force_edit_warning(current_task.action_type)
+                        if warning_count == 1:
+                            print(f"  ⚠️ Exploration budget exhausted - forcing edit mode (warning 1/2)")
+                            messages.append({
+                                "role": "user",
+                                "content": "You have done extensive exploration without making any edits. STOP searching/reading and create the code change NOW using write_file or apply_patch. If you cannot find the exact location, create the best-effort implementation."
+                            })
+                        else:
+                            print(f"  🛑 Exploration blocked - you MUST make an edit now")
+                            messages.append({
+                                "role": "user",
+                                "content": f"FINAL WARNING: Exploration is now DISABLED for this task. You MUST use write_file or apply_patch immediately. The task is: '{current_task.description}'. Based on what you've learned, create the code NOW. Do not request any more file reads or searches."
+                            })
+                        exec_context.exploration_count = 0  # Reset counter but warnings persist
 
                     # Record this tool call for deduplication tracking
                     exec_context.record_tool_call(tool_name, tool_args)
@@ -1569,14 +1622,33 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         "content": f"WARNING: {loop_warning}. Stop exploring and make a concrete edit using write_file or apply_patch NOW."
                     })
 
+                # Check if exploration should be blocked for edit/add tasks
+                exploration_tools = {"read_file", "search_code", "list_dir", "tree_view", "get_repo_context"}
+                if tool_name in exploration_tools and exec_context.should_block_exploration(task.action_type):
+                    print(f"  🚫 Blocking {tool_name} - exploration disabled for this task, make an edit now")
+                    messages.append({
+                        "role": "tool",
+                        "name": tool_name,
+                        "content": f"BLOCKED: Exploration is disabled. You MUST use write_file or apply_patch to make changes now. The task is '{task.description}'. Create the implementation with your current knowledge."
+                    })
+                    continue
+
                 # Check if too much exploration without editing
                 if exec_context.is_exploration_heavy(threshold=8):
-                    print(f"  ⚠️ Exploration budget exhausted - forcing edit mode")
-                    messages.append({
-                        "role": "user",
-                        "content": "You have done extensive exploration without making any edits. STOP searching/reading and create the code change NOW using write_file or apply_patch. If you cannot find the exact location, create the best-effort implementation."
-                    })
-                    exec_context.exploration_count = 0  # Reset to allow some more exploration after warning
+                    warning_count = exec_context.increment_force_edit_warning(task.action_type)
+                    if warning_count == 1:
+                        print(f"  ⚠️ Exploration budget exhausted - forcing edit mode (warning 1/2)")
+                        messages.append({
+                            "role": "user",
+                            "content": "You have done extensive exploration without making any edits. STOP searching/reading and create the code change NOW using write_file or apply_patch. If you cannot find the exact location, create the best-effort implementation."
+                        })
+                    else:
+                        print(f"  🛑 Exploration blocked - you MUST make an edit now")
+                        messages.append({
+                            "role": "user",
+                            "content": f"FINAL WARNING: Exploration is now DISABLED for this task. You MUST use write_file or apply_patch immediately. The task is: '{task.description}'. Based on what you've learned, create the code NOW. Do not request any more file reads or searches."
+                        })
+                    exec_context.exploration_count = 0  # Reset counter but warnings persist
 
                 # Record this tool call for deduplication tracking
                 exec_context.record_tool_call(tool_name, tool_args)

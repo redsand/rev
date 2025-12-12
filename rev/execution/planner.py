@@ -177,13 +177,13 @@ For "add multiple analysts/indicators/modules":
 
 Return ONLY a JSON array of subtasks:
 [
-  {"description": "Review existing analysts in lib/analysts.py to understand patterns", "action_type": "review", "complexity": "low"},
-  {"description": "Analyze source code in ../external-lib to identify available features", "action_type": "review", "complexity": "low"},
-  {"description": "Implement SMA analyst based on identified pattern", "action_type": "add", "complexity": "low"},
-  {"description": "Implement EMA analyst based on identified pattern", "action_type": "add", "complexity": "low"},
-  {"description": "Implement RSI analyst based on identified pattern", "action_type": "add", "complexity": "low"},
-  {"description": "Add unit tests for new analysts", "action_type": "add", "complexity": "low"},
-  {"description": "Update matrix recipes configuration", "action_type": "edit", "complexity": "low"}
+  {"description": "Review existing code to understand patterns and structure", "action_type": "review", "complexity": "low"},
+  {"description": "Analyze source code to identify available features to implement", "action_type": "review", "complexity": "low"},
+  {"description": "Implement first feature/module based on identified pattern", "action_type": "add", "complexity": "low"},
+  {"description": "Implement second feature/module based on identified pattern", "action_type": "add", "complexity": "low"},
+  {"description": "Implement third feature/module based on identified pattern", "action_type": "add", "complexity": "low"},
+  {"description": "Add unit tests for new features", "action_type": "add", "complexity": "low"},
+  {"description": "Update configuration/registry with new features", "action_type": "edit", "complexity": "low"}
 ]
 
 Keep subtasks focused and executable. Each should accomplish ONE clear goal."""
@@ -470,16 +470,16 @@ REQUIREMENTS:
 - If the task mentions multiple items (analysts, features, etc.), create ONE subtask per item
 - Start with review/analysis tasks, then implementation tasks, then test tasks
 
-Example for "add multiple indicators":
+Example for "add multiple modules/features":
 [
-  {{"description": "Review existing indicator implementations", "action_type": "review", "complexity": "low"}},
-  {{"description": "Add SMA (Simple Moving Average) indicator", "action_type": "add", "complexity": "low"}},
-  {{"description": "Add EMA (Exponential Moving Average) indicator", "action_type": "add", "complexity": "low"}},
-  {{"description": "Add RSI (Relative Strength Index) indicator", "action_type": "add", "complexity": "low"}},
-  {{"description": "Add MACD indicator", "action_type": "add", "complexity": "low"}},
-  {{"description": "Add Bollinger Bands indicator", "action_type": "add", "complexity": "low"}},
-  {{"description": "Write unit tests for new indicators", "action_type": "add", "complexity": "low"}},
-  {{"description": "Update configuration/registry", "action_type": "edit", "complexity": "low"}}
+  {{"description": "Review existing implementations to understand patterns", "action_type": "review", "complexity": "low"}},
+  {{"description": "Add first new module/feature", "action_type": "add", "complexity": "low"}},
+  {{"description": "Add second new module/feature", "action_type": "add", "complexity": "low"}},
+  {{"description": "Add third new module/feature", "action_type": "add", "complexity": "low"}},
+  {{"description": "Add fourth new module/feature", "action_type": "add", "complexity": "low"}},
+  {{"description": "Add fifth new module/feature", "action_type": "add", "complexity": "low"}},
+  {{"description": "Write unit tests for new modules", "action_type": "add", "complexity": "low"}},
+  {{"description": "Update configuration/registry with new modules", "action_type": "edit", "complexity": "low"}}
 ]
 
 Context:
