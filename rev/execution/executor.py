@@ -15,7 +15,6 @@ import re
 import threading
 from collections import OrderedDict
 from typing import Dict, Any, List, Optional, Tuple
-from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 from rev.models.task import ExecutionPlan, Task, TaskStatus
 from rev.execution.state_manager import StateManager
@@ -675,6 +674,35 @@ def _manage_message_history(messages: List[Dict], max_recent: int = 20, tracker:
     return messages
 
 
+def _trim_history_with_notice(
+    messages: List[Dict], max_recent: int = 20, tracker: 'SessionTracker' = None
+) -> Tuple[List[Dict], bool]:
+    """Trim and summarize history while warning the user when context is reduced.
+
+    Args:
+        messages: Current message history
+        max_recent: Number of recent messages to keep verbatim
+        tracker: Optional SessionTracker for enhanced summaries
+
+    Returns:
+        A tuple of (trimmed messages, whether trimming occurred)
+    """
+
+    if len(messages) <= max_recent + 1:  # +1 for optional system prompt
+        return messages, False
+
+    before_count = len(messages)
+    trimmed = _manage_message_history(messages, max_recent=max_recent, tracker=tracker)
+    after_count = len(trimmed)
+
+    print(
+        "  ℹ️  Context window trimmed: "
+        f"{before_count} → {after_count} messages (keeping last {max_recent} + summary to avoid token overflow)"
+    )
+
+    return trimmed, True
+
+
 def execution_mode(
     plan: ExecutionPlan,
     approved: bool = False,
@@ -1153,13 +1181,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
         }, "INFO")
 
         # OPTIMIZATION: Manage message history to prevent unbounded growth
-        # Trim every 10 messages or when it exceeds 30 messages
-        if len(messages) > 30:
-            messages_before = len(messages)
-            messages = _manage_message_history(messages, max_recent=20, tracker=session_tracker)
-            messages_trimmed = messages_before - len(messages)
-            if messages_trimmed > 0:
-                print(f"  ℹ️  Message history optimized: {messages_before} → {len(messages)} messages")
+        messages, _ = _trim_history_with_notice(messages, max_recent=20, tracker=session_tracker)
 
     if not plan.is_complete() and iteration >= max_iterations:
         error_msg = "Exceeded execution iteration limit"
@@ -1571,123 +1593,23 @@ def concurrent_execution_mode(
     state_manager: Optional[StateManager] = None,
     budget: Optional["ResourceBudget"] = None,
 ) -> bool:
-    """Execute tasks in the plan concurrently with dependency tracking.
+    """Sequential wrapper to comply with single-worker execution only."""
 
-    This function executes tasks in parallel while respecting task dependencies.
-    It uses a ThreadPoolExecutor to manage concurrent task execution and ensures
-    only tasks with satisfied dependencies are executed.
-
-    Args:
-        plan: ExecutionPlan with tasks to execute
-        max_workers: Maximum number of concurrent tasks (default: 2, must be > 0)
-        auto_approve: If True (default), runs autonomously without initial approval
-        tools: List of available tools for LLM function calling (optional)
-        enable_action_review: If True, review each action before execution (default: False)
-        coding_mode: If True, use coding-specific execution prompts
-
-    Returns:
-        True if all tasks completed successfully, False otherwise
-    """
-    # Validate max_workers parameter
     if max_workers <= 0:
         raise ValueError(f"max_workers must be greater than 0, got {max_workers}")
 
-    print("\n" + "=" * 60)
-    print("CONCURRENT EXECUTION MODE")
-    print("=" * 60)
-    effective_workers = max(1, min(max_workers, len(plan.tasks)))
-    if effective_workers != max_workers:
-        print(f"  ℹ️  Max concurrent tasks: {max_workers} (effective: {effective_workers} based on {len(plan.tasks)} task(s))")
-    else:
-        print(f"  ℹ️  Max concurrent tasks: {effective_workers}")
+    if max_workers != 1:
+        print(f"\n⚠️ Parallel execution is disabled. Forcing sequential mode (requested {max_workers} workers).")
 
-    if not auto_approve:
-        print("\nThis will execute tasks in parallel with full autonomy.")
-        print("⚠️  Note: Destructive operations will still require confirmation.")
-        response = input("Start execution? [y/N]: ").strip().lower()
-        if response not in ["y", "yes"]:
-            print("Execution cancelled.")
-            return False
-
-    print("\n✓ Starting concurrent autonomous execution...\n")
-    if auto_approve:
-        print("  ℹ️  Running in autonomous mode. Destructive operations will prompt for confirmation.\n")
-
-    # Get system info for context
-    sys_info = get_system_info_cached()
-    exec_context = ExecutionContext(plan)
-    tool_limits = {
-        "read_file": MAX_READ_FILE_PER_TASK,
-        "search_code": MAX_SEARCH_CODE_PER_TASK,
-        "run_cmd": MAX_RUN_CMD_PER_TASK,
-    }
-    budget_warned_tasks = set()
-
-    # Use ThreadPoolExecutor for concurrent execution
-    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
-        futures = {}
-
-        while plan.has_pending_tasks():
-            # Get tasks that are ready to execute (dependencies met)
-            available_slots = effective_workers - len(futures)
-            if available_slots > 0:
-                executable_tasks = plan.get_executable_tasks(max_count=available_slots)
-
-                # Submit new tasks
-                for task in executable_tasks:
-                    if budget and budget.is_exceeded() and task.task_id not in budget_warned_tasks:
-                        print(f"⚠️ Resource budget exceeded before scheduling task {task.task_id}: {budget.get_usage_summary()} (continuing)")
-                        budget_warned_tasks.add(task.task_id)
-                    future = executor.submit(
-                        execute_single_task, task, plan, sys_info,
-                        auto_approve, tools, enable_action_review, coding_mode, state_manager,
-                        exec_context, tool_limits, budget
-                    )
-                    futures[future] = task
-
-            # Wait for at least one task to complete
-            if futures:
-                done, pending = wait(futures.keys(), return_when=FIRST_COMPLETED)
-                for future in done:
-                    task = futures.pop(future)
-                    try:
-                        success = future.result()
-                        if not success:
-                            print(f"  ⚠ Task {task.task_id + 1} failed: {task.error}")
-                    except Exception as e:
-                        print(f"  ✗ Task {task.task_id + 1} crashed: {e}")
-                        plan.mark_task_failed(task, str(e))
-                    break  # Process one completion at a time
-            else:
-                # No tasks running and no tasks ready - check if we're stuck
-                if plan.has_pending_tasks():
-                    print("  ⚠ Warning: Tasks have unmet dependencies. Possible deadlock.")
-                    break
-
-    # Final summary
-    print("\n" + "=" * 60)
-    print("EXECUTION SUMMARY")
-    print("=" * 60)
-    print(plan.get_summary())
-    print()
-
-    for i, task in enumerate(plan.tasks, 1):
-        status_icon = {
-            TaskStatus.COMPLETED: "✓",
-            TaskStatus.FAILED: "✗",
-            TaskStatus.IN_PROGRESS: "→",
-            TaskStatus.PENDING: "○",
-            TaskStatus.STOPPED: "⏸"
-        }.get(task.status, "?")
-
-        deps_str = f" (depends on: {task.dependencies})" if task.dependencies else ""
-        print(f"{status_icon} {i}. {task.description} [{task.status.value}]{deps_str}")
-        if task.error:
-            print(f"    Error: {task.error}")
-
-    print("=" * 60)
-
-    return all(t.status == TaskStatus.COMPLETED for t in plan.tasks)
+    return execution_mode(
+        plan,
+        auto_approve=auto_approve,
+        tools=tools,
+        enable_action_review=enable_action_review,
+        coding_mode=coding_mode,
+        state_manager=state_manager,
+        budget=budget,
+    )
 
 
 def fix_validation_failures(

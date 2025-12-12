@@ -1170,7 +1170,7 @@ class TestREPLMode:
             output = captured_output.getvalue()
 
             # Should show escape key indicator
-            assert "[ESC pressed - submitting immediately]" in output
+            assert "[ESC pressed - input cleared]" in output
         finally:
             sys.stdout = old_stdout
 

@@ -65,7 +65,7 @@ def main():
         type=int,
         default=1,
         metavar="N",
-        help="Number of concurrent tasks to run in parallel (default: 1 = sequential; use >1 to enable parallel)"
+        help="Number of concurrent tasks to run in parallel (forced to 1; parallel execution is disabled)"
     )
     parser.add_argument(
         "--review",
@@ -159,6 +159,11 @@ def main():
 
 
     args = parser.parse_args()
+
+    # Enforce single-worker execution regardless of CLI input
+    if args.parallel != 1:
+        print(f"⚠️ Parallel execution is disabled. Forcing --parallel=1 (requested {args.parallel}).")
+        args.parallel = 1
 
     # Initialize debug logging if requested
     debug_logger = DebugLogger.initialize(enabled=args.debug)

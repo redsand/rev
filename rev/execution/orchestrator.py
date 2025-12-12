@@ -152,6 +152,10 @@ class OrchestratorConfig:
     max_plan_tasks: int = MAX_PLAN_TASKS
 
     def __post_init__(self):
+        # Enforce strictly sequential execution (single worker only)
+        if self.parallel_workers != 1:
+            self.parallel_workers = 1
+        
         # If legacy max_retries is provided, apply to all retry knobs for backward compatibility
         if self.max_retries is not None:
             self.orchestrator_retries = self.max_retries
@@ -301,6 +305,9 @@ class Orchestrator:
         print(f"   Mode: {route.mode} | Research depth: {self.config.research_depth}")
         print(f"   Plan task cap: {self.config.max_plan_tasks}")
         print(f"   Validation mode: {self.config.validation_mode}")
+
+        # Parallel execution is disabled globally; enforce single worker
+        self.config.parallel_workers = 1
 
         route_agents = []
         if route.enable_learning:

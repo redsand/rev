@@ -9,7 +9,7 @@ from rev.execution import planning_mode, execution_mode
 from rev.execution.orchestrator import run_orchestrated
 from rev.models.task import TaskStatus
 from rev import config
-from rev.config import set_escape_interrupt
+from rev.config import EscapeInterrupt, set_escape_interrupt
 from rev.terminal.input import get_input_with_escape, get_history
 from rev.terminal.commands import execute_command
 from rev.terminal.formatting import colorize, Colors, Symbols, get_color_status
@@ -70,7 +70,7 @@ def repl_mode():
             user_input, escape_pressed = get_input_with_escape(prompt)
             user_input = user_input.strip()
             if escape_pressed:
-                print(f"  {colorize('[ESC pressed - submitting immediately]', Colors.BRIGHT_YELLOW)}")
+                print(f"  {colorize('[ESC pressed - input cleared]', Colors.BRIGHT_YELLOW)}")
         except (KeyboardInterrupt, EOFError):
             print("\nExiting REPL")
             break
@@ -101,28 +101,33 @@ def repl_mode():
         get_history().add_input(user_input)
         set_escape_interrupt(False)
         mode_cfg = session_context.get("mode_config", {})
-        with escape_monitor_context(check_interval=0.05):
-            if mode_cfg.get("orchestrate", False):
-                result = run_orchestrated(
-                    user_input,
-                    config.ROOT,
-                    enable_learning=mode_cfg.get("learn", False),
-                    enable_research=mode_cfg.get("research", True),
-                    enable_review=mode_cfg.get("review", True),
-                    enable_validation=mode_cfg.get("validate", True),
-                    review_strictness=mode_cfg.get("review_strictness", "moderate"),
-                    enable_action_review=mode_cfg.get("action_review", False),
-                    enable_auto_fix=mode_cfg.get("auto_fix", False),
-                    parallel_workers=mode_cfg.get("parallel", 1),
-                    auto_approve=True,
-                    research_depth=mode_cfg.get("research_depth", "medium"),
-                )
-                plan = result.plan if hasattr(result, "plan") and result.plan else None
-            else:
-                plan = planning_mode(user_input)
-                tools = get_available_tools()
-                execution_mode(plan, auto_approve=True, tools=tools)
-        set_escape_interrupt(False)
+        try:
+            with escape_monitor_context(check_interval=0.05):
+                if mode_cfg.get("orchestrate", False):
+                    result = run_orchestrated(
+                        user_input,
+                        config.ROOT,
+                        enable_learning=mode_cfg.get("learn", False),
+                        enable_research=mode_cfg.get("research", True),
+                        enable_review=mode_cfg.get("review", True),
+                        enable_validation=mode_cfg.get("validate", True),
+                        review_strictness=mode_cfg.get("review_strictness", "moderate"),
+                        enable_action_review=mode_cfg.get("action_review", False),
+                        enable_auto_fix=mode_cfg.get("auto_fix", False),
+                        parallel_workers=mode_cfg.get("parallel", 1),
+                        auto_approve=True,
+                        research_depth=mode_cfg.get("research_depth", "medium"),
+                    )
+                    plan = result.plan if hasattr(result, "plan") and result.plan else None
+                else:
+                    plan = planning_mode(user_input)
+                    tools = get_available_tools()
+                    execution_mode(plan, auto_approve=True, tools=tools)
+        except EscapeInterrupt:
+            print(f"  {colorize('[ESC pressed - execution cancelled]', Colors.BRIGHT_YELLOW)}")
+            plan = None
+        finally:
+            set_escape_interrupt(False)
         if plan:
             for task in plan.tasks:
                 if task.status == TaskStatus.COMPLETED:

@@ -375,9 +375,11 @@ class TestPlanReview(unittest.TestCase):
         ])
 
         call_count = {"n": 0}
+        calls = []
 
-        def fake_chat(*args, **kwargs):
+        def fake_chat(messages, **kwargs):
             call_count["n"] += 1
+            calls.append(messages)
             return next(responses)
 
         reviewer.ollama_chat = fake_chat
@@ -395,6 +397,10 @@ class TestPlanReview(unittest.TestCase):
         )
 
         self.assertEqual(call_count["n"], 2)
+        self.assertIn("Return ONLY valid JSON", calls[0][1]["content"])
+        retry_user_prompt = calls[1][-1]["content"]
+        self.assertIn("could not be parsed as JSON", retry_user_prompt)
+        self.assertIn("{ bad json", retry_user_prompt)
         self.assertEqual(review.decision.value, "approved")
         self.assertAlmostEqual(review.confidence_score, 0.91)
 

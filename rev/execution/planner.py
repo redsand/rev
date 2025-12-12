@@ -16,6 +16,7 @@ from rev.llm.client import ollama_chat
 from rev.config import (
     MAX_LLM_TOKENS_PER_RUN,
     MAX_PLAN_TASKS,
+    ensure_escape_is_cleared,
     get_system_info_cached,
 )
 from rev import config
@@ -558,6 +559,8 @@ def planning_mode(
     sys_info = get_system_info_cached()
     context = get_repo_context()
 
+    ensure_escape_is_cleared("Planning interrupted")
+
     # Format available tools for the planning prompt
     tools_description = _format_available_tools(tools)
 
@@ -635,6 +638,7 @@ After gathering information with tools, generate a comprehensive execution plan 
     ]
 
     print("→ Generating execution plan...")
+    ensure_escape_is_cleared("Planning interrupted before LLM call")
     response = _call_llm_with_tools(
         messages,
         tools,
@@ -642,6 +646,7 @@ After gathering information with tools, generate a comprehensive execution plan 
         model_name=model_name,
         model_supports_tools=model_supports_tools,
     )
+    ensure_escape_is_cleared("Planning interrupted")
 
     if not isinstance(response, dict):
         error_msg = "Planning failed: LLM returned no response"

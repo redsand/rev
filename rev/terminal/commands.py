@@ -892,13 +892,13 @@ Available modes:
                 • Medium research depth
                 • Moderate review strictness
                 • Validation enabled
-                • Parallel execution (2 workers)
+                • Sequential execution (single worker)
 
   deep        - Comprehensive analysis and validation
                 • Deep research + learning
                 • Strict review + action review
                 • Full validation with auto-fix
-                • Parallel execution (3 workers)
+                • Sequential execution (single worker)
 
 Aliases:
   standard -> advanced

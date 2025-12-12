@@ -269,13 +269,14 @@ class TestOrchestratorReviewHandling(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertIn("rejected", result.errors[0].lower())
 
+    @patch('rev.execution.orchestrator.execution_mode')
     @patch('rev.execution.router.TaskRouter')
     @patch('rev.execution.orchestrator.concurrent_execution_mode')
     @patch('rev.execution.orchestrator.review_execution_plan')
     @patch('rev.execution.orchestrator.planning_mode')
     @patch('rev.execution.orchestrator.research_codebase')
     def test_approved_proceeds_to_execution(
-        self, mock_research, mock_planning, mock_review, mock_execution, mock_router
+        self, mock_research, mock_planning, mock_review, mock_concurrent, mock_router, mock_execution_mode
     ):
         """Test that APPROVED plans proceed to execution."""
         # Setup mock plan
@@ -303,7 +304,8 @@ class TestOrchestratorReviewHandling(unittest.TestCase):
             for task in plan_obj.tasks:
                 task.status = TaskStatus.COMPLETED
 
-        mock_execution.side_effect = mark_completed
+        mock_execution_mode.side_effect = mark_completed
+        mock_concurrent.side_effect = AssertionError("Concurrent execution should not be used when parallelism is disabled")
 
         # Create orchestrator
         config = OrchestratorConfig(
@@ -321,8 +323,9 @@ class TestOrchestratorReviewHandling(unittest.TestCase):
         # Verify execution proceeded past review phase
         self.assertNotEqual(result.phase_reached, AgentPhase.REVIEW)
 
-        # Verify execution was called
-        mock_execution.assert_called_once()
+        # Verify sequential execution was used
+        mock_execution_mode.assert_called_once()
+        mock_concurrent.assert_not_called()
 
 
 class TestValidationHoldBehavior(unittest.TestCase):
@@ -523,7 +526,7 @@ class TestOrchestratorConfig(unittest.TestCase):
         self.assertTrue(config.enable_review)
         self.assertTrue(config.enable_validation)
         self.assertEqual(config.review_strictness, ReviewStrictness.MODERATE)
-        self.assertEqual(config.parallel_workers, 2)
+        self.assertEqual(config.parallel_workers, 1)
         self.assertTrue(config.auto_approve)
 
     def test_custom_config(self):
@@ -536,7 +539,7 @@ class TestOrchestratorConfig(unittest.TestCase):
         )
         self.assertFalse(config.enable_learning)
         self.assertEqual(config.review_strictness, ReviewStrictness.STRICT)
-        self.assertEqual(config.parallel_workers, 4)
+        self.assertEqual(config.parallel_workers, 1)
         self.assertFalse(config.auto_approve)
 
 
