@@ -761,12 +761,7 @@ def execution_mode(
         if budget:
             budget.update_time()
             if budget.is_exceeded():
-                print("✗ Resource budget exceeded before starting task loop")
-                plan.mark_failed("Resource budget exceeded")
-                if state_manager and current_task:
-                    state_manager.on_task_failed(current_task)
-                session_tracker.track_task_failed(current_task.description if current_task else "execution", "budget_exceeded")
-                break
+                print(f"⚠️ Resource budget exceeded before starting task loop: {budget.get_usage_summary()} (continuing)")
 
         print(f"\n[Task {plan.current_index + 1}/{len(plan.tasks)}] {current_task.description}")
         print(f"[Type: {current_task.action_type}]")
@@ -867,14 +862,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                     budget.update_tokens(usage.get("total", 0) or 0)
                     budget.update_time()
                     if budget.is_exceeded():
-                        error_msg = "Resource budget exceeded during execution"
-                        print(f"  ✗ {error_msg}")
-                        plan.mark_failed(error_msg)
-                        if state_manager:
-                            state_manager.on_task_failed(current_task)
-                        session_tracker.track_task_failed(current_task.description, error_msg)
-                        task_complete = True
-                        break
+                        print(f"  ⚠️ Resource budget exceeded during execution: {budget.get_usage_summary()} (continuing)")
 
             msg = response.get("message", {})
             content = msg.get("content", "")
@@ -1303,11 +1291,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
         if budget:
             budget.update_time()
             if budget.is_exceeded():
-                plan.mark_task_failed(task, "Resource budget exceeded")
-                if state_manager:
-                    state_manager.on_task_failed(task)
-                _log_usage(False)
-                return False
+                print(f"⚠️ Resource budget exceeded for task {task.task_id + 1}: {budget.get_usage_summary()} (continuing)")
 
         call_tools = tools if tools_enabled and model_supports_tools else None
         llm_messages = _prepare_llm_messages(messages, exec_context)
@@ -1342,11 +1326,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                 budget.update_tokens(usage.get("total", 0) or 0)
                 budget.update_time()
                 if budget.is_exceeded():
-                    plan.mark_task_failed(task, "Resource budget exceeded during execution")
-                    if state_manager:
-                        state_manager.on_task_failed(task)
-                    _log_usage(False)
-                    return False
+                    print(f"⚠️ Resource budget exceeded during execution for task {task.task_id + 1}: {budget.get_usage_summary()} (continuing)")
 
         msg = response.get("message", {})
         content = msg.get("content", "")
@@ -1622,8 +1602,7 @@ def concurrent_execution_mode(
                 # Submit new tasks
                 for task in executable_tasks:
                     if budget and budget.is_exceeded():
-                        plan.mark_task_failed(task, "Resource budget exceeded")
-                        continue
+                        print(f"⚠️ Resource budget exceeded before scheduling task {task.task_id}: {budget.get_usage_summary()} (continuing)")
                     future = executor.submit(
                         execute_single_task, task, plan, sys_info,
                         auto_approve, tools, enable_action_review, coding_mode, state_manager,

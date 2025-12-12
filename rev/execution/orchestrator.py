@@ -353,10 +353,7 @@ class Orchestrator:
                 self._update_phase(AgentPhase.LEARNING)
                 budget.update_step()  # Track phase transition
                 if budget.is_exceeded():
-                    print(f"\n⚠️ Resource budget exceeded during learning phase!")
-                    result.errors.append("Resource budget exceeded during learning phase")
-                    result.phase_reached = AgentPhase.LEARNING
-                    return result
+                    print(f"\n⚠️ Resource budget exceeded during learning phase! Usage: {budget.get_usage_summary()}")
                 suggestions = self.learning_agent.get_suggestions(user_request)
                 if suggestions["similar_patterns"]:
                     display_learning_suggestions(suggestions, user_request)
@@ -367,10 +364,7 @@ class Orchestrator:
                 self._update_phase(AgentPhase.RESEARCH)
                 budget.update_step()
                 if budget.is_exceeded():
-                    print(f"\n⚠️ Resource budget exceeded during research phase!")
-                    result.errors.append("Resource budget exceeded during research phase")
-                    result.phase_reached = AgentPhase.RESEARCH
-                    return result
+                    print(f"\n⚠️ Resource budget exceeded during research phase! Usage: {budget.get_usage_summary()}")
                 quick_mode = self.config.research_depth == "shallow"
                 research_findings = research_codebase(
                     user_request,
@@ -392,10 +386,7 @@ class Orchestrator:
             self._update_phase(AgentPhase.PLANNING)
             budget.update_step()
             if budget.is_exceeded():
-                print(f"\n⚠️ Resource budget exceeded during planning phase!")
-                result.errors.append("Resource budget exceeded during planning phase")
-                result.phase_reached = AgentPhase.PLANNING
-                return result
+                print(f"\n⚠️ Resource budget exceeded during planning phase! Usage: {budget.get_usage_summary()}")
             plan = planning_mode(
                 user_request,
                 coding_mode=coding_mode,
@@ -415,10 +406,7 @@ class Orchestrator:
                 self._update_phase(AgentPhase.REVIEW)
                 budget.update_step()
                 if budget.is_exceeded():
-                    print(f"\n⚠️ Resource budget exceeded during review phase!")
-                    result.errors.append("Resource budget exceeded during review phase")
-                    result.phase_reached = AgentPhase.REVIEW
-                    return result
+                    print(f"\n⚠️ Resource budget exceeded during review phase! Usage: {budget.get_usage_summary()}")
 
                 # Retry loop for plan regeneration
                 planning_retry_count = 0
@@ -502,10 +490,7 @@ IMPORTANT - Address the following review feedback:
             self._update_phase(AgentPhase.EXECUTION)
             budget.update_step()
             if budget.is_exceeded():
-                print(f"\n⚠️ Resource budget exceeded before execution phase!")
-                result.errors.append("Resource budget exceeded before execution phase")
-                result.phase_reached = AgentPhase.EXECUTION
-                return result
+                print(f"\n⚠️ Resource budget exceeded before execution phase! Usage: {budget.get_usage_summary()}")
             # Note: Task execution steps are tracked inside execution_mode/concurrent_execution_mode
             # per-task, not consumed upfront to allow accurate tracking of partial execution
             tools = get_available_tools()
@@ -537,25 +522,17 @@ IMPORTANT - Address the following review feedback:
                 self._update_phase(AgentPhase.VALIDATION)
                 budget.update_step()
                 if budget.is_exceeded():
-                    print(f"\n⚠️ Resource budget exceeded during validation phase! Skipping validation.")
-                    result.errors.append("Resource budget exceeded during validation phase (validation skipped)")
-                    result.phase_reached = AgentPhase.VALIDATION
-                    result.validation_status = ValidationStatus.SKIPPED
-                    result.agent_insights["validation"] = {
-                        "status": ValidationStatus.SKIPPED.value,
-                        "reason": "resource_budget_exceeded",
-                    }
-                    result.no_retry = True
-                else:
-                    validation = validate_execution(
-                        plan,
-                        user_request,
-                        run_tests=True,
-                        run_linter=True,
-                        check_syntax=True,
-                        enable_auto_fix=self.config.enable_auto_fix,
-                        validation_mode=self.config.validation_mode,
-                    )
+                    print(f"\n⚠️ Resource budget exceeded during validation phase! Usage: {budget.get_usage_summary()} (continuing)")
+                validation = validate_execution(
+                    plan,
+                    user_request,
+                    run_tests=True,
+                    run_linter=True,
+                    check_syntax=True,
+                    enable_auto_fix=self.config.enable_auto_fix,
+                    validation_mode=self.config.validation_mode,
+                )
+                if validation:
                     result.validation_status = validation.overall_status
                     result.agent_insights["validation"] = {
                         "status": validation.overall_status.value,
@@ -564,13 +541,13 @@ IMPORTANT - Address the following review feedback:
                         "auto_fixed": validation.auto_fixed,
                         "commands": validation.details.get("commands_run", []),
                     }
-                result.validation_status = validation.overall_status
-                result.agent_insights["validation"] = {
-                    "status": validation.overall_status.value,
-                    "checks_passed": sum(1 for r in validation.results if r.status == ValidationStatus.PASSED),
-                    "checks_failed": sum(1 for r in validation.results if r.status == ValidationStatus.FAILED),
-                    "auto_fixed": validation.auto_fixed
-                }
+                else:
+                    print("⚠️ Validation returned no result; marking as skipped")
+                    result.validation_status = ValidationStatus.SKIPPED
+                    result.agent_insights["validation"] = {
+                        "status": ValidationStatus.SKIPPED.value,
+                        "reason": "validation_returned_none",
+                    }
 
                 # Auto-fix loop for validation failures
                 if validation and validation.overall_status == ValidationStatus.FAILED:
