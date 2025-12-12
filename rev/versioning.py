@@ -6,9 +6,10 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+import subprocess
 from typing import Dict, Optional
 
-from rev._version import REV_VERSION
+from rev._version import REV_VERSION, REV_GIT_COMMIT
 
 
 def _version_from_setup() -> Optional[str]:
@@ -43,14 +44,32 @@ def get_version() -> str:
         return "unknown"
 
 
+def get_git_commit(short: bool = True) -> Optional[str]:
+    """Return the git commit hash, preferring the build-time value if present."""
+    if REV_GIT_COMMIT and REV_GIT_COMMIT != "unknown":
+        return REV_GIT_COMMIT[:7] if short else REV_GIT_COMMIT
+
+    try:
+        repo_root = Path(__file__).resolve().parent.parent
+        cmd = ["git", "rev-parse", "--short" if short else "HEAD"]
+        commit = subprocess.check_output(cmd, cwd=repo_root, stderr=subprocess.DEVNULL)
+        return commit.decode().strip()
+    except Exception:
+        return None
+
+
 def build_version_output(model: str, system_info: Dict[str, str]) -> str:
     """Format detailed version information for display."""
 
     version = get_version()
+    commit = get_git_commit(short=True)
 
     output = ["\nRev - Autonomous AI Development System"]
     output.append("=" * 60)
-    output.append(f"  Version:          {version}")
+    if commit:
+        output.append(f"  Version:          {version} (commit {commit})")
+    else:
+        output.append(f"  Version:          {version}")
     output.append("  Architecture:     Multi-Agent Orchestration")
     output.append(f"  Model:            {model}")
     output.append("\nSystem:")
@@ -59,4 +78,3 @@ def build_version_output(model: str, system_info: Dict[str, str]) -> str:
     output.append(f"  Python:           {system_info['python_version']}")
 
     return "\n".join(output)
-

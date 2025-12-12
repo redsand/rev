@@ -8,7 +8,8 @@ param(
     [switch]$Coverage,
     [switch]$Clean,
     [switch]$CleanVenv,
-    [switch]$Help
+    [switch]$Help,
+    [switch]$Publish
 )
 
 # Colors for output
@@ -20,7 +21,7 @@ $WHITE = "White"
 
 # Script information
 $SCRIPT_NAME = "rev Build Script"
-$SCRIPT_VERSION = "1.0.0"
+$SCRIPT_VERSION = "1.1.0"
 
 function Write-Status {
     param([string]$Message)
@@ -219,6 +220,53 @@ function Validate-Build {
     }
 }
 
+function Stamp-GitCommit {
+    # Update rev/_version.py with current git commit for packaged artifacts
+    try {
+        $repoRoot = Split-Path $PSScriptRoot
+        $commit = git -C $repoRoot rev-parse HEAD 2>$null
+        if (-not $commit) {
+            Write-WarningMsg "Git commit not found; leaving REV_GIT_COMMIT unchanged"
+            return
+        }
+        $versionFile = Join-Path $repoRoot "rev\_version.py"
+        if (-not (Test-Path $versionFile)) {
+            Write-WarningMsg "Version file not found at $versionFile"
+            return
+        }
+        $content = Get-Content $versionFile -Raw
+        $newContent = $content -replace 'REV_GIT_COMMIT\s*=\s*".*"', "REV_GIT_COMMIT = `"$commit`""
+        Set-Content $versionFile $newContent -Encoding UTF8
+        Write-Status "Stamped REV_GIT_COMMIT=$($commit.Substring(0,7))"
+    }
+    catch {
+        Write-WarningMsg "Failed to stamp git commit: $($_.Exception.Message)"
+    }
+}
+
+function Build-Wheel {
+    Write-Status "Building wheel..."
+    if (-not (Test-CommandExists "python")) {
+        Write-ErrorExit "Python not found for build"
+    }
+    & python -m build
+    if ($LASTEXITCODE -ne 0) {
+        Write-ErrorExit "Wheel build failed"
+    }
+}
+
+function Publish-Package {
+    param([string]$Repository = "pypi")
+    Write-Status "Publishing to $Repository via twine..."
+    if (-not (Test-CommandExists "twine")) {
+        Write-ErrorExit "twine not installed. Install with: pip install twine"
+    }
+    & twine upload --repository $Repository dist/*
+    if ($LASTEXITCODE -ne 0) {
+        Write-ErrorExit "twine upload failed"
+    }
+}
+
 # Function to clean build artifacts
 function Clean-Build {
     Write-Status "Cleaning build artifacts..."
@@ -262,12 +310,14 @@ function Show-Help {
     Write-Host "  -Coverage    Run tests with coverage report"
     Write-Host "  -Clean       Clean build artifacts"
     Write-Host "  -CleanVenv   Clean build artifacts and virtual environment"
+    Write-Host "  -Publish     Stamp commit, build wheel, and upload via twine"
     Write-Host "  -Help        Show this help message"
     Write-Host ""
     Write-Host "Examples:"
     Write-Host "  .\build.ps1                    # Basic setup"
     Write-Host "  .\build.ps1 -Dev -Test         # Development setup with tests"
     Write-Host "  .\build.ps1 -Full -Coverage    # Full setup with coverage"
+    Write-Host "  .\build.ps1 -Publish           # Stamp commit, build, and upload"
 }
 
 # Main function
@@ -310,6 +360,14 @@ function Main {
     
     # Validate build
     Validate-Build
+
+    # Stamp commit and build wheel/sdist
+    Stamp-GitCommit
+    Build-Wheel
+
+    if ($Publish) {
+        Publish-Package
+    }
     
     Write-Host ""
     Write-Host "================================" -ForegroundColor $GREEN
