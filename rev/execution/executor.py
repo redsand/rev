@@ -69,6 +69,14 @@ Work methodically:
 4. Validate changes (run tests)
 5. Report completion
 
+Progress discipline for autonomous runs:
+- Move from discovery to editing quickly; make a concrete edit after your initial inspection.
+- Avoid repeatedly listing directories or re-reading the same file unless it changed.
+- If the task implies creating or updating a file/class/module, do so proactively with apply_patch/write_file.
+- Do not burn iterations on tree views—prefer a single listing, then edit.
+- If you feel stuck, create the best-effort patch that addresses the task instead of looping on exploration.
+- When resource/iteration budgets warn or near exhaustion, stop re-listing and commit the best feasible edit immediately.
+
 Use unified diffs (apply_patch) for editing files. Always preserve formatting.
 After making changes, run tests to ensure nothing broke.
 
@@ -85,6 +93,8 @@ When the task involves code changes:
 2. Make changes safely:
    - Use apply_patch with unified diffs instead of overwriting files blindly.
    - Keep changes minimal, consistent, and well-structured.
+   - If a file/class/function is missing, create it immediately instead of re-listing directories.
+   - If resource or iteration budgets start warning, pause further exploration and finish the best viable patch.
 3. Validate:
    - Use run_tests with an appropriate command (e.g. 'pytest -q') AFTER making changes.
    - If tests fail, inspect the output and fix the issues before declaring completion.
@@ -1611,6 +1621,7 @@ def concurrent_execution_mode(
         "search_code": MAX_SEARCH_CODE_PER_TASK,
         "run_cmd": MAX_RUN_CMD_PER_TASK,
     }
+    budget_warned_tasks = set()
 
     # Use ThreadPoolExecutor for concurrent execution
     with ThreadPoolExecutor(max_workers=effective_workers) as executor:
