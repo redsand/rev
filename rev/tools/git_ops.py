@@ -648,6 +648,32 @@ def run_cmd(cmd: str, timeout: int = 300) -> str:
     ok = parts0 and (parts0[0] in ALLOW_CMDS or parts0[0] == "npx")
     if not ok:
         return json.dumps({"blocked": parts0, "allow": sorted(ALLOW_CMDS)})
+
+    # Short-circuit repeated git clones to an existing destination
+    tokens = shlex.split(cmd)
+    if len(tokens) >= 2 and tokens[0] == "git" and tokens[1] == "clone":
+        # Identify destination directory if explicitly provided
+        dest_tokens = [t for t in tokens[2:] if not t.startswith("-")]
+        dest: Optional[str] = None
+        if len(dest_tokens) >= 2:
+            dest = dest_tokens[-1]
+        elif len(dest_tokens) == 1 and "://" not in dest_tokens[0]:
+            dest = dest_tokens[0]
+
+        if dest:
+            dest_path = pathlib.Path(dest)
+            if not dest_path.is_absolute():
+                dest_path = ROOT / dest_path
+
+            if dest_path.exists():
+                return json.dumps({
+                    "skipped": True,
+                    "reason": "destination already exists; skipping git clone",
+                    "path": str(dest_path),
+                    "cmd": cmd,
+                    "rc": 0,
+                })
+
     try:
         result = _run_shell_streamed(
             cmd,
