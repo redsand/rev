@@ -2,14 +2,18 @@
 # -*- coding: utf-8 -*-
 """Tool registry and execution for rev."""
 
+from __future__ import annotations
+
 import json
 import os
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, TYPE_CHECKING
 
 from rev import config
 from rev.debug_logger import get_logger
-from rev.execution.timeout_manager import TimeoutManager, TimeoutConfig
+
+if TYPE_CHECKING:  # pragma: no cover - used only for type hints
+    from rev.execution.timeout_manager import TimeoutManager, TimeoutConfig
 
 # Import tool functions from their respective modules
 from rev.tools.file_ops import (
@@ -149,13 +153,16 @@ _TIMEOUT_PROTECTED_TOOLS = {
     "run_all_analysis"
 }
 
-def _get_timeout_manager() -> TimeoutManager:
+def _get_timeout_manager() -> TimeoutManager | None:
     """Get or create the global timeout manager."""
     global _TIMEOUT_MANAGER
     if _TIMEOUT_MANAGER is None:
         # Check if timeouts are disabled via environment variable
         if os.getenv("REV_DISABLE_TIMEOUTS", "0") == "1":
             return None
+        # Import lazily to avoid circular import with planning modules
+        from rev.execution.timeout_manager import TimeoutManager, TimeoutConfig
+
         _TIMEOUT_MANAGER = TimeoutManager(TimeoutConfig.from_env())
     return _TIMEOUT_MANAGER
 
