@@ -34,7 +34,9 @@ setup(
     author="Rev Team",
     python_requires=">=3.8",
     install_requires=requirements,
-    packages=find_packages(exclude=["tests", "tests.*", "examples", "examples.*"]),
+    packages=find_packages(
+        exclude=["tests", "tests.*", "examples", "examples.*", "build", "build.*"]
+    ),
     entry_points={
         "console_scripts": [
             "rev=rev.main:main",

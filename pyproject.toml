@@ -60,7 +60,7 @@ Repository = "https://github.com/redsand/rev"
 rev = "rev.main:main"
 
 [tool.setuptools.packages.find]
-exclude = ["tests*", "examples*", ".git*", "__pycache__*"]
+exclude = ["tests*", "examples*", "build*", ".git*", "__pycache__*"]
 
 [tool.black]
 line-length = 100
