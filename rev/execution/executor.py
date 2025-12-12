@@ -731,7 +731,6 @@ def execution_mode(
         "run_cmd": MAX_RUN_CMD_PER_TASK,
     }
     budget_warned_tasks = set()
-    budget_warned_tasks = set()
 
     while not plan.is_complete() and iteration < max_iterations:
         # Check for escape key interrupt

@@ -99,7 +99,8 @@ def is_scary_operation(tool_name: str, args: Dict[str, Any], action_type: str = 
 
     # Check for file deletion
     if tool_name == "run_cmd":
-        cmd = args.get("cmd", "").lower()
+        raw_cmd = args.get("cmd", "")
+        cmd = raw_cmd.lower() if isinstance(raw_cmd, str) else str(raw_cmd)
 
         # Check for dangerous git commands
         for git_cmd in SCARY_OPERATIONS["git_commands"]:
