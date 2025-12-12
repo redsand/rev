@@ -440,7 +440,15 @@ def _analyze_project_structure() -> Dict[str, Any]:
         # Get directory structure
         result = execute_tool("tree_view", {"path": ".", "max_depth": 2})
         result_data = json.loads(result)
-        tree = result_data.get("tree", "")
+        tree = result_data.get("tree")
+        if tree is None:
+            tree = ""
+        elif not isinstance(tree, str):
+            # Some tool impls may return structured trees (dict/list); make it searchable
+            try:
+                tree = json.dumps(tree)
+            except Exception:
+                tree = str(tree)
 
         # Detect patterns from structure
         if "src/" in tree:

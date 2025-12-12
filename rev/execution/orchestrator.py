@@ -9,6 +9,7 @@ Implements Resource-Aware Optimization pattern to track and enforce budgets.
 
 import os
 import time
+import traceback
 from typing import Dict, Any, List, Optional, Literal
 from dataclasses import dataclass, field
 from enum import Enum
@@ -378,6 +379,8 @@ class Orchestrator:
                     repo_stats=repo_stats,
                     budget=budget,
                 )
+                if not research_findings:
+                    research_findings = ResearchFindings()
                 result.research_findings = research_findings
                 result.agent_insights["research"] = {
                     "files_found": len(research_findings.relevant_files),
@@ -694,7 +697,15 @@ IMPORTANT - Address the following review feedback:
             raise
         except Exception as e:
             failure_phase = self.current_phase if self.current_phase else AgentPhase.FAILED
+            tb = traceback.format_exc()
+            print(f"\n?? Exception during {failure_phase.value} phase: {e}")
+            print(tb)
             result.errors.append(f"{failure_phase.value} phase error: {e}")
+            result.agent_insights["exception"] = {
+                "phase": failure_phase.value,
+                "error": str(e),
+                "traceback": tb,
+            }
             result.phase_reached = failure_phase
             result.success = False
 
