@@ -198,11 +198,25 @@ def _get_input_windows(prompt: str) -> Tuple[str, bool]:
     escape_pressed = False
     navigating_history = False
     is_command = prompt.strip().endswith('/')  # Simple heuristic for command mode
+    pending_char = None
+
+    def _insert_newline() -> None:
+        """Insert a newline into the buffer and render continuation prompt."""
+        nonlocal cursor_pos, navigating_history
+        buffer.insert(cursor_pos, '\n')
+        cursor_pos += 1
+        navigating_history = False
+
+        sys.stdout.write('\n')
+        if prompt:
+            sys.stdout.write('...')
+        sys.stdout.flush()
 
     try:
         while True:
             # Read one character (blocking)
-            char = msvcrt.getch()
+            char = pending_char if pending_char is not None else msvcrt.getch()
+            pending_char = None
 
             # Handle extended keys (arrow keys, etc.)
             if char in (b'\x00', b'\xe0'):
@@ -268,9 +282,22 @@ def _get_input_windows(prompt: str) -> Tuple[str, bool]:
 
             # Enter key
             elif char == b'\r':
+                # Detect pasted newlines by checking for buffered characters
+                if msvcrt.kbhit():
+                    next_char = msvcrt.getch()
+                    _insert_newline()
+                    if next_char != b'\n':
+                        pending_char = next_char
+                    continue
+
                 sys.stdout.write('\n')
                 sys.stdout.flush()
                 break
+
+            # Line feed (e.g., from pasted text)
+            elif char == b'\n':
+                _insert_newline()
+                continue
 
             # Backspace
             elif char == b'\x08':

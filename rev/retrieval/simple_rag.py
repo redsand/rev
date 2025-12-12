@@ -7,10 +7,13 @@ TF-IDF-like scoring for code retrieval without requiring external libraries.
 """
 
 import re
+import json
+import math
+import time
+import hashlib
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Set
 from collections import Counter
-import math
 
 from rev.retrieval.base import BaseCodeRetriever, CodeChunk
 from rev.config import EXCLUDE_DIRS
@@ -35,8 +38,54 @@ class SimpleCodeRetriever(BaseCodeRetriever):
         self.chunks: List[CodeChunk] = []
         self.term_document_freq: Dict[str, int] = {}  # IDF calculation
         self.total_documents = 0
+        self.cache_version = 1
 
-    def build_index(self, root: Optional[Path] = None) -> None:
+    def _cache_path(self) -> Path:
+        """Location for persisted index cache."""
+        cache_dir = Path(".rev") / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        root_id = hashlib.sha1(str(self.root.resolve()).encode("utf-8")).hexdigest()[:12]
+        return cache_dir / f"rag_index_{root_id}_{self.chunk_size}.json"
+
+    def _load_cache(self, cache_path: Path) -> bool:
+        """Load an index from cache if available."""
+        if not cache_path.exists():
+            return False
+        try:
+            start = time.perf_counter()
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            if payload.get("version") != self.cache_version:
+                return False
+
+            self.chunk_size = payload.get("chunk_size", self.chunk_size)
+            self.total_documents = payload.get("total_documents", 0)
+            self.term_document_freq = payload.get("term_document_freq", {})
+            self.chunks = [CodeChunk(**chunk) for chunk in payload.get("chunks", [])]
+            self.index_built = True
+            duration = time.perf_counter() - start
+            print(f"    Loaded RAG index from {cache_path} ({len(self.chunks)} chunks, {duration:.2f}s)")
+            return True
+        except Exception:
+            return False
+
+    def _save_cache(self, cache_path: Path) -> None:
+        """Persist the built index to cache."""
+        try:
+            payload = {
+                "version": self.cache_version,
+                "root": str(self.root),
+                "chunk_size": self.chunk_size,
+                "total_documents": self.total_documents,
+                "term_document_freq": self.term_document_freq,
+                "chunks": [c.to_dict() for c in self.chunks],
+            }
+            cache_path.write_text(json.dumps(payload), encoding="utf-8")
+            print(f"    Saved RAG index to {cache_path}")
+        except Exception:
+            # Best-effort persistence; ignore failures
+            pass
+
+    def build_index(self, root: Optional[Path] = None, repo_stats: Optional[Dict[str, Any]] = None, budget=None) -> None:
         """Build the search index by chunking code files.
 
         Args:
@@ -44,6 +93,18 @@ class SimpleCodeRetriever(BaseCodeRetriever):
         """
         if root:
             self.root = Path(root)
+
+        file_count = (repo_stats or {}).get("file_count", 0)
+        if file_count and file_count > 2000:
+            print("    Skipping RAG index (repo too large)")
+            return
+        if budget and budget.get_remaining().get("tokens", 100) < 10:
+            print("    Skipping RAG index (token budget too low)")
+            return
+
+        cache_path = self._cache_path()
+        if self._load_cache(cache_path):
+            return
 
         self.chunks = []
         self.term_document_freq = {}
@@ -55,6 +116,8 @@ class SimpleCodeRetriever(BaseCodeRetriever):
             ".cs", ".go", ".rs", ".rb", ".php", ".swift", ".kt", ".scala",
             ".sh", ".bash", ".yaml", ".yml", ".json", ".xml", ".md"
         }
+
+        start = time.perf_counter()
 
         # Index all code files
         for file_path in self.root.rglob("*"):
@@ -78,6 +141,9 @@ class SimpleCodeRetriever(BaseCodeRetriever):
         # Build IDF index
         self._build_idf_index()
         self.index_built = True
+        duration = time.perf_counter() - start
+        print(f"    Built RAG index with {len(self.chunks)} chunks in {duration:.2f}s")
+        self._save_cache(cache_path)
 
     def _index_file(self, file_path: Path) -> None:
         """Index a single file by chunking it.

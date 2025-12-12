@@ -23,7 +23,7 @@ from rev.llm.client import ollama_chat
 _RAG_RETRIEVER = None
 
 
-def get_rag_retriever():
+def get_rag_retriever(budget=None, repo_stats: Optional[Dict[str, Any]] = None):
     """Get or initialize the RAG code retriever.
 
     Returns:
@@ -40,11 +40,21 @@ def get_rag_retriever():
 
             # Build index if not already built
             if not retriever.index_built:
-                print("  → Building RAG index (one-time setup, max 5 minutes)...")
+                file_count = (repo_stats or {}).get("file_count", 0)
+                if file_count and file_count > 1500:
+                    print("  ⚠️  Skipping RAG index (repo too large for lightweight index)")
+                    return None
+                if budget:
+                    remaining = budget.get_remaining()
+                    if remaining.get("tokens", 100) < 10 or remaining.get("time", 100) < 10:
+                        print("  ⚠️  Skipping RAG index due to tight budget")
+                        return None
+
+                print("  → Building or loading RAG index (cached)...")
 
                 # Use timeout to prevent hanging on large codebases
                 def build_with_timeout():
-                    retriever.build_index()
+                    retriever.build_index(repo_stats=repo_stats, budget=budget)
 
                 # Build index with 600s (10 minute) timeout
                 try:
@@ -137,7 +147,7 @@ Return your analysis in JSON format:
 Be concise but thorough. Focus on actionable insights. PRIORITIZE finding code reuse opportunities."""
 
 
-def _rag_search(query: str, k: int = 10) -> Dict[str, Any]:
+def _rag_search(query: str, k: int = 10, budget=None, repo_stats: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Perform semantic code search using RAG.
 
     Args:
@@ -147,7 +157,7 @@ def _rag_search(query: str, k: int = 10) -> Dict[str, Any]:
     Returns:
         Dict with files and relevant chunks
     """
-    retriever = get_rag_retriever()
+    retriever = get_rag_retriever(budget=budget, repo_stats=repo_stats)
 
     if retriever is None:
         return {"files": [], "chunks": []}
@@ -187,7 +197,9 @@ def research_codebase(
     user_request: str,
     quick_mode: bool = False,
     search_depth: str = "medium",
-    use_rag: bool = True
+    use_rag: bool = True,
+    repo_stats: Optional[Dict[str, Any]] = None,
+    budget=None,
 ) -> ResearchFindings:
     """Research the codebase to gather context for a task.
 
@@ -219,7 +231,7 @@ def research_codebase(
 
         # 2. RAG semantic search (if enabled)
         if use_rag and not quick_mode:
-            futures[executor.submit(_rag_search, user_request, 10)] = "rag_search"
+            futures[executor.submit(_rag_search, user_request, 10, budget, repo_stats)] = "rag_search"
 
         # 3. Get project structure
         futures[executor.submit(_analyze_project_structure)] = "structure"

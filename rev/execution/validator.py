@@ -11,6 +11,8 @@ from typing import Dict, Any, List, Optional
 from enum import Enum
 from dataclasses import dataclass, field
 
+from rev import config
+
 from rev.models.task import ExecutionPlan, Task, TaskStatus
 from rev.tools.registry import execute_tool
 from rev.llm.client import ollama_chat
@@ -358,7 +360,7 @@ def _check_syntax() -> ValidationResult:
             "[(print(f'PY_SYNTAX_ERROR {p}: {err}')) for p,err in fails];"
             "sys.exit(1 if errs else 0)\""
         )
-        result = execute_tool("run_cmd", {"cmd": cmd, "timeout": 600})
+        result = execute_tool("run_cmd", {"cmd": cmd, "timeout": config.VALIDATION_TIMEOUT_SECONDS})
         result_data = json.loads(result)
         output = result_data.get("stdout", "") + result_data.get("stderr", "")
 
@@ -385,7 +387,7 @@ def _check_syntax() -> ValidationResult:
 def _run_test_suite(cmd: str) -> ValidationResult:
     """Run the project's test suite."""
     try:
-        result = execute_tool("run_tests", {"cmd": cmd, "timeout": 600})
+        result = execute_tool("run_tests", {"cmd": cmd, "timeout": config.VALIDATION_TIMEOUT_SECONDS})
         result_data = json.loads(result)
 
         rc = result_data.get("rc", 1)
@@ -421,7 +423,7 @@ def _run_test_suite(cmd: str) -> ValidationResult:
 def _run_linter(cmd: str) -> ValidationResult:
     """Run linter checks (ruff/flake8/pylint)."""
     try:
-        result = execute_tool("run_cmd", {"cmd": cmd, "timeout": 600})
+        result = execute_tool("run_cmd", {"cmd": cmd, "timeout": config.VALIDATION_TIMEOUT_SECONDS})
         result_data = json.loads(result)
         output = result_data.get("stdout", "[]")
 
@@ -600,7 +602,7 @@ def _attempt_auto_fix(test_result: ValidationResult, max_attempts: int = 3) -> b
 
     for cmd in attempts:
         try:
-            rerun = execute_tool("run_tests", {"cmd": cmd, "timeout": 600})
+            rerun = execute_tool("run_tests", {"cmd": cmd, "timeout": config.VALIDATION_TIMEOUT_SECONDS})
             rerun_data = json.loads(rerun)
             if rerun_data.get("rc", 1) == 0:
                 return True
@@ -614,7 +616,7 @@ def _attempt_auto_fix(test_result: ValidationResult, max_attempts: int = 3) -> b
 def _auto_fix_linting() -> bool:
     """Attempt to auto-fix linting issues."""
     try:
-        execute_tool("run_cmd", {"cmd": "ruff check . --fix", "timeout": 600})
+        execute_tool("run_cmd", {"cmd": "ruff check . --fix", "timeout": config.VALIDATION_TIMEOUT_SECONDS})
         return True
     except:
         return False

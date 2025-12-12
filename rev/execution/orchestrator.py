@@ -7,11 +7,13 @@ manage workflow, resolve conflicts, and make meta-decisions.
 Implements Resource-Aware Optimization pattern to track and enforce budgets.
 """
 
+import os
 import time
 from typing import Dict, Any, List, Optional, Literal
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from collections import defaultdict
 
 from rev.models.task import ExecutionPlan, TaskStatus
 from rev.execution.planner import planning_mode
@@ -34,6 +36,9 @@ from rev.config import (
     MAX_WALLCLOCK_SECONDS,
     RESEARCH_DEPTH_DEFAULT,
     VALIDATION_MODE_DEFAULT,
+    MAX_ORCHESTRATOR_RETRIES,
+    MAX_PLAN_REGEN_RETRIES,
+    MAX_VALIDATION_RETRIES,
 )
 from rev.llm.client import get_token_usage
 
@@ -124,7 +129,7 @@ class AgentPhase(Enum):
 @dataclass
 class OrchestratorConfig:
     """Configuration for the orchestrator."""
-    enable_learning: bool = True
+    enable_learning: bool = False
     enable_research: bool = True
     enable_review: bool = True
     enable_validation: bool = True
@@ -135,8 +140,19 @@ class OrchestratorConfig:
     auto_approve: bool = True
     research_depth: Literal["off", "shallow", "medium", "deep"] = RESEARCH_DEPTH_DEFAULT
     validation_mode: Literal["none", "smoke", "targeted", "full"] = VALIDATION_MODE_DEFAULT
-    max_retries: int = 2
+    orchestrator_retries: int = MAX_ORCHESTRATOR_RETRIES
+    plan_regen_retries: int = MAX_PLAN_REGEN_RETRIES
+    validation_retries: int = MAX_VALIDATION_RETRIES
+    # Back-compat shim (legacy)
+    max_retries: Optional[int] = None
     max_plan_tasks: int = MAX_PLAN_TASKS
+
+    def __post_init__(self):
+        # If legacy max_retries is provided, apply to all retry knobs for backward compatibility
+        if self.max_retries is not None:
+            self.orchestrator_retries = self.max_retries
+            self.plan_regen_retries = self.max_retries
+            self.validation_retries = self.max_retries
 
 
 @dataclass
@@ -196,9 +212,9 @@ class Orchestrator:
         aggregate_errors: List[str] = []
         last_result: Optional[OrchestratorResult] = None
 
-        for attempt in range(self.config.max_retries + 1):
+        for attempt in range(self.config.orchestrator_retries + 1):
             if attempt > 0:
-                print(f"\n🔄 Orchestrator retry {attempt}/{self.config.max_retries}")
+                print(f"\n🔄 Orchestrator retry {attempt}/{self.config.orchestrator_retries}")
             result = self._run_single_attempt(user_request)
             aggregate_errors.extend([f"Attempt {attempt + 1}: {err}" for err in result.errors])
 
@@ -231,30 +247,21 @@ class Orchestrator:
         # NEW: Route the request to determine optimal configuration
         from rev.execution.router import TaskRouter
         router = TaskRouter()
-        route = router.route(user_request, repo_stats={})
+        repo_stats = self._collect_repo_stats()
+        route = router.route(user_request, repo_stats=repo_stats)
         run_mode = route.mode
 
         # Apply routing decision to config (if not explicitly overridden)
         print(f"\n🔀 Routing Decision: {route.mode}")
         print(f"   Reasoning: {route.reasoning}")
 
-        elevated_for_mode = False
-        selected_research_depth = (
-            route.research_depth
-            or self.config.research_depth
-            or RESEARCH_DEPTH_DEFAULT
-            or "medium"
-        )
-        high_risk_modes = {"full_feature"}
-        if route.mode in high_risk_modes and selected_research_depth == "medium":
-            print("   ℹ️  Elevating research depth to deep for high-risk mode")
-            selected_research_depth = "deep"
-            elevated_for_mode = True
+        route_research_depth = getattr(route, "research_depth", None)
         if not self._user_config_provided:
             self.config.validation_mode = getattr(route, "validation_mode", self.config.validation_mode)
 
         # Update config based on route (only if using default config)
-        coding_mode = route.mode != "quick_edit"  # Enable coding mode for more involved routes
+        coding_modes = {"quick_edit", "focused_feature", "full_feature", "refactor", "test_focus"}
+        coding_mode = route.mode in coding_modes
         if not self._user_config_provided:
             self.config.enable_learning = route.enable_learning
             self.config.enable_research = route.enable_research
@@ -264,17 +271,29 @@ class Orchestrator:
             self.config.parallel_workers = route.parallel_workers
             self.config.enable_action_review = route.enable_action_review
             self.config.auto_approve = getattr(route, "auto_approve", self.config.auto_approve)
-            self.config.max_retries = route.max_retries
+            self.config.orchestrator_retries = route.max_retries
+            self.config.plan_regen_retries = route.max_retries
+            self.config.validation_retries = route.max_retries
             self.config.enable_auto_fix = getattr(route, "enable_auto_fix", self.config.enable_auto_fix)
             route_plan_cap = getattr(route, "max_plan_tasks", None)
             if route_plan_cap:
                 self.config.max_plan_tasks = route_plan_cap
+            # Mode-based agent toggles
+            if route.mode in {"quick_edit", "test_focus"}:
+                self.config.enable_learning = False
+                self.config.enable_validation = True
+                if route_research_depth not in {"shallow", "off"}:
+                    self.config.enable_research = False
+                    route_research_depth = "off"
+                if not getattr(route, "validation_mode", None):
+                    self.config.validation_mode = "smoke"
+            elif route.mode == "exploration":
+                self.config.enable_learning = True
+                self.config.enable_research = True
+                self.config.enable_validation = False
 
-        self.config.research_depth = selected_research_depth
-        print(
-            f"   Mode: {route.mode} | Research depth: {self.config.research_depth}"
-            f"{' (elevated)' if elevated_for_mode else ''}"
-        )
+        self.config.research_depth = route_research_depth or self.config.research_depth or RESEARCH_DEPTH_DEFAULT
+        print(f"   Mode: {route.mode} | Research depth: {self.config.research_depth}")
         print(f"   Plan task cap: {self.config.max_plan_tasks}")
         print(f"   Validation mode: {self.config.validation_mode}")
 
@@ -355,7 +374,9 @@ class Orchestrator:
                 research_findings = research_codebase(
                     user_request,
                     quick_mode=quick_mode,
-                    search_depth=self.config.research_depth
+                    search_depth=self.config.research_depth,
+                    repo_stats=repo_stats,
+                    budget=budget,
                 )
                 result.research_findings = research_findings
                 result.agent_insights["research"] = {
@@ -398,7 +419,8 @@ class Orchestrator:
 
                 # Retry loop for plan regeneration
                 planning_retry_count = 0
-                while planning_retry_count <= self.config.max_retries:
+                max_plan_retries = max(1, self.config.plan_regen_retries)
+                while planning_retry_count <= max_plan_retries:
                     review = review_execution_plan(
                         plan,
                         user_request,
@@ -425,7 +447,7 @@ class Orchestrator:
 
                     if review.decision == ReviewDecision.REQUIRES_CHANGES:
                         # Display review feedback
-                        print(f"\n⚠️  Plan requires changes (attempt {planning_retry_count + 1}/{self.config.max_retries + 1})")
+                        print(f"\n⚠️  Plan requires changes (attempt {planning_retry_count + 1}/{self.config.plan_regen_retries + 1})")
                         print(f"   Review confidence: {review.confidence_score:.0%}")
                         print(f"   Issues found: {len(review.issues)}")
                         print(f"   Security concerns: {len(review.security_concerns)}")
@@ -433,15 +455,15 @@ class Orchestrator:
                             print(f"   Suggestions: {len(review.suggestions)}")
 
                         # Check if we've exhausted retries
-                        if planning_retry_count >= self.config.max_retries:
-                            print(f"\n❌ Plan still requires changes after {self.config.max_retries} regeneration attempt(s)")
-                            result.errors.append(f"Plan requires changes after {self.config.max_retries} regeneration attempts")
+                        if planning_retry_count >= max_plan_retries:
+                            print(f"\n❌ Plan still requires changes after {max_plan_retries} regeneration attempt(s)")
+                            result.errors.append(f"Plan requires changes after {max_plan_retries} regeneration attempts")
                             result.phase_reached = AgentPhase.REVIEW
                             return result
 
                         # Regenerate plan with review feedback
                         planning_retry_count += 1
-                        print(f"\n🔄 Plan Regeneration {planning_retry_count}/{self.config.max_retries}")
+                        print(f"\n🔄 Plan Regeneration {planning_retry_count}/{max_plan_retries}")
                         print("  → Incorporating review feedback...")
 
                         # Format review feedback for planning agent
@@ -493,6 +515,7 @@ IMPORTANT - Address the following review feedback:
                     enable_action_review=self.config.enable_action_review,
                     coding_mode=coding_mode,
                     state_manager=state_manager,
+                    budget=budget,
                 )
             else:
                 execution_mode(
@@ -502,6 +525,7 @@ IMPORTANT - Address the following review feedback:
                     enable_action_review=self.config.enable_action_review,
                     coding_mode=coding_mode,
                     state_manager=state_manager,
+                    budget=budget,
                 )
 
             # Phase 6: Validation Agent - Verify results
@@ -550,9 +574,9 @@ IMPORTANT - Address the following review feedback:
                     result.errors.append("Initial validation failed")
 
                     retry_count = 0
-                    while retry_count < self.config.max_retries and validation.overall_status == ValidationStatus.FAILED:
+                    while retry_count < self.config.validation_retries and validation.overall_status == ValidationStatus.FAILED:
                         retry_count += 1
-                        print(f"\n🔄 Validation Retry {retry_count}/{self.config.max_retries}")
+                        print(f"\n🔄 Validation Retry {retry_count}/{self.config.validation_retries}")
 
                         # Format validation feedback for LLM
                         feedback = format_validation_feedback_for_llm(validation, user_request)
@@ -878,11 +902,50 @@ IMPORTANT - Address the following review feedback:
 
         return result
 
+    def _collect_repo_stats(self) -> Dict[str, Any]:
+        """Collect lightweight repository statistics for routing decisions."""
+        stats: Dict[str, Any] = {
+            "file_count": 0,
+            "test_file_count": 0,
+            "has_tests": False,
+            "dominant_language": None,
+        }
+        ext_lang = {
+            ".py": "python",
+            ".js": "javascript",
+            ".ts": "typescript",
+            ".md": "markdown",
+        }
+        ext_counts = defaultdict(int)
+        skip_dirs = {".git", "node_modules", "venv", "__pycache__", ".pytest_cache", ".rev-metrics", ".mypy_cache"}
+
+        for root, dirs, files in os.walk(self.project_root):
+            dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
+            for fname in files:
+                stats["file_count"] += 1
+                lower = fname.lower()
+                if lower.startswith("test_") or lower.endswith("_test.py") or "tests" in Path(root).parts:
+                    stats["test_file_count"] += 1
+                ext = Path(fname).suffix.lower()
+                if ext in ext_lang:
+                    ext_counts[ext_lang[ext]] += 1
+
+                # Guardrail to avoid expensive walks
+                if stats["file_count"] >= 2000:
+                    break
+            if stats["file_count"] >= 2000:
+                break
+
+        stats["has_tests"] = stats["test_file_count"] > 0
+        if ext_counts:
+            stats["dominant_language"] = max(ext_counts, key=ext_counts.get)
+        return stats
+
 
 def run_orchestrated(
     user_request: str,
     project_root: Path,
-    enable_learning: bool = True,
+    enable_learning: bool = False,
     enable_research: bool = True,
     enable_review: bool = True,
     enable_validation: bool = True,
@@ -891,8 +954,11 @@ def run_orchestrated(
     enable_auto_fix: bool = False,
     parallel_workers: int = 2,
     auto_approve: bool = True,
-    research_depth: Literal["off", "shallow", "medium", "deep"] = "medium",
+    research_depth: Literal["off", "shallow", "medium", "deep"] = RESEARCH_DEPTH_DEFAULT,
     validation_mode: Literal["none", "smoke", "targeted", "full"] = "targeted",
+    orchestrator_retries: int = MAX_ORCHESTRATOR_RETRIES,
+    plan_regen_retries: int = MAX_PLAN_REGEN_RETRIES,
+    validation_retries: int = MAX_VALIDATION_RETRIES,
 ) -> OrchestratorResult:
     """Run a task through the orchestrated multi-agent pipeline.
 
@@ -927,6 +993,9 @@ def run_orchestrated(
         auto_approve=auto_approve,
         research_depth=research_depth,
         validation_mode=validation_mode,
+        orchestrator_retries=orchestrator_retries,
+        plan_regen_retries=plan_regen_retries,
+        validation_retries=validation_retries,
     )
 
     orchestrator = Orchestrator(project_root, config)

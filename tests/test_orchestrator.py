@@ -35,7 +35,7 @@ def _route_stub(enable_validation: bool = False, parallel_workers: int = 1, max_
             "auto_approve": True,
             "enable_action_review": False,
             "enable_auto_fix": False,
-            "research_depth": "deep",
+            "research_depth": "off",
             "max_retries": max_retries,
             "max_plan_tasks": None,
         },
@@ -465,7 +465,7 @@ class TestOrchestratorConfig(unittest.TestCase):
     def test_default_config(self):
         """Test default configuration values."""
         config = OrchestratorConfig()
-        self.assertTrue(config.enable_learning)
+        self.assertFalse(config.enable_learning)
         self.assertTrue(config.enable_research)
         self.assertTrue(config.enable_review)
         self.assertTrue(config.enable_validation)

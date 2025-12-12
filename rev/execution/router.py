@@ -15,7 +15,7 @@ from rev.debug_logger import get_logger
 
 
 # Route modes - different execution strategies
-RouteMode = Literal["quick_edit", "focused_feature", "full_feature"]
+RouteMode = Literal["quick_edit", "focused_feature", "full_feature", "exploration"]
 
 
 class RoutePriority(Enum):
@@ -88,10 +88,14 @@ class TaskRouter:
         text = user_request.lower()
         repo_stats = repo_stats or {}
 
-        if self._is_full_feature(text, repo_stats):
-            decision = self._full_feature_decision(text)
-        elif self._is_quick_edit(text):
+        if self._is_quick_edit(text):
             decision = self._quick_edit_decision(text)
+        elif self._is_exploration(text):
+            decision = self._exploration_decision(text)
+        elif self._is_full_feature(text, repo_stats):
+            decision = self._full_feature_decision(text, repo_stats)
+        elif self._is_focused_feature(text, repo_stats):
+            decision = self._focused_feature_decision(text)
         else:
             decision = self._focused_feature_decision(text)
 
@@ -143,18 +147,20 @@ class TaskRouter:
             enable_review=enable_review,
             enable_validation=True,
             review_strictness="moderate",
-            parallel_workers=3,
+            parallel_workers=2,
             research_depth="medium",
             validation_mode="targeted",
             max_plan_tasks=20,
-            max_retries=3,
+            max_retries=2,
             priority=RoutePriority.NORMAL,
             reasoning=self._focused_feature_reason(text, enable_review),
         )
 
-    def _full_feature_decision(self, text: str) -> RouteDecision:
+    def _full_feature_decision(self, text: str, repo_stats: Dict[str, Any]) -> RouteDecision:
         """Full feature mode for large or high-risk changes."""
         is_security = self._is_security_heavy(text)
+        has_tests = repo_stats.get("has_tests", True)
+        validation_mode = "full" if has_tests else "targeted"
         return RouteDecision(
             mode="full_feature",
             enable_learning=True,
@@ -165,11 +171,29 @@ class TaskRouter:
             parallel_workers=2 if is_security else 3,
             enable_action_review=is_security,
             research_depth="deep",
-            validation_mode="full",
+            validation_mode=validation_mode,
             max_plan_tasks=30,
             max_retries=3,
             priority=RoutePriority.CRITICAL if is_security else RoutePriority.HIGH,
             reasoning=self._full_feature_reason(text, is_security),
+        )
+
+    def _exploration_decision(self, text: str) -> RouteDecision:
+        """Exploration mode for learning and mapping tasks."""
+        return RouteDecision(
+            mode="exploration",
+            enable_learning=True,
+            enable_research=True,
+            enable_review=False,
+            enable_validation=False,
+            review_strictness="lenient",
+            parallel_workers=1,
+            research_depth="shallow",
+            validation_mode="none",
+            max_plan_tasks=10,
+            max_retries=1,
+            priority=RoutePriority.LOW,
+            reasoning="Exploratory request detected",
         )
 
     def _is_full_feature(self, text: str, repo_stats: Dict[str, Any]) -> bool:
@@ -179,12 +203,10 @@ class TaskRouter:
             "schema", "migration", "database", "core module", "rewrite", "re-architect",
             "security audit", "penetration", "vulnerability", "performance audit", "scalability",
             "across the codebase", "multiple modules", "many files", "entire codebase",
-            "all services", "all modules",
+            "all services", "all modules", "microservice", "subsystem",
         ]
-        if any(keyword in text for keyword in architecture_keywords):
-            return True
+        broad_scope = any(keyword in text for keyword in architecture_keywords)
 
-        # Heuristic: explicit mention of touching many modules/subsystems
         mentions_many = any(phrase in text for phrase in [
             "many files",
             "multiple modules",
@@ -196,8 +218,25 @@ class TaskRouter:
             "system wide",
             "system-wide",
             "large refactor",
+            "entire repo",
+            "across the repo",
         ])
-        return mentions_many
+
+        file_count = repo_stats.get("file_count", 0)
+        has_tests = repo_stats.get("has_tests", True)
+        tiny_repo = file_count and file_count <= 20
+        large_repo = file_count >= 150
+
+        if tiny_repo or not has_tests:
+            return False
+
+        if broad_scope:
+            return True
+
+        if mentions_many and (large_repo or file_count == 0):
+            return True
+
+        return False
 
     def _is_quick_edit(self, text: str) -> bool:
         """Check if the request is a small, localized change."""
@@ -211,10 +250,45 @@ class TaskRouter:
             "refactor", "redesign", "rewrite", "migration", "large",
         ]
 
-        mentions_file = ".py" in text or ".ts" in text or ".js" in text or ".md" in text
-        looks_small = any(keyword in text for keyword in quick_keywords) or mentions_file
+        looks_small = any(keyword in text for keyword in quick_keywords)
         looks_heavy = any(keyword in text for keyword in heavy_keywords)
         return looks_small and not looks_heavy
+
+    def _is_focused_feature(self, text: str, repo_stats: Dict[str, Any]) -> bool:
+        """Detect contained work on a specific file/module/function."""
+        broad_keywords = [
+            "across the codebase", "entire codebase", "system-wide", "system wide",
+            "rewrite the system", "whole project", "across modules", "across services",
+            "re-architect", "microservice", "subsystem",
+        ]
+        if any(keyword in text for keyword in broad_keywords):
+            return False
+
+        single_scope_markers = [".py", ".ts", ".js", ".md", ".json", " module", " function", " handler", " endpoint", " class "]
+        focused_actions = ["add", "update", "modify", "tweak", "adjust", "extend", "write"]
+        small_descriptors = ["small", "minor", "helper", "utility", "single", "one file"]
+
+        mentions_single_scope = any(marker in text for marker in single_scope_markers)
+        mentions_small = any(word in text for word in small_descriptors)
+        mentions_action = any(word in text for word in focused_actions)
+
+        if mentions_single_scope and (mentions_action or mentions_small):
+            return True
+
+        file_count = repo_stats.get("file_count", 0)
+        tiny_repo = file_count and file_count <= 50
+        if tiny_repo and (mentions_action or mentions_small):
+            return True
+
+        return False
+
+    def _is_exploration(self, text: str) -> bool:
+        """Detect exploration/understanding tasks without explicit edits."""
+        exploration_keywords = [
+            "investigate", "explore", "understand", "figure out", "learn how", "what does", "how does",
+        ]
+        change_keywords = ["fix", "add", "implement", "build", "rewrite", "refactor", "update", "remove", "delete", "create"]
+        return any(k in text for k in exploration_keywords) and not any(k in text for k in change_keywords)
 
     def _needs_review(self, text: str) -> bool:
         """Enable review for focused features when complexity is hinted."""

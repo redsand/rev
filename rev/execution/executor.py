@@ -13,6 +13,7 @@ Performance optimizations:
 import json
 import re
 import threading
+from collections import OrderedDict
 from typing import Dict, Any, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
@@ -26,6 +27,9 @@ from rev.config import (
     set_escape_interrupt,
     MAX_READ_FILE_PER_TASK,
     MAX_SEARCH_CODE_PER_TASK,
+    MAX_RUN_CMD_PER_TASK,
+    MAX_EXECUTION_ITERATIONS,
+    MAX_TASK_ITERATIONS,
 )
 from rev import config
 from rev.execution.safety import (
@@ -143,7 +147,8 @@ class ExecutionContext:
 
     def __init__(self, plan: ExecutionPlan):
         self.plan_summary = _summarize_plan(plan)
-        self.code_cache: Dict[str, str] = {}
+        self.code_cache: OrderedDict[str, str] = OrderedDict()
+        self.max_code_cache = 32
         self.search_cache: Dict[Tuple[Any, ...], str] = {}
         self.snippet_cache: List[Dict[str, Any]] = []
         self._lock = threading.Lock()
@@ -153,7 +158,10 @@ class ExecutionContext:
         if not path:
             return None
         with self._lock:
-            return self.code_cache.get(path)
+            if path in self.code_cache:
+                self.code_cache.move_to_end(path)
+                return self.code_cache[path]
+            return None
 
     def set_code(self, path: Optional[str], content: str):
         """Cache code content for a path."""
@@ -161,6 +169,9 @@ class ExecutionContext:
             return
         with self._lock:
             self.code_cache[path] = content
+            self.code_cache.move_to_end(path)
+            if len(self.code_cache) > self.max_code_cache:
+                self.code_cache.popitem(last=False)
 
     def get_search(self, key: Tuple[Any, ...]) -> Optional[str]:
         """Return cached search results if available."""
@@ -171,6 +182,18 @@ class ExecutionContext:
         """Cache search results."""
         with self._lock:
             self.search_cache[key] = result
+
+    def invalidate_code(self, path: Optional[str]):
+        """Invalidate cached code for a path."""
+        if not path:
+            return
+        with self._lock:
+            self.code_cache.pop(path, None)
+
+    def clear_code_cache(self):
+        """Clear code cache (e.g., after broad patches)."""
+        with self._lock:
+            self.code_cache.clear()
 
     def add_snippet(self, path: str, start_line: Optional[int], end_line: Optional[int], content: str, max_snippets: int = 8):
         """Store a trimmed snippet for later prompt context."""
@@ -410,11 +433,48 @@ def _extract_patch_from_text(content: str) -> Optional[str]:
     return None
 
 
+def _extract_file_from_text(content: str) -> Optional[Tuple[str, str]]:
+    """Extract a full file write (path, content) from fenced code blocks."""
+    if not content:
+        return None
+
+    fence = re.search(r"```[\w+-]*\s+([\s\S]*?)```", content)
+    if not fence:
+        return None
+
+    block = fence.group(1)
+    lines = block.splitlines()
+    if not lines:
+        return None
+
+    path = None
+    first_line = lines[0].strip()
+    path_markers = ("path:", "file:", "filepath:")
+    if any(first_line.lower().startswith(marker) for marker in path_markers):
+        path = first_line.split(":", 1)[1].strip()
+        body = "\n".join(lines[1:])
+    elif (
+        "." in first_line
+        and " " not in first_line
+        and first_line.lower().endswith((".py", ".js", ".ts", ".md", ".json", ".yaml", ".yml", ".txt"))
+    ):
+        path = first_line
+        body = "\n".join(lines[1:])
+    else:
+        return None
+
+    body = body.rstrip("\n")
+    if not path or not body:
+        return None
+    return path, body
+
+
 def _apply_patch_fallback(
     patch_text: str,
     messages: List[Dict[str, Any]],
     session_tracker: Optional[SessionTracker],
     debug_logger,
+    exec_context: Optional[ExecutionContext] = None,
 ) -> bool:
     """Execute an apply_patch fallback when the model emits text patches."""
     if not patch_text:
@@ -440,11 +500,51 @@ def _apply_patch_fallback(
         })
         if debug_logger:
             debug_logger.log("executor", "TEXT_PATCH_APPLIED", {"status": "ok"}, "INFO")
+        if exec_context:
+            exec_context.clear_code_cache()
         return True
     except Exception as exc:  # pragma: no cover - defensive
         if debug_logger:
             debug_logger.log("executor", "TEXT_PATCH_FAILED", {"error": str(exc)}, "ERROR")
         return False
+
+
+def _apply_text_fallbacks(
+    content: str,
+    messages: List[Dict[str, Any]],
+    session_tracker: Optional[SessionTracker],
+    exec_context: Optional[ExecutionContext],
+    debug_logger,
+) -> bool:
+    """Try to handle text-only responses by applying patches or writing files."""
+    text_patch = _extract_patch_from_text(content)
+    if text_patch:
+        applied = _apply_patch_fallback(text_patch, messages, session_tracker, debug_logger, exec_context)
+        if applied:
+            return True
+
+    file_payload = _extract_file_from_text(content)
+    if file_payload:
+        path, body = file_payload
+        try:
+            result = execute_tool("write_file", {"path": path, "content": body})
+            if exec_context:
+                exec_context.invalidate_code(path)
+                exec_context.set_code(path, body)
+            if session_tracker:
+                session_tracker.track_tool_call("write_file", {"path": path})
+            messages.append({
+                "role": "tool",
+                "name": "write_file",
+                "content": result
+            })
+            if debug_logger:
+                debug_logger.log("executor", "TEXT_WRITE_APPLIED", {"path": path}, "INFO")
+            return not _has_error_result(result)
+        except Exception as exc:  # pragma: no cover - defensive
+            if debug_logger:
+                debug_logger.log("executor", "TEXT_WRITE_FAILED", {"error": str(exc)}, "ERROR")
+    return False
 
 
 def _build_execution_system_context(sys_info: Dict[str, Any], coding_mode: bool = False) -> str:
@@ -573,6 +673,7 @@ def execution_mode(
     enable_action_review: bool = False,
     coding_mode: bool = False,
     state_manager: Optional[StateManager] = None,
+    budget: Optional["ResourceBudget"] = None,
 ) -> bool:
     """Execute all tasks in the plan iteratively.
 
@@ -617,7 +718,7 @@ def execution_mode(
     model_supports_tools = config.EXECUTION_SUPPORTS_TOOLS
 
     messages = [{"role": "system", "content": system_context}]
-    max_iterations = 10000  # Very high limit to effectively remove restriction
+    max_iterations = MAX_EXECUTION_ITERATIONS
     iteration = 0
 
     # Initialize session tracker for comprehensive summarization
@@ -627,6 +728,7 @@ def execution_mode(
     tool_limits = {
         "read_file": MAX_READ_FILE_PER_TASK,
         "search_code": MAX_SEARCH_CODE_PER_TASK,
+        "run_cmd": MAX_RUN_CMD_PER_TASK,
     }
 
     while not plan.is_complete() and iteration < max_iterations:
@@ -655,6 +757,16 @@ def execution_mode(
 
         iteration += 1
         current_task = plan.get_current_task()
+
+        if budget:
+            budget.update_time()
+            if budget.is_exceeded():
+                print("✗ Resource budget exceeded before starting task loop")
+                plan.mark_failed("Resource budget exceeded")
+                if state_manager and current_task:
+                    state_manager.on_task_failed(current_task)
+                session_tracker.track_task_failed(current_task.description if current_task else "execution", "budget_exceeded")
+                break
 
         print(f"\n[Task {plan.current_index + 1}/{len(plan.tasks)}] {current_task.description}")
         print(f"[Type: {current_task.action_type}]")
@@ -690,10 +802,13 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
 
         # Execute task with tool calls
         task_iterations = 0
-        max_task_iterations = 10000  # Very high limit to effectively remove restriction
+        max_task_iterations = MAX_TASK_ITERATIONS
         task_complete = False
-        tool_counters = {name: 0 for name in tool_limits}
+        tool_usage = {name: 0 for name in tool_limits}
+        over_budget_hits = {name: 0 for name in tool_limits}
         prompt_tokens_used = 0
+        tools_enabled = model_supports_tools
+        no_tool_call_streak = 0
 
         while task_iterations < max_task_iterations and not task_complete:
             # Check for escape key interrupt during task execution
@@ -719,26 +834,47 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
 
             task_iterations += 1
 
-            # Try with tools, fall back to no-tools if needed
+            call_tools = tools if tools_enabled and model_supports_tools else None
             llm_messages = _prepare_llm_messages(messages, exec_context, session_tracker)
-            response = ollama_chat(llm_messages, tools=tools, model=model_name, supports_tools=model_supports_tools)
-            if "usage" in response:
-                prompt_tokens_used += response.get("usage", {}).get("prompt", 0) or 0
+            response = ollama_chat(llm_messages, tools=call_tools, model=model_name, supports_tools=model_supports_tools)
 
             if "error" in response:
                 error_msg = response['error']
                 print(f"  ✗ Error: {error_msg}")
 
                 # If we keep getting errors, try without tools
-                if "400" in error_msg and task_iterations < 3:
-                    print(f"  → Retrying without tool support...")
-                    response = ollama_chat(llm_messages, tools=None, model=model_name, supports_tools=model_supports_tools)
+                if "400" in error_msg:
+                    tools_enabled = False
+                    if messages and messages[0].get("role") == "system" and "Tool calling is disabled" not in messages[0].get("content", ""):
+                        messages[0]["content"] = messages[0]["content"] + "\n\nTool calling is disabled; provide explicit file edits & patches."
+                    messages.append({
+                        "role": "user",
+                        "content": "Tool calling is disabled due to previous errors. Provide explicit file edits and unified diffs."
+                    })
+                    print("  → Disabling tools for this task and retrying without tool support...")
+                    response = ollama_chat(llm_messages, tools=None, model=model_name, supports_tools=False)
 
                 if "error" in response:
                     plan.mark_failed(error_msg)
                     if state_manager:
                         state_manager.on_task_failed(current_task)
                     break
+
+            if "usage" in response:
+                usage = response.get("usage", {}) or {}
+                prompt_tokens_used += usage.get("prompt", 0) or 0
+                if budget:
+                    budget.update_tokens(usage.get("total", 0) or 0)
+                    budget.update_time()
+                    if budget.is_exceeded():
+                        error_msg = "Resource budget exceeded during execution"
+                        print(f"  ✗ {error_msg}")
+                        plan.mark_failed(error_msg)
+                        if state_manager:
+                            state_manager.on_task_failed(current_task)
+                        session_tracker.track_task_failed(current_task.description, error_msg)
+                        task_complete = True
+                        break
 
             msg = response.get("message", {})
             content = msg.get("content", "")
@@ -780,13 +916,30 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                             tool_args = {}
 
                     # Enforce per-task tool budgets
-                    allowed, budget_msg = _consume_tool_budget(tool_name, tool_counters, tool_limits)
+                    allowed, budget_msg = _consume_tool_budget(tool_name, tool_usage, tool_limits)
                     if not allowed:
+                        over_budget_hits[tool_name] = over_budget_hits.get(tool_name, 0) + 1
+                        debug_logger.log("executor", "TOOL_BUDGET_EXCEEDED", {
+                            "tool": tool_name,
+                            "count": over_budget_hits[tool_name],
+                        }, "WARNING")
                         messages.append({
                             "role": "tool",
                             "name": tool_name,
                             "content": budget_msg
                         })
+                        messages.append({
+                            "role": "user",
+                            "content": f"You have reached the {tool_name} call limit for this task. Provide next steps without more {tool_name} calls."
+                        })
+                        if over_budget_hits[tool_name] >= 2:
+                            error_msg = f"{tool_name} budget exceeded for this task"
+                            plan.mark_failed(error_msg)
+                            if state_manager:
+                                state_manager.on_task_failed(current_task)
+                            session_tracker.track_task_failed(current_task.description, error_msg)
+                            task_complete = True
+                            break
                         continue
 
                     # Check if this is a scary operation
@@ -865,6 +1018,16 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                                 session_tracker,
                                 debug_logger,
                             )
+                    elif tool_name == "write_file":
+                        path = tool_args.get("path")
+                        result = execute_tool(tool_name, tool_args)
+                        if not _has_error_result(result):
+                            exec_context.invalidate_code(path)
+                            exec_context.set_code(path, tool_args.get("content", ""))
+                    elif tool_name == "apply_patch":
+                        result = execute_tool(tool_name, tool_args)
+                        if not _has_error_result(result):
+                            exec_context.clear_code_cache()
                     else:
                         result = execute_tool(tool_name, tool_args)
 
@@ -923,20 +1086,16 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             if not tool_calls and content:
                 # Model is thinking/responding without tool calls
                 print(f"  → {content[:200]}")
-
-                text_patch = _extract_patch_from_text(content)
-                applied_fallback = False
-                if text_patch:
-                    applied_fallback = _apply_patch_fallback(text_patch, messages, session_tracker, debug_logger)
-
+                no_tool_call_streak += 1
+                applied_fallback = _apply_text_fallbacks(content, messages, session_tracker, exec_context, debug_logger)
                 if applied_fallback:
                     continue
 
                 # If model keeps responding without tools or completion, it might not support them
-                if task_iterations >= 3:
+                if no_tool_call_streak >= 3:
                     error_msg = (
-                        f"Model {model_name} did not call tools (tools_enabled={model_supports_tools}); "
-                        f"text_fallback={'yes' if text_patch else 'no'}."
+                        f"Model {model_name} did not call tools (tools_enabled={tools_enabled}); "
+                        f"text_fallback={'yes' if applied_fallback else 'no'}."
                     )
                     print(f"  ⚠ Model not using tools. Marking task as needs manual intervention.")
                     plan.mark_failed(error_msg)
@@ -944,6 +1103,8 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         state_manager.on_task_failed(current_task)
                     session_tracker.track_task_failed(current_task.description, error_msg)
                     break
+            else:
+                no_tool_call_streak = 0
 
         if not task_complete and task_iterations >= max_task_iterations:
             error_msg = "Exceeded iteration limit"
@@ -956,8 +1117,9 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
         debug_logger.log("executor", "TASK_USAGE", {
             "task_id": current_task.task_id,
             "description": current_task.description,
-            "read_file_calls": tool_counters.get("read_file", 0),
-            "search_code_calls": tool_counters.get("search_code", 0),
+            "read_file_calls": tool_usage.get("read_file", 0),
+            "search_code_calls": tool_usage.get("search_code", 0),
+            "run_cmd_calls": tool_usage.get("run_cmd", 0),
             "prompt_tokens": prompt_tokens_used,
         }, "INFO")
 
@@ -969,6 +1131,12 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             messages_trimmed = messages_before - len(messages)
             if messages_trimmed > 0:
                 print(f"  ℹ️  Message history optimized: {messages_before} → {len(messages)} messages")
+
+    if not plan.is_complete() and iteration >= max_iterations:
+        error_msg = "Exceeded execution iteration limit"
+        print(f"\n✗ Execution exceeded iteration limit ({max_iterations}); stopping.")
+        plan.mark_failed(error_msg)
+        session_tracker.track_task_failed("execution_loop", error_msg)
 
     # Final summary
     print("\n" + "=" * 60)
@@ -1025,6 +1193,7 @@ def execute_single_task(
     state_manager: Optional[StateManager] = None,
     exec_context: Optional[ExecutionContext] = None,
     tool_limits: Optional[Dict[str, int]] = None,
+    budget: Optional["ResourceBudget"] = None,
 ) -> bool:
     """Execute a single task (for concurrent execution).
 
@@ -1057,6 +1226,7 @@ def execute_single_task(
     tool_limits = tool_limits or {
         "read_file": MAX_READ_FILE_PER_TASK,
         "search_code": MAX_SEARCH_CODE_PER_TASK,
+        "run_cmd": MAX_RUN_CMD_PER_TASK,
     }
     debug_logger = get_logger()
 
@@ -1075,17 +1245,21 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
 
     # Execute task with tool calls
     task_iterations = 0
-    max_task_iterations = 10000
+    max_task_iterations = MAX_TASK_ITERATIONS
     task_complete = False
-    tool_counters = {name: 0 for name in tool_limits}
+    tool_usage = {name: 0 for name in tool_limits}
+    over_budget_hits = {name: 0 for name in tool_limits}
     prompt_tokens_used = 0
+    tools_enabled = model_supports_tools
+    no_tool_call_streak = 0
 
     def _log_usage(success: bool):
         debug_logger.log("executor", "TASK_USAGE", {
             "task_id": task.task_id,
             "description": task.description,
-            "read_file_calls": tool_counters.get("read_file", 0),
-            "search_code_calls": tool_counters.get("search_code", 0),
+            "read_file_calls": tool_usage.get("read_file", 0),
+            "search_code_calls": tool_usage.get("search_code", 0),
+            "run_cmd_calls": tool_usage.get("run_cmd", 0),
             "prompt_tokens": prompt_tokens_used,
             "success": success,
         }, "INFO")
@@ -1093,23 +1267,49 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
     while task_iterations < max_task_iterations and not task_complete:
         task_iterations += 1
 
-        # Try with tools, fall back to no-tools if needed
+        if budget:
+            budget.update_time()
+            if budget.is_exceeded():
+                plan.mark_task_failed(task, "Resource budget exceeded")
+                if state_manager:
+                    state_manager.on_task_failed(task)
+                _log_usage(False)
+                return False
+
+        call_tools = tools if tools_enabled and model_supports_tools else None
         llm_messages = _prepare_llm_messages(messages, exec_context)
-        response = ollama_chat(llm_messages, tools=tools, model=model_name, supports_tools=model_supports_tools)
-        if "usage" in response:
-            prompt_tokens_used += response.get("usage", {}).get("prompt", 0) or 0
+        response = ollama_chat(llm_messages, tools=call_tools, model=model_name, supports_tools=model_supports_tools)
+
+        if "error" in response:
+            error_msg = response['error']
+            print(f"  ✗ Error: {error_msg}")
+
+            if "400" in error_msg:
+                tools_enabled = False
+                if messages and messages[0].get("role") == "system" and "Tool calling is disabled" not in messages[0].get("content", ""):
+                    messages[0]["content"] = messages[0]["content"] + "\n\nTool calling is disabled; provide explicit file edits & patches."
+                messages.append({
+                    "role": "user",
+                    "content": "Tool calling is disabled due to previous errors. Provide explicit file edits and unified diffs."
+                })
+                print(f"  → Retrying without tool support...")
+                response = ollama_chat(llm_messages, tools=None, model=model_name, supports_tools=False)
 
             if "error" in response:
-                error_msg = response['error']
-                print(f"  ✗ Error: {error_msg}")
+                plan.mark_task_failed(task, error_msg)
+                if state_manager:
+                    state_manager.on_task_failed(task)
+                _log_usage(False)
+                return False
 
-                # If we keep getting errors, try without tools
-                if "400" in error_msg and task_iterations < 3:
-                    print(f"  → Retrying without tool support...")
-                response = ollama_chat(llm_messages, tools=None, model=model_name, supports_tools=model_supports_tools)
-
-                if "error" in response:
-                    plan.mark_task_failed(task, error_msg)
+        if "usage" in response:
+            usage = response.get("usage", {}) or {}
+            prompt_tokens_used += usage.get("prompt", 0) or 0
+            if budget:
+                budget.update_tokens(usage.get("total", 0) or 0)
+                budget.update_time()
+                if budget.is_exceeded():
+                    plan.mark_task_failed(task, "Resource budget exceeded during execution")
                     if state_manager:
                         state_manager.on_task_failed(task)
                     _log_usage(False)
@@ -1135,13 +1335,29 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                     except:
                         tool_args = {}
 
-                allowed, budget_msg = _consume_tool_budget(tool_name, tool_counters, tool_limits)
+                allowed, budget_msg = _consume_tool_budget(tool_name, tool_usage, tool_limits)
                 if not allowed:
+                    over_budget_hits[tool_name] = over_budget_hits.get(tool_name, 0) + 1
+                    debug_logger.log("executor", "TOOL_BUDGET_EXCEEDED", {
+                        "tool": tool_name,
+                        "count": over_budget_hits[tool_name],
+                        "task_id": task.task_id,
+                    }, "WARNING")
                     messages.append({
                         "role": "tool",
                         "name": tool_name,
                         "content": budget_msg
                     })
+                    messages.append({
+                        "role": "user",
+                        "content": f"You have reached the {tool_name} call limit for this task. Provide next steps without more {tool_name} calls."
+                    })
+                    if over_budget_hits[tool_name] >= 2:
+                        plan.mark_task_failed(task, f"{tool_name} budget exceeded for this task")
+                        if state_manager:
+                            state_manager.on_task_failed(task)
+                        _log_usage(False)
+                        return False
                     continue
 
                 # Check if this is a scary operation
@@ -1220,6 +1436,16 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                             None,
                             debug_logger,
                         )
+                elif tool_name == "write_file":
+                    path = tool_args.get("path")
+                    result = execute_tool(tool_name, tool_args)
+                    if not _has_error_result(result):
+                        exec_context.invalidate_code(path)
+                        exec_context.set_code(path, tool_args.get("content", ""))
+                elif tool_name == "apply_patch":
+                    result = execute_tool(tool_name, tool_args)
+                    if not _has_error_result(result):
+                        exec_context.clear_code_cache()
                 else:
                     result = execute_tool(tool_name, tool_args)
 
@@ -1261,27 +1487,25 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
         if not tool_calls and content:
             # Model is thinking/responding without tool calls
             print(f"  → {content[:200]}")
-
-            text_patch = _extract_patch_from_text(content)
-            applied_fallback = False
-            if text_patch:
-                applied_fallback = _apply_patch_fallback(text_patch, messages, None, debug_logger)
-
+            no_tool_call_streak += 1
+            applied_fallback = _apply_text_fallbacks(content, messages, None, exec_context, debug_logger)
             if applied_fallback:
                 continue
 
             # If model keeps responding without tools or completion, it might not support them
-            if task_iterations >= 3:
+            if no_tool_call_streak >= 3:
                 print(f"  ⚠ Model not using tools. Marking task as needs manual intervention.")
                 plan.mark_task_failed(
                     task,
-                    f"Model {model_name} did not call tools (tools_enabled={model_supports_tools}); "
-                    f"text_fallback={'yes' if text_patch else 'no'}.",
+                    f"Model {model_name} did not call tools (tools_enabled={tools_enabled}); "
+                    f"text_fallback={'yes' if applied_fallback else 'no'}.",
                 )
                 if state_manager:
                     state_manager.on_task_failed(task)
                 _log_usage(False)
                 return False
+        else:
+            no_tool_call_streak = 0
 
     if not task_complete:
         print(f"  ✗ Task exceeded iteration limit")
@@ -1303,6 +1527,7 @@ def concurrent_execution_mode(
     enable_action_review: bool = False,
     coding_mode: bool = False,
     state_manager: Optional[StateManager] = None,
+    budget: Optional["ResourceBudget"] = None,
 ) -> bool:
     """Execute tasks in the plan concurrently with dependency tracking.
 
@@ -1348,6 +1573,7 @@ def concurrent_execution_mode(
     tool_limits = {
         "read_file": MAX_READ_FILE_PER_TASK,
         "search_code": MAX_SEARCH_CODE_PER_TASK,
+        "run_cmd": MAX_RUN_CMD_PER_TASK,
     }
 
     # Use ThreadPoolExecutor for concurrent execution
@@ -1362,10 +1588,13 @@ def concurrent_execution_mode(
 
                 # Submit new tasks
                 for task in executable_tasks:
+                    if budget and budget.is_exceeded():
+                        plan.mark_task_failed(task, "Resource budget exceeded")
+                        continue
                     future = executor.submit(
                         execute_single_task, task, plan, sys_info,
                         auto_approve, tools, enable_action_review, coding_mode, state_manager,
-                        exec_context, tool_limits
+                        exec_context, tool_limits, budget
                     )
                     futures[future] = task
 
