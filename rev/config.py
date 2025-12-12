@@ -80,7 +80,8 @@ LOG_RETENTION_LIMIT = LOG_RETENTION_LIMIT_DEFAULT
 
 # History configuration
 HISTORY_SIZE = int(os.getenv("REV_HISTORY_SIZE", "100"))  # Number of history entries to keep
-HISTORY_FILE = os.getenv("REV_HISTORY_FILE", "")  # Empty means no file persistence
+# Default to .rev/history; set REV_HISTORY_FILE to an empty string to disable persistence
+HISTORY_FILE = os.getenv("REV_HISTORY_FILE", str(REV_DIR / "history"))
 
 # Input configuration
 PASTE_THRESHOLD = int(os.getenv("REV_PASTE_THRESHOLD", "3"))  # Lines threshold for paste detection
