@@ -562,13 +562,15 @@ Research findings:
 Suggest the best approach and identify any concerns."""}
     ]
 
-    response = ollama_chat(messages)
+    response = ollama_chat(messages) or {}
+    if not isinstance(response, dict):
+        return {"approach": None, "complexity": "medium", "warnings": []}
 
     if "error" in response:
         return {"approach": None, "complexity": "medium", "warnings": []}
 
     try:
-        content = response.get("message", {}).get("content", "")
+        content = response.get("message", {}).get("content", "") if isinstance(response, dict) else ""
         json_match = re.search(r'\{.*\}', content, re.DOTALL)
         if json_match:
             data = json.loads(json_match.group(0))
