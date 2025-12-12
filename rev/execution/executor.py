@@ -342,7 +342,7 @@ def _augment_search_results(
     tool_args: Dict[str, Any],
     exec_context: ExecutionContext,
     tool_limits: Dict[str, int],
-    tool_counters: Dict[str, int],
+    tool_usage: Dict[str, int],
     session_tracker: Optional[SessionTracker],
     debug_logger,
     max_context_matches: int = 5,
@@ -367,7 +367,7 @@ def _augment_search_results(
         used_cache = content is not None
 
         if content is None:
-            allowed, budget_msg = _consume_tool_budget("read_file", tool_counters, tool_limits)
+            allowed, budget_msg = _consume_tool_budget("read_file", tool_usage, tool_limits)
             if not allowed:
                 snippets.append({"file": path, "note": budget_msg})
                 continue
@@ -1014,7 +1014,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                                 tool_args,
                                 exec_context,
                                 tool_limits,
-                                tool_counters,
+                                tool_usage,
                                 session_tracker,
                                 debug_logger,
                             )
@@ -1432,7 +1432,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                             tool_args,
                             exec_context,
                             tool_limits,
-                            tool_counters,
+                            tool_usage,
                             None,
                             debug_logger,
                         )
