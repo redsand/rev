@@ -12,7 +12,8 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from rev import config
 
 # Location for persisted settings
-SETTINGS_FILE = config.ROOT / ".rev_settings.json"
+SETTINGS_FILE = config.SETTINGS_FILE
+LEGACY_SETTINGS_FILE = config.ROOT / ".rev_settings.json"
 
 
 # Mode presets and aliases
@@ -92,7 +93,7 @@ def _parse_positive_int(value: Any) -> int:
 RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
     "log_retention": RuntimeSetting(
         key="log_retention",
-        description="Number of .rev_logs files to keep (newest preserved)",
+        description="Number of .rev/logs files to keep (newest preserved)",
         section="Logging",
         parser=_parse_positive_int,
         getter=lambda: config.LOG_RETENTION_LIMIT,
@@ -181,7 +182,26 @@ def get_default_mode() -> Tuple[str, Dict[str, Any]]:
 def load_settings() -> Dict[str, Any]:
     """Load persisted settings from disk if they exist."""
 
+    def _migrate_legacy_settings_file() -> None:
+        """Move legacy .rev_settings.json into the consolidated .rev directory."""
+
+        if not LEGACY_SETTINGS_FILE.exists():
+            return
+
+        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            if not SETTINGS_FILE.exists():
+                LEGACY_SETTINGS_FILE.rename(SETTINGS_FILE)
+            else:
+                LEGACY_SETTINGS_FILE.unlink()
+        except OSError:
+            # If migration fails, continue using the legacy file location for this run
+            return
+
     try:
+        _migrate_legacy_settings_file()
+
         if SETTINGS_FILE.exists():
             return json.loads(SETTINGS_FILE.read_text())
     except Exception:
@@ -202,6 +222,7 @@ def save_settings(session_context: Dict[str, Any]) -> Path:
         "runtime_settings": get_runtime_settings_snapshot(),
     }
 
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
     return SETTINGS_FILE
 

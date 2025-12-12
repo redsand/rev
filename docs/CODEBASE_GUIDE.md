@@ -283,7 +283,7 @@ execution_mode()
 - Recalls similar past tasks
 - Estimates execution time
 - Warns about past failures
-- Persists to `.rev_cache/learning/`
+- Persists to `.rev/cache/learning/`
 
 ### Research Agent (`rev/execution/researcher.py`)
 
@@ -397,7 +397,7 @@ execution_mode()
 - `get(key)`, `set(key, value, ttl)`, `invalidate(key)`, `clear()`
 - `get_stats()`: Returns hit rate, total requests, cache size
 
-**Persistence**: Caches persist to `.rev_cache/` directory
+**Persistence**: Caches persist to `.rev/cache/` directory
 
 ## Data Flow
 

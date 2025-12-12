@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
-from rev.config import ROOT
+from rev import config
 from rev.tools.utils import _run_shell, _safe_path
 from rev.tools.advanced_analysis import analyze_code_context, analyze_dependencies
 
@@ -67,13 +67,13 @@ def analyze_runtime_logs(log_paths: List[str], since: Optional[str] = None) -> s
                     continue
                 if traceback_re.search(line):
                     trace_block = _collect_trace(lines, idx - 1)
-                    add_issue("traceback", trace_block, str(log_file.relative_to(ROOT)), idx)
+                    add_issue("traceback", trace_block, str(log_file.relative_to(config.ROOT)), idx)
                 elif warning_re.search(line):
-                    add_issue("warning", line.strip(), str(log_file.relative_to(ROOT)), idx)
+                    add_issue("warning", line.strip(), str(log_file.relative_to(config.ROOT)), idx)
                 elif error_re.search(line):
-                    add_issue("error", line.strip(), str(log_file.relative_to(ROOT)), idx)
+                    add_issue("error", line.strip(), str(log_file.relative_to(config.ROOT)), idx)
 
-        return json.dumps({"issues": list(issues.values()), "summary": {"files": [str(p.relative_to(ROOT)) for p in resolved], "missing_paths": missing}}, indent=2)
+        return json.dumps({"issues": list(issues.values()), "summary": {"files": [str(p.relative_to(config.ROOT)) for p in resolved], "missing_paths": missing}}, indent=2)
 
     except Exception as e:
         return json.dumps({"error": f"Runtime log analysis failed: {type(e).__name__}: {e}"})
@@ -81,7 +81,7 @@ def analyze_runtime_logs(log_paths: List[str], since: Optional[str] = None) -> s
 
 def analyze_performance_regression(
     benchmark_cmd: str,
-    baseline_file: str = ".rev-metrics/perf-baseline.json",
+    baseline_file: str = str(config.METRICS_DIR / "perf-baseline.json"),
     tolerance_pct: float = 10.0
 ) -> str:
     """Run benchmarks and compare against baseline."""
@@ -114,7 +114,7 @@ def analyze_performance_regression(
         summary = {
             "returncode": proc.returncode,
             "benchmarks_seen": len(current),
-            "baseline_file": str(baseline_path.relative_to(ROOT)),
+            "baseline_file": str(baseline_path.relative_to(config.ROOT)),
             "tolerance_pct": tolerance_pct
         }
 

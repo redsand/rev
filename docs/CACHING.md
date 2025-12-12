@@ -12,7 +12,7 @@ rev includes a comprehensive intelligent caching system that significantly impro
 - **🔄 LRU Eviction** - Least Recently Used entries evicted when limits reached
 - **📊 Size Limits** - Memory-based limits prevent excessive cache growth
 - **📈 Hit Rate Statistics** - Track cache performance with detailed metrics
-- **💾 Disk Persistence** - Caches persist across sessions (stored in `.rev_cache/`)
+- **💾 Disk Persistence** - Caches persist across sessions (stored in `.rev/cache/`)
 - **🔒 Thread-Safe** - Safe for concurrent access
 - **🎯 Smart Invalidation** - Automatic invalidation based on file modifications
 
@@ -193,14 +193,14 @@ Manually save caches to disk (automatic on clean exit):
 ```
 
 **Cache Location:**
-- **Directory:** `.rev_cache/` (in project root)
+- **Directory:** `.rev/cache/` (in project root)
 - **Files:**
   - `file_cache.pkl` - File content cache
   - `llm_cache.pkl` - LLM response cache
   - `repo_cache.pkl` - Repository context cache
   - `dep_cache.pkl` - Dependency tree cache
 
-**Note:** Add `.rev_cache/` to `.gitignore` to avoid committing cache files.
+**Note:** Add `.rev/cache/` to `.gitignore` to avoid committing cache files.
 
 ## Configuration
 
@@ -420,19 +420,19 @@ analyze_dependencies()  # Caches analysis
 - Load errors on startup
 
 **Solutions:**
-1. Check `.rev_cache/` directory exists and is writable
+1. Check `.rev/cache/` directory exists and is writable
 2. Verify disk space availability
 3. Clear corrupted cache files manually:
    ```bash
-   rm -rf .rev_cache/
+   rm -rf .rev/cache/
    ```
 4. Check file permissions
 
 ## Best Practices
 
-1. **Add `.rev_cache/` to `.gitignore`**
+1. **Add `.rev/cache/` to `.gitignore`**
    ```bash
-   echo ".rev_cache/" >> .gitignore
+   echo ".rev/cache/" >> .gitignore
    ```
 
 2. **Monitor cache performance during development**

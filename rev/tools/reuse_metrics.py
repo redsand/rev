@@ -13,6 +13,8 @@ from typing import Dict, Any, List
 from datetime import datetime
 from dataclasses import dataclass, field, asdict
 
+from rev import config
+
 
 @dataclass
 class ReuseMetrics:
@@ -47,7 +49,7 @@ class ReuseMetrics:
 class ReuseMetricsTracker:
     """Tracks code reuse metrics across sessions."""
 
-    def __init__(self, metrics_file: str = ".rev-metrics/code_reuse.jsonl"):
+    def __init__(self, metrics_file: str = str(config.METRICS_DIR / "code_reuse.jsonl")):
         """Initialize metrics tracker.
 
         Args:

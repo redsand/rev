@@ -25,8 +25,11 @@ def main():
     # Apply any saved configuration overrides before parsing arguments
     apply_saved_settings()
 
+    # Ensure rev data directory exists
+    config.REV_DIR.mkdir(parents=True, exist_ok=True)
+
     # Initialize cache system
-    cache_dir = config.ROOT / ".rev_cache"
+    cache_dir = config.CACHE_DIR
     initialize_caches(config.ROOT, cache_dir)
 
     parser = argparse.ArgumentParser(
@@ -194,7 +197,7 @@ def main():
         checkpoints = ExecutionPlan.list_checkpoints()
         if not checkpoints:
             print("No checkpoints found.")
-            print(f"Checkpoints are saved in .rev_checkpoints/ directory when execution is interrupted.")
+            print(f"Checkpoints are saved in .rev/checkpoints/ directory when execution is interrupted.")
         else:
             for i, cp in enumerate(checkpoints, 1):
                 print(f"{i}. {cp['filename']}")
@@ -226,7 +229,7 @@ def main():
                 checkpoint_path = StateManager.find_latest_checkpoint()
                 if not checkpoint_path:
                     print("✗ No checkpoints found.")
-                    print(f"\nCheckpoints are saved in .rev_checkpoints/ directory when execution is interrupted.")
+                    print(f"\nCheckpoints are saved in .rev/checkpoints/ directory when execution is interrupted.")
                     print("Use --list-checkpoints to see available checkpoints.")
                     sys.exit(1)
                 print(f"Using latest checkpoint: {checkpoint_path}\n")

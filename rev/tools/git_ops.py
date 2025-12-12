@@ -38,10 +38,10 @@ def _run_shell(cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:
 
 
 def _create_log_file(prefix: str) -> pathlib.Path:
-    """Create a log file inside .rev_logs for streaming command output."""
+    """Create a log file inside .rev/logs for streaming command output."""
 
-    log_dir = config.ROOT / ".rev_logs"
-    log_dir.mkdir(exist_ok=True)
+    log_dir = config.LOGS_DIR
+    log_dir.mkdir(exist_ok=True, parents=True)
 
     fd, path_str = tempfile.mkstemp(prefix=prefix, suffix=".log", dir=log_dir)
     os.close(fd)

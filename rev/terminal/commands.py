@@ -497,7 +497,7 @@ class DoctorCommand(CommandHandler):
         # Check directory permissions
         output.append(create_section("Permissions"))
         try:
-            test_file = config.ROOT / ".rev_test"
+            test_file = config.TEST_MARKER_FILE
             test_file.touch()
             test_file.unlink()
             output.append(create_bullet_item(f"Write access: {config.ROOT}", 'check'))

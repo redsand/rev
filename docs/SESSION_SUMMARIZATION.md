@@ -26,7 +26,7 @@ The session tracker automatically monitors:
 
 ### Session Persistence
 
-- **Auto-Save**: Session summaries automatically saved to `.rev_sessions/`
+- **Auto-Save**: Session summaries automatically saved to `.rev/sessions/`
 - **JSON Format**: Easy to parse and analyze
 - **Load & Review**: Can load past sessions for analysis
 
@@ -66,7 +66,7 @@ summary = tracker.get_summary(detailed=False)  # Concise
 summary_detailed = tracker.get_summary(detailed=True)  # Detailed
 
 # Save to disk
-path = tracker.save_to_file()  # Saves to .rev_sessions/
+path = tracker.save_to_file()  # Saves to .rev/sessions/
 ```
 
 ### Loading Past Sessions
@@ -77,7 +77,7 @@ from pathlib import Path
 
 # Load a session
 tracker = SessionTracker.load_from_file(
-    Path(".rev_sessions/session_1234567890.json")
+    Path(".rev/sessions/session_1234567890.json")
 )
 
 # Access tracked data
@@ -232,7 +232,7 @@ summary_path = tracker.save_to_file(
 
 ```python
 # Analyze all sessions
-sessions_dir = Path(".rev_sessions")
+sessions_dir = Path(".rev/sessions")
 for session_file in sessions_dir.glob("*.json"):
     tracker = SessionTracker.load_from_file(session_file)
     print(f"Session: {tracker.session_id}")
@@ -245,7 +245,7 @@ for session_file in sessions_dir.glob("*.json"):
 
 1. **Let it Run Automatically**: The system handles summarization automatically - no manual intervention needed
 
-2. **Review Summaries**: Check `.rev_sessions/` periodically to understand workflow patterns
+2. **Review Summaries**: Check `.rev/sessions/` periodically to understand workflow patterns
 
 3. **Archive Old Sessions**: Sessions are small (~5-50KB each) but can accumulate over time
 
@@ -284,11 +284,11 @@ for session_file in sessions_dir.glob("*.json"):
 
 ### Sessions Not Saving
 
-Check that `.rev_sessions/` directory is writable:
+Check that `.rev/sessions/` directory is writable:
 
 ```bash
-mkdir -p .rev_sessions
-chmod 755 .rev_sessions
+mkdir -p .rev/sessions
+chmod 755 .rev/sessions
 ```
 
 ### Summaries Too Verbose

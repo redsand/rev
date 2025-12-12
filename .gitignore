@@ -34,17 +34,10 @@ coverage.xml
 .dev_agent_prefs.json
 tests_tmp_*/
 
-# Cache directory
-.rev_cache/
-
-# Checkpoint directory (for resume functionality)
-.rev_checkpoints/
-
-# Memory directory (for learning agent)
-.rev_memory/
+# rev data directory
+.rev/
 
 # OS
 .DS_Store
 Thumbs.db
 
-.rev*

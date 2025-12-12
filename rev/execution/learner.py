@@ -13,6 +13,7 @@ from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 
+from rev import config
 from rev.models.task import ExecutionPlan, Task, TaskStatus, RiskLevel
 
 
@@ -92,10 +93,10 @@ class LearningAgent:
 
         Args:
             project_root: Root path of the project
-            memory_dir: Directory to store learning data (default: .rev_memory)
+            memory_dir: Directory to store learning data (default: .rev/memory)
         """
         self.project_root = project_root
-        self.memory_dir = memory_dir or project_root / ".rev_memory"
+        self.memory_dir = memory_dir or config.MEMORY_DIR
         self.memory_dir.mkdir(parents=True, exist_ok=True)
 
         # Memory stores

@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 import uuid
 
+from rev import config
 from rev.models.task import ExecutionPlan, Task, TaskStatus
 from rev.debug_logger import get_logger
 
@@ -28,7 +29,7 @@ class StateManager:
     def __init__(
         self,
         plan: ExecutionPlan,
-        checkpoint_dir: str = ".rev_checkpoints",
+        checkpoint_dir: str = str(config.CHECKPOINTS_DIR),
         auto_save: bool = True
     ):
         """Initialize state manager.
@@ -338,7 +339,7 @@ class StateManager:
             raise
 
     @staticmethod
-    def find_latest_checkpoint(checkpoint_dir: str = ".rev_checkpoints") -> Optional[str]:
+    def find_latest_checkpoint(checkpoint_dir: str = str(config.CHECKPOINTS_DIR)) -> Optional[str]:
         """Find the most recent checkpoint file.
 
         Args:

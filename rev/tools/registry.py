@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from typing import Dict, Any
 
+from rev import config
 from rev.debug_logger import get_logger
 from rev.execution.timeout_manager import TimeoutManager, TimeoutConfig
 
@@ -281,7 +282,7 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         "analyze_runtime_logs": lambda args: analyze_runtime_logs(args.get("log_paths", []), args.get("since")),
         "analyze_performance_regression": lambda args: analyze_performance_regression(
             args["benchmark_cmd"],
-            args.get("baseline_file", ".rev-metrics/perf-baseline.json"),
+            args.get("baseline_file", str(config.METRICS_DIR / "perf-baseline.json")),
             args.get("tolerance_pct", 10.0)
         ),
         "analyze_error_traces": lambda args: analyze_error_traces(args.get("log_paths", []), args.get("max_traces", 200)),
@@ -1233,7 +1234,7 @@ def get_available_tools() -> list:
                     "type": "object",
                     "properties": {
                         "benchmark_cmd": {"type": "string", "description": "Command to run benchmarks (e.g., pytest ... --benchmark-only)"},
-                        "baseline_file": {"type": "string", "description": "Path to baseline metrics file", "default": ".rev-metrics/perf-baseline.json"},
+                        "baseline_file": {"type": "string", "description": "Path to baseline metrics file", "default": str(config.METRICS_DIR / "perf-baseline.json")},
                         "tolerance_pct": {"type": "number", "description": "Allowed performance regression percentage", "default": 10.0}
                     },
                     "required": ["benchmark_cmd"]

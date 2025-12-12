@@ -129,7 +129,7 @@ This document summarizes the implementation of Agentic Design Patterns into Rev,
 
 4. **Metrics Emission** (`session.py`, `executor.py`) ✅
    - ✓ Added `SessionTracker.emit_metrics()` method
-   - ✓ JSONL metrics written to `.rev-metrics/metrics.jsonl`
+   - ✓ JSONL metrics written to `.rev/metrics/metrics.jsonl`
    - ✓ Captures: tasks, tools, tests, files, git, messages, success rate
    - ✓ Integrated into execution pipeline
 
@@ -165,7 +165,7 @@ This document summarizes the implementation of Agentic Design Patterns into Rev,
 1. **MEMORY.md** - Memory tier documentation
    - Ephemeral context (messages)
    - Session memory (summaries)
-   - Long-term project memory (`.rev_memory`)
+   - Long-term project memory (`.rev/memory`)
 
 2. **RAG_DESIGN.md** - RAG architecture guide
    - Simple TF-IDF baseline
