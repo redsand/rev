@@ -26,9 +26,8 @@ from rev.config import (
     set_escape_interrupt,
     MAX_READ_FILE_PER_TASK,
     MAX_SEARCH_CODE_PER_TASK,
-    EXECUTION_MODEL,
-    EXECUTION_SUPPORTS_TOOLS,
 )
+from rev import config
 from rev.execution.safety import (
     format_operation_description,
     is_scary_operation,
@@ -614,8 +613,8 @@ def execution_mode(
     # Get system info and build context
     sys_info = get_system_info_cached()
     system_context = _build_execution_system_context(sys_info, coding_mode)
-    model_name = EXECUTION_MODEL
-    model_supports_tools = EXECUTION_SUPPORTS_TOOLS
+    model_name = config.EXECUTION_MODEL
+    model_supports_tools = config.EXECUTION_SUPPORTS_TOOLS
 
     messages = [{"role": "system", "content": system_context}]
     max_iterations = 10000  # Very high limit to effectively remove restriction
@@ -1051,8 +1050,8 @@ def execute_single_task(
     if state_manager:
         state_manager.on_task_started(task)
 
-    model_name = EXECUTION_MODEL
-    model_supports_tools = EXECUTION_SUPPORTS_TOOLS
+    model_name = config.EXECUTION_MODEL
+    model_supports_tools = config.EXECUTION_SUPPORTS_TOOLS
 
     exec_context = exec_context or ExecutionContext(plan)
     tool_limits = tool_limits or {

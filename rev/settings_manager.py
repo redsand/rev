@@ -120,7 +120,7 @@ def apply_saved_settings(session_context: Optional[Dict[str, Any]] = None) -> Op
     private_mode_before = config.get_private_mode()
 
     if settings.get("model"):
-        config.OLLAMA_MODEL = settings["model"]
+        config.set_model(settings["model"])
     if settings.get("base_url"):
         config.OLLAMA_BASE_URL = settings["base_url"]
     if "private_mode" in settings:
@@ -152,7 +152,7 @@ def apply_saved_settings(session_context: Optional[Dict[str, Any]] = None) -> Op
 def reset_settings(session_context: Optional[Dict[str, Any]] = None) -> None:
     """Reset settings to defaults and remove persisted configuration."""
 
-    config.OLLAMA_MODEL = config.DEFAULT_OLLAMA_MODEL
+    config.set_model(config.DEFAULT_OLLAMA_MODEL)
     config.OLLAMA_BASE_URL = config.DEFAULT_OLLAMA_BASE_URL
     config.set_private_mode(config.DEFAULT_PRIVATE_MODE)
     os.environ["REV_PRIVATE_MODE"] = "true" if config.DEFAULT_PRIVATE_MODE else "false"

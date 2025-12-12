@@ -168,7 +168,7 @@ def main():
         print(f"Debug logging enabled: {debug_logger.log_file_path}")
 
     # Update config globals for ollama_chat function
-    config.OLLAMA_MODEL = args.model
+    config.set_model(args.model)
     config.OLLAMA_BASE_URL = args.base_url
 
     if args.version:

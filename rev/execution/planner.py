@@ -17,9 +17,8 @@ from rev.config import (
     MAX_LLM_TOKENS_PER_RUN,
     MAX_PLAN_TASKS,
     get_system_info_cached,
-    PLANNING_MODEL,
-    PLANNING_SUPPORTS_TOOLS,
 )
+from rev import config
 from rev.tools.git_ops import get_repo_context
 from rev.tools.registry import get_available_tools, execute_tool
 
@@ -540,8 +539,8 @@ def planning_mode(
     print("=" * 60)
 
     task_limit = max_plan_tasks or MAX_PLAN_TASKS
-    model_name = PLANNING_MODEL
-    model_supports_tools = PLANNING_SUPPORTS_TOOLS
+    model_name = config.PLANNING_MODEL
+    model_supports_tools = config.PLANNING_SUPPORTS_TOOLS
 
     # Get available tools for LLM function calling
     tools = get_available_tools()

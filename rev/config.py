@@ -179,6 +179,21 @@ _ESCAPE_INTERRUPT = False
 _PRIVATE_MODE_OVERRIDE: Optional[bool] = None
 
 
+def set_model(model_name: str) -> None:
+    """
+    Update the active model for all agent phases.
+
+    This keeps execution, planning, and research models in sync with the user
+    selection (e.g., via CLI --model or /model command) to avoid falling back
+    to the default.
+    """
+    global OLLAMA_MODEL, EXECUTION_MODEL, PLANNING_MODEL, RESEARCH_MODEL
+    OLLAMA_MODEL = model_name
+    EXECUTION_MODEL = model_name
+    PLANNING_MODEL = model_name
+    RESEARCH_MODEL = model_name
+
+
 def get_system_info_cached() -> Dict[str, Any]:
     """Get cached system information."""
     global _SYSTEM_INFO

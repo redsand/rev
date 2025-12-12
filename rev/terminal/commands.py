@@ -245,7 +245,7 @@ class ModelCommand(CommandHandler):
         # Change model
         new_model = args[0]
         old_model = config.OLLAMA_MODEL
-        config.OLLAMA_MODEL = new_model
+        config.set_model(new_model)
 
         return f"\n{colorize('Model changed:', Colors.BRIGHT_WHITE, bold=True)} {old_model} {colorize(Symbols.ARROW, Colors.BRIGHT_GREEN)} {colorize(new_model, Colors.BRIGHT_CYAN, bold=True)}"
 
