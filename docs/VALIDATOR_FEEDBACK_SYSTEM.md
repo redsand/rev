@@ -20,7 +20,7 @@ The feedback system creates a closed loop with automatic retry:
 2. **Format failures** - `format_validation_feedback_for_llm()` creates detailed feedback
 3. **Auto-fix attempt** - `fix_validation_failures()` uses the LLM to create fixes
 4. **Re-validate** - Validation runs again to check if fixes worked
-5. **Retry loop** - Repeats up to `max_retries` times until validation passes
+5. **Retry loop** - Repeats up to `MAX_VALIDATION_RETRIES` times until validation passes
 
 ## Architecture
 

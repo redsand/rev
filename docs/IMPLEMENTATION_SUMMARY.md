@@ -67,8 +67,11 @@ This document summarizes the implementation of Agentic Design Patterns into Rev,
 - **Implementation**: Added resource budget configuration
 - **Features**:
   - `MAX_STEPS_PER_RUN`: Maximum steps per execution (default: 200)
-  - `MAX_LLM_TOKENS_PER_RUN`: Token budget (default: 120,000)
+  - `MAX_LLM_TOKENS_PER_RUN`: Token budget (default: 80,000; keep comfortably below provider limits)
   - `MAX_WALLCLOCK_SECONDS`: Time budget (default: 1800s / 30min)
+  - `MAX_EXECUTION_ITERATIONS` / `MAX_TASK_ITERATIONS`: Execution/task loop limits (defaults: 40 / 20)
+  - Per-task tool budgets: `MAX_READ_FILE_PER_TASK`, `MAX_SEARCH_CODE_PER_TASK`, `MAX_RUN_CMD_PER_TASK`
+  - Split retry knobs: `MAX_ORCHESTRATOR_RETRIES`, `MAX_PLAN_REGEN_RETRIES`, `MAX_VALIDATION_RETRIES`
   - Environment variable overrides
 
 #### 8. Coding-Specific Patterns
