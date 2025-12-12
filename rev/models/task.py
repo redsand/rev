@@ -187,9 +187,9 @@ class ExecutionPlan:
             self.current_index += 1
 
     def is_complete(self) -> bool:
-        """Check if all tasks are done (completed or failed)."""
+        """Check if all tasks are done (completed, failed, or stopped)."""
         return all(
-            task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED]
+            task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.STOPPED]
             for task in self.tasks
         )
 
@@ -530,9 +530,17 @@ class ExecutionPlan:
         return plan
 
     def mark_task_stopped(self, task: Task):
-        """Mark a specific task as stopped (for resume functionality)."""
+        """Mark a specific task as stopped (for resume functionality).
+
+        Also advances current_index to prevent the execution loop from getting
+        stuck retrying the same task indefinitely.
+        """
         with self.lock:
             task.status = TaskStatus.STOPPED
+            # Advance to next task so sequential execution doesn't get stuck
+            # on the same stopped task (similar to mark_failed behavior)
+            if task.task_id is not None and task.task_id == self.current_index:
+                self.current_index += 1
 
     def save_checkpoint(self, filepath: str = None):
         """Save the current execution state to a checkpoint file.
