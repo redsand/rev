@@ -17,7 +17,8 @@ from typing import Optional, Iterable
 # into smaller chunks.
 _LARGE_PATCH_HINT_THRESHOLD = 120_000
 
-from rev.config import ROOT, ALLOW_CMDS
+from rev import config
+from rev.debug_logger import prune_old_logs
 
 
 # ========== Helper Function ==========
@@ -27,7 +28,7 @@ def _run_shell(cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:
     return subprocess.run(
         cmd,
         shell=True,
-        cwd=str(ROOT),
+        cwd=str(config.ROOT),
         text=True,
         capture_output=True,
         timeout=timeout,
@@ -39,11 +40,12 @@ def _run_shell(cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:
 def _create_log_file(prefix: str) -> pathlib.Path:
     """Create a log file inside .rev_logs for streaming command output."""
 
-    log_dir = ROOT / ".rev_logs"
+    log_dir = config.ROOT / ".rev_logs"
     log_dir.mkdir(exist_ok=True)
 
     fd, path_str = tempfile.mkstemp(prefix=prefix, suffix=".log", dir=log_dir)
     os.close(fd)
+    prune_old_logs(log_dir, config.LOG_RETENTION_LIMIT)
     return pathlib.Path(path_str)
 
 
@@ -82,7 +84,7 @@ def _run_shell_streamed(
         proc = subprocess.Popen(
             cmd,
             shell=True,
-            cwd=str(ROOT),
+            cwd=str(config.ROOT),
             text=True,
             stdout=stdout_handle,
             stderr=stderr_handle,
@@ -200,7 +202,7 @@ def _snapshot_paths(paths: set[str]) -> dict[str, Optional[bytes]]:
 
     snapshot: dict[str, Optional[bytes]] = {}
     for path in paths:
-        full_path = ROOT / path
+        full_path = config.ROOT / path
         snapshot[path] = full_path.read_bytes() if full_path.exists() else None
     return snapshot
 
@@ -645,9 +647,9 @@ def git_branch(action: str = "list", branch_name: str = None) -> str:
 def run_cmd(cmd: str, timeout: int = 300) -> str:
     """Run a shell command."""
     parts0 = shlex.split(cmd)[:1]
-    ok = parts0 and (parts0[0] in ALLOW_CMDS or parts0[0] == "npx")
+    ok = parts0 and (parts0[0] in config.ALLOW_CMDS or parts0[0] == "npx")
     if not ok:
-        return json.dumps({"blocked": parts0, "allow": sorted(ALLOW_CMDS)})
+        return json.dumps({"blocked": parts0, "allow": sorted(config.ALLOW_CMDS)})
 
     # Short-circuit repeated git clones to an existing destination
     tokens = shlex.split(cmd)
@@ -663,7 +665,7 @@ def run_cmd(cmd: str, timeout: int = 300) -> str:
         if dest:
             dest_path = pathlib.Path(dest)
             if not dest_path.is_absolute():
-                dest_path = ROOT / dest_path
+                dest_path = config.ROOT / dest_path
 
             if dest_path.exists():
                 return json.dumps({
@@ -689,7 +691,7 @@ def run_cmd(cmd: str, timeout: int = 300) -> str:
 def run_tests(cmd: str = "pytest -q", timeout: int = 600) -> str:
     """Run test suite."""
     p0 = shlex.split(cmd)[0]
-    if p0 not in ALLOW_CMDS and p0 != "npx":
+    if p0 not in config.ALLOW_CMDS and p0 != "npx":
         return json.dumps({"blocked": p0})
     try:
         result = _run_shell_streamed(
@@ -720,7 +722,7 @@ def get_repo_context(commits: int = 6) -> str:
 
     from rev.config import EXCLUDE_DIRS
     top = []
-    for p in sorted(ROOT.iterdir()):
+    for p in sorted(config.ROOT.iterdir()):
         if p.name in EXCLUDE_DIRS:
             continue
         top.append({"name": p.name, "type": ("dir" if p.is_dir() else "file")})

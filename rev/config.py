@@ -65,6 +65,10 @@ MAX_VALIDATION_RETRIES = int(os.getenv("REV_MAX_VALIDATION_RETRIES", "2"))
 MAX_ADAPTIVE_REPLANS = int(os.getenv("REV_MAX_ADAPTIVE_REPLANS", "1"))
 VALIDATION_TIMEOUT_SECONDS = int(os.getenv("REV_VALIDATION_TIMEOUT", "180"))
 
+# Logging configuration
+LOG_RETENTION_LIMIT_DEFAULT = int(os.getenv("REV_LOG_RETENTION", "7"))
+LOG_RETENTION_LIMIT = LOG_RETENTION_LIMIT_DEFAULT
+
 # History configuration
 HISTORY_SIZE = int(os.getenv("REV_HISTORY_SIZE", "100"))  # Number of history entries to keep
 HISTORY_FILE = os.getenv("REV_HISTORY_FILE", "")  # Empty means no file persistence

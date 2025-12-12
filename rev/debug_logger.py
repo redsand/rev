@@ -16,6 +16,28 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from functools import wraps
 
+from rev import config
+
+
+def prune_old_logs(log_dir: Path, keep: int) -> None:
+    """Remove old log files beyond the configured retention limit."""
+
+    if keep < 1 or not log_dir.exists():
+        return
+
+    log_files = sorted(
+        [path for path in log_dir.glob("*.log") if path.is_file()],
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+
+    for stale_file in log_files[keep:]:
+        try:
+            stale_file.unlink()
+        except Exception:
+            # Best-effort cleanup; ignore failures to avoid interrupting the session
+            continue
+
 
 class DebugLogger:
     """Centralized debug logger with component-specific logging."""
@@ -46,6 +68,8 @@ class DebugLogger:
 
             # Set up root logger
             self._setup_logging()
+
+            prune_old_logs(log_dir, config.LOG_RETENTION_LIMIT)
 
             # Log session start
             self.log("system", "DEBUG_SESSION_START", {
