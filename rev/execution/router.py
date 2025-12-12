@@ -39,7 +39,7 @@ class RouteDecision:
     enable_review: bool
     enable_validation: bool
     review_strictness: str = "moderate"  # strict, moderate, lenient
-    parallel_workers: int = 2
+    parallel_workers: int = 1
     enable_action_review: bool = False
     research_depth: str = "medium"  # shallow, medium, deep
     validation_mode: str = "targeted"  # none, smoke, targeted, full
@@ -128,7 +128,7 @@ class TaskRouter:
             enable_review=False,
             enable_validation=True,
             review_strictness="lenient",
-            parallel_workers=2,
+            parallel_workers=1,
             research_depth="off",
             validation_mode="smoke",
             max_plan_tasks=8,
@@ -147,7 +147,7 @@ class TaskRouter:
             enable_review=enable_review,
             enable_validation=True,
             review_strictness="moderate",
-            parallel_workers=2,
+            parallel_workers=1,
             research_depth="medium",
             validation_mode="targeted",
             max_plan_tasks=20,
@@ -168,7 +168,7 @@ class TaskRouter:
             enable_review=True,
             enable_validation=True,
             review_strictness="strict" if is_security else "moderate",
-            parallel_workers=2 if is_security else 3,
+            parallel_workers=1,
             enable_action_review=is_security,
             research_depth="deep",
             validation_mode=validation_mode,

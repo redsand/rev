@@ -241,7 +241,7 @@ def _consume_tool_budget(tool_name: str, counters: Dict[str, int], limits: Dict[
 
     used = counters.get(tool_name, 0)
     if used >= limit:
-        return False, f"You've already used the maximum number of {tool_name} calls for this task; continue using the code you have."
+        return False, f"{tool_name} budget reached for this task ({used}/{limit}); continue without more {tool_name} calls."
 
     counters[tool_name] = used + 1
     return True, ""
@@ -730,6 +730,7 @@ def execution_mode(
         "search_code": MAX_SEARCH_CODE_PER_TASK,
         "run_cmd": MAX_RUN_CMD_PER_TASK,
     }
+    budget_warned_tasks = set()
 
     while not plan.is_complete() and iteration < max_iterations:
         # Check for escape key interrupt
@@ -758,10 +759,12 @@ def execution_mode(
         iteration += 1
         current_task = plan.get_current_task()
 
+        budget_warned = False
         if budget:
             budget.update_time()
             if budget.is_exceeded():
                 print(f"⚠️ Resource budget exceeded before starting task loop: {budget.get_usage_summary()} (continuing)")
+                budget_warned = True
 
         print(f"\n[Task {plan.current_index + 1}/{len(plan.tasks)}] {current_task.description}")
         print(f"[Type: {current_task.action_type}]")
@@ -797,13 +800,16 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
 
         # Execute task with tool calls
         task_iterations = 0
-        max_task_iterations = MAX_TASK_ITERATIONS
+        base_task_iterations = MAX_TASK_ITERATIONS
+        warn_task_iterations = base_task_iterations * 2
+        max_task_iterations = base_task_iterations * 3
         task_complete = False
         tool_usage = {name: 0 for name in tool_limits}
         over_budget_hits = {name: 0 for name in tool_limits}
         prompt_tokens_used = 0
         tools_enabled = model_supports_tools
         no_tool_call_streak = 0
+        iter_warned = False
 
         while task_iterations < max_task_iterations and not task_complete:
             # Check for escape key interrupt during task execution
@@ -828,6 +834,9 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                 return False
 
             task_iterations += 1
+            if task_iterations >= warn_task_iterations and not iter_warned:
+                print(f"⚠️ Task {plan.current_index + 1} exceeded 2x iteration limit ({task_iterations}/{max_task_iterations})")
+                iter_warned = True
 
             call_tools = tools if tools_enabled and model_supports_tools else None
             llm_messages = _prepare_llm_messages(messages, exec_context, session_tracker)
@@ -861,8 +870,9 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                 if budget:
                     budget.update_tokens(usage.get("total", 0) or 0)
                     budget.update_time()
-                    if budget.is_exceeded():
+                    if budget.is_exceeded() and not budget_warned:
                         print(f"  ⚠️ Resource budget exceeded during execution: {budget.get_usage_summary()} (continuing)")
+                        budget_warned = True
 
             msg = response.get("message", {})
             content = msg.get("content", "")
@@ -934,6 +944,10 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                             "tool": tool_name,
                             "count": over_budget_hits[tool_name],
                         }, "WARNING")
+                        if over_budget_hits[tool_name] == 1:
+                            limit = tool_limits.get(tool_name)
+                            used = tool_usage.get(tool_name, 0)
+                            print(f"  ⚠️ {tool_name} budget reached for this task ({used}/{limit}); please continue without additional {tool_name} calls.")
                         messages.append({
                             "role": "tool",
                             "name": tool_name,
@@ -943,15 +957,6 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                             "role": "user",
                             "content": f"You have reached the {tool_name} call limit for this task. Provide next steps without more {tool_name} calls."
                         })
-                        if over_budget_hits[tool_name] >= 2:
-                            error_msg = f"{tool_name} budget exceeded for this task"
-                            print(f"  ⚠️ {error_msg} (marking stopped)")
-                            plan.mark_task_stopped(current_task)
-                            if state_manager:
-                                state_manager.on_task_failed(current_task)
-                            session_tracker.track_task_failed(current_task.description, error_msg)
-                            task_complete = True
-                            break
                         continue
 
                     # Check if this is a scary operation
@@ -1120,12 +1125,11 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
 
         if not task_complete and task_iterations >= max_task_iterations:
             error_msg = "Exceeded iteration limit"
-            print(f"  ✗ Task exceeded iteration limit (marking stopped)")
+            print(f"  ⚠️ Task exceeded 3x iteration limit (marking stopped)")
             plan.mark_task_stopped(current_task)
             current_task.error = error_msg
             if state_manager:
                 state_manager.on_task_failed(current_task)
-            session_tracker.track_task_failed(current_task.description, error_msg)
 
         debug_logger.log("executor", "TASK_USAGE", {
             "task_id": current_task.task_id,
@@ -1258,7 +1262,9 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
 
     # Execute task with tool calls
     task_iterations = 0
-    max_task_iterations = MAX_TASK_ITERATIONS
+    base_task_iterations = MAX_TASK_ITERATIONS
+    warn_task_iterations = base_task_iterations * 2
+    max_task_iterations = base_task_iterations * 3
     task_complete = False
     tool_usage = {name: 0 for name in tool_limits}
     over_budget_hits = {name: 0 for name in tool_limits}
@@ -1266,7 +1272,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
     tools_enabled = model_supports_tools
     no_tool_call_streak = 0
     budget_warned = False
-    execution_budget_warned = False
+    iter_warned = False
 
     def _log_usage(success: bool):
         debug_logger.log("executor", "TASK_USAGE", {
@@ -1291,6 +1297,9 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             return False
 
         task_iterations += 1
+        if task_iterations >= warn_task_iterations and not iter_warned:
+            print(f"⚠️ Task {task.task_id + 1} exceeded 2x iteration limit ({task_iterations}/{max_task_iterations})")
+            iter_warned = True
 
         if budget:
             budget.update_time()
@@ -1331,9 +1340,9 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             if budget:
                 budget.update_tokens(usage.get("total", 0) or 0)
                 budget.update_time()
-                if budget.is_exceeded() and not execution_budget_warned:
+                if budget.is_exceeded() and not budget_warned:
                     print(f"⚠️ Resource budget exceeded during execution for task {task.task_id + 1}: {budget.get_usage_summary()} (continuing)")
-                    execution_budget_warned = True
+                    budget_warned = True
 
         msg = response.get("message", {})
         content = msg.get("content", "")
@@ -1363,6 +1372,10 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         "count": over_budget_hits[tool_name],
                         "task_id": task.task_id,
                     }, "WARNING")
+                    if over_budget_hits[tool_name] == 1:
+                        limit = tool_limits.get(tool_name)
+                        used = tool_usage.get(tool_name, 0)
+                        print(f"  ⚠️ {tool_name} budget reached for this task ({used}/{limit}); please continue without additional {tool_name} calls.")
                     messages.append({
                         "role": "tool",
                         "name": tool_name,
@@ -1372,12 +1385,6 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         "role": "user",
                         "content": f"You have reached the {tool_name} call limit for this task. Provide next steps without more {tool_name} calls."
                     })
-                    if over_budget_hits[tool_name] >= 2:
-                        plan.mark_task_failed(task, f"{tool_name} budget exceeded for this task")
-                        if state_manager:
-                            state_manager.on_task_failed(task)
-                        _log_usage(False)
-                        return False
                     continue
 
                 # Check if this is a scary operation
@@ -1528,8 +1535,9 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             no_tool_call_streak = 0
 
     if not task_complete:
-        print(f"  ✗ Task exceeded iteration limit")
-        plan.mark_task_failed(task, "Exceeded iteration limit")
+        print(f"  ✗ Task exceeded 3x iteration limit (marking stopped)")
+        plan.mark_task_stopped(task)
+        task.error = "Exceeded iteration limit"
         if state_manager:
             state_manager.on_task_failed(task)
         _log_usage(False)
@@ -1608,8 +1616,9 @@ def concurrent_execution_mode(
 
                 # Submit new tasks
                 for task in executable_tasks:
-                    if budget and budget.is_exceeded():
+                    if budget and budget.is_exceeded() and task.task_id not in budget_warned_tasks:
                         print(f"⚠️ Resource budget exceeded before scheduling task {task.task_id}: {budget.get_usage_summary()} (continuing)")
+                        budget_warned_tasks.add(task.task_id)
                     future = executor.submit(
                         execute_single_task, task, plan, sys_info,
                         auto_approve, tools, enable_action_review, coding_mode, state_manager,

@@ -75,6 +75,32 @@ class ActionReview:
         }
 
 
+def _extract_bullets(text: str) -> List[str]:
+    """Extract bullet-style lines from freeform text."""
+    bullets = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("-", "*")):
+            bullets.append(stripped.lstrip("-* ").strip())
+    return [b for b in bullets if b]
+
+
+def _apply_freeform_review(review: "PlanReview", content: str) -> bool:
+    """Fallback parsing when the review agent returns plain text instead of JSON."""
+    if not content or not content.strip():
+        return False
+
+    review.decision = ReviewDecision.APPROVED_WITH_SUGGESTIONS
+    review.overall_assessment = content.strip()
+    review.confidence_score = 0.65
+
+    suggestions = _extract_bullets(content)
+    if not suggestions:
+        suggestions = [content.strip()[:200]]
+    review.suggestions = suggestions
+    return True
+
+
 PLAN_REVIEW_SYSTEM = """You are an expert code review agent specializing in CI/CD workflows and software architecture.
 
 You have access to code analysis tools to verify plans:
@@ -314,6 +340,9 @@ Provide a thorough review."""}
             parse_attempt += 1
             print(f"⚠️  Error parsing review: {e}")
             if parse_attempt > max_parse_retries:
+                if _apply_freeform_review(review, content):
+                    print("⚠️  Falling back to freeform review parsing.")
+                    break
                 review.decision = ReviewDecision.APPROVED_WITH_SUGGESTIONS
                 review.suggestions.append("Could not parse review - approved by default")
                 review.confidence_score = 0.7

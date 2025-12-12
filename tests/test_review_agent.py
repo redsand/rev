@@ -399,6 +399,31 @@ class TestPlanReview(unittest.TestCase):
         self.assertAlmostEqual(review.confidence_score, 0.91)
 
     @patch('rev.execution.reviewer.ollama_chat')
+    def test_plan_review_freeform_fallback(self, mock_ollama):
+        """Freeform (non-JSON) responses should still be parsed into suggestions."""
+        mock_ollama.return_value = {
+            "message": {
+                "content": "Overall looks fine.\n- add unit tests for new endpoints\n- keep logging minimal"
+            }
+        }
+
+        plan = ExecutionPlan()
+        plan.add_task("Add endpoint", "add")
+        plan.tasks[0].risk_level = RiskLevel.MEDIUM
+
+        review = review_execution_plan(
+            plan,
+            "Add endpoint",
+            strictness=ReviewStrictness.MODERATE,
+            auto_approve_low_risk=False,
+            max_parse_retries=0,  # Force fallback on first parse failure
+        )
+
+        self.assertEqual(review.decision, ReviewDecision.APPROVED_WITH_SUGGESTIONS)
+        self.assertTrue(any("add unit tests" in s for s in review.suggestions))
+        self.assertIn("Overall looks fine", review.overall_assessment)
+
+    @patch('rev.execution.reviewer.ollama_chat')
     def test_plan_requires_changes(self, mock_ollama):
         """Test plan that requires changes."""
         mock_ollama.return_value = {

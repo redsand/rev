@@ -113,7 +113,7 @@ def repl_mode():
                     review_strictness=mode_cfg.get("review_strictness", "moderate"),
                     enable_action_review=mode_cfg.get("action_review", False),
                     enable_auto_fix=mode_cfg.get("auto_fix", False),
-                    parallel_workers=mode_cfg.get("parallel", 2),
+                    parallel_workers=mode_cfg.get("parallel", 1),
                     auto_approve=True,
                     research_depth=mode_cfg.get("research_depth", "medium"),
                 )
