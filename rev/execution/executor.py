@@ -68,6 +68,14 @@ Work methodically:
 4. Validate changes (run tests)
 5. Report completion
 
+CRITICAL - AVOID LOOPS AND DUPLICATE ACTIONS:
+- NEVER call the same tool with the same arguments twice. Results are cached.
+- NEVER call tree_view, list_dir, or search_code more than 2-3 times total per task.
+- If you already read a file, DO NOT read it again. Use the cached content.
+- If a search didn't find what you need, try ONE different pattern, then MOVE ON.
+- After 5 exploration actions (read/search/list), you MUST make an edit.
+- If you cannot find the exact location, CREATE the file/class anyway with best-effort code.
+
 Progress discipline for autonomous runs:
 - Move from discovery to editing quickly; make a concrete edit after your initial inspection.
 - Avoid repeatedly listing directories or re-reading the same file unless it changed.
@@ -161,6 +169,11 @@ class ExecutionContext:
         self.search_cache: Dict[Tuple[Any, ...], str] = {}
         self.snippet_cache: List[Dict[str, Any]] = []
         self._lock = threading.Lock()
+        # Track tool calls to detect loops and duplicates
+        self.tool_call_history: List[Tuple[str, str]] = []  # (tool_name, args_hash)
+        self.recent_actions: List[str] = []  # Human-readable recent actions
+        self.exploration_count = 0  # Count of read/search/list calls
+        self.edit_count = 0  # Count of write/patch calls
 
     def get_code(self, path: Optional[str]) -> Optional[str]:
         """Return cached code for a path if available."""
@@ -221,6 +234,103 @@ class ExecutionContext:
         """Return a copy of cached snippets."""
         with self._lock:
             return list(self.snippet_cache)
+
+    def _hash_args(self, args: Dict[str, Any]) -> str:
+        """Create a stable hash of tool arguments."""
+        import hashlib
+        # Sort keys for consistent hashing
+        sorted_args = json.dumps(args, sort_keys=True, default=str)
+        return hashlib.md5(sorted_args.encode()).hexdigest()[:12]
+
+    def is_duplicate_call(self, tool_name: str, tool_args: Dict[str, Any]) -> bool:
+        """Check if this exact tool call was already made."""
+        args_hash = self._hash_args(tool_args)
+        call_key = (tool_name, args_hash)
+        with self._lock:
+            return call_key in self.tool_call_history
+
+    def record_tool_call(self, tool_name: str, tool_args: Dict[str, Any]) -> None:
+        """Record a tool call for deduplication tracking."""
+        args_hash = self._hash_args(tool_args)
+        call_key = (tool_name, args_hash)
+
+        # Track exploration vs edit operations
+        exploration_tools = {"read_file", "search_code", "list_dir", "tree_view", "get_repo_context"}
+        edit_tools = {"write_file", "apply_patch"}
+
+        with self._lock:
+            if call_key not in self.tool_call_history:
+                self.tool_call_history.append(call_key)
+
+            if tool_name in exploration_tools:
+                self.exploration_count += 1
+            elif tool_name in edit_tools:
+                self.edit_count += 1
+
+            # Record human-readable action (keep last 10)
+            action_desc = self._format_action(tool_name, tool_args)
+            self.recent_actions.append(action_desc)
+            self.recent_actions = self.recent_actions[-10:]
+
+    def _format_action(self, tool_name: str, tool_args: Dict[str, Any]) -> str:
+        """Format a tool call as a human-readable action."""
+        if tool_name == "read_file":
+            return f"read_file({tool_args.get('path', '?')})"
+        elif tool_name == "search_code":
+            pattern = tool_args.get("pattern", "")[:30]
+            include = tool_args.get("include", "**/*")
+            return f"search_code('{pattern}' in {include})"
+        elif tool_name == "list_dir":
+            return f"list_dir({tool_args.get('pattern', '?')})"
+        elif tool_name == "tree_view":
+            return f"tree_view({tool_args.get('path', '.')})"
+        elif tool_name == "write_file":
+            return f"write_file({tool_args.get('path', '?')})"
+        elif tool_name == "apply_patch":
+            return "apply_patch(...)"
+        else:
+            return f"{tool_name}(...)"
+
+    def get_recent_actions_summary(self) -> str:
+        """Get a summary of recent actions for context injection."""
+        with self._lock:
+            if not self.recent_actions:
+                return ""
+            return "Recent actions: " + " → ".join(self.recent_actions[-5:])
+
+    def is_exploration_heavy(self, threshold: int = 8) -> bool:
+        """Check if task has done too much exploration without editing."""
+        with self._lock:
+            return self.exploration_count >= threshold and self.edit_count == 0
+
+    def detect_loop_pattern(self) -> Optional[str]:
+        """Detect if the same tools are being called repeatedly (loop)."""
+        with self._lock:
+            if len(self.tool_call_history) < 4:
+                return None
+
+            # Check last 6 calls for repeated patterns
+            recent = self.tool_call_history[-6:]
+            tool_names = [t[0] for t in recent]
+
+            # Count occurrences of each tool in recent calls
+            from collections import Counter
+            counts = Counter(tool_names)
+
+            # If any tool was called 3+ times in last 6 calls, it's a potential loop
+            for tool, count in counts.items():
+                if count >= 3 and tool in {"search_code", "list_dir", "tree_view", "read_file"}:
+                    return f"Detected loop: {tool} called {count} times in last 6 operations"
+
+            return None
+
+    def reset_for_new_task(self) -> None:
+        """Reset per-task tracking for a new task."""
+        with self._lock:
+            self.tool_call_history.clear()
+            self.recent_actions.clear()
+            self.exploration_count = 0
+            self.edit_count = 0
 
 
 def _make_search_cache_key(args: Dict[str, Any]) -> Tuple[Any, ...]:
@@ -325,6 +435,12 @@ def _prepare_llm_messages(
     snippet_text = _format_snippet_context(exec_context)
     if snippet_text:
         context_blocks.append(f"Cached code snippets:\n{snippet_text}")
+
+    # Add recent actions to help LLM avoid repeating itself
+    if exec_context:
+        recent_actions = exec_context.get_recent_actions_summary()
+        if recent_actions:
+            context_blocks.append(f"⚠️ {recent_actions} - DO NOT repeat these actions.")
 
     if context_blocks:
         prepared.append({"role": "user", "content": "\n\n".join(context_blocks)})
@@ -811,6 +927,9 @@ def execution_mode(
         if state_manager:
             state_manager.on_task_started(current_task)
 
+        # Reset per-task deduplication tracking
+        exec_context.reset_for_new_task()
+
         # Log task start
         debug_logger = get_logger()
         debug_logger.log_task_status(
@@ -963,6 +1082,37 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                             tool_args = json.loads(tool_args)
                         except:
                             tool_args = {}
+
+                    # Check for duplicate tool call (exact same args)
+                    if exec_context.is_duplicate_call(tool_name, tool_args):
+                        print(f"  ⚠️ Skipping duplicate {tool_name} call (already executed with same args)")
+                        messages.append({
+                            "role": "tool",
+                            "name": tool_name,
+                            "content": f"DUPLICATE_CALL: This exact {tool_name} call was already made. Use the cached result or try different parameters."
+                        })
+                        continue
+
+                    # Check for loop pattern (same tool called repeatedly)
+                    loop_warning = exec_context.detect_loop_pattern()
+                    if loop_warning:
+                        print(f"  ⚠️ {loop_warning}")
+                        messages.append({
+                            "role": "user",
+                            "content": f"WARNING: {loop_warning}. Stop exploring and make a concrete edit using write_file or apply_patch NOW."
+                        })
+
+                    # Check if too much exploration without editing
+                    if exec_context.is_exploration_heavy(threshold=8):
+                        print(f"  ⚠️ Exploration budget exhausted - forcing edit mode")
+                        messages.append({
+                            "role": "user",
+                            "content": "You have done extensive exploration without making any edits. STOP searching/reading and create the code change NOW using write_file or apply_patch. If you cannot find the exact location, create the best-effort implementation."
+                        })
+                        exec_context.exploration_count = 0  # Reset to allow some more exploration after warning
+
+                    # Record this tool call for deduplication tracking
+                    exec_context.record_tool_call(tool_name, tool_args)
 
                     # Final escape check immediately before executing the tool
                     if get_escape_interrupt():
@@ -1274,6 +1424,8 @@ def execute_single_task(
     model_supports_tools = config.EXECUTION_SUPPORTS_TOOLS
 
     exec_context = exec_context or ExecutionContext(plan)
+    # Reset per-task deduplication tracking
+    exec_context.reset_for_new_task()
     tool_limits = tool_limits or {
         "read_file": MAX_READ_FILE_PER_TASK,
         "search_code": MAX_SEARCH_CODE_PER_TASK,
@@ -1397,6 +1549,37 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         tool_args = json.loads(tool_args)
                     except:
                         tool_args = {}
+
+                # Check for duplicate tool call (exact same args)
+                if exec_context.is_duplicate_call(tool_name, tool_args):
+                    print(f"  ⚠️ Skipping duplicate {tool_name} call (already executed with same args)")
+                    messages.append({
+                        "role": "tool",
+                        "name": tool_name,
+                        "content": f"DUPLICATE_CALL: This exact {tool_name} call was already made. Use the cached result or try different parameters."
+                    })
+                    continue
+
+                # Check for loop pattern (same tool called repeatedly)
+                loop_warning = exec_context.detect_loop_pattern()
+                if loop_warning:
+                    print(f"  ⚠️ {loop_warning}")
+                    messages.append({
+                        "role": "user",
+                        "content": f"WARNING: {loop_warning}. Stop exploring and make a concrete edit using write_file or apply_patch NOW."
+                    })
+
+                # Check if too much exploration without editing
+                if exec_context.is_exploration_heavy(threshold=8):
+                    print(f"  ⚠️ Exploration budget exhausted - forcing edit mode")
+                    messages.append({
+                        "role": "user",
+                        "content": "You have done extensive exploration without making any edits. STOP searching/reading and create the code change NOW using write_file or apply_patch. If you cannot find the exact location, create the best-effort implementation."
+                    })
+                    exec_context.exploration_count = 0  # Reset to allow some more exploration after warning
+
+                # Record this tool call for deduplication tracking
+                exec_context.record_tool_call(tool_name, tool_args)
 
                 allowed, budget_msg = _consume_tool_budget(tool_name, tool_usage, tool_limits)
                 if not allowed:
