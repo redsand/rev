@@ -148,31 +148,45 @@ Your goal is to produce a PLAN that explicitly couples code changes with tests a
 
 BREAKDOWN_SYSTEM = """You are an expert at breaking down complex tasks into smaller, actionable subtasks.
 
-Given a high-level task, break it down into specific, atomic subtasks that can be executed independently.
+Given a high-level task, break it down into SPECIFIC, ATOMIC subtasks that can be executed independently.
+
+CRITICAL RULES FOR BREAKDOWN:
+1. Each subtask must be a SINGLE, CONCRETE action (not "implement X, Y, and Z")
+2. If the task mentions "many" or "multiple" items, create a SEPARATE subtask for EACH item
+3. For integration tasks: first analyze source, then create individual tasks per feature/function
+4. Never create a single subtask that encompasses the entire original task
+5. Aim for 5-15 granular subtasks for complex integration work
+6. Each subtask should take 1-3 tool calls to complete
 
 You have access to code analysis tools to help understand the codebase:
 - analyze_ast_patterns, run_pylint, run_mypy, run_radon_complexity, find_dead_code
 - search_code, list_dir, read_file
 
-Consider:
-1. What files need to be created or modified?
-2. What are the logical steps to implement this?
-3. What dependencies exist between steps?
-4. What testing is needed?
+BREAKDOWN STRATEGY:
+For "implement features from X to Y" tasks:
+1. First: Review/analyze source code to identify specific features
+2. For EACH feature found: Create individual implementation subtask
+3. After features: Add integration/testing subtasks
+4. Never bundle multiple features into one subtask
 
-Token discipline:
-- Keep the subtask list concise and avoid long prose explanations.
-- If the user requests a token cap (e.g., "use 500 tokens"), honor it.
-- If the breakdown would be lengthy, propose splitting the subtasks into smaller batches instead of returning a huge list.
+For "add multiple analysts/indicators/modules":
+1. Review existing code to understand patterns
+2. One subtask per analyst/indicator to add
+3. Separate subtasks for updating registries/configurations
+4. Separate subtasks for testing
 
 Return ONLY a JSON array of subtasks:
 [
-  {"description": "Create authentication middleware file", "action_type": "add", "complexity": "low"},
-  {"description": "Implement JWT token validation logic", "action_type": "edit", "complexity": "medium"},
-  {"description": "Add authentication tests", "action_type": "add", "complexity": "low"}
+  {"description": "Review existing analysts in lib/analysts.py to understand patterns", "action_type": "review", "complexity": "low"},
+  {"description": "Analyze source code in ../external-lib to identify available features", "action_type": "review", "complexity": "low"},
+  {"description": "Implement SMA analyst based on identified pattern", "action_type": "add", "complexity": "low"},
+  {"description": "Implement EMA analyst based on identified pattern", "action_type": "add", "complexity": "low"},
+  {"description": "Implement RSI analyst based on identified pattern", "action_type": "add", "complexity": "low"},
+  {"description": "Add unit tests for new analysts", "action_type": "add", "complexity": "low"},
+  {"description": "Update matrix recipes configuration", "action_type": "edit", "complexity": "low"}
 ]
 
-Keep subtasks focused and executable. Each should accomplish one clear goal."""
+Keep subtasks focused and executable. Each should accomplish ONE clear goal."""
 
 
 TOOL_RESULT_CHAR_LIMIT = 6000
@@ -345,7 +359,46 @@ def _call_llm_with_tools(
     return final_response  # Final call without tools
 
 
-def _recursive_breakdown(task_description: str, action_type: str, context: str, max_depth: int = 2, current_depth: int = 0, tools: list = None) -> List[Dict[str, Any]]:
+def _is_overly_broad_task(task_description: str) -> bool:
+    """Detect if a task description is too broad and needs breakdown.
+
+    Returns True if the task is likely a high-level request that should be
+    broken down into multiple granular subtasks.
+    """
+    description_lower = task_description.lower()
+
+    # Indicators of broad/multi-step tasks
+    broad_indicators = [
+        # Multi-item references
+        "many ", "multiple ", "several ", "various ", "all ",
+        # Implementation scope
+        "implement", "build", "create system", "add features",
+        "framework", "integrate", "migration",
+        # Analysis/review scope
+        "analyze", "review all", "audit",
+        # Generic goals
+        "goal is to", "should be", "exponential",
+        # File/module references suggesting multiple targets
+        "analysts", "strategies", "indicators", "modules",
+        # External reference suggesting integration work
+        "from ../", "from another", "algorithmic", "trading"
+    ]
+
+    # Check for broad indicators
+    has_broad_indicator = any(indicator in description_lower for indicator in broad_indicators)
+
+    # Check task length - very long descriptions often indicate complex tasks
+    is_long_description = len(task_description) > 200
+
+    # Check for multiple distinct actions mentioned
+    action_words = ["add", "implement", "create", "update", "modify", "review", "test", "integrate"]
+    action_count = sum(1 for word in action_words if word in description_lower)
+    has_multiple_actions = action_count >= 2
+
+    return has_broad_indicator or is_long_description or has_multiple_actions
+
+
+def _recursive_breakdown(task_description: str, action_type: str, context: str, max_depth: int = 2, current_depth: int = 0, tools: list = None, force_breakdown: bool = False) -> List[Dict[str, Any]]:
     """Recursively break down a complex task into subtasks.
 
     Args:
@@ -355,13 +408,25 @@ def _recursive_breakdown(task_description: str, action_type: str, context: str, 
         max_depth: Maximum recursion depth
         current_depth: Current recursion level
         tools: List of available tools for LLM function calling
+        force_breakdown: If True, force breakdown regardless of depth
 
     Returns:
         List of subtask dictionaries
     """
-    if current_depth >= max_depth:
+    if current_depth >= max_depth and not force_breakdown:
         # Max depth reached, return original task
         return [{"description": task_description, "action_type": action_type, "complexity": "medium"}]
+
+    # Add extra instructions when force breakdown is enabled
+    force_instruction = ""
+    if force_breakdown:
+        force_instruction = """
+IMPORTANT: This task was detected as overly broad and MUST be broken down into MANY granular subtasks.
+- Create at least 5-10 specific subtasks
+- Each subtask should be a single, atomic action
+- If this involves multiple features/items, create a SEPARATE subtask for EACH one
+- Do NOT return a single catch-all subtask
+"""
 
     messages = [
         {"role": "system", "content": BREAKDOWN_SYSTEM},
@@ -369,7 +434,7 @@ def _recursive_breakdown(task_description: str, action_type: str, context: str, 
 
 Task: {task_description}
 Action Type: {action_type}
-
+{force_instruction}
 Context:
 {context}
 
@@ -389,6 +454,49 @@ Provide detailed subtasks."""}
         json_match = re.search(r'\[.*\]', content, re.DOTALL)
         if json_match:
             subtasks = json.loads(json_match.group(0))
+
+            # If force_breakdown is True but we got too few subtasks, try harder
+            if force_breakdown and len(subtasks) <= 2:
+                print(f"  ⚠️  Breakdown returned only {len(subtasks)} subtasks, retrying with stronger prompt...")
+                retry_messages = [
+                    {"role": "system", "content": BREAKDOWN_SYSTEM},
+                    {"role": "user", "content": f"""The previous breakdown was insufficient. Break down this task into MORE specific subtasks:
+
+Task: {task_description}
+
+REQUIREMENTS:
+- You MUST return at least 5 subtasks
+- Each subtask must be a SINGLE action (e.g., "Add SMA indicator" not "Add indicators")
+- If the task mentions multiple items (analysts, features, etc.), create ONE subtask per item
+- Start with review/analysis tasks, then implementation tasks, then test tasks
+
+Example for "add multiple indicators":
+[
+  {{"description": "Review existing indicator implementations", "action_type": "review", "complexity": "low"}},
+  {{"description": "Add SMA (Simple Moving Average) indicator", "action_type": "add", "complexity": "low"}},
+  {{"description": "Add EMA (Exponential Moving Average) indicator", "action_type": "add", "complexity": "low"}},
+  {{"description": "Add RSI (Relative Strength Index) indicator", "action_type": "add", "complexity": "low"}},
+  {{"description": "Add MACD indicator", "action_type": "add", "complexity": "low"}},
+  {{"description": "Add Bollinger Bands indicator", "action_type": "add", "complexity": "low"}},
+  {{"description": "Write unit tests for new indicators", "action_type": "add", "complexity": "low"}},
+  {{"description": "Update configuration/registry", "action_type": "edit", "complexity": "low"}}
+]
+
+Context:
+{context}
+
+Return ONLY a JSON array with at least 5 subtasks."""}
+                ]
+                retry_response = ollama_chat(retry_messages, tools=tools) or {}
+                if isinstance(retry_response, dict) and "error" not in retry_response:
+                    retry_content = retry_response.get("message", {}).get("content", "")
+                    retry_match = re.search(r'\[.*\]', retry_content, re.DOTALL)
+                    if retry_match:
+                        retry_subtasks = json.loads(retry_match.group(0))
+                        if len(retry_subtasks) > len(subtasks):
+                            subtasks = retry_subtasks
+                            print(f"  ✓ Retry produced {len(subtasks)} subtasks")
+
             # Recursively break down any high-complexity subtasks
             expanded_subtasks = []
             for subtask in subtasks:
@@ -671,17 +779,36 @@ After gathering information with tools, generate a comprehensive execution plan 
             if enable_recursive_breakdown:
                 print("→ Checking for complex tasks...")
                 expanded_tasks = []
+
+                # Detect single/few broad tasks that need forced breakdown
+                is_single_broad_plan = (
+                    len(tasks_data) <= 2 and
+                    any(_is_overly_broad_task(t.get("description", "")) for t in tasks_data)
+                )
+
+                if is_single_broad_plan:
+                    print("  ⚠️  Detected overly broad plan with 1-2 tasks - forcing breakdown...")
+
                 for task_data in tasks_data:
                     complexity = task_data.get("complexity", "low")
-                    if complexity == "high":
-                        print(f"  ├─ Breaking down complex task: {task_data['description'][:60]}...")
+                    description = task_data.get("description", "")
+
+                    # Force breakdown for broad tasks when plan is too small
+                    should_breakdown = (
+                        complexity == "high" or
+                        (is_single_broad_plan and _is_overly_broad_task(description))
+                    )
+
+                    if should_breakdown:
+                        print(f"  ├─ Breaking down {'broad' if is_single_broad_plan else 'complex'} task: {description[:60]}...")
                         subtasks = _recursive_breakdown(
-                            task_data["description"],
+                            description,
                             task_data.get("action_type", "general"),
                             context,
                             max_depth=2,
                             current_depth=0,
-                            tools=tools
+                            tools=tools,
+                            force_breakdown=is_single_broad_plan
                         )
                         print(f"     └─ Expanded into {len(subtasks)} subtasks")
                         expanded_tasks.extend(subtasks)
