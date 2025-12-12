@@ -113,6 +113,111 @@ class ExecutionPlan:
         task = Task(description, action_type, dependencies)
         task.task_id = len(self.tasks)
         self.tasks.append(task)
+        return task
+
+    def insert_subtasks_after(self, parent_task: Task, subtasks: List[Dict[str, Any]]) -> List[Task]:
+        """Insert subtasks immediately after a parent task in the execution plan.
+
+        This enables dynamic task expansion during execution. Subtasks are inserted
+        right after the parent task and inherit dependencies from the parent.
+
+        Args:
+            parent_task: The task after which to insert subtasks
+            subtasks: List of dicts with 'description', 'action_type', optional 'complexity'
+
+        Returns:
+            List of created Task objects
+        """
+        if not subtasks:
+            return []
+
+        with self.lock:
+            parent_idx = parent_task.task_id
+            if parent_idx is None or parent_idx < 0 or parent_idx >= len(self.tasks):
+                raise ValueError(f"Invalid parent task ID: {parent_idx}")
+
+            created_tasks = []
+            insert_position = parent_idx + 1
+
+            for i, subtask_data in enumerate(subtasks):
+                new_task = Task(
+                    description=subtask_data.get("description", "Subtask"),
+                    action_type=subtask_data.get("action_type", parent_task.action_type),
+                    dependencies=[parent_idx]  # Subtask depends on parent completion
+                )
+                new_task.complexity = subtask_data.get("complexity", "low")
+                new_task.task_id = insert_position + i  # Will be renumbered below
+                created_tasks.append(new_task)
+
+            # Insert the new tasks
+            for i, task in enumerate(created_tasks):
+                self.tasks.insert(insert_position + i, task)
+
+            # Renumber all tasks after insertion
+            for idx, task in enumerate(self.tasks):
+                old_id = task.task_id
+                task.task_id = idx
+
+                # Update dependencies that reference shifted tasks
+                if old_id != idx and old_id > parent_idx:
+                    # Update parent's subtasks list if needed
+                    pass
+
+            # Update parent's subtasks list
+            parent_task.subtasks = [t.task_id for t in created_tasks]
+
+            # Update dependencies in all tasks to account for renumbering
+            shift_amount = len(created_tasks)
+            for task in self.tasks:
+                if task in created_tasks:
+                    continue
+                new_deps = []
+                for dep_id in task.dependencies:
+                    if dep_id > parent_idx:
+                        # Dependency was shifted, update it
+                        new_deps.append(dep_id + shift_amount)
+                    else:
+                        new_deps.append(dep_id)
+                task.dependencies = new_deps
+
+            return created_tasks
+
+    def add_subtasks_to_pending(self, subtasks: List[Dict[str, Any]], after_task_id: int = None) -> List[Task]:
+        """Add new subtasks to the plan that haven't been executed yet.
+
+        Unlike insert_subtasks_after, this appends subtasks at the end of the plan,
+        making them suitable for late-discovered work.
+
+        Args:
+            subtasks: List of dicts with 'description', 'action_type', optional 'complexity'
+            after_task_id: Optional task ID that these subtasks depend on
+
+        Returns:
+            List of created Task objects
+        """
+        if not subtasks:
+            return []
+
+        with self.lock:
+            created_tasks = []
+            dependencies = [after_task_id] if after_task_id is not None else []
+
+            for subtask_data in subtasks:
+                new_task = Task(
+                    description=subtask_data.get("description", "Subtask"),
+                    action_type=subtask_data.get("action_type", "general"),
+                    dependencies=dependencies.copy()
+                )
+                new_task.complexity = subtask_data.get("complexity", "low")
+                new_task.task_id = len(self.tasks)
+                self.tasks.append(new_task)
+                created_tasks.append(new_task)
+
+                # If sequential execution is desired, make each subtask depend on the previous
+                if subtask_data.get("sequential", False) and created_tasks:
+                    dependencies = [new_task.task_id]
+
+            return created_tasks
 
     def get_current_task(self) -> Optional[Task]:
         """Get the next task (for sequential execution compatibility)."""
