@@ -76,7 +76,13 @@ class Task:
             action_type=data.get("action_type", "general"),
             dependencies=data.get("dependencies", [])
         )
-        task.status = TaskStatus(data["status"])
+        status_raw = str(data.get("status", "pending"))
+        # Accept both plain values and enum-like strings (e.g., "TaskStatus.COMPLETED")
+        status_value = status_raw.split(".")[-1]
+        try:
+            task.status = TaskStatus(status_value)
+        except Exception:
+            task.status = TaskStatus.PENDING
         task.result = data.get("result")
         task.error = data.get("error")
         task.task_id = data.get("task_id")

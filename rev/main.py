@@ -14,7 +14,7 @@ from .execution.validator import validate_execution, ValidationStatus
 from .execution.orchestrator import run_orchestrated
 from .terminal import repl_mode
 from .settings_manager import apply_saved_settings
-from .models.task import ExecutionPlan
+from .models.task import ExecutionPlan, TaskStatus
 from .tools.registry import get_available_tools
 from .debug_logger import DebugLogger
 from .execution.state_manager import StateManager
