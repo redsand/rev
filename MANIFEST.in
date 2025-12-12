@@ -16,6 +16,4 @@ recursive-exclude tests *
 recursive-exclude .git *
 recursive-exclude __pycache__ *
 recursive-exclude *.pyc *
-recursive-exclude .rev_cache *
-recursive-exclude .rev_checkpoints *
-recursive-exclude .rev_logs *
+recursive-exclude .rev *

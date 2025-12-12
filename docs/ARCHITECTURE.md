@@ -267,13 +267,13 @@ from rev.execution.orchestrator import run_orchestrated, Orchestrator
 
 Memory and caching remain **project-specific**:
 
-**Cache System** (`.rev_cache/`):
+**Cache System** (`.rev/cache/`):
 - File content cache with mtime tracking
 - LLM response cache (1 hour TTL)
 - Repository context cache (30s TTL)
 - Dependency tree cache (10 min TTL)
 
-**Learning Agent Memory** (`.rev_memory/`):
+**Learning Agent Memory** (`.rev/memory/`):
 - `patterns.json` — Learned task patterns from successful executions
 - `context.json` — Project-specific knowledge (framework, language, style)
 - `history.json` — Last 100 execution memories

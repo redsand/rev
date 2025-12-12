@@ -17,6 +17,8 @@ from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 
+from rev import config
+
 
 @dataclass
 class SessionSummary:
@@ -271,9 +273,9 @@ class SessionTracker:
             Path where summary was saved
         """
         if path is None:
-            # Default location: .rev_sessions/session_<id>.json
-            sessions_dir = Path.cwd() / ".rev_sessions"
-            sessions_dir.mkdir(exist_ok=True)
+            # Default location: .rev/sessions/session_<id>.json
+            sessions_dir = config.SESSIONS_DIR
+            sessions_dir.mkdir(exist_ok=True, parents=True)
             path = sessions_dir / f"{self.session_id}.json"
 
         self.summary.finalize()
@@ -298,9 +300,9 @@ class SessionTracker:
         import json
 
         if path is None:
-            # Default location: .rev-metrics/metrics.jsonl
-            metrics_dir = Path.cwd() / ".rev-metrics"
-            metrics_dir.mkdir(exist_ok=True)
+            # Default location: .rev/metrics/metrics.jsonl
+            metrics_dir = config.METRICS_DIR
+            metrics_dir.mkdir(exist_ok=True, parents=True)
             path = metrics_dir / "metrics.jsonl"
 
         # Ensure summary is finalized

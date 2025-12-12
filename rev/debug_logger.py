@@ -52,15 +52,15 @@ class DebugLogger:
 
         Args:
             enabled: Whether debug logging is enabled
-            log_dir: Directory to store log files (defaults to .rev_logs/)
+            log_dir: Directory to store log files (defaults to .rev/logs/)
         """
         self._enabled = enabled
 
         if enabled:
             # Create log directory
             if log_dir is None:
-                log_dir = Path.cwd() / ".rev_logs"
-            log_dir.mkdir(exist_ok=True)
+                log_dir = config.LOGS_DIR
+            log_dir.mkdir(exist_ok=True, parents=True)
 
             # Create log file with timestamp
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

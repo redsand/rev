@@ -675,7 +675,7 @@ compare_behavior_with_baseline(baseline_ref: str = "origin/main", test_selector:
 ```python
 analyze_runtime_logs(log_paths: list[str], since: str | None = None) -> str
 analyze_error_traces(log_paths: list[str], max_traces: int = 200) -> str
-analyze_performance_regression(benchmark_cmd: str, baseline_file: str = ".rev-metrics/perf-baseline.json", tolerance_pct: float = 10.0) -> str
+analyze_performance_regression(benchmark_cmd: str, baseline_file: str = ".rev/metrics/perf-baseline.json", tolerance_pct: float = 10.0) -> str
 validate_ci_config(paths: list[str] | None = None) -> str
 verify_migrations(path: str = "migrations") -> str
 ```

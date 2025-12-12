@@ -110,7 +110,7 @@ Resume execution from a checkpoint after an interruption.
 rev --resume
 
 # Resume from specific checkpoint
-rev --resume .rev_checkpoints/checkpoint_20250101_123456_0005_20250101_123456_789.json
+rev --resume .rev/checkpoints/checkpoint_20250101_123456_0005_20250101_123456_789.json
 
 # List all available checkpoints
 rev --list-checkpoints
@@ -152,11 +152,11 @@ Graceful handling of Ctrl+C interrupts:
 ⚠️  EXECUTION INTERRUPTED
 ==============================================================
 
-✓ State saved to: .rev_checkpoints/checkpoint_20250101_123456_0005.json
+✓ State saved to: .rev/checkpoints/checkpoint_20250101_123456_0005.json
 
 To resume from where you left off, run:
 
-  rev --resume .rev_checkpoints/checkpoint_20250101_123456_0005.json
+  rev --resume .rev/checkpoints/checkpoint_20250101_123456_0005.json
 
 Or to resume from the latest checkpoint:
 
@@ -195,7 +195,7 @@ rev --orchestrate "Refactor entire authentication system"
 
 ⚠️  Execution interrupted by Ctrl+C
 ==============================================================
-✓ State saved to: .rev_checkpoints/checkpoint_20250101_143022_0012.json
+✓ State saved to: .rev/checkpoints/checkpoint_20250101_143022_0012.json
 
 To resume:
   rev --resume
@@ -212,10 +212,10 @@ rev --resume
 rev --list-checkpoints
 
 # Resume from specific checkpoint
-rev --resume .rev_checkpoints/checkpoint_20250101_143022_0012.json
+rev --resume .rev/checkpoints/checkpoint_20250101_143022_0012.json
 
 # Clean old checkpoints manually (keeps last 10 by default)
-find .rev_checkpoints -type f -name "*.json" | sort -r | tail -n +11 | xargs rm
+find .rev/checkpoints -type f -name "*.json" | sort -r | tail -n +11 | xargs rm
 ```
 
 ## Integration Points
@@ -305,7 +305,7 @@ The state manager is automatically integrated in `execution_mode()`:
 
 ### Checkpoint Directory
 
-- Default: `.rev_checkpoints/`
+- Default: `.rev/checkpoints/`
 - Automatically created if it doesn't exist
 - Files named: `checkpoint_{session_id}_{number}_{timestamp}.json`
 - Cleaned automatically (keeps last 10)

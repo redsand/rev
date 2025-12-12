@@ -16,6 +16,7 @@ from enum import Enum
 from pathlib import Path
 from collections import defaultdict
 
+from rev import config
 from rev.models.task import ExecutionPlan, TaskStatus
 from rev.execution.planner import planning_mode
 from rev.execution.reviewer import review_execution_plan, ReviewStrictness, ReviewDecision
@@ -752,7 +753,7 @@ IMPORTANT - Address the following review feedback:
             from pathlib import Path
             import json
 
-            metrics_dir = Path.cwd() / ".rev-metrics"
+            metrics_dir = config.METRICS_DIR
             metrics_dir.mkdir(exist_ok=True)
             metrics_path = metrics_dir / "run-metrics.jsonl"
 
@@ -991,7 +992,7 @@ addresses the failures so the goals can still be met. Keep tasks concise and exe
             ".md": "markdown",
         }
         ext_counts = defaultdict(int)
-        skip_dirs = {".git", "node_modules", "venv", "__pycache__", ".pytest_cache", ".rev-metrics", ".mypy_cache"}
+        skip_dirs = {".git", "node_modules", "venv", "__pycache__", ".pytest_cache", ".rev", ".mypy_cache"}
 
         for root, dirs, files in os.walk(self.project_root):
             dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]

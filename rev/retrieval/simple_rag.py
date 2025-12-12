@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Set
 from collections import Counter
 
+from rev import config
 from rev.retrieval.base import BaseCodeRetriever, CodeChunk
 from rev.config import EXCLUDE_DIRS
 
@@ -42,7 +43,7 @@ class SimpleCodeRetriever(BaseCodeRetriever):
 
     def _cache_path(self) -> Path:
         """Location for persisted index cache."""
-        cache_dir = Path(".rev") / "cache"
+        cache_dir = config.CACHE_DIR
         cache_dir.mkdir(parents=True, exist_ok=True)
         root_id = hashlib.sha1(str(self.root.resolve()).encode("utf-8")).hexdigest()[:12]
         return cache_dir / f"rag_index_{root_id}_{self.chunk_size}.json"

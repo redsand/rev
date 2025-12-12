@@ -7,6 +7,8 @@ import threading
 from enum import Enum
 from typing import Dict, Any, List, Optional
 
+from rev import config
+
 
 class TaskStatus(Enum):
     PENDING = "pending"
@@ -543,7 +545,7 @@ class ExecutionPlan:
         from datetime import datetime
 
         if filepath is None:
-            checkpoint_dir = ".rev_checkpoints"
+            checkpoint_dir = config.CHECKPOINTS_DIR
             os.makedirs(checkpoint_dir, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filepath = os.path.join(checkpoint_dir, f"checkpoint_{timestamp}.json")
@@ -578,7 +580,7 @@ class ExecutionPlan:
         return plan
 
     @classmethod
-    def list_checkpoints(cls, checkpoint_dir: str = ".rev_checkpoints") -> List[Dict[str, Any]]:
+    def list_checkpoints(cls, checkpoint_dir: str = str(config.CHECKPOINTS_DIR)) -> List[Dict[str, Any]]:
         """List all available checkpoints.
 
         Args:

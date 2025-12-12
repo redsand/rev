@@ -139,7 +139,7 @@ Rev implements **21 Agentic Design Patterns** from cutting-edge AI agent researc
 - **TaskRouter Integration** — Routes every request to determine coding mode and agent configuration
 - **Goal Integration** — Goals automatically derived and validated post-execution
 - **Priority Scheduling** — Higher-priority tasks execute first for critical path optimization
-- **Metrics Emission** — JSONL metrics for evaluation and monitoring (`.rev-metrics/`)
+- **Metrics Emission** — JSONL metrics for evaluation and monitoring (`.rev/metrics/`)
 
 **Phase 3: Advanced Integration** ✅
 - **RAG Integration** — Research Agent uses hybrid symbolic + semantic search (enabled by default)
@@ -475,7 +475,7 @@ Options:
 
   # Resuming / Checkpoints
   --resume [CHECKPOINT]        Resume from a checkpoint (omit path to use latest)
-  --list-checkpoints           List checkpoints saved in .rev_checkpoints/
+  --list-checkpoints           List checkpoints saved in .rev/checkpoints/
 
   -h, --help                   Show help message
 ```
@@ -1326,7 +1326,7 @@ rev "Show cache statistics"
 rev "Clear all caches"
 rev "Clear LLM response cache"
 
-# Caches persist automatically to .rev_cache/
+# Caches persist automatically to .rev/cache/
 ```
 
 ### Performance Impact

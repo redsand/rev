@@ -100,7 +100,7 @@ def test_checkpoint_default_location():
     # Save without specifying path
     checkpoint_path = plan.save_checkpoint()
     try:
-        assert ".rev_checkpoints" in checkpoint_path
+        assert ".rev/checkpoints" in checkpoint_path
         assert os.path.exists(checkpoint_path)
 
         # Load it back

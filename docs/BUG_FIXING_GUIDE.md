@@ -386,7 +386,7 @@ clear_caches(["file", "llm"])
 **Debug:**
 ```bash
 # Check cache directory
-ls -la .rev_cache/
+ls -la .rev/cache/
 df -h .  # Check disk space
 
 # Test cache write manually
@@ -394,7 +394,7 @@ python -c "from rev.cache import persist_caches; persist_caches()"
 ```
 
 **Fix:**
-- Ensure `.rev_cache/` is writable
+- Ensure `.rev/cache/` is writable
 - Free up disk space
 - Add lock for cache file writes
 
@@ -566,7 +566,7 @@ path = "C:/Users/name/file.txt"    # Forward slash (works on Windows)
 
 **Workaround:**
 - Avoid resuming if task definitions changed
-- Delete old checkpoints: `rm -rf .rev_checkpoints/`
+- Delete old checkpoints: `rm -rf .rev/checkpoints/`
 - Use `--list-checkpoints` to check before resuming
 
 ## Error Message Guide
