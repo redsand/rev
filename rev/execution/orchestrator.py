@@ -415,7 +415,35 @@ class Orchestrator:
                 # Retry loop for plan regeneration
                 planning_retry_count = 0
                 max_plan_retries = max(1, self.config.plan_regen_retries)
+                min_plan_tasks = 1 if route.mode == "quick_edit" else 2
                 while planning_retry_count <= max_plan_retries:
+                    if len(plan.tasks) < min_plan_tasks:
+                        if planning_retry_count >= max_plan_retries:
+                            print(f"\n❌ Plan too small after {max_plan_retries} regeneration attempt(s) (tasks: {len(plan.tasks)})")
+                            result.errors.append(
+                                f"Plan contained fewer than {min_plan_tasks} tasks after regeneration"
+                            )
+                            result.phase_reached = AgentPhase.REVIEW
+                            return result
+
+                        planning_retry_count += 1
+                        print(f"\n⚠️  Plan too small (only {len(plan.tasks)} task(s)); regenerating {planning_retry_count}/{max_plan_retries}")
+                        plan = planning_mode(
+                            f"""{user_request}
+
+Regenerate the plan with at least {min_plan_tasks} distinct tasks and explicit dependencies. Avoid collapsing multi-step work into one task.""",
+                            coding_mode=coding_mode,
+                            max_plan_tasks=self.config.max_plan_tasks,
+                        )
+                        result.plan = plan
+                        state_manager = StateManager(plan)
+
+                        if not plan.tasks:
+                            result.errors.append("Plan regeneration failed")
+                            result.phase_reached = AgentPhase.FAILED
+                            return result
+                        continue
+
                     review = review_execution_plan(
                         plan,
                         user_request,

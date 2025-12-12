@@ -304,10 +304,13 @@ Provide a thorough review."""}
             review.confidence_score = 0.7
             return review
 
+        content = response.get("message", {}).get("content", "")
         try:
-            content = response.get("message", {}).get("content", "")
             json_match = re.search(r'\{.*\}', content, re.DOTALL)
             if not json_match:
+                if _apply_freeform_review(review, content):
+                    print("⚠️  Falling back to freeform review parsing.")
+                    break
                 raise ValueError("No JSON object found in review response")
 
             review_data = json.loads(json_match.group(0))

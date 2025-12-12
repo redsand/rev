@@ -801,8 +801,8 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
         # Execute task with tool calls
         task_iterations = 0
         base_task_iterations = MAX_TASK_ITERATIONS
-        warn_task_iterations = base_task_iterations * 2
-        max_task_iterations = base_task_iterations * 3
+        warn_task_iterations = max(1, int(base_task_iterations * 0.8))
+        max_task_iterations = base_task_iterations
         task_complete = False
         tool_usage = {name: 0 for name in tool_limits}
         over_budget_hits = {name: 0 for name in tool_limits}
@@ -835,7 +835,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
 
             task_iterations += 1
             if task_iterations >= warn_task_iterations and not iter_warned:
-                print(f"⚠️ Task {plan.current_index + 1} exceeded 2x iteration limit ({task_iterations}/{max_task_iterations})")
+                print(f"⚠️ Task {plan.current_index + 1} nearing iteration limit ({task_iterations}/{max_task_iterations})")
                 iter_warned = True
 
             call_tools = tools if tools_enabled and model_supports_tools else None
@@ -1124,7 +1124,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
 
         if not task_complete and task_iterations >= max_task_iterations:
             error_msg = "Exceeded iteration limit"
-            print(f"  ⚠️ Task exceeded 3x iteration limit (marking stopped)")
+            print(f"  ⚠️ Task exceeded iteration limit ({task_iterations}/{max_task_iterations}) (marking stopped)")
             plan.mark_task_stopped(current_task)
             current_task.error = error_msg
             if state_manager:
@@ -1265,8 +1265,8 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
     # Execute task with tool calls
     task_iterations = 0
     base_task_iterations = MAX_TASK_ITERATIONS
-    warn_task_iterations = base_task_iterations * 2
-    max_task_iterations = base_task_iterations * 3
+    warn_task_iterations = max(1, int(base_task_iterations * 0.8))
+    max_task_iterations = base_task_iterations
     task_complete = False
     tool_usage = {name: 0 for name in tool_limits}
     over_budget_hits = {name: 0 for name in tool_limits}
@@ -1300,7 +1300,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
 
         task_iterations += 1
         if task_iterations >= warn_task_iterations and not iter_warned:
-            print(f"⚠️ Task {task.task_id + 1} exceeded 2x iteration limit ({task_iterations}/{max_task_iterations})")
+            print(f"⚠️ Task {task.task_id + 1} nearing iteration limit ({task_iterations}/{max_task_iterations})")
             iter_warned = True
 
         if budget:
@@ -1536,7 +1536,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             no_tool_call_streak = 0
 
     if not task_complete:
-        print(f"  ⚠️ Task exceeded 3x iteration limit (marking stopped)")
+        print(f"  ⚠️ Task exceeded iteration limit ({task_iterations}/{max_task_iterations}) (marking stopped)")
         plan.mark_task_stopped(task)
         task.error = "Exceeded iteration limit"
         if state_manager:
@@ -1585,7 +1585,11 @@ def concurrent_execution_mode(
     print("\n" + "=" * 60)
     print("CONCURRENT EXECUTION MODE")
     print("=" * 60)
-    print(f"  ℹ️  Max concurrent tasks: {max_workers}")
+    effective_workers = max(1, min(max_workers, len(plan.tasks)))
+    if effective_workers != max_workers:
+        print(f"  ℹ️  Max concurrent tasks: {max_workers} (effective: {effective_workers} based on {len(plan.tasks)} task(s))")
+    else:
+        print(f"  ℹ️  Max concurrent tasks: {effective_workers}")
 
     if not auto_approve:
         print("\nThis will execute tasks in parallel with full autonomy.")
@@ -1609,12 +1613,12 @@ def concurrent_execution_mode(
     }
 
     # Use ThreadPoolExecutor for concurrent execution
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
         futures = {}
 
         while plan.has_pending_tasks():
             # Get tasks that are ready to execute (dependencies met)
-            available_slots = max_workers - len(futures)
+            available_slots = effective_workers - len(futures)
             if available_slots > 0:
                 executable_tasks = plan.get_executable_tasks(max_count=available_slots)
 

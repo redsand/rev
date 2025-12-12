@@ -528,7 +528,11 @@ class AddDirCommand(CommandHandler):
                 path_str = str(path)
                 if path_str not in tracked_dirs:
                     tracked_dirs.append(path_str)
-                    added_dirs.append(path_str)
+                try:
+                    config.register_additional_root(path)
+                except ValueError as exc:
+                    return f"Error: {exc}"
+                added_dirs.append(path_str)
             else:
                 return f"Error: Directory not found: {dir_path}"
 

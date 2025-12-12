@@ -6,6 +6,7 @@ import pytest
 from pathlib import Path
 import shutil
 import rev
+import rev.config as rev_config
 
 
 class TestFileOperations:
@@ -51,6 +52,25 @@ class TestFileOperations:
                 assert test_file.read_text() == "Test content"
         finally:
             shutil.rmtree(test_dir, ignore_errors=True)
+
+    def test_read_file_from_additional_dir(self, tmp_path, monkeypatch):
+        """Ensure /add-dir roots are honored by file operations."""
+
+        extra_root = tmp_path / "external_repo"
+        extra_root.mkdir()
+        extra_file = extra_root / "sample.txt"
+        extra_file.write_text("external content")
+
+        # Isolate modifications to additional roots
+        monkeypatch.setattr(rev_config, "ADDITIONAL_ROOTS", [])
+        rev_config.register_additional_root(extra_root)
+
+        rel_path = os.path.relpath(extra_file, rev.ROOT)
+        content = rev.read_file(rel_path)
+        assert "external content" in content
+
+        listing = json.loads(rev.list_dir(os.path.relpath(extra_root / "**/*", rev.ROOT)))
+        assert any("sample.txt" in entry for entry in listing.get("files", []))
 
     def test_file_exists_true(self):
         """Test file_exists returns true for existing file."""
