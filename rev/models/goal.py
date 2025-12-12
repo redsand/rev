@@ -132,6 +132,15 @@ class Goal:
 
         return self.status
 
+    def evaluate_metrics(self) -> bool:
+        """Alias used by validator; returns True only when all metrics pass."""
+        status = self.evaluate()
+        return status == GoalStatus.ACHIEVED
+
+    def get_metrics_summary(self) -> List[Dict[str, Any]]:
+        """Return a summary of metrics for reporting."""
+        return [m.to_dict() for m in self.metrics]
+
     def get_summary(self) -> str:
         """Get a human-readable summary of goal status."""
         passed = sum(1 for m in self.metrics if m.passed)

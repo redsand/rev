@@ -38,10 +38,10 @@ MAX_READ_FILE_PER_TASK = int(os.getenv("REV_MAX_READ_FILE_PER_TASK", "5"))
 MAX_SEARCH_CODE_PER_TASK = int(os.getenv("REV_MAX_SEARCH_CODE_PER_TASK", "5"))
 MAX_RUN_CMD_PER_TASK = int(os.getenv("REV_MAX_RUN_CMD_PER_TASK", "3"))
 MAX_EXECUTION_ITERATIONS = int(os.getenv("REV_MAX_EXEC_ITER", "40"))
-MAX_TASK_ITERATIONS = int(os.getenv("REV_MAX_TASK_ITER", "20"))
+MAX_TASK_ITERATIONS = int(os.getenv("REV_MAX_TASK_ITER", "60"))
 MAX_RUN_CMD_PER_TASK = int(os.getenv("REV_MAX_RUN_CMD_PER_TASK", "3"))
 MAX_EXECUTION_ITERATIONS = int(os.getenv("REV_MAX_EXEC_ITER", "40"))
-MAX_TASK_ITERATIONS = int(os.getenv("REV_MAX_TASK_ITER", "20"))
+MAX_TASK_ITERATIONS = int(os.getenv("REV_MAX_TASK_ITER", "60"))
 
 EXCLUDE_DIRS = {
     ".git", ".hg", ".svn", ".idea", ".vscode", "__pycache__", ".pytest_cache",
@@ -58,7 +58,7 @@ ALLOW_CMDS = {
 MAX_STEPS_PER_RUN = int(os.getenv("REV_MAX_STEPS", "200"))
 # Keep token budget comfortably below the provider cap to avoid hard failures when the heuristic
 # token estimates differ from true usage.
-MAX_LLM_TOKENS_PER_RUN = int(os.getenv("REV_MAX_TOKENS", "80000"))
+MAX_LLM_TOKENS_PER_RUN = int(os.getenv("REV_MAX_TOKENS", str(1_500_000)))
 MAX_WALLCLOCK_SECONDS = int(os.getenv("REV_MAX_SECONDS", "1800"))  # 30 minutes default
 MAX_PLAN_TASKS = int(os.getenv("REV_MAX_PLAN_TASKS", "20"))
 RESEARCH_DEPTH_DEFAULT = os.getenv("REV_RESEARCH_DEPTH", "medium").lower()

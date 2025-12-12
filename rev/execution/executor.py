@@ -945,7 +945,8 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         })
                         if over_budget_hits[tool_name] >= 2:
                             error_msg = f"{tool_name} budget exceeded for this task"
-                            plan.mark_failed(error_msg)
+                            print(f"  ⚠️ {error_msg} (marking stopped)")
+                            plan.mark_task_stopped(current_task)
                             if state_manager:
                                 state_manager.on_task_failed(current_task)
                             session_tracker.track_task_failed(current_task.description, error_msg)
@@ -1119,8 +1120,9 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
 
         if not task_complete and task_iterations >= max_task_iterations:
             error_msg = "Exceeded iteration limit"
-            print(f"  ✗ Task exceeded iteration limit")
-            plan.mark_failed(error_msg)
+            print(f"  ✗ Task exceeded iteration limit (marking stopped)")
+            plan.mark_task_stopped(current_task)
+            current_task.error = error_msg
             if state_manager:
                 state_manager.on_task_failed(current_task)
             session_tracker.track_task_failed(current_task.description, error_msg)
@@ -1263,6 +1265,8 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
     prompt_tokens_used = 0
     tools_enabled = model_supports_tools
     no_tool_call_streak = 0
+    budget_warned = False
+    execution_budget_warned = False
 
     def _log_usage(success: bool):
         debug_logger.log("executor", "TASK_USAGE", {
@@ -1291,7 +1295,9 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
         if budget:
             budget.update_time()
             if budget.is_exceeded():
-                print(f"⚠️ Resource budget exceeded for task {task.task_id + 1}: {budget.get_usage_summary()} (continuing)")
+                if not budget_warned:
+                    print(f"⚠️ Resource budget exceeded for task {task.task_id + 1}: {budget.get_usage_summary()} (continuing)")
+                    budget_warned = True
 
         call_tools = tools if tools_enabled and model_supports_tools else None
         llm_messages = _prepare_llm_messages(messages, exec_context)
@@ -1325,8 +1331,9 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             if budget:
                 budget.update_tokens(usage.get("total", 0) or 0)
                 budget.update_time()
-                if budget.is_exceeded():
+                if budget.is_exceeded() and not execution_budget_warned:
                     print(f"⚠️ Resource budget exceeded during execution for task {task.task_id + 1}: {budget.get_usage_summary()} (continuing)")
+                    execution_budget_warned = True
 
         msg = response.get("message", {})
         content = msg.get("content", "")
