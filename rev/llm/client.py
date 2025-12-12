@@ -7,6 +7,7 @@ import json
 import signal
 import threading
 import time
+import random
 from typing import Dict, Any, List, Optional, Tuple
 
 import requests
@@ -57,12 +58,38 @@ _token_usage_tracker = _TokenUsageTracker()
 
 # Retry configuration (can be overridden via environment variables)
 def _get_retry_config():
-    """Get retry/backoff configuration from environment variables."""
-    max_retries = max(1, int(os.getenv("OLLAMA_MAX_RETRIES", "6")))
+    """Get retry/backoff configuration from environment variables.
+
+    Semantics:
+    - OLLAMA_MAX_RETRIES:
+        * 0 = retry forever for retryable errors (5xx, timeouts, connection errors)
+        * >0 = max attempts (including the first)
+    - OLLAMA_RETRY_FOREVER=1 forces retry-forever regardless of OLLAMA_MAX_RETRIES
+    """
+    raw = os.getenv("OLLAMA_MAX_RETRIES", "0").strip().lower()
+    retry_forever_env = os.getenv("OLLAMA_RETRY_FOREVER", "0").strip() == "1"
+
+    max_retries = 0
+    if raw in {"inf", "infinite", "forever"}:
+        max_retries = 0
+    else:
+        try:
+            max_retries = int(raw)
+        except Exception:
+            max_retries = 0
+
+    retry_forever = retry_forever_env or max_retries <= 0
+
     backoff_seconds = max(0.0, float(os.getenv("OLLAMA_RETRY_BACKOFF_SECONDS", "2.0")))
     max_backoff_seconds = max(0.0, float(os.getenv("OLLAMA_RETRY_BACKOFF_MAX_SECONDS", "30.0")))
     timeout_multiplier_cap = max(1, int(os.getenv("OLLAMA_TIMEOUT_MAX_MULTIPLIER", "3")))
-    return max_retries, backoff_seconds, max_backoff_seconds, timeout_multiplier_cap
+
+    # If we're not retrying forever, ensure at least 1 attempt
+    if not retry_forever:
+        max_retries = max(1, max_retries)
+
+    return max_retries, retry_forever, backoff_seconds, max_backoff_seconds, timeout_multiplier_cap
+
 
 
 def get_token_usage() -> Dict[str, int]:
@@ -142,6 +169,24 @@ def _truncate_message_content(message: Dict[str, Any], remaining_tokens: int) ->
     truncated_message = {**message, "content": trimmed_text}
     return truncated_message, _estimate_message_tokens(truncated_message)
 
+def _ensure_last_user_or_tool(messages: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], bool]:
+    """Ollama's /api/chat expects the last message role to be 'user' or 'tool'.
+
+    In multi-turn loops it's easy to end up with the last role == 'assistant', which
+    Ollama rejects with a 400. To keep the loop going, we append a tiny user turn.
+
+   Returns: (messages, appended)
+    """
+    if not messages:
+        return messages, False
+
+    last_role = (messages[-1] or {}).get("role")
+    if last_role in {"user", "tool"}:
+        return messages, False
+
+    fixed = list(messages)
+    fixed.append({"role": "user", "content": "Continue."})
+    return fixed, True
 
 def _enforce_token_limit(messages: List[Dict[str, Any]], max_tokens: int) -> Tuple[List[Dict[str, Any]], int, int, bool]:
     """Ensure messages stay within the configured token limit.
@@ -282,6 +327,7 @@ def ollama_chat(
         )
 
     messages = trimmed_messages
+    messages, _appended_continue = _ensure_last_user_or_tool(messages)
 
     model_name = model or config.OLLAMA_MODEL
     supports_tools = config.DEFAULT_SUPPORTS_TOOLS if supports_tools is None else supports_tools
@@ -342,7 +388,7 @@ def ollama_chat(
             print(f"[DEBUG] Tools suppressed (supports_tools=False) for model {model_name}")
 
     # Retry with configurable limits and backoff
-    max_retries, retry_backoff, max_backoff, timeout_cap = _get_retry_config()
+    max_retries, retry_forever, retry_backoff, max_backoff, timeout_cap = _get_retry_config()
     base_timeout = 600  # 10 minutes
 
     # Track if we've already prompted for auth in this call

@@ -39,7 +39,7 @@ MODE_PRESETS: Dict[str, Dict[str, Any]] = {
         "validate": True,
         "auto_fix": False,
         "action_review": False,
-        "parallel": 2,
+        "parallel": 1,
         "description": "Balanced approach with orchestration",
     },
     "deep": {
@@ -52,7 +52,7 @@ MODE_PRESETS: Dict[str, Dict[str, Any]] = {
         "validate": True,
         "auto_fix": True,
         "action_review": True,
-        "parallel": 3,
+        "parallel": 1,
         "description": "Comprehensive analysis and validation",
     },
 }

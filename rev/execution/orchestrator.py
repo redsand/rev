@@ -136,7 +136,7 @@ class OrchestratorConfig:
     review_strictness: ReviewStrictness = ReviewStrictness.MODERATE
     enable_action_review: bool = False
     enable_auto_fix: bool = False
-    parallel_workers: int = 2
+    parallel_workers: int = 1
     auto_approve: bool = True
     research_depth: Literal["off", "shallow", "medium", "deep"] = RESEARCH_DEPTH_DEFAULT
     validation_mode: Literal["none", "smoke", "targeted", "full"] = VALIDATION_MODE_DEFAULT
@@ -952,7 +952,7 @@ def run_orchestrated(
     review_strictness: str = "moderate",
     enable_action_review: bool = False,
     enable_auto_fix: bool = False,
-    parallel_workers: int = 2,
+    parallel_workers: int = 1,
     auto_approve: bool = True,
     research_depth: Literal["off", "shallow", "medium", "deep"] = RESEARCH_DEPTH_DEFAULT,
     validation_mode: Literal["none", "smoke", "targeted", "full"] = "targeted",

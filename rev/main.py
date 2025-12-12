@@ -60,9 +60,9 @@ def main():
     parser.add_argument(
         "-j", "--parallel",
         type=int,
-        default=2,
+        default=1,
         metavar="N",
-        help="Number of concurrent tasks to run in parallel (default: 2, use 1 for sequential)"
+        help="Number of concurrent tasks to run in parallel (default: 1 = sequential; use >1 to enable parallel)"
     )
     parser.add_argument(
         "--review",
