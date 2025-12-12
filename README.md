@@ -1366,6 +1366,20 @@ if [ $? -eq 0 ]; then
 fi
 ```
 
+### Packaging & Releases
+
+Automate release builds with `build.ps1` (and the cross-platform `build.sh`) which stamps the git commit, builds packages, and optionally uploads to PyPI.
+
+- Before building, `build.ps1` runs `Stamp-GitCommit` so the constant `REV_GIT_COMMIT` in `rev/_version.py` reflects the current HEAD. When `python -m rev --version` (or `rev --version`) runs later, `rev.versioning.build_version_output()` includes that commit hash even if the installed wheel lacks git metadata.
+- `Build-Wheel` installs the `build` module if missing and then calls `python -m build`. `Publish-Package` ensures `twine` is available before uploading, so the script no longer fails with `No module named build` or `twine` errors.
+- Run `.\build.ps1 -Publish` (or the equivalent `build.sh`) to stamp the commit, build wheels/sdists, and push packages via `twine`. Point `TWINE_USERNAME`/`TWINE_PASSWORD` at your PyPI credentials (or configure `~/.pypirc`) before publishing.
+- If Git is unavailable (e.g., packaging from a source archive), stamping is skipped and `REV_GIT_COMMIT` stays at its previous value or the fallback `"unknown"`.
+
+```
+.\build.ps1 -Publish    # stamp commit, build wheel + sdist, upload via twine
+python -m rev --version  # confirm version + commit hash baked into wheel
+```
+
 ## Allowed Commands
 
 For security, only these commands are permitted:

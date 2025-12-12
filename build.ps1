@@ -244,11 +244,28 @@ function Stamp-GitCommit {
     }
 }
 
+function Ensure-Build-Tool {
+    Write-Status "Ensuring build module is installed"
+    & python -m pip install --upgrade build
+    if ($LASTEXITCODE -ne 0) {
+        Write-WarningMsg "Failed to install 'build'; wheel creation may fail"
+    }
+}
+
+function Ensure-Twine {
+    Write-Status "Ensuring twine is installed"
+    & python -m pip install --upgrade twine
+    if ($LASTEXITCODE -ne 0) {
+        Write-WarningMsg "Failed to install 'twine'; publishing may fail"
+    }
+}
+
 function Build-Wheel {
     Write-Status "Building wheel..."
     if (-not (Test-CommandExists "python")) {
         Write-ErrorExit "Python not found for build"
     }
+    Ensure-Build-Tool
     & python -m build
     if ($LASTEXITCODE -ne 0) {
         Write-ErrorExit "Wheel build failed"
@@ -258,8 +275,9 @@ function Build-Wheel {
 function Publish-Package {
     param([string]$Repository = "pypi")
     Write-Status "Publishing to $Repository via twine..."
+    Ensure-Twine
     if (-not (Test-CommandExists "twine")) {
-        Write-ErrorExit "twine not installed. Install with: pip install twine"
+        Write-ErrorExit "twine not found even after installation."
     }
     & twine upload --repository $Repository dist/*
     if ($LASTEXITCODE -ne 0) {
