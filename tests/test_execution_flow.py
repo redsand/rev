@@ -7,6 +7,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from rev.execution.orchestrator import AgentPhase, Orchestrator, OrchestratorConfig
+from rev.execution.executor import concurrent_execution_mode
 from rev.execution.reviewer import _quick_security_check
 from rev.models.task import ExecutionPlan, TaskStatus
 
@@ -138,6 +139,27 @@ def test_orchestrator_reports_failure_phase(monkeypatch):
     assert result.phase_reached == AgentPhase.PLANNING
     assert result.success is False
     assert any("planning blew up" in err for err in result.errors)
+
+
+def test_concurrent_execution_mode_forces_sequential(monkeypatch):
+    plan = ExecutionPlan()
+    plan.add_task("single task")
+
+    called = {"execution_mode": False}
+
+    def fake_execution_mode(plan_obj, **_kwargs):
+        called["execution_mode"] = True
+        for task in plan_obj.tasks:
+            task.status = TaskStatus.COMPLETED
+        return True
+
+    monkeypatch.setattr("rev.execution.executor.execution_mode", fake_execution_mode)
+
+    result = concurrent_execution_mode(plan, max_workers=3, auto_approve=True)
+
+    assert result is True
+    assert called["execution_mode"] is True
+    assert all(task.status == TaskStatus.COMPLETED for task in plan.tasks)
 
 
 def test_orchestrator_retries_failed_attempts(monkeypatch):

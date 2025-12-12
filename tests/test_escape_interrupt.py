@@ -4,10 +4,12 @@ import os
 import sys
 from unittest.mock import Mock
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from rev import config  # noqa: E402
-from rev.execution import executor  # noqa: E402
+from rev.execution import executor, planner  # noqa: E402
 from rev.models.task import ExecutionPlan, TaskStatus  # noqa: E402
 
 
@@ -15,6 +17,22 @@ def _make_task():
     plan = ExecutionPlan()
     plan.add_task("sample task", "edit")
     return plan, plan.tasks[0]
+
+
+def test_planning_mode_interrupts_before_llm(monkeypatch):
+    """Planning should bail out immediately when ESC is active."""
+
+    config.set_escape_interrupt(True)
+    monkeypatch.setattr(
+        planner,
+        "_call_llm_with_tools",
+        Mock(side_effect=AssertionError("LLM should not run when ESC is pressed")),
+    )
+
+    with pytest.raises(config.EscapeInterrupt):
+        planner.planning_mode("sample request")
+
+    assert config.get_escape_interrupt() is False
 
 
 def test_execute_single_task_interrupts_before_llm(monkeypatch):

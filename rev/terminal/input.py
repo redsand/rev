@@ -175,7 +175,10 @@ def _get_input_unix(prompt: str) -> Tuple[str, bool]:
                                 cursor_pos = 0
                             sys.stdout.flush()
                 else:
-                    # Just ESC key pressed alone - submit input immediately
+                    # Just ESC key pressed alone - clear the current input
+                    buffer = []
+                    cursor_pos = 0
+                    navigating_history = False
                     escape_pressed = True
                     set_escape_interrupt(True)
                     sys.stdout.write('\n')
@@ -337,7 +340,10 @@ def _get_input_windows(prompt: str) -> Tuple[str, bool]:
 
             # Check for ESC key
             if char == b'\x1b':
-                # Just ESC key pressed - submit input immediately
+                # Just ESC key pressed - clear the current input
+                buffer = []
+                cursor_pos = 0
+                navigating_history = False
                 escape_pressed = True
                 set_escape_interrupt(True)
                 sys.stdout.write('\n')

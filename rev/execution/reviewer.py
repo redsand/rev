@@ -160,6 +160,12 @@ Return your review in JSON format:
   "unnecessary_tasks": [1, 3]
 }
 
+STRICT JSON OUTPUT REQUIREMENTS:
+- You must return ONLY the JSON object matching the schema above.
+- Do NOT wrap the JSON in code fences or markdown.
+- Do NOT include any explanatory text before or after the JSON.
+- If uncertain about a value, use an empty list or null-equivalent in JSON.
+
 Be thorough but practical. Focus on issues that could cause real problems."""
 
 
@@ -281,6 +287,8 @@ def review_execution_plan(
 
 Strictness level: {strictness.value}
 
+Return ONLY valid JSON per the schema. Do not include any other text or formatting.
+
 Provide a thorough review."""}
     ]
 
@@ -308,9 +316,6 @@ Provide a thorough review."""}
         try:
             json_match = re.search(r'\{.*\}', content, re.DOTALL)
             if not json_match:
-                if _apply_freeform_review(review, content):
-                    print("⚠️  Falling back to freeform review parsing.")
-                    break
                 raise ValueError("No JSON object found in review response")
 
             review_data = json.loads(json_match.group(0))
@@ -350,7 +355,19 @@ Provide a thorough review."""}
                 review.suggestions.append("Could not parse review - approved by default")
                 review.confidence_score = 0.7
                 break
-            print("⚠️  Retrying review agent once due to parse failure...")
+            retry_instruction = (
+                "Your previous response could not be parsed as JSON. "
+                f"Error: {e}.\n"
+                "The raw response was:\n" 
+                "============================================================\n"
+                f"{content}\n"
+                "============================================================\n"
+                "Return ONLY valid JSON that matches the required schema with no additional text."
+            )
+
+            messages.append({"role": "assistant", "content": str(content)})
+            messages.append({"role": "user", "content": retry_instruction})
+            print("⚠️  Retrying review agent once due to parse failure with strict JSON reminder...")
             continue
 
     # Display review

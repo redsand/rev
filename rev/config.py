@@ -216,6 +216,25 @@ _SYSTEM_INFO: Optional[Dict[str, Any]] = None
 # Global interrupt flag for escape key handling
 _ESCAPE_INTERRUPT = False
 
+
+class EscapeInterrupt(RuntimeError):
+    """Raised when the user presses ESC to interrupt execution."""
+
+
+def ensure_escape_is_cleared(message: str = "ESC pressed") -> None:
+    """Raise an interrupt if ESC was pressed during processing.
+
+    This helper lets long-running workflows bail out quickly when the
+    background escape monitor sets the global flag. It also clears the flag so
+    subsequent operations start cleanly.
+
+    Args:
+        message: Contextual message for the interrupt exception.
+    """
+    if get_escape_interrupt():
+        set_escape_interrupt(False)
+        raise EscapeInterrupt(message)
+
 # Global private mode flag (can be toggled at runtime)
 _PRIVATE_MODE_OVERRIDE: Optional[bool] = None
 

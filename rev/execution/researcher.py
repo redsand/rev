@@ -13,7 +13,6 @@ import signal
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 
 from rev.tools.registry import execute_tool
 from rev.llm.client import ollama_chat
@@ -222,59 +221,44 @@ def research_codebase(
     keywords = _extract_search_keywords(user_request)
     print(f"→ Searching for: {', '.join(keywords[:5])}")
 
-    # Parallel research tasks
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {}
+    # Sequential research tasks to avoid parallel threads
+    research_steps = [
+        ("code_search", lambda: _search_relevant_code(keywords)),
+        ("structure", _analyze_project_structure),
+    ]
 
-        # 1. Search for relevant code (symbolic search)
-        futures[executor.submit(_search_relevant_code, keywords)] = "code_search"
+    if use_rag and not quick_mode:
+        research_steps.append(("rag_search", lambda: _rag_search(user_request, 10, budget, repo_stats)))
 
-        # 2. RAG semantic search (if enabled)
-        if use_rag and not quick_mode:
-            futures[executor.submit(_rag_search, user_request, 10, budget, repo_stats)] = "rag_search"
+    if not quick_mode:
+        research_steps.append(("similar", lambda: _find_similar_implementations(user_request, keywords)))
 
-        # 3. Get project structure
-        futures[executor.submit(_analyze_project_structure)] = "structure"
+    if not quick_mode and search_depth in ["medium", "deep"]:
+        research_steps.append(("dependencies", lambda: _analyze_dependencies(keywords)))
 
-        # 4. Check for similar implementations
-        if not quick_mode:
-            futures[executor.submit(_find_similar_implementations, user_request, keywords)] = "similar"
-
-        # 5. Analyze dependencies (if not quick mode)
-        if not quick_mode and search_depth in ["medium", "deep"]:
-            futures[executor.submit(_analyze_dependencies, keywords)] = "dependencies"
-
-        # Collect results with 600s timeout per task
-        # This prevents any single research task from hanging indefinitely
-        for future in as_completed(futures, timeout=600):
-            task_name = futures[future]
-            try:
-                result = future.result(timeout=10)  # 10s to get already-completed result
-                if task_name == "code_search":
-                    findings.relevant_files = result.get("files", [])
-                    findings.code_patterns = result.get("patterns", [])
-                elif task_name == "rag_search":
-                    # Merge RAG results with existing files
-                    rag_files = result.get("files", [])
-                    # Add RAG files that aren't already in the list
-                    existing_paths = {f['path'] for f in findings.relevant_files}
-                    for rag_file in rag_files:
-                        if rag_file['path'] not in existing_paths:
-                            findings.relevant_files.append(rag_file)
-                    # Add RAG-specific patterns
-                    for chunk in result.get("chunks", [])[:3]:
-                        findings.code_patterns.append(f"RAG: {chunk['location']}")
-                elif task_name == "structure":
-                    findings.architecture_notes = result.get("notes", [])
-                elif task_name == "similar":
-                    findings.similar_implementations = result.get("implementations", [])
-                elif task_name == "dependencies":
-                    findings.dependencies = result.get("dependencies", [])
-                    findings.potential_conflicts = result.get("conflicts", [])
-            except FuturesTimeoutError:
-                print(f"  ⚠️  {task_name} research timed out (600s limit) - skipping")
-            except Exception as e:
-                print(f"  ⚠️  {task_name} research failed: {e}")
+    for task_name, step in research_steps:
+        try:
+            result = step()
+            if task_name == "code_search":
+                findings.relevant_files = result.get("files", [])
+                findings.code_patterns = result.get("patterns", [])
+            elif task_name == "rag_search":
+                rag_files = result.get("files", [])
+                existing_paths = {f['path'] for f in findings.relevant_files}
+                for rag_file in rag_files:
+                    if rag_file['path'] not in existing_paths:
+                        findings.relevant_files.append(rag_file)
+                for chunk in result.get("chunks", [])[:3]:
+                    findings.code_patterns.append(f"RAG: {chunk['location']}")
+            elif task_name == "structure":
+                findings.architecture_notes = result.get("notes", [])
+            elif task_name == "similar":
+                findings.similar_implementations = result.get("implementations", [])
+            elif task_name == "dependencies":
+                findings.dependencies = result.get("dependencies", [])
+                findings.potential_conflicts = result.get("conflicts", [])
+        except Exception as e:
+            print(f"  ⚠️  {task_name} research failed: {e}")
 
     # Use LLM to synthesize findings and suggest approach
     if not quick_mode:
