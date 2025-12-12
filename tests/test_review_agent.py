@@ -342,6 +342,62 @@ class TestPlanReview(unittest.TestCase):
         self.assertEqual(review.decision, ReviewDecision.REJECTED)
         self.assertTrue(len(review.security_concerns) > 0)
 
+    def test_plan_review_retries_on_parse_error(self):
+        """Parsing failures should trigger a retry before defaulting."""
+        import importlib.util
+        import types
+        from pathlib import Path
+
+        reviewer_path = Path(__file__).resolve().parent.parent / "rev" / "execution" / "reviewer.py"
+        spec = importlib.util.spec_from_file_location("reviewer_reload", reviewer_path)
+        reviewer = importlib.util.module_from_spec(spec)  # type: ignore
+        assert spec.loader is not None
+        spec.loader.exec_module(reviewer)  # type: ignore
+
+        responses = iter([
+            {"message": {"content": "{ bad json"}},
+            {
+                "message": {
+                    "content": '''
+                    {
+                        "decision": "approved",
+                        "overall_assessment": "Parsed on retry",
+                        "confidence_score": 0.91,
+                        "issues": [],
+                        "suggestions": [],
+                        "security_concerns": [],
+                        "missing_tasks": [],
+                        "unnecessary_tasks": []
+                    }
+                    '''
+                }
+            },
+        ])
+
+        call_count = {"n": 0}
+
+        def fake_chat(*args, **kwargs):
+            call_count["n"] += 1
+            return next(responses)
+
+        reviewer.ollama_chat = fake_chat
+
+        plan = ExecutionPlan()
+        plan.add_task("Add endpoint", "add")
+        plan.tasks[0].risk_level = RiskLevel.MEDIUM
+
+        review = reviewer.review_execution_plan(
+            plan,
+            "Add endpoint",
+            strictness=ReviewStrictness.MODERATE,
+            auto_approve_low_risk=False,
+            max_parse_retries=1,
+        )
+
+        self.assertEqual(call_count["n"], 2)
+        self.assertEqual(review.decision.value, "approved")
+        self.assertAlmostEqual(review.confidence_score, 0.91)
+
     @patch('rev.execution.reviewer.ollama_chat')
     def test_plan_requires_changes(self, mock_ollama):
         """Test plan that requires changes."""

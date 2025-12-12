@@ -737,9 +737,9 @@ def execution_mode(
             print("\n⚠️  Execution interrupted by ESC key")
             set_escape_interrupt(False)
 
-            # Mark current task as stopped if it's in progress
+            # Mark current task as stopped
             current_task = plan.get_current_task()
-            if current_task and current_task.status == TaskStatus.IN_PROGRESS:
+            if current_task:
                 plan.mark_task_stopped(current_task)
 
             if state_manager:
@@ -880,6 +880,17 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             content = msg.get("content", "")
             tool_calls = msg.get("tool_calls", [])
 
+            # Allow ESC to interrupt after LLM response but before any tool execution
+            if get_escape_interrupt():
+                print("\n⚠️  Task execution interrupted by ESC key")
+                set_escape_interrupt(False)
+                plan.mark_task_stopped(current_task)
+                if state_manager:
+                    state_manager.on_interrupt(current_task)
+                task_complete = True
+                _log_usage(False)
+                break
+
             # Add assistant response to conversation
             messages.append(msg)
 
@@ -893,6 +904,8 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
 
                         # Mark current task as stopped
                         plan.mark_task_stopped(current_task)
+                        if state_manager:
+                            state_manager.on_interrupt(current_task)
 
                         # Save checkpoint for resume
                         try:
@@ -914,6 +927,16 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                             tool_args = json.loads(tool_args)
                         except:
                             tool_args = {}
+
+                    # Final escape check immediately before executing the tool
+                    if get_escape_interrupt():
+                        print("\n⚠️  Tool execution interrupted by ESC key")
+                        set_escape_interrupt(False)
+                        plan.mark_task_stopped(current_task)
+                        if state_manager:
+                            state_manager.on_interrupt(current_task)
+                        task_complete = True
+                        break
 
                     # Enforce per-task tool budgets
                     allowed, budget_msg = _consume_tool_budget(tool_name, tool_usage, tool_limits)
@@ -1265,6 +1288,16 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
         }, "INFO")
 
     while task_iterations < max_task_iterations and not task_complete:
+        # Allow ESC to interrupt concurrent task execution immediately
+        if get_escape_interrupt():
+            print("\n⚠️  Task execution interrupted by ESC key")
+            set_escape_interrupt(False)
+            plan.mark_task_stopped(task)
+            if state_manager:
+                state_manager.on_interrupt(task)
+            _log_usage(False)
+            return False
+
         task_iterations += 1
 
         if budget:

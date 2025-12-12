@@ -194,7 +194,9 @@ def review_execution_plan(
     plan: ExecutionPlan,
     user_request: str,
     strictness: ReviewStrictness = ReviewStrictness.MODERATE,
-    auto_approve_low_risk: bool = True
+    auto_approve_low_risk: bool = True,
+    max_parse_retries: int = 1,
+    **kwargs,
 ) -> PlanReview:
     """Review an execution plan and provide feedback.
 
@@ -257,28 +259,31 @@ Provide a thorough review."""}
     ]
 
     print("→ Analyzing plan with review agent...")
-    response = ollama_chat(messages, tools=tools) or {}
+    parse_attempt = 0
+    while parse_attempt <= max_parse_retries:
+        response = ollama_chat(messages, tools=tools) or {}
 
-    if not isinstance(response, dict):
-        print("⚠️  Review agent returned no response; approving with suggestions by default")
-        review.decision = ReviewDecision.APPROVED_WITH_SUGGESTIONS
-        review.suggestions.append("Review agent unavailable - plan approved by default")
-        review.confidence_score = 0.7
-        return review
+        if not isinstance(response, dict):
+            print("⚠️  Review agent returned no response; approving with suggestions by default")
+            review.decision = ReviewDecision.APPROVED_WITH_SUGGESTIONS
+            review.suggestions.append("Review agent unavailable - plan approved by default")
+            review.confidence_score = 0.7
+            return review
 
-    if "error" in response:
-        print(f"⚠️  Review agent error: {response['error']}")
-        # Default to approved with warning
-        review.decision = ReviewDecision.APPROVED_WITH_SUGGESTIONS
-        review.suggestions.append("Review agent unavailable - plan approved by default")
-        review.confidence_score = 0.7
-        return review
+        if "error" in response:
+            print(f"⚠️  Review agent error: {response['error']}")
+            # Default to approved with warning
+            review.decision = ReviewDecision.APPROVED_WITH_SUGGESTIONS
+            review.suggestions.append("Review agent unavailable - plan approved by default")
+            review.confidence_score = 0.7
+            return review
 
-    # Parse review response
-    try:
-        content = response.get("message", {}).get("content", "")
-        json_match = re.search(r'\{.*\}', content, re.DOTALL)
-        if json_match:
+        try:
+            content = response.get("message", {}).get("content", "")
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if not json_match:
+                raise ValueError("No JSON object found in review response")
+
             review_data = json.loads(json_match.group(0))
 
             # Map decision
@@ -303,12 +308,18 @@ Provide a thorough review."""}
             review.security_concerns = review_data.get("security_concerns", [])
             review.missing_tasks = review_data.get("missing_tasks", [])
             review.unnecessary_tasks = review_data.get("unnecessary_tasks", [])
+            break  # Parsed successfully
 
-    except Exception as e:
-        print(f"⚠️  Error parsing review: {e}")
-        review.decision = ReviewDecision.APPROVED_WITH_SUGGESTIONS
-        review.suggestions.append("Could not parse review - approved by default")
-        review.confidence_score = 0.7
+        except Exception as e:
+            parse_attempt += 1
+            print(f"⚠️  Error parsing review: {e}")
+            if parse_attempt > max_parse_retries:
+                review.decision = ReviewDecision.APPROVED_WITH_SUGGESTIONS
+                review.suggestions.append("Could not parse review - approved by default")
+                review.confidence_score = 0.7
+                break
+            print("⚠️  Retrying review agent once due to parse failure...")
+            continue
 
     # Display review
     _display_plan_review(review, plan)
