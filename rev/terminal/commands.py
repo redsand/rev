@@ -28,6 +28,10 @@ from rev.settings_manager import (
     get_default_mode,
     save_settings,
     reset_settings,
+    get_runtime_setting,
+    get_runtime_settings_snapshot,
+    list_runtime_settings_by_section,
+    set_runtime_setting,
 )
 
 
@@ -83,7 +87,7 @@ class HelpCommand(CommandHandler):
         categories = {
             "Session Management": ["clear", "save", "reset", "exit"],
             "Information": ["status", "cost", "config", "doctor", "version"],
-            "Model & Configuration": ["model", "mode", "private", "add-dir"],
+            "Model & Configuration": ["model", "mode", "set", "private", "add-dir"],
             "Code Review & Validation": ["review", "validate"],
             "Project Setup": ["init", "export"],
             "Help": ["help"]
@@ -281,6 +285,77 @@ class ConfigCommand(CommandHandler):
         return "\n".join(output)
 
 
+class SetCommand(CommandHandler):
+    """View or modify runtime configuration settings."""
+
+    def __init__(self):
+        super().__init__(
+            "set",
+            "View or change runtime settings (e.g., /set log_retention 10)"
+        )
+
+    def _render_settings(self) -> str:
+        output = [create_header("Runtime Settings", width=80)]
+
+        for section, settings in list_runtime_settings_by_section().items():
+            output.append(create_section(section))
+            for setting in settings:
+                output.append(
+                    create_item(
+                        setting.key,
+                        f"{setting.getter()}  — {setting.description}"
+                    )
+                )
+
+        output.append(
+            f"\n  {colorize('Use /set <key> <value> to update. Run /save to persist.', Colors.DIM)}"
+        )
+
+        return "\n".join(output)
+
+    def execute(self, args: List[str], session_context: Dict[str, Any]) -> str:
+        if not args:
+            return self._render_settings()
+
+        key = args[0].lower()
+        setting = get_runtime_setting(key)
+        available_keys = sorted(get_runtime_settings_snapshot().keys())
+
+        if not setting:
+            available_display = ", ".join(available_keys)
+            return (
+                create_bullet_item(f"Unknown setting: {key}", 'cross')
+                + f"\n  Available: {available_display}"
+            )
+
+        if len(args) == 1:
+            output = [create_header(f"Setting: {setting.key}", width=80)]
+            output.append(create_item("Current value", str(setting.getter())))
+            output.append(create_item("Description", setting.description))
+            output.append(
+                f"\n  {colorize('Usage: /set <key> <value>', Colors.DIM)}"
+            )
+            return "\n".join(output)
+
+        raw_value = " ".join(args[1:]).strip()
+        if raw_value == "":
+            return create_bullet_item("Please provide a value to set", 'warning')
+
+        try:
+            new_value = set_runtime_setting(key, raw_value)
+        except ValueError as exc:
+            return create_bullet_item(f"Invalid value for {key}: {exc}", 'cross')
+
+        output = [create_header("Setting Updated", width=80)]
+        output.append(create_bullet_item(f"{setting.key} → {new_value}", 'check'))
+        output.append(create_item("Description", setting.description))
+        output.append(
+            f"\n  {colorize('Run /save to persist this value for future sessions', Colors.DIM)}"
+        )
+
+        return "\n".join(output)
+
+
 class ClearCommand(CommandHandler):
     """Clear session memory."""
 
@@ -319,6 +394,11 @@ class SaveCommand(CommandHandler):
         output.append(create_bullet_item(f"Mode: {session_context.get('execution_mode', DEFAULT_MODE_NAME)}", 'check'))
         privacy_status = "Enabled" if config.get_private_mode() else "Disabled"
         output.append(create_bullet_item(f"Private mode: {privacy_status}", 'check'))
+        runtime_settings = get_runtime_settings_snapshot()
+        if runtime_settings:
+            output.append(create_section("Runtime Settings"))
+            for key, value in runtime_settings.items():
+                output.append(create_item(key, str(value)))
         output.append(f"\n  {colorize('Saved to', Colors.DIM)} {saved_path}")
         output.append(f"  {colorize('Settings will auto-load next time you start rev', Colors.DIM)}")
 
@@ -875,6 +955,7 @@ def _build_command_registry() -> Dict[str, CommandHandler]:
         CostCommand(),
         ModelCommand(),
         ConfigCommand(),
+        SetCommand(),
         ClearCommand(),
         SaveCommand(),
         ResetCommand(),
