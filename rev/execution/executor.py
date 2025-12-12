@@ -183,6 +183,12 @@ class ExecutionContext:
         self.force_edit_warnings = 0  # Count of "force edit" warnings given
         self.exploration_blocked = False  # If True, block exploration tools for edit tasks
 
+        # Session-level tracking (persists across tasks within same run)
+        self.session_failed_commands: List[str] = []  # Commands that failed
+        self.session_unavailable_paths: List[str] = []  # Paths that don't exist
+        self.session_learnings: List[str] = []  # Key learnings from previous tasks
+        self.completed_task_summaries: List[str] = []  # What each completed task accomplished
+
     def get_code(self, path: Optional[str]) -> Optional[str]:
         """Return cached code for a path if available."""
         if not path:
@@ -365,6 +371,66 @@ class ExecutionContext:
             if self.force_edit_warnings >= 2 and action_type in {"edit", "add"}:
                 self.exploration_blocked = True
             return self.force_edit_warnings
+
+    def record_failed_command(self, cmd: str, error: str) -> None:
+        """Record a command that failed (persists across tasks)."""
+        with self._lock:
+            entry = f"{cmd[:80]}: {error[:100]}"
+            if entry not in self.session_failed_commands:
+                self.session_failed_commands.append(entry)
+                # Keep last 10 failures
+                self.session_failed_commands = self.session_failed_commands[-10:]
+
+    def record_unavailable_path(self, path: str) -> None:
+        """Record a path that doesn't exist (persists across tasks)."""
+        with self._lock:
+            if path not in self.session_unavailable_paths:
+                self.session_unavailable_paths.append(path)
+                # Keep last 15 paths
+                self.session_unavailable_paths = self.session_unavailable_paths[-15:]
+
+    def record_learning(self, learning: str) -> None:
+        """Record a key learning from task execution (persists across tasks)."""
+        with self._lock:
+            if learning not in self.session_learnings:
+                self.session_learnings.append(learning)
+                # Keep last 10 learnings
+                self.session_learnings = self.session_learnings[-10:]
+
+    def record_task_completion(self, task_desc: str, summary: str) -> None:
+        """Record what a completed task accomplished."""
+        with self._lock:
+            entry = f"[{task_desc[:50]}]: {summary[:100]}"
+            self.completed_task_summaries.append(entry)
+            # Keep last 5 task summaries
+            self.completed_task_summaries = self.completed_task_summaries[-5:]
+
+    def get_session_context(self) -> str:
+        """Get session-level context to inject at start of each task."""
+        with self._lock:
+            parts = []
+
+            if self.session_unavailable_paths:
+                parts.append("UNAVAILABLE PATHS (do not search/read these):")
+                for path in self.session_unavailable_paths:
+                    parts.append(f"  - {path}")
+
+            if self.session_failed_commands:
+                parts.append("\nFAILED COMMANDS (do not retry):")
+                for cmd in self.session_failed_commands:
+                    parts.append(f"  - {cmd}")
+
+            if self.session_learnings:
+                parts.append("\nKEY LEARNINGS FROM PREVIOUS TASKS:")
+                for learning in self.session_learnings:
+                    parts.append(f"  - {learning}")
+
+            if self.completed_task_summaries:
+                parts.append("\nPREVIOUS TASK RESULTS:")
+                for summary in self.completed_task_summaries:
+                    parts.append(f"  - {summary}")
+
+            return "\n".join(parts) if parts else ""
 
 
 def _make_search_cache_key(args: Dict[str, Any]) -> Tuple[Any, ...]:
@@ -980,13 +1046,25 @@ def execution_mode(
         # Track task start
         session_tracker.track_task_started(current_task.description)
 
-        # Add task to conversation
+        # Get session context (learnings from previous tasks in this run)
+        session_context = exec_context.get_session_context()
+
+        # Add task to conversation with session context
+        task_prompt = f"""Task: {current_task.description}
+Action type: {current_task.action_type}
+"""
+        if session_context:
+            task_prompt += f"""
+SESSION CONTEXT (from previous tasks in this run):
+{session_context}
+
+IMPORTANT: Do not repeat failed commands or search unavailable paths listed above.
+"""
+        task_prompt += "\nExecute this task completely. When done, respond with TASK_COMPLETE."
+
         messages.append({
             "role": "user",
-            "content": f"""Task: {current_task.description}
-Action type: {current_task.action_type}
-
-Execute this task completely. When done, respond with TASK_COMPLETE."""
+            "content": task_prompt
         })
 
         # Execute task with tool calls
@@ -1147,22 +1225,23 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         })
                         continue
 
-                    # Check if too much exploration without editing
-                    if exec_context.is_exploration_heavy(threshold=8):
+                    # Check if too much exploration without editing (threshold lowered for faster intervention)
+                    if exec_context.is_exploration_heavy(threshold=5):
                         warning_count = exec_context.increment_force_edit_warning(current_task.action_type)
                         if warning_count == 1:
                             print(f"  ⚠️ Exploration budget exhausted - forcing edit mode (warning 1/2)")
                             messages.append({
                                 "role": "user",
-                                "content": "You have done extensive exploration without making any edits. STOP searching/reading and create the code change NOW using write_file or apply_patch. If you cannot find the exact location, create the best-effort implementation."
+                                "content": f"You have done extensive exploration without making any edits. STOP searching/reading and create the code change NOW using write_file or apply_patch. The task is: '{current_task.description}'. Create the best-effort implementation immediately."
                             })
+                            exec_context.exploration_count = 3  # Partial reset - triggers warning 2 faster
                         else:
                             print(f"  🛑 Exploration blocked - you MUST make an edit now")
                             messages.append({
                                 "role": "user",
                                 "content": f"FINAL WARNING: Exploration is now DISABLED for this task. You MUST use write_file or apply_patch immediately. The task is: '{current_task.description}'. Based on what you've learned, create the code NOW. Do not request any more file reads or searches."
                             })
-                        exec_context.exploration_count = 0  # Reset counter but warnings persist
+                            # Don't reset - blocking will take over on next exploration attempt
 
                     # Record this tool call for deduplication tracking
                     exec_context.record_tool_call(tool_name, tool_args)
@@ -1307,6 +1386,21 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         "name": tool_name,
                         "content": result
                     })
+
+                    # Track failures in session context (persists across tasks)
+                    if _has_error_result(result):
+                        try:
+                            error_data = json.loads(result)
+                            error_msg = error_data.get("error", "Unknown error")
+                            if tool_name == "run_cmd":
+                                cmd = tool_args.get("cmd", "")[:80]
+                                exec_context.record_failed_command(cmd, error_msg)
+                            elif tool_name in {"read_file", "search_code", "list_dir"}:
+                                path = tool_args.get("path", tool_args.get("include", ""))
+                                if "not found" in error_msg.lower() or "does not exist" in error_msg.lower():
+                                    exec_context.record_unavailable_path(path)
+                        except:
+                            pass
 
                     # Check for test failures and track results
                     if tool_name == "run_tests":
@@ -1633,22 +1727,23 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                     })
                     continue
 
-                # Check if too much exploration without editing
-                if exec_context.is_exploration_heavy(threshold=8):
+                # Check if too much exploration without editing (threshold lowered for faster intervention)
+                if exec_context.is_exploration_heavy(threshold=5):
                     warning_count = exec_context.increment_force_edit_warning(task.action_type)
                     if warning_count == 1:
                         print(f"  ⚠️ Exploration budget exhausted - forcing edit mode (warning 1/2)")
                         messages.append({
                             "role": "user",
-                            "content": "You have done extensive exploration without making any edits. STOP searching/reading and create the code change NOW using write_file or apply_patch. If you cannot find the exact location, create the best-effort implementation."
+                            "content": f"You have done extensive exploration without making any edits. STOP searching/reading and create the code change NOW using write_file or apply_patch. The task is: '{task.description}'. Create the best-effort implementation immediately."
                         })
+                        exec_context.exploration_count = 3  # Partial reset - triggers warning 2 faster
                     else:
                         print(f"  🛑 Exploration blocked - you MUST make an edit now")
                         messages.append({
                             "role": "user",
                             "content": f"FINAL WARNING: Exploration is now DISABLED for this task. You MUST use write_file or apply_patch immediately. The task is: '{task.description}'. Based on what you've learned, create the code NOW. Do not request any more file reads or searches."
                         })
-                    exec_context.exploration_count = 0  # Reset counter but warnings persist
+                        # Don't reset - blocking will take over on next exploration attempt
 
                 # Record this tool call for deduplication tracking
                 exec_context.record_tool_call(tool_name, tool_args)
