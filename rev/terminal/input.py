@@ -15,13 +15,72 @@ Features:
 
 import sys
 import platform
-from typing import Tuple
+from typing import List, Tuple
 from rev.terminal.history import PromptHistory
 
-from rev.config import get_escape_interrupt, set_escape_interrupt
+from rev.config import set_escape_interrupt
+from rev.settings_manager import get_runtime_settings_snapshot
+from rev.terminal.commands import COMMAND_HANDLERS
 
 # Global history instance
 _history = PromptHistory()
+
+
+def _get_command_suggestions() -> List[str]:
+    """Return sorted list of available slash commands with leading slash."""
+
+    unique_commands = {handler.name for handler in COMMAND_HANDLERS.values()}
+    return sorted(f"/{cmd}" for cmd in unique_commands)
+
+
+def _get_tab_suggestions(text: str) -> List[str]:
+    """Build tab-completion suggestions based on current input text."""
+
+    if not text.startswith('/'):
+        return []
+
+    stripped = text[1:]
+    parts = stripped.split()
+
+    # Suggest commands when only "/" or partial command is present
+    command_list = _get_command_suggestions()
+    if not parts or (len(parts) == 1 and stripped and ' ' not in stripped and not stripped.endswith(' ')):
+        prefix = parts[0] if parts else ""
+        return [cmd for cmd in command_list if cmd.startswith(f"/{prefix}")]
+
+    # Suggest /set keys when applicable
+    if parts[0] == "set":
+        key_prefix = parts[1] if len(parts) > 1 else ""
+        return [
+            key
+            for key in sorted(get_runtime_settings_snapshot().keys())
+            if key.startswith(key_prefix)
+        ]
+
+    return []
+
+
+def _render_prompt(prompt: str, buffer: List[str], cursor_pos: int) -> None:
+    """Redraw prompt and buffer while keeping cursor position consistent."""
+
+    sys.stdout.write("\r" + prompt + ''.join(buffer))
+    if cursor_pos < len(buffer):
+        sys.stdout.write('\x1b[' + str(len(buffer) - cursor_pos) + 'D')
+    sys.stdout.flush()
+
+
+def _handle_tab_completion(prompt: str, buffer: List[str], cursor_pos: int) -> int:
+    """Render tab-completion suggestions and re-draw the current prompt."""
+
+    buffer_prefix = ''.join(buffer[:cursor_pos])
+    suggestions = _get_tab_suggestions(buffer_prefix)
+
+    if not suggestions:
+        return cursor_pos
+
+    sys.stdout.write("\n" + "  ".join(suggestions) + "\n")
+    _render_prompt(prompt, buffer, cursor_pos)
+    return cursor_pos
 
 def get_history() -> PromptHistory:
     """Get the global history instance."""
@@ -122,6 +181,11 @@ def _get_input_unix(prompt: str) -> Tuple[str, bool]:
                     sys.stdout.write('\n')
                     sys.stdout.flush()
                     break
+
+            elif char == '\t':  # Tab key for command completion
+                navigating_history = False
+                cursor_pos = _handle_tab_completion(prompt, buffer, cursor_pos)
+                continue
 
             elif char == '\r':  # Carriage return (Enter key)
                 sys.stdout.write('\n')
@@ -279,6 +343,11 @@ def _get_input_windows(prompt: str) -> Tuple[str, bool]:
                 sys.stdout.write('\n')
                 sys.stdout.flush()
                 break
+
+            elif char == b'\t':
+                navigating_history = False
+                cursor_pos = _handle_tab_completion(prompt, buffer, cursor_pos)
+                continue
 
             # Enter key
             elif char == b'\r':
