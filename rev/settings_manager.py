@@ -90,7 +90,307 @@ def _parse_positive_int(value: Any) -> int:
     return parsed
 
 
+def _parse_non_negative_int(value: Any) -> int:
+    """Parse and validate a non-negative integer setting."""
+
+    parsed = int(str(value).strip())
+    if parsed < 0:
+        raise ValueError("Value cannot be negative")
+    return parsed
+
+
+def _parse_positive_float(value: Any) -> float:
+    """Parse and validate a positive float setting."""
+
+    parsed = float(str(value).strip())
+    if parsed <= 0:
+        raise ValueError("Value must be greater than 0")
+    return parsed
+
+
+def _parse_float_between_zero_and_one(value: Any) -> float:
+    """Parse a float constrained to the inclusive range [0, 1]."""
+
+    parsed = float(str(value).strip())
+    if not 0 <= parsed <= 1:
+        raise ValueError("Value must be between 0 and 1")
+    return parsed
+
+
+def _parse_bool(value: Any) -> bool:
+    """Parse boolean-like inputs (true/false, yes/no, 1/0)."""
+
+    if isinstance(value, bool):
+        return value
+
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "y", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "n", "off"}:
+        return False
+
+    raise ValueError("Value must be a boolean (true/false)")
+
+
+def _parse_choice(value: Any, *, choices: set[str], case_insensitive: bool = True) -> str:
+    """Validate that the value is one of the allowed choices."""
+
+    raw = str(value).strip()
+    candidate = raw.lower() if case_insensitive else raw
+    normalized_choices = {c.lower() if case_insensitive else c for c in choices}
+    if candidate not in normalized_choices:
+        allowed_display = ", ".join(sorted(normalized_choices))
+        raise ValueError(f"Value must be one of: {allowed_display}")
+    return candidate if case_insensitive else raw
+
+
+def _parse_non_empty_str(value: Any) -> str:
+    """Parse and validate a non-empty string setting."""
+
+    parsed = str(value).strip()
+    if not parsed:
+        raise ValueError("Value cannot be empty")
+    return parsed
+
+
+def _set_private_mode_runtime(enabled: bool) -> None:
+    """Apply private mode changes and refresh MCP server registry."""
+
+    config.set_private_mode(enabled)
+    os.environ["REV_PRIVATE_MODE"] = "true" if enabled else "false"
+
+    # Reload MCP servers to reflect privacy changes
+    try:
+        from rev.mcp.client import mcp_client
+
+        mcp_client.servers.clear()
+        mcp_client._load_default_servers()
+    except Exception:
+        # Avoid hard failures if MCP is unavailable in the current context
+        pass
+
+
 RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
+    "model": RuntimeSetting(
+        key="model",
+        description="Active LLM model for all agent phases",
+        section="Models",
+        parser=_parse_non_empty_str,
+        getter=lambda: config.OLLAMA_MODEL,
+        setter=lambda value: config.set_model(value),
+        default=config.DEFAULT_OLLAMA_MODEL,
+    ),
+    "execution_model": RuntimeSetting(
+        key="execution_model",
+        description="Model used for execution tasks (overrides /model)",
+        section="Models",
+        parser=_parse_non_empty_str,
+        getter=lambda: config.EXECUTION_MODEL,
+        setter=lambda value: setattr(config, "EXECUTION_MODEL", value),
+        default=config.EXECUTION_MODEL,
+    ),
+    "planning_model": RuntimeSetting(
+        key="planning_model",
+        description="Model used for planning tasks (overrides /model)",
+        section="Models",
+        parser=_parse_non_empty_str,
+        getter=lambda: config.PLANNING_MODEL,
+        setter=lambda value: setattr(config, "PLANNING_MODEL", value),
+        default=config.PLANNING_MODEL,
+    ),
+    "research_model": RuntimeSetting(
+        key="research_model",
+        description="Model used for research tasks (overrides /model)",
+        section="Models",
+        parser=_parse_non_empty_str,
+        getter=lambda: config.RESEARCH_MODEL,
+        setter=lambda value: setattr(config, "RESEARCH_MODEL", value),
+        default=config.RESEARCH_MODEL,
+    ),
+    "ollama_base_url": RuntimeSetting(
+        key="ollama_base_url",
+        description="Base URL for the Ollama server",
+        section="Models",
+        parser=_parse_non_empty_str,
+        getter=lambda: config.OLLAMA_BASE_URL,
+        setter=lambda value: setattr(config, "OLLAMA_BASE_URL", value),
+        default=config.DEFAULT_OLLAMA_BASE_URL,
+    ),
+    "execution_supports_tools": RuntimeSetting(
+        key="execution_supports_tools",
+        description="Whether the execution model supports tool usage",
+        section="Models",
+        parser=_parse_bool,
+        getter=lambda: config.EXECUTION_SUPPORTS_TOOLS,
+        setter=lambda value: setattr(config, "EXECUTION_SUPPORTS_TOOLS", value),
+        default=config.EXECUTION_SUPPORTS_TOOLS,
+    ),
+    "planning_supports_tools": RuntimeSetting(
+        key="planning_supports_tools",
+        description="Whether the planning model supports tool usage",
+        section="Models",
+        parser=_parse_bool,
+        getter=lambda: config.PLANNING_SUPPORTS_TOOLS,
+        setter=lambda value: setattr(config, "PLANNING_SUPPORTS_TOOLS", value),
+        default=config.PLANNING_SUPPORTS_TOOLS,
+    ),
+    "research_supports_tools": RuntimeSetting(
+        key="research_supports_tools",
+        description="Whether the research model supports tool usage",
+        section="Models",
+        parser=_parse_bool,
+        getter=lambda: config.RESEARCH_SUPPORTS_TOOLS,
+        setter=lambda value: setattr(config, "RESEARCH_SUPPORTS_TOOLS", value),
+        default=config.RESEARCH_SUPPORTS_TOOLS,
+    ),
+    "validation_mode": RuntimeSetting(
+        key="validation_mode",
+        description="Default validation mode (none, smoke, targeted, full)",
+        section="Validation",
+        parser=lambda value: _parse_choice(
+            value, choices={"none", "smoke", "targeted", "full"}
+        ),
+        getter=lambda: config.VALIDATION_MODE_DEFAULT,
+        setter=lambda value: setattr(config, "VALIDATION_MODE_DEFAULT", value),
+        default=config.VALIDATION_MODE_DEFAULT,
+    ),
+    "max_read_file_per_task": RuntimeSetting(
+        key="max_read_file_per_task",
+        description="Maximum number of /read calls per task",
+        section="Execution Limits",
+        parser=_parse_positive_int,
+        getter=lambda: config.MAX_READ_FILE_PER_TASK,
+        setter=lambda value: setattr(config, "MAX_READ_FILE_PER_TASK", value),
+        default=config.MAX_READ_FILE_PER_TASK,
+    ),
+    "max_search_code_per_task": RuntimeSetting(
+        key="max_search_code_per_task",
+        description="Maximum number of /search code calls per task",
+        section="Execution Limits",
+        parser=_parse_positive_int,
+        getter=lambda: config.MAX_SEARCH_CODE_PER_TASK,
+        setter=lambda value: setattr(config, "MAX_SEARCH_CODE_PER_TASK", value),
+        default=config.MAX_SEARCH_CODE_PER_TASK,
+    ),
+    "max_run_cmd_per_task": RuntimeSetting(
+        key="max_run_cmd_per_task",
+        description="Maximum number of /run_cmd calls per task",
+        section="Execution Limits",
+        parser=_parse_positive_int,
+        getter=lambda: config.MAX_RUN_CMD_PER_TASK,
+        setter=lambda value: setattr(config, "MAX_RUN_CMD_PER_TASK", value),
+        default=config.MAX_RUN_CMD_PER_TASK,
+    ),
+    "max_execution_iterations": RuntimeSetting(
+        key="max_execution_iterations",
+        description="Maximum execution loop iterations before stopping",
+        section="Execution Limits",
+        parser=_parse_positive_int,
+        getter=lambda: config.MAX_EXECUTION_ITERATIONS,
+        setter=lambda value: setattr(config, "MAX_EXECUTION_ITERATIONS", value),
+        default=config.MAX_EXECUTION_ITERATIONS,
+    ),
+    "max_task_iterations": RuntimeSetting(
+        key="max_task_iterations",
+        description="Maximum planner task iterations",
+        section="Execution Limits",
+        parser=_parse_positive_int,
+        getter=lambda: config.MAX_TASK_ITERATIONS,
+        setter=lambda value: setattr(config, "MAX_TASK_ITERATIONS", value),
+        default=config.MAX_TASK_ITERATIONS,
+    ),
+    "max_steps_per_run": RuntimeSetting(
+        key="max_steps_per_run",
+        description="Resource budget: maximum steps per run",
+        section="Resource Budgets",
+        parser=_parse_positive_int,
+        getter=lambda: config.MAX_STEPS_PER_RUN,
+        setter=lambda value: setattr(config, "MAX_STEPS_PER_RUN", value),
+        default=config.MAX_STEPS_PER_RUN,
+    ),
+    "max_llm_tokens_per_run": RuntimeSetting(
+        key="max_llm_tokens_per_run",
+        description="Resource budget: maximum tokens per run",
+        section="Resource Budgets",
+        parser=_parse_positive_int,
+        getter=lambda: config.MAX_LLM_TOKENS_PER_RUN,
+        setter=lambda value: setattr(config, "MAX_LLM_TOKENS_PER_RUN", value),
+        default=config.MAX_LLM_TOKENS_PER_RUN,
+    ),
+    "max_wallclock_seconds": RuntimeSetting(
+        key="max_wallclock_seconds",
+        description="Resource budget: maximum wallclock seconds per run",
+        section="Resource Budgets",
+        parser=_parse_positive_int,
+        getter=lambda: config.MAX_WALLCLOCK_SECONDS,
+        setter=lambda value: setattr(config, "MAX_WALLCLOCK_SECONDS", value),
+        default=config.MAX_WALLCLOCK_SECONDS,
+    ),
+    "max_plan_tasks": RuntimeSetting(
+        key="max_plan_tasks",
+        description="Resource budget: maximum tasks in generated plans",
+        section="Resource Budgets",
+        parser=_parse_positive_int,
+        getter=lambda: config.MAX_PLAN_TASKS,
+        setter=lambda value: setattr(config, "MAX_PLAN_TASKS", value),
+        default=config.MAX_PLAN_TASKS,
+    ),
+    "research_depth": RuntimeSetting(
+        key="research_depth",
+        description="Default research depth (off, shallow, medium, deep)",
+        section="Research",
+        parser=lambda value: _parse_choice(
+            value, choices={"off", "shallow", "medium", "deep"}
+        ),
+        getter=lambda: config.RESEARCH_DEPTH_DEFAULT,
+        setter=lambda value: setattr(config, "RESEARCH_DEPTH_DEFAULT", value),
+        default=config.RESEARCH_DEPTH_DEFAULT,
+    ),
+    "orchestrator_retries": RuntimeSetting(
+        key="orchestrator_retries",
+        description="Number of orchestrator retries for coordination",
+        section="Retries",
+        parser=_parse_non_negative_int,
+        getter=lambda: config.MAX_ORCHESTRATOR_RETRIES,
+        setter=lambda value: setattr(config, "MAX_ORCHESTRATOR_RETRIES", value),
+        default=config.MAX_ORCHESTRATOR_RETRIES,
+    ),
+    "plan_regen_retries": RuntimeSetting(
+        key="plan_regen_retries",
+        description="Retries allowed when regenerating plans",
+        section="Retries",
+        parser=_parse_non_negative_int,
+        getter=lambda: config.MAX_PLAN_REGEN_RETRIES,
+        setter=lambda value: setattr(config, "MAX_PLAN_REGEN_RETRIES", value),
+        default=config.MAX_PLAN_REGEN_RETRIES,
+    ),
+    "validation_retries": RuntimeSetting(
+        key="validation_retries",
+        description="Retries allowed during validation",
+        section="Retries",
+        parser=_parse_non_negative_int,
+        getter=lambda: config.MAX_VALIDATION_RETRIES,
+        setter=lambda value: setattr(config, "MAX_VALIDATION_RETRIES", value),
+        default=config.MAX_VALIDATION_RETRIES,
+    ),
+    "adaptive_replans": RuntimeSetting(
+        key="adaptive_replans",
+        description="Adaptive replans allowed after failed validation",
+        section="Retries",
+        parser=_parse_non_negative_int,
+        getter=lambda: config.MAX_ADAPTIVE_REPLANS,
+        setter=lambda value: setattr(config, "MAX_ADAPTIVE_REPLANS", value),
+        default=config.MAX_ADAPTIVE_REPLANS,
+    ),
+    "validation_timeout_seconds": RuntimeSetting(
+        key="validation_timeout_seconds",
+        description="Timeout for validation steps (seconds)",
+        section="Validation",
+        parser=_parse_positive_int,
+        getter=lambda: config.VALIDATION_TIMEOUT_SECONDS,
+        setter=lambda value: setattr(config, "VALIDATION_TIMEOUT_SECONDS", value),
+        default=config.VALIDATION_TIMEOUT_SECONDS,
+    ),
     "log_retention": RuntimeSetting(
         key="log_retention",
         description="Number of .rev/logs files to keep (newest preserved)",
@@ -99,7 +399,115 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         getter=lambda: config.LOG_RETENTION_LIMIT,
         setter=lambda value: setattr(config, "LOG_RETENTION_LIMIT", value),
         default=config.LOG_RETENTION_LIMIT_DEFAULT,
-    )
+    ),
+    "history_size": RuntimeSetting(
+        key="history_size",
+        description="Number of history entries to keep in-memory",
+        section="History",
+        parser=_parse_positive_int,
+        getter=lambda: config.HISTORY_SIZE,
+        setter=lambda value: setattr(config, "HISTORY_SIZE", value),
+        default=config.HISTORY_SIZE,
+    ),
+    "history_file": RuntimeSetting(
+        key="history_file",
+        description="Path to persist history (empty to disable)",
+        section="History",
+        parser=lambda value: str(value).strip(),
+        getter=lambda: config.HISTORY_FILE,
+        setter=lambda value: setattr(config, "HISTORY_FILE", value),
+        default=config.HISTORY_FILE,
+    ),
+    "paste_threshold": RuntimeSetting(
+        key="paste_threshold",
+        description="Line-count threshold to detect pasted input",
+        section="Input",
+        parser=_parse_positive_int,
+        getter=lambda: config.PASTE_THRESHOLD,
+        setter=lambda value: setattr(config, "PASTE_THRESHOLD", value),
+        default=config.PASTE_THRESHOLD,
+    ),
+    "paste_time_threshold": RuntimeSetting(
+        key="paste_time_threshold",
+        description="Inter-line time threshold (seconds) for paste detection",
+        section="Input",
+        parser=_parse_positive_float,
+        getter=lambda: config.PASTE_TIME_THRESHOLD,
+        setter=lambda value: setattr(config, "PASTE_TIME_THRESHOLD", value),
+        default=config.PASTE_TIME_THRESHOLD,
+    ),
+    "escape_interval": RuntimeSetting(
+        key="escape_interval",
+        description="Interval for escape key polling (seconds)",
+        section="Input",
+        parser=_parse_positive_float,
+        getter=lambda: config.ESCAPE_INTERVAL,
+        setter=lambda value: setattr(config, "ESCAPE_INTERVAL", value),
+        default=config.ESCAPE_INTERVAL,
+    ),
+    "escape_timeout": RuntimeSetting(
+        key="escape_timeout",
+        description="Escape key timeout (seconds)",
+        section="Input",
+        parser=_parse_positive_float,
+        getter=lambda: config.ESCAPE_TIMEOUT,
+        setter=lambda value: setattr(config, "ESCAPE_TIMEOUT", value),
+        default=config.ESCAPE_TIMEOUT,
+    ),
+    "prefer_reuse": RuntimeSetting(
+        key="prefer_reuse",
+        description="Prefer reusing existing files over creating new ones",
+        section="Code Reuse",
+        parser=_parse_bool,
+        getter=lambda: config.PREFER_REUSE,
+        setter=lambda value: setattr(config, "PREFER_REUSE", value),
+        default=config.PREFER_REUSE,
+    ),
+    "warn_on_new_files": RuntimeSetting(
+        key="warn_on_new_files",
+        description="Warn when creating new files instead of reusing",
+        section="Code Reuse",
+        parser=_parse_bool,
+        getter=lambda: config.WARN_ON_NEW_FILES,
+        setter=lambda value: setattr(config, "WARN_ON_NEW_FILES", value),
+        default=config.WARN_ON_NEW_FILES,
+    ),
+    "require_reuse_justification": RuntimeSetting(
+        key="require_reuse_justification",
+        description="Require justification when not reusing existing files",
+        section="Code Reuse",
+        parser=_parse_bool,
+        getter=lambda: config.REQUIRE_REUSE_JUSTIFICATION,
+        setter=lambda value: setattr(config, "REQUIRE_REUSE_JUSTIFICATION", value),
+        default=config.REQUIRE_REUSE_JUSTIFICATION,
+    ),
+    "max_files_per_feature": RuntimeSetting(
+        key="max_files_per_feature",
+        description="Maximum files encouraged for a single feature",
+        section="Code Reuse",
+        parser=_parse_positive_int,
+        getter=lambda: config.MAX_FILES_PER_FEATURE,
+        setter=lambda value: setattr(config, "MAX_FILES_PER_FEATURE", value),
+        default=config.MAX_FILES_PER_FEATURE,
+    ),
+    "similarity_threshold": RuntimeSetting(
+        key="similarity_threshold",
+        description="Similarity threshold for file name reuse suggestions",
+        section="Code Reuse",
+        parser=_parse_float_between_zero_and_one,
+        getter=lambda: config.SIMILARITY_THRESHOLD,
+        setter=lambda value: setattr(config, "SIMILARITY_THRESHOLD", value),
+        default=config.SIMILARITY_THRESHOLD,
+    ),
+    "private_mode": RuntimeSetting(
+        key="private_mode",
+        description="Enable to disable all public MCP servers",
+        section="Privacy",
+        parser=_parse_bool,
+        getter=lambda: config.get_private_mode(),
+        setter=_set_private_mode_runtime,
+        default=config.DEFAULT_PRIVATE_MODE,
+    ),
 }
 
 
