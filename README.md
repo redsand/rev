@@ -465,6 +465,10 @@ Options:
   --validate / --no-validate   Enable/disable validation agent (default: enabled)
   --auto-fix                   Enable auto-fix for minor validation issues
 
+  # Resuming / Checkpoints
+  --resume [CHECKPOINT]        Resume from a checkpoint (omit path to use latest)
+  --list-checkpoints           List checkpoints saved in .rev_checkpoints/
+
   -h, --help                   Show help message
 ```
 
