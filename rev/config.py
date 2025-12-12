@@ -5,7 +5,7 @@
 import os
 import pathlib
 import platform
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 # Check for optional dependencies
 try:
@@ -17,6 +17,25 @@ except ImportError:
 
 # Configuration
 ROOT = pathlib.Path(os.getcwd()).resolve()
+# Allowlist of additional roots that tools can access (populated via /add-dir)
+ADDITIONAL_ROOTS: list[pathlib.Path] = []
+
+
+def register_additional_root(path: pathlib.Path) -> None:
+    """Register an additional root directory that tools may access."""
+
+    resolved = path.resolve()
+    if not resolved.is_dir():
+        raise ValueError(f"Additional root must be a directory: {path}")
+
+    if resolved not in ADDITIONAL_ROOTS:
+        ADDITIONAL_ROOTS.append(resolved)
+
+
+def get_allowed_roots() -> List[pathlib.Path]:
+    """Return the primary project root plus any additional allowed roots."""
+
+    return [ROOT, *ADDITIONAL_ROOTS]
 REV_DIR = ROOT / ".rev"
 CACHE_DIR = REV_DIR / "cache"
 CHECKPOINTS_DIR = REV_DIR / "checkpoints"

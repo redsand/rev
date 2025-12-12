@@ -13,20 +13,58 @@ import shlex
 from typing import List, Optional
 
 from rev.config import (
-    ROOT, EXCLUDE_DIRS, MAX_FILE_BYTES, READ_RETURN_LIMIT, SEARCH_MATCH_LIMIT, LIST_LIMIT,
-    WARN_ON_NEW_FILES, SIMILARITY_THRESHOLD
+    ROOT,
+    EXCLUDE_DIRS,
+    MAX_FILE_BYTES,
+    READ_RETURN_LIMIT,
+    SEARCH_MATCH_LIMIT,
+    LIST_LIMIT,
+    WARN_ON_NEW_FILES,
+    SIMILARITY_THRESHOLD,
+    get_allowed_roots,
 )
 from rev.cache import get_file_cache, get_repo_cache
 
 
 # ========== Helper Functions ==========
 
+def _allowed_roots() -> list[pathlib.Path]:
+    """Return configured roots that file operations may access."""
+
+    return get_allowed_roots()
+
+
+def _rel_to_root(path: pathlib.Path) -> str:
+    """Return a path string relative to the main ROOT (allows .. for extras)."""
+
+    try:
+        rel = path.relative_to(ROOT)
+        return str(rel)
+    except ValueError:
+        return os.path.relpath(path, ROOT)
+
+
 def _safe_path(rel: str) -> pathlib.Path:
-    """Resolve path safely within repo root."""
-    p = (ROOT / rel).resolve()
-    if not str(p).startswith(str(ROOT)):
-        raise ValueError(f"Path escapes repo: {rel}")
-    return p
+    """Resolve path safely within allowed roots (project root or /add-dir)."""
+
+    candidate = pathlib.Path(rel)
+    potential_paths = []
+
+    if candidate.is_absolute():
+        potential_paths.append(candidate.resolve())
+    else:
+        for root in _allowed_roots():
+            potential_paths.append((root / rel).resolve())
+
+    for path in potential_paths:
+        for root in _allowed_roots():
+            try:
+                path.relative_to(root)
+                return path
+            except ValueError:
+                continue
+
+    raise ValueError(f"Path escapes allowed roots: {rel}")
 
 
 def _is_text_file(path: pathlib.Path) -> bool:
@@ -45,8 +83,12 @@ def _should_skip(path: pathlib.Path) -> bool:
 
 def _iter_files(include_glob: str) -> List[pathlib.Path]:
     """Iterate files matching glob pattern."""
-    all_paths = [pathlib.Path(p) for p in glob.glob(str(ROOT / include_glob), recursive=True)]
-    files = [p for p in all_paths if p.is_file()]
+    files: List[pathlib.Path] = []
+
+    for base in _allowed_roots():
+        all_paths = [pathlib.Path(p) for p in glob.glob(str(base / include_glob), recursive=True)]
+        files.extend(p for p in all_paths if p.is_file())
+
     return [p for p in files if not _should_skip(p)]
 
 
@@ -144,7 +186,7 @@ def _check_for_similar_files(path: str) -> dict:
                     similarity = _calculate_similarity(existing.stem, filestem)
                     if similarity >= SIMILARITY_THRESHOLD:
                         similar_files.append({
-                            "path": str(existing.relative_to(ROOT)),
+                            "path": _rel_to_root(existing),
                             "similarity": f"{similarity:.1%}"
                         })
 
@@ -219,15 +261,15 @@ def write_file(path: str, content: str) -> str:
         try:
             from rev.tools.reuse_metrics import track_file_operation
             if is_new:
-                track_file_operation('create', str(p.relative_to(ROOT)),
+                track_file_operation('create', _rel_to_root(p),
                                       has_similar=bool(check_result.get('similar_files')))
             else:
-                track_file_operation('modify', str(p.relative_to(ROOT)))
+                track_file_operation('modify', _rel_to_root(p))
         except Exception:
             # Don't fail if metrics tracking fails
             pass
 
-        result = {"wrote": str(p.relative_to(ROOT)), "bytes": len(content)}
+        result = {"wrote": _rel_to_root(p), "bytes": len(content)}
 
         # Include warnings and similar files in result for LLM awareness
         if is_new and check_result.get('similar_files'):
@@ -243,7 +285,7 @@ def write_file(path: str, content: str) -> str:
 def list_dir(pattern: str = "**/*") -> str:
     """List files matching pattern."""
     files = _iter_files(pattern)
-    rels = sorted(str(p.relative_to(ROOT)).replace("\\", "/") for p in files)[:LIST_LIMIT]
+    rels = sorted(_rel_to_root(p).replace("\\", "/") for p in files)[:LIST_LIMIT]
     return json.dumps({"count": len(rels), "files": rels})
 
 
@@ -258,7 +300,7 @@ def search_code(pattern: str, include: str = "**/*", regex: bool = True,
 
     matches = []
     for p in _iter_files(include):
-        rel = str(p.relative_to(ROOT)).replace("\\", "/")
+        rel = _rel_to_root(p).replace("\\", "/")
         if p.stat().st_size > MAX_FILE_BYTES or not _is_text_file(p):
             continue
         try:
@@ -284,7 +326,7 @@ def delete_file(path: str) -> str:
         if p.is_dir():
             return json.dumps({"error": f"Cannot delete directory (use delete_directory): {path}"})
         p.unlink()
-        return json.dumps({"deleted": str(p.relative_to(ROOT))})
+        return json.dumps({"deleted": _rel_to_root(p)})
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
@@ -299,8 +341,8 @@ def move_file(src: str, dest: str) -> str:
         dest_p.parent.mkdir(parents=True, exist_ok=True)
         src_p.rename(dest_p)
         return json.dumps({
-            "moved": str(src_p.relative_to(ROOT)),
-            "to": str(dest_p.relative_to(ROOT))
+            "moved": _rel_to_root(src_p),
+            "to": _rel_to_root(dest_p)
         })
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
@@ -313,7 +355,7 @@ def append_to_file(path: str, content: str) -> str:
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("a", encoding="utf-8") as f:
             f.write(content)
-        return json.dumps({"appended_to": str(p.relative_to(ROOT)), "bytes": len(content)})
+        return json.dumps({"appended_to": _rel_to_root(p), "bytes": len(content)})
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
@@ -336,13 +378,13 @@ def replace_in_file(path: str, find: str, replace: str, regex: bool = False) -> 
             new_content = content.replace(find, replace)
 
         if content == new_content:
-            return json.dumps({"replaced": 0, "file": str(p.relative_to(ROOT))})
+            return json.dumps({"replaced": 0, "file": _rel_to_root(p)})
 
         p.write_text(new_content, encoding="utf-8")
         count = len(content.split(find)) - 1 if not regex else len(re.findall(find, content))
         return json.dumps({
             "replaced": count,
-            "file": str(p.relative_to(ROOT))
+            "file": _rel_to_root(p)
         })
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
@@ -353,7 +395,7 @@ def create_directory(path: str) -> str:
     try:
         p = _safe_path(path)
         p.mkdir(parents=True, exist_ok=True)
-        return json.dumps({"created": str(p.relative_to(ROOT))})
+        return json.dumps({"created": _rel_to_root(p)})
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
@@ -366,7 +408,7 @@ def get_file_info(path: str) -> str:
             return json.dumps({"error": f"Not found: {path}"})
         stat = p.stat()
         return json.dumps({
-            "path": str(p.relative_to(ROOT)),
+            "path": _rel_to_root(p),
             "size": stat.st_size,
             "modified": stat.st_mtime,
             "is_file": p.is_file(),
@@ -388,8 +430,8 @@ def copy_file(src: str, dest: str) -> str:
         dest_p.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src_p, dest_p)
         return json.dumps({
-            "copied": str(src_p.relative_to(ROOT)),
-            "to": str(dest_p.relative_to(ROOT))
+            "copied": _rel_to_root(src_p),
+            "to": _rel_to_root(dest_p)
         })
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
@@ -424,7 +466,7 @@ def read_file_lines(path: str, start: int = 1, end: int = None) -> str:
 
         selected_lines = lines[start_idx:end_idx]
         return json.dumps({
-            "path": str(p.relative_to(ROOT)),
+            "path": _rel_to_root(p),
             "start": start,
             "end": end_idx,
             "total_lines": len(lines),
@@ -472,7 +514,7 @@ def tree_view(path: str = ".", max_depth: int = 3, max_files: int = 100) -> str:
         build_tree(p)
 
         return json.dumps({
-            "path": str(p.relative_to(ROOT)) if p != ROOT else ".",
+            "path": _rel_to_root(p) if p != ROOT else ".",
             "tree": "\n".join(tree),
             "files_shown": count
         })
