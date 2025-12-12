@@ -308,7 +308,10 @@ def _call_llm_with_tools(
             tools=tools if (model_supports_tools is not False) else None,
             model=model_name,
             supports_tools=model_supports_tools,
-        )
+        ) or {}
+
+        if not isinstance(response, dict):
+            return {"error": "LLM returned no response during planning"}
 
         if "error" in response:
             return response
@@ -335,7 +338,10 @@ def _call_llm_with_tools(
 
     # Max iterations reached
     print(f"  Warning: Max planning iterations ({max_iterations}) reached")
-    return ollama_chat(conversation, tools=None, model=model_name, supports_tools=model_supports_tools)  # Final call without tools
+    final_response = ollama_chat(conversation, tools=None, model=model_name, supports_tools=model_supports_tools) or {}
+    if not isinstance(final_response, dict):
+        return {"error": "LLM returned no response during planning (final call)"}
+    return final_response  # Final call without tools
 
 
 def _recursive_breakdown(task_description: str, action_type: str, context: str, max_depth: int = 2, current_depth: int = 0, tools: list = None) -> List[Dict[str, Any]]:
@@ -369,7 +375,9 @@ Context:
 Provide detailed subtasks."""}
     ]
 
-    response = ollama_chat(messages, tools=tools)
+    response = ollama_chat(messages, tools=tools) or {}
+    if not isinstance(response, dict):
+        return [{"description": task_description, "action_type": action_type, "complexity": "medium"}]
 
     if "error" in response:
         # Fallback to original task if breakdown fails
@@ -634,6 +642,11 @@ After gathering information with tools, generate a comprehensive execution plan 
         model_name=model_name,
         model_supports_tools=model_supports_tools,
     )
+
+    if not isinstance(response, dict):
+        error_msg = "Planning failed: LLM returned no response"
+        print(f"Error: {error_msg}")
+        raise RuntimeError(error_msg)
 
     if "error" in response:
         error_msg = f"Planning failed: {response['error']}"

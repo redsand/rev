@@ -390,6 +390,7 @@ def ollama_chat(
     # Retry with configurable limits and backoff
     max_retries, retry_forever, retry_backoff, max_backoff, timeout_cap = _get_retry_config()
     base_timeout = 600  # 10 minutes
+    max_attempts = max_retries if max_retries > 0 else 1  # ensure at least one attempt even when retry_forever
 
     # Track if we've already prompted for auth in this call
     auth_prompted = False
@@ -408,7 +409,8 @@ def ollama_chat(
             time.sleep(delay)
         return delay
 
-    for attempt in range(max_retries):
+    attempt = 0
+    while attempt < max_attempts or retry_forever:
         timeout = base_timeout * min(attempt + 1, timeout_cap)  # 600, 1200, 1800 (capped)
 
         if attempt > 0:
@@ -521,10 +523,12 @@ def ollama_chat(
                 "will_retry": attempt < max_retries - 1
             }, "WARNING")
 
-            if attempt < max_retries - 1:
+            should_retry = retry_forever or attempt < max_attempts - 1
+            if should_retry:
                 if OLLAMA_DEBUG:
                     print(f"[DEBUG] Request timed out after {timeout}s, will retry with longer timeout...")
                 _sleep_before_retry("timeout")
+                attempt += 1
                 continue  # Retry with longer timeout
             else:
                 error_msg = f"Ollama API timeout after {max_retries} attempts (final timeout: {timeout}s)"
@@ -548,10 +552,14 @@ def ollama_chat(
             }, "ERROR")
 
             # For retryable HTTP errors (5xx server errors), continue to retry
-            if 'resp' in locals() and resp.status_code >= 500 and attempt < max_retries - 1:
+            status_code = resp.status_code if 'resp' in locals() else None
+            retryable_http = status_code is not None and status_code >= 500
+            should_retry = retryable_http and (retry_forever or attempt < max_attempts - 1)
+            if should_retry:
                 if OLLAMA_DEBUG:
                     print(f"[DEBUG] HTTP {resp.status_code} error, will retry (attempt {attempt + 1}/{max_retries})...")
                 _sleep_before_retry("http_error")
+                attempt += 1
                 continue
 
             # For non-retryable errors or final attempt, return the error
@@ -567,10 +575,12 @@ def ollama_chat(
             }, "ERROR")
 
             # Network-related errors (connection errors, etc.) should be retried
-            if attempt < max_retries - 1:
+            should_retry = retry_forever or attempt < max_attempts - 1
+            if should_retry:
                 if OLLAMA_DEBUG:
                     print(f"[DEBUG] Request error: {e}, will retry (attempt {attempt + 1}/{max_retries})...")
                 _sleep_before_retry("request_exception")
+                attempt += 1
                 continue
             return {"error": f"Ollama API error: {e}"}
 
@@ -581,5 +591,13 @@ def ollama_chat(
                 "error_type": type(e).__name__
             }, "ERROR")
 
-            # For unexpected errors, don't retry
+            # For unexpected errors, don't retry unless explicitly configured to retry forever
+            if retry_forever:
+                _sleep_before_retry("unexpected_error")
+                attempt += 1
+                continue
             return {"error": f"Ollama API error: {e}"}
+
+        attempt += 1
+
+    return {"error": f"Ollama API retries exhausted after {attempt} attempt(s) (retry_forever={retry_forever})"}

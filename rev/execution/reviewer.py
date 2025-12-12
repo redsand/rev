@@ -257,7 +257,14 @@ Provide a thorough review."""}
     ]
 
     print("→ Analyzing plan with review agent...")
-    response = ollama_chat(messages, tools=tools)
+    response = ollama_chat(messages, tools=tools) or {}
+
+    if not isinstance(response, dict):
+        print("⚠️  Review agent returned no response; approving with suggestions by default")
+        review.decision = ReviewDecision.APPROVED_WITH_SUGGESTIONS
+        review.suggestions.append("Review agent unavailable - plan approved by default")
+        review.confidence_score = 0.7
+        return review
 
     if "error" in response:
         print(f"⚠️  Review agent error: {response['error']}")

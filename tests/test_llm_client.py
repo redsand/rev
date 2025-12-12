@@ -153,3 +153,76 @@ def test_sends_tools_mode_even_with_empty_tools(mock_post):
     payload = mock_post.call_args.kwargs["json"]
     assert payload["mode"] == "tools"
     assert payload["tools"] == []
+
+
+@patch("rev.llm.client.time.sleep")
+@patch("rev.llm.client.requests.post")
+def test_max_retries_zero_still_makes_a_call(mock_post, mock_sleep, monkeypatch):
+    """When OLLAMA_MAX_RETRIES=0, we still make at least one attempt and return a response."""
+    monkeypatch.setenv("OLLAMA_MAX_RETRIES", "0")
+    monkeypatch.delenv("OLLAMA_RETRY_FOREVER", raising=False)
+
+    messages = [{"role": "user", "content": "hello"}]
+    mock_post.return_value = _make_response(
+        200, payload={"message": {"content": "ok", "tool_calls": []}}
+    )
+
+    cache = client.get_llm_cache()
+    if cache:
+        cache.clear()
+
+    result = client.ollama_chat(messages)
+
+    assert result["message"]["content"] == "ok"
+    assert mock_post.call_count == 1
+    mock_sleep.assert_not_called()
+
+
+@patch("rev.llm.client.time.sleep")
+def test_retry_forever_retries_retryable_errors_until_success(mock_sleep, monkeypatch):
+    """With retry_forever enabled, retryable HTTP 5xx errors keep retrying until success."""
+    monkeypatch.setenv("OLLAMA_MAX_RETRIES", "0")
+    monkeypatch.setenv("OLLAMA_RETRY_FOREVER", "1")
+    monkeypatch.setenv("OLLAMA_RETRY_BACKOFF_SECONDS", "0.01")
+    monkeypatch.setenv("OLLAMA_RETRY_BACKOFF_MAX_SECONDS", "0.02")
+
+    messages = [{"role": "user", "content": "keep trying"}]
+    responses = [
+        _make_response(500, text="fail"),
+        _make_response(502, text="fail again"),
+        _make_response(200, payload={"message": {"content": "ok", "tool_calls": []}}),
+    ]
+
+    cache = client.get_llm_cache()
+    if cache:
+        cache.clear()
+
+    with patch("rev.llm.client.requests.post", side_effect=responses) as mock_post:
+        result = client.ollama_chat(messages)
+
+    assert result["message"]["content"] == "ok"
+    assert mock_post.call_count == 3
+    assert mock_sleep.call_count >= 2
+
+
+@patch("rev.llm.client.time.sleep")
+def test_retry_forever_does_not_spin_on_non_retryable(mock_sleep, monkeypatch):
+    """retry_forever should not loop forever on non-retryable (e.g., 400) errors."""
+    monkeypatch.setenv("OLLAMA_MAX_RETRIES", "0")
+    monkeypatch.setenv("OLLAMA_RETRY_FOREVER", "1")
+    monkeypatch.setenv("OLLAMA_RETRY_BACKOFF_SECONDS", "0.01")
+    monkeypatch.setenv("OLLAMA_RETRY_BACKOFF_MAX_SECONDS", "0.02")
+
+    messages = [{"role": "user", "content": "bad request"}]
+    responses = [_make_response(400, text="bad request")]
+
+    cache = client.get_llm_cache()
+    if cache:
+        cache.clear()
+
+    with patch("rev.llm.client.requests.post", side_effect=responses) as mock_post:
+        result = client.ollama_chat(messages)
+
+    assert "error" in result
+    assert mock_post.call_count == 1
+    mock_sleep.assert_not_called()
