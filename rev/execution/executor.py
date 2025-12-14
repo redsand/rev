@@ -1255,7 +1255,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                             "content": f"DUPLICATE_CALL: This exact {tool_name} call was just executed. Avoid calling the same tool with identical arguments twice in a row."
                         })
                         continue
-                    """
+                    
                     
                     # Check for loop pattern (same tool called repeatedly)
                     loop_warning = exec_context.detect_loop_pattern()
@@ -1265,6 +1265,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                             "role": "user",
                             "content": f"WARNING: {loop_warning}. Stop exploring and make a concrete edit using write_file or apply_patch NOW."
                         })
+                    """
 
                     # Check if exploration should be blocked for edit/add tasks
                     exploration_tools = {"read_file", "search_code", "list_dir", "tree_view", "get_repo_context"}
@@ -1759,7 +1760,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         "content": f"DUPLICATE_CALL: This exact {tool_name} call was just executed. Avoid calling the same tool with identical arguments twice in a row."
                     })
                     continue
-                """
+                
                 
                 # Check for loop pattern (same tool called repeatedly)
                 loop_warning = exec_context.detect_loop_pattern()
@@ -1769,6 +1770,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         "role": "user",
                         "content": f"WARNING: {loop_warning}. Stop exploring and make a concrete edit using write_file or apply_patch NOW."
                     })
+                """
 
                 # Check if exploration should be blocked for edit/add tasks
                 exploration_tools = {"read_file", "search_code", "list_dir", "tree_view", "get_repo_context"}

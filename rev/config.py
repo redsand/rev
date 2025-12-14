@@ -82,7 +82,7 @@ MAX_READ_FILE_PER_TASK = int(os.getenv("REV_MAX_READ_FILE_PER_TASK", "15"))
 MAX_SEARCH_CODE_PER_TASK = int(os.getenv("REV_MAX_SEARCH_CODE_PER_TASK", "15"))
 MAX_RUN_CMD_PER_TASK = int(os.getenv("REV_MAX_RUN_CMD_PER_TASK", "15"))
 MAX_EXECUTION_ITERATIONS = int(os.getenv("REV_MAX_EXEC_ITER", "25"))
-MAX_TASK_ITERATIONS = int(os.getenv("REV_MAX_TASK_ITER", "25"))
+MAX_TASK_ITERATIONS = int(os.getenv("REV_MAX_TASK_ITER", "100"))
 
 EXCLUDE_DIRS = {
     ".git", ".hg", ".svn", ".idea", ".vscode", "__pycache__", ".pytest_cache",

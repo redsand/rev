@@ -337,7 +337,7 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
     ),
     "max_task_iterations": RuntimeSetting(
         key="max_task_iterations",
-        description="Maximum planner task iterations",
+        description="Maximum iterations allowed per task across execution modes",
         section="Execution Limits",
         parser=_parse_positive_int,
         getter=lambda: config.MAX_TASK_ITERATIONS,
