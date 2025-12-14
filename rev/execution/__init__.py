@@ -12,6 +12,7 @@ from rev.execution.executor import (
     execution_mode,
     execute_single_task,
     concurrent_execution_mode,
+    streaming_execution_mode,
     EXECUTION_SYSTEM
 )
 from rev.execution.safety import (
@@ -30,6 +31,7 @@ __all__ = [
     "execution_mode",
     "execute_single_task",
     "concurrent_execution_mode",
+    "streaming_execution_mode",
     "EXECUTION_SYSTEM",
     # Safety
     "is_scary_operation",

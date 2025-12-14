@@ -616,3 +616,216 @@ def ollama_chat(
         attempt += 1
 
     return {"error": f"Ollama API retries exhausted after {attempt} attempt(s) (retry_forever={retry_forever})"}
+
+
+def ollama_chat_stream(
+    messages: List[Dict[str, str]],
+    tools: List[Dict] = None,
+    model: Optional[str] = None,
+    supports_tools: Optional[bool] = None,
+    on_chunk: Optional[callable] = None,
+    check_interrupt: Optional[callable] = None,
+    check_user_messages: Optional[callable] = None,
+) -> Dict[str, Any]:
+    """Stream chat responses from Ollama with real-time output.
+
+    This function provides the same interface as ollama_chat but streams
+    the response, calling on_chunk for each piece of generated text.
+    This enables a real-time experience similar to Claude Code.
+
+    Args:
+        messages: Chat messages in OpenAI format
+        tools: Optional list of tool definitions
+        model: Model name (defaults to config.OLLAMA_MODEL)
+        supports_tools: Whether the model supports tool calling
+        on_chunk: Callback called with each text chunk as it arrives
+        check_interrupt: Callback to check if execution should be interrupted
+        check_user_messages: Callback to check for and inject user messages
+
+    Returns:
+        Complete response dict (same format as ollama_chat)
+    """
+    _setup_signal_handlers()
+    _interrupt_requested.clear()
+
+    # Enforce token limits
+    trimmed_messages, original_tokens, trimmed_tokens, was_truncated = _enforce_token_limit(
+        messages,
+        config.MAX_LLM_TOKENS_PER_RUN,
+    )
+
+    prompt_tokens_estimate = trimmed_tokens
+
+    if was_truncated:
+        print(
+            f"⚠️  Context trimmed from ~{original_tokens:,} to ~{trimmed_tokens:,} tokens "
+            f"(limit {config.MAX_LLM_TOKENS_PER_RUN:,})."
+        )
+
+    messages = trimmed_messages
+    messages, _appended_continue = _ensure_last_user_or_tool(messages)
+
+    model_name = model or config.OLLAMA_MODEL
+    supports_tools = config.DEFAULT_SUPPORTS_TOOLS if supports_tools is None else supports_tools
+
+    tools_provided = tools is not None and supports_tools
+
+    base_url = config.OLLAMA_BASE_URL
+    url = f"{base_url}/api/chat"
+
+    # Build streaming payload
+    payload = {
+        "model": model_name,
+        "messages": messages,
+        "stream": True,  # Enable streaming
+        "options": {
+            "temperature": config.OLLAMA_TEMPERATURE,
+            "num_ctx": config.OLLAMA_NUM_CTX,
+            "top_p": config.OLLAMA_TOP_P,
+            "top_k": config.OLLAMA_TOP_K,
+        }
+    }
+
+    if tools_provided:
+        payload["mode"] = "tools"
+        payload["tools"] = tools or []
+
+    # Log request
+    debug_logger = get_logger()
+    debug_logger.log_llm_request(model_name, messages, tools if tools_provided else None)
+
+    if OLLAMA_DEBUG:
+        print(f"[DEBUG] Streaming request to {url}")
+        print(f"[DEBUG] Model: {model_name}")
+
+    max_retries, retry_forever, retry_backoff, max_backoff, timeout_cap = _get_retry_config()
+    base_timeout = 600
+
+    attempt = 0
+    max_attempts = max_retries if max_retries > 0 else 1
+
+    while attempt < max_attempts or retry_forever:
+        timeout = base_timeout * min(attempt + 1, timeout_cap)
+
+        try:
+            # Make streaming request
+            response = requests.post(url, json=payload, timeout=timeout, stream=True)
+
+            if response.status_code == 400 and tools_provided:
+                # Retry without tools
+                payload_no_tools = {
+                    "model": model_name,
+                    "messages": messages,
+                    "stream": True,
+                    "options": payload.get("options", {})
+                }
+                response = requests.post(url, json=payload_no_tools, timeout=timeout, stream=True)
+
+            response.raise_for_status()
+
+            # Accumulate the streaming response
+            accumulated_content = ""
+            accumulated_tool_calls = []
+            final_message = {}
+
+            for line in response.iter_lines():
+                # Check for interrupts
+                if _interrupt_requested.is_set():
+                    raise KeyboardInterrupt("Request cancelled by user")
+
+                if check_interrupt and check_interrupt():
+                    raise KeyboardInterrupt("Execution interrupted")
+
+                # Check for user messages that should be injected
+                # (We don't inject mid-stream, but we can signal for next iteration)
+                if check_user_messages:
+                    check_user_messages()
+
+                if not line:
+                    continue
+
+                try:
+                    chunk_data = json.loads(line)
+
+                    if "error" in chunk_data:
+                        return {"error": chunk_data["error"]}
+
+                    msg = chunk_data.get("message", {})
+                    content = msg.get("content", "")
+                    tool_calls = msg.get("tool_calls", [])
+
+                    if content:
+                        accumulated_content += content
+                        if on_chunk:
+                            on_chunk(content)
+
+                    if tool_calls:
+                        accumulated_tool_calls.extend(tool_calls)
+
+                    # Check if this is the final chunk
+                    if chunk_data.get("done", False):
+                        final_message = {
+                            "role": "assistant",
+                            "content": accumulated_content,
+                        }
+                        if accumulated_tool_calls:
+                            final_message["tool_calls"] = accumulated_tool_calls
+                        break
+
+                except json.JSONDecodeError:
+                    # Skip malformed lines
+                    continue
+
+            # Build complete response
+            completion_tokens = _estimate_message_tokens(final_message)
+            _token_usage_tracker.record(prompt_tokens_estimate, completion_tokens)
+
+            result = {
+                "message": final_message,
+                "done": True,
+                "usage": {
+                    "prompt": prompt_tokens_estimate,
+                    "completion": completion_tokens,
+                    "total": prompt_tokens_estimate + completion_tokens,
+                }
+            }
+
+            debug_logger.log_llm_response(model_name, result, cached=False)
+            return result
+
+        except KeyboardInterrupt:
+            debug_logger.log("llm", "STREAM_CANCELLED", {}, "WARNING")
+            if on_chunk:
+                on_chunk("\n[Cancelled]")
+            raise
+
+        except requests.exceptions.Timeout:
+            should_retry = retry_forever or attempt < max_attempts - 1
+            if should_retry:
+                delay = min(max_backoff, retry_backoff * (attempt + 1))
+                time.sleep(delay)
+                attempt += 1
+                continue
+            return {"error": f"Streaming timeout after {attempt + 1} attempts"}
+
+        except requests.exceptions.RequestException as e:
+            should_retry = retry_forever or attempt < max_attempts - 1
+            if should_retry:
+                delay = min(max_backoff, retry_backoff * (attempt + 1))
+                time.sleep(delay)
+                attempt += 1
+                continue
+            return {"error": f"Streaming error: {e}"}
+
+        except Exception as e:
+            debug_logger.log("llm", "STREAM_ERROR", {"error": str(e)}, "ERROR")
+            if retry_forever:
+                delay = min(max_backoff, retry_backoff * (attempt + 1))
+                time.sleep(delay)
+                attempt += 1
+                continue
+            return {"error": f"Streaming error: {e}"}
+
+        attempt += 1
+
+    return {"error": f"Streaming retries exhausted after {attempt} attempt(s)"}

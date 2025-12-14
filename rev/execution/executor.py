@@ -2148,3 +2148,370 @@ Please analyze these validation failures and fix them. Complete each fix and rep
         return False
 
     return fixes_complete
+
+
+# =============================================================================
+# Streaming Execution Mode - Real-time interaction like Claude Code
+# =============================================================================
+
+def streaming_execution_mode(
+    plan: ExecutionPlan,
+    approved: bool = False,
+    auto_approve: bool = True,
+    tools: list = None,
+    enable_action_review: bool = False,
+    coding_mode: bool = False,
+    state_manager: Optional[StateManager] = None,
+    budget: Optional["ResourceBudget"] = None,
+    on_chunk: Optional[callable] = None,
+    on_user_message: Optional[callable] = None,
+) -> bool:
+    """Execute all tasks with streaming LLM output and real-time user interaction.
+
+    This provides a Claude Code-like experience where:
+    - LLM responses stream to the terminal in real-time
+    - Users can submit messages while tasks are running
+    - User messages are injected into the conversation
+    - The LLM adapts its approach based on user feedback
+
+    Args:
+        plan: ExecutionPlan with tasks to execute
+        approved: Legacy parameter (ignored)
+        auto_approve: If True (default), runs autonomously
+        tools: List of available tools for LLM function calling
+        enable_action_review: If True, review each action before execution
+        coding_mode: If True, use coding-specific execution prompts
+        state_manager: Optional state manager for persistence
+        budget: Optional resource budget
+        on_chunk: Callback for each streaming chunk (default: print)
+        on_user_message: Callback when user message is received
+
+    Returns:
+        True if all tasks completed successfully, False otherwise
+    """
+    from rev.llm.client import ollama_chat_stream
+    from rev.execution.streaming import (
+        StreamingExecutionManager,
+        UserMessageQueue,
+        MessagePriority,
+    )
+    from rev.terminal.input import start_streaming_input, stop_streaming_input
+
+    print("\n" + "=" * 60)
+    print("STREAMING EXECUTION MODE")
+    print("=" * 60)
+    print("  ℹ️  Type messages while tasks run to guide the LLM")
+    print("  ℹ️  Special commands: /stop, /priority <msg>")
+    print("=" * 60)
+
+    if not auto_approve:
+        print("\nThis will execute all tasks with streaming output.")
+        response = input("Start execution? [y/N]: ").strip().lower()
+        if response not in ["y", "yes"]:
+            print("Execution cancelled.")
+            return False
+
+    print("\n✓ Starting streaming execution...\n")
+
+    # Initialize streaming infrastructure
+    message_queue = UserMessageQueue()
+
+    def default_chunk_handler(chunk: str):
+        """Default handler that prints chunks to stdout."""
+        print(chunk, end='', flush=True)
+
+    chunk_handler = on_chunk or default_chunk_handler
+
+    # Create streaming manager
+    streaming_manager = StreamingExecutionManager(
+        message_queue=message_queue,
+        on_chunk=chunk_handler,
+        on_user_message=on_user_message,
+    )
+    streaming_manager.start()
+
+    # Start background input handler
+    def handle_user_input(text: str):
+        """Handle user input during streaming execution."""
+        if text.startswith('/stop') or text.startswith('/cancel'):
+            message_queue.submit("STOP the current task immediately.", MessagePriority.INTERRUPT)
+            print(f"\n  📩 [Interrupt requested]")
+        elif text.startswith('/priority '):
+            msg = text[len('/priority '):].strip()
+            if msg:
+                message_queue.submit(msg, MessagePriority.HIGH)
+                print(f"\n  📩 [High priority: {msg[:50]}...]")
+        else:
+            message_queue.submit(text, MessagePriority.NORMAL)
+            print(f"\n  📩 [Guidance: {text[:50]}...]")
+
+    start_streaming_input(on_message=handle_user_input)
+
+    try:
+        # Get system info and build context
+        sys_info = get_system_info_cached()
+        system_context = _build_execution_system_context(sys_info, coding_mode)
+        model_name = config.EXECUTION_MODEL
+        model_supports_tools = config.EXECUTION_SUPPORTS_TOOLS
+
+        messages = [{"role": "system", "content": system_context}]
+        max_iterations = MAX_EXECUTION_ITERATIONS
+        iteration = 0
+
+        # Initialize session tracker
+        session_tracker = SessionTracker()
+        exec_context = ExecutionContext(plan)
+        tool_limits = {
+            "read_file": MAX_READ_FILE_PER_TASK,
+            "search_code": MAX_SEARCH_CODE_PER_TASK,
+            "run_cmd": MAX_RUN_CMD_PER_TASK,
+        }
+
+        while not plan.is_complete() and iteration < max_iterations:
+            # Check for escape/interrupt
+            if get_escape_interrupt() or streaming_manager.is_interrupted():
+                print("\n⚠️  Execution interrupted")
+                set_escape_interrupt(False)
+                current_task = plan.get_current_task()
+                if current_task:
+                    plan.mark_task_stopped(current_task)
+                break
+
+            iteration += 1
+            current_task = plan.get_current_task()
+
+            print(f"\n{'='*60}")
+            print(f"[Task {plan.current_index + 1}/{len(plan.tasks)}] {current_task.description}")
+            print(f"[Type: {current_task.action_type}]")
+            print(f"{'='*60}\n")
+
+            current_task.status = TaskStatus.IN_PROGRESS
+            if state_manager:
+                state_manager.on_task_started(current_task)
+
+            exec_context.reset_for_new_task()
+
+            # Build task prompt
+            session_context = exec_context.get_session_context()
+            task_prompt = f"""Task: {current_task.description}
+Action type: {current_task.action_type}
+"""
+            if session_context:
+                task_prompt += f"\nSESSION CONTEXT:\n{session_context}\n"
+            task_prompt += "\nExecute this task completely. When done, respond with TASK_COMPLETE."
+
+            messages.append({"role": "user", "content": task_prompt})
+
+            # Task execution loop
+            task_iterations = 0
+            max_task_iterations = MAX_TASK_ITERATIONS
+            task_complete = False
+            tool_usage = {name: 0 for name in tool_limits}
+            tools_enabled = model_supports_tools
+
+            while task_iterations < max_task_iterations and not task_complete:
+                # Check for interrupt
+                if get_escape_interrupt() or streaming_manager.is_interrupted():
+                    print("\n⚠️  Task interrupted")
+                    plan.mark_task_stopped(current_task)
+                    task_complete = True
+                    break
+
+                task_iterations += 1
+
+                # CHECK FOR USER MESSAGES - inject before LLM call
+                if message_queue.has_pending():
+                    pending = message_queue.get_pending()
+                    for user_msg in pending:
+                        llm_msg = user_msg.to_llm_message()
+                        messages.append(llm_msg)
+                        print(f"\n  💬 Injected user guidance into conversation")
+
+                        # Check for stop command
+                        if "STOP" in user_msg.content.upper():
+                            print("\n  🛑 Stop requested by user")
+                            plan.mark_task_stopped(current_task)
+                            task_complete = True
+                            break
+
+                if task_complete:
+                    break
+
+                # Make streaming LLM call
+                print("\n  🤖 ", end='', flush=True)
+
+                def check_interrupt():
+                    return get_escape_interrupt() or streaming_manager.is_interrupted()
+
+                def check_messages():
+                    # Signal that messages are pending (will be injected next iteration)
+                    if message_queue.has_pending():
+                        print("\n  📥 [Message pending - will process after response]", end='', flush=True)
+
+                call_tools = tools if tools_enabled and model_supports_tools else None
+                llm_messages = _prepare_llm_messages(messages, exec_context, session_tracker)
+
+                try:
+                    response = ollama_chat_stream(
+                        llm_messages,
+                        tools=call_tools,
+                        model=model_name,
+                        supports_tools=model_supports_tools,
+                        on_chunk=chunk_handler,
+                        check_interrupt=check_interrupt,
+                        check_user_messages=check_messages,
+                    )
+                except KeyboardInterrupt:
+                    print("\n⚠️  Request cancelled")
+                    plan.mark_task_stopped(current_task)
+                    task_complete = True
+                    break
+
+                print()  # Newline after streaming output
+
+                if "error" in response:
+                    print(f"  ✗ Error: {response['error']}")
+                    if "400" in str(response['error']):
+                        tools_enabled = False
+                        messages.append({
+                            "role": "user",
+                            "content": "Tool calling disabled. Provide explicit file edits."
+                        })
+                    continue
+
+                msg = response.get("message", {})
+                content = msg.get("content", "")
+                tool_calls = msg.get("tool_calls", [])
+
+                messages.append(msg)
+
+                # Execute tool calls
+                if tool_calls:
+                    for tool_call in tool_calls:
+                        if get_escape_interrupt() or streaming_manager.is_interrupted():
+                            task_complete = True
+                            break
+
+                        func = tool_call.get("function", {})
+                        tool_name = func.get("name")
+                        tool_args = func.get("arguments", {})
+
+                        if isinstance(tool_args, str):
+                            try:
+                                tool_args = json.loads(tool_args)
+                            except:
+                                tool_args = {}
+
+                        # Check for duplicate
+                        if exec_context.is_duplicate_call(tool_name, tool_args):
+                            print(f"  ⚠️ Skipping duplicate {tool_name} call")
+                            messages.append({
+                                "role": "tool",
+                                "name": tool_name,
+                                "content": "DUPLICATE_CALL: Already executed."
+                            })
+                            continue
+
+                        exec_context.record_tool_call(tool_name, tool_args)
+
+                        # Check budget
+                        allowed, budget_msg = _consume_tool_budget(tool_name, tool_usage, tool_limits)
+                        if not allowed:
+                            messages.append({
+                                "role": "tool",
+                                "name": tool_name,
+                                "content": budget_msg
+                            })
+                            continue
+
+                        # Check for scary operation
+                        is_scary, scary_reason = is_scary_operation(
+                            tool_name, tool_args, current_task.action_type
+                        )
+                        if is_scary:
+                            operation_desc = format_operation_description(tool_name, tool_args)
+                            if not prompt_scary_operation(operation_desc, scary_reason):
+                                print(f"  ✗ Operation cancelled")
+                                plan.mark_failed("User cancelled destructive operation")
+                                task_complete = True
+                                break
+
+                        # Execute tool
+                        print(f"  🔧 {tool_name}...", end='', flush=True)
+
+                        if tool_name == "read_file":
+                            path = tool_args.get("path")
+                            cached = exec_context.get_code(path)
+                            if cached is not None:
+                                result = cached
+                            else:
+                                result = execute_tool(tool_name, tool_args)
+                                if not _has_error_result(result):
+                                    exec_context.set_code(path, result)
+                        elif tool_name == "write_file":
+                            path = tool_args.get("path")
+                            result = execute_tool(tool_name, tool_args)
+                            if not _has_error_result(result):
+                                exec_context.invalidate_code(path)
+                        elif tool_name == "apply_patch":
+                            result = execute_tool(tool_name, tool_args)
+                            if not _has_error_result(result):
+                                exec_context.clear_code_cache()
+                        else:
+                            result = execute_tool(tool_name, tool_args)
+
+                        print(" done")
+                        session_tracker.track_tool_call(tool_name, tool_args)
+
+                        messages.append({
+                            "role": "tool",
+                            "name": tool_name,
+                            "content": result
+                        })
+
+                # Check for task completion
+                if "TASK_COMPLETE" in content or "task complete" in content.lower():
+                    print(f"\n  ✅ Task completed")
+                    plan.mark_completed(content)
+                    if state_manager:
+                        state_manager.on_task_completed(current_task)
+                    session_tracker.track_task_completed(current_task.description)
+                    task_complete = True
+                    break
+
+            if not task_complete and task_iterations >= max_task_iterations:
+                print(f"\n  ⚠️ Task exceeded iteration limit")
+                plan.mark_task_stopped(current_task)
+
+            # Trim message history
+            messages, _ = _trim_history_with_notice(messages, max_recent=20, tracker=session_tracker)
+
+    finally:
+        # Cleanup
+        stop_streaming_input()
+        streaming_manager.stop()
+
+    # Print summary
+    print("\n" + "=" * 60)
+    print("EXECUTION SUMMARY")
+    print("=" * 60)
+    print(plan.get_summary())
+
+    for i, task in enumerate(plan.tasks, 1):
+        status_icon = {
+            TaskStatus.COMPLETED: "✓",
+            TaskStatus.FAILED: "✗",
+            TaskStatus.IN_PROGRESS: "→",
+            TaskStatus.PENDING: "○",
+            TaskStatus.STOPPED: "⏸"
+        }.get(task.status, "?")
+        print(f"{status_icon} {i}. {task.description} [{task.status.value}]")
+
+    print("=" * 60)
+
+    # Show message queue stats
+    stats = message_queue.get_stats()
+    if stats["total_submitted"] > 0:
+        print(f"\n📊 User messages: {stats['total_submitted']} submitted, {stats['total_processed']} processed")
+
+    return all(t.status == TaskStatus.COMPLETED for t in plan.tasks)
