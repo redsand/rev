@@ -1267,6 +1267,17 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                         })
                     """
 
+                    # Prevent review tasks from performing edits
+                    edit_tools = {"write_file", "apply_patch"}
+                    if current_task.action_type == "review" and tool_name in edit_tools:
+                        print(f"  ?? Blocking {tool_name} during review task")
+                        messages.append({
+                            "role": "tool",
+                            "name": tool_name,
+                            "content": f"BLOCKED: Review tasks must not modify files. Complete the review for '{current_task.description}' and move to the next task."
+                        })
+                        continue
+
                     # Check if exploration should be blocked for edit/add tasks
                     exploration_tools = {"read_file", "search_code", "list_dir", "tree_view", "get_repo_context"}
                     if tool_name in exploration_tools and exec_context.should_block_exploration(current_task.action_type):
@@ -1771,6 +1782,17 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         "content": f"WARNING: {loop_warning}. Stop exploring and make a concrete edit using write_file or apply_patch NOW."
                     })
                 """
+
+                # Prevent review tasks from performing edits
+                edit_tools = {"write_file", "apply_patch"}
+                if task.action_type == "review" and tool_name in edit_tools:
+                    print(f"  ?? Blocking {tool_name} during review task")
+                    messages.append({
+                        "role": "tool",
+                        "name": tool_name,
+                        "content": f"BLOCKED: Review tasks must not modify files. Gather the context for '{task.description}' and let the next task handle edits."
+                    })
+                    continue
 
                 # Check if exploration should be blocked for edit/add tasks
                 exploration_tools = {"read_file", "search_code", "list_dir", "tree_view", "get_repo_context"}
@@ -2429,7 +2451,18 @@ Action type: {current_task.action_type}
                             })
                             continue
                         """
-                        
+
+                        # Prevent review tasks from performing edits
+                        edit_tools = {"write_file", "apply_patch"}
+                        if current_task.action_type == "review" and tool_name in edit_tools:
+                            print(f"  ?? Blocking {tool_name} during review task")
+                            messages.append({
+                                "role": "tool",
+                                "name": tool_name,
+                                "content": f"BLOCKED: Review tasks must not modify files. Gather the context for '{current_task.description}' and let the next task handle edits."
+                            })
+                            continue
+
                         exec_context.record_tool_call(tool_name, tool_args)
 
                         # Check budget
