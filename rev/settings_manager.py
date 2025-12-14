@@ -117,6 +117,15 @@ def _parse_float_between_zero_and_one(value: Any) -> float:
     return parsed
 
 
+def _parse_temperature(value: Any) -> float:
+    """Parse and validate temperature setting (0.0-2.0)."""
+
+    parsed = float(str(value).strip())
+    if not 0.0 <= parsed <= 2.0:
+        raise ValueError("Temperature must be between 0.0 and 2.0")
+    return parsed
+
+
 def _parse_bool(value: Any) -> bool:
     """Parse boolean-like inputs (true/false, yes/no, 1/0)."""
 
@@ -242,6 +251,42 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         getter=lambda: config.RESEARCH_SUPPORTS_TOOLS,
         setter=lambda value: setattr(config, "RESEARCH_SUPPORTS_TOOLS", value),
         default=config.RESEARCH_SUPPORTS_TOOLS,
+    ),
+    "temperature": RuntimeSetting(
+        key="temperature",
+        description="LLM temperature (0.0-2.0; lower = more deterministic)",
+        section="LLM Generation",
+        parser=_parse_temperature,
+        getter=lambda: config.OLLAMA_TEMPERATURE,
+        setter=lambda value: setattr(config, "OLLAMA_TEMPERATURE", value),
+        default=0.1,
+    ),
+    "num_ctx": RuntimeSetting(
+        key="num_ctx",
+        description="Context window size in tokens (e.g., 8192, 16384, 32768)",
+        section="LLM Generation",
+        parser=_parse_positive_int,
+        getter=lambda: config.OLLAMA_NUM_CTX,
+        setter=lambda value: setattr(config, "OLLAMA_NUM_CTX", value),
+        default=16384,
+    ),
+    "top_p": RuntimeSetting(
+        key="top_p",
+        description="Top-p nucleus sampling (0.0-1.0)",
+        section="LLM Generation",
+        parser=_parse_float_between_zero_and_one,
+        getter=lambda: config.OLLAMA_TOP_P,
+        setter=lambda value: setattr(config, "OLLAMA_TOP_P", value),
+        default=0.9,
+    ),
+    "top_k": RuntimeSetting(
+        key="top_k",
+        description="Top-k vocabulary limiting (positive integer)",
+        section="LLM Generation",
+        parser=_parse_positive_int,
+        getter=lambda: config.OLLAMA_TOP_K,
+        setter=lambda value: setattr(config, "OLLAMA_TOP_K", value),
+        default=40,
     ),
     "validation_mode": RuntimeSetting(
         key="validation_mode",

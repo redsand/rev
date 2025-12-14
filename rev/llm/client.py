@@ -362,11 +362,21 @@ def ollama_chat(
         print(f"ℹ️  Using cloud model: {model_name} (proxied through local Ollama)")
         ollama_chat._cloud_model_notified = True
 
-    # Build base payload
+    # Build base payload with generation parameters
+    # These parameters improve tool calling accuracy, especially for local models
     payload = {
         "model": model_name,
         "messages": messages,
-        "stream": False
+        "stream": False,
+        "options": {
+            # Lower temperature (0.1) improves consistency and accuracy for tool calling
+            "temperature": config.OLLAMA_TEMPERATURE,
+            # Larger context window (16K) allows for more complex tool interactions
+            "num_ctx": config.OLLAMA_NUM_CTX,
+            # Top-p and top-k for controlled sampling
+            "top_p": config.OLLAMA_TOP_P,
+            "top_k": config.OLLAMA_TOP_K,
+        }
     }
 
     # Try with tools first if provided (including an empty array to force tools mode)
@@ -381,6 +391,11 @@ def ollama_chat(
     if OLLAMA_DEBUG:
         print(f"[DEBUG] Ollama request to {url}")
         print(f"[DEBUG] Model: {model_name}")
+        print(f"[DEBUG] Generation parameters:")
+        print(f"[DEBUG]   - temperature: {config.OLLAMA_TEMPERATURE}")
+        print(f"[DEBUG]   - num_ctx: {config.OLLAMA_NUM_CTX}")
+        print(f"[DEBUG]   - top_p: {config.OLLAMA_TOP_P}")
+        print(f"[DEBUG]   - top_k: {config.OLLAMA_TOP_K}")
         print(f"[DEBUG] Messages: {json.dumps(messages, indent=2)}")
         if tools_provided:
             print(f"[DEBUG] Tools: {len(tools or [])} tools provided")
