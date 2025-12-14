@@ -97,7 +97,7 @@ def _apply_freeform_review(review: "PlanReview", content: str) -> bool:
     suggestions = _extract_bullets(content)
     if not suggestions:
         suggestions = [content.strip()[:200]]
-    review.suggestions = suggestions
+    review.suggestions = [s for s in suggestions if str(s).strip()]
     return True
 
 
@@ -389,11 +389,23 @@ Provide a thorough review."""
                 review.confidence_score = float(review_data.get("confidence_score", 0.8))
             except (ValueError, TypeError):
                 review.confidence_score = 0.7  # Default fallback for malformed LLM response
-            review.issues = review_data.get("issues", [])
-            review.suggestions = review_data.get("suggestions", [])
-            review.security_concerns = review_data.get("security_concerns", [])
-            review.missing_tasks = review_data.get("missing_tasks", [])
-            review.unnecessary_tasks = review_data.get("unnecessary_tasks", [])
+            review.issues = review_data.get("issues", []) or []
+            review.suggestions = [
+                str(s).strip()
+                for s in (review_data.get("suggestions", []) or [])
+                if str(s).strip()
+            ]
+            review.security_concerns = [
+                str(s).strip()
+                for s in (review_data.get("security_concerns", []) or [])
+                if str(s).strip()
+            ]
+            review.missing_tasks = [
+                str(s).strip()
+                for s in (review_data.get("missing_tasks", []) or [])
+                if str(s).strip()
+            ]
+            review.unnecessary_tasks = review_data.get("unnecessary_tasks", []) or []
             break  # Parsed successfully
 
         except Exception as e:

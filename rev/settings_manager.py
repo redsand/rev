@@ -353,6 +353,15 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         setter=lambda value: setattr(config, "CONTEXT_WINDOW_HISTORY", value),
         default=config.CONTEXT_WINDOW_HISTORY,
     ),
+    "max_planning_iterations": RuntimeSetting(
+        key="max_planning_iterations",
+        description="Maximum tool-calling iterations during planning (separate from max_plan_tasks)",
+        section="Planning Limits",
+        parser=_parse_positive_int,
+        getter=lambda: config.MAX_PLANNING_TOOL_ITERATIONS,
+        setter=lambda value: setattr(config, "MAX_PLANNING_TOOL_ITERATIONS", value),
+        default=config.MAX_PLANNING_TOOL_ITERATIONS,
+    ),
     "max_steps_per_run": RuntimeSetting(
         key="max_steps_per_run",
         description="Resource budget: maximum steps per run",

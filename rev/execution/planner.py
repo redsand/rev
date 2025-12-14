@@ -16,6 +16,7 @@ from rev.llm.client import ollama_chat
 from rev.config import (
     MAX_LLM_TOKENS_PER_RUN,
     MAX_PLAN_TASKS,
+    MAX_PLANNING_TOOL_ITERATIONS,
     ensure_escape_is_cleared,
     get_system_info_cached,
 )
@@ -237,7 +238,7 @@ def _call_llm_with_tools(
             # No more tool calls - return final response
             return response
 
-        print(f"\n  Planning iteration {iteration + 1}: LLM calling {len(tool_calls)} tool(s)...")
+        print(f"\n  Planning tool-iteration {iteration + 1}: LLM calling {len(tool_calls)} tool(s)...")
 
         # Add assistant message with tool calls to conversation
         conversation.append(message)
@@ -249,7 +250,7 @@ def _call_llm_with_tools(
         conversation.extend(tool_results)
 
     # Max iterations reached
-    print(f"  Warning: Max planning iterations ({max_iterations}) reached")
+    print(f"  Warning: Max planning tool-iterations ({max_iterations}) reached")
     final_response = ollama_chat(conversation, tools=None, model=model_name, supports_tools=model_supports_tools) or {}
     if not isinstance(final_response, dict):
         return {"error": "LLM returned no response during planning (final call)"}
@@ -531,7 +532,8 @@ def planning_mode(
     enable_advanced_analysis: bool = True,
     enable_recursive_breakdown: bool = True,
     coding_mode: bool = False,
-    max_plan_tasks: Optional[int] = None
+    max_plan_tasks: Optional[int] = None,
+    max_planning_iterations: Optional[int] = None,
 ) -> ExecutionPlan:
     """Generate execution plan from user request with advanced analysis.
 
@@ -553,6 +555,7 @@ def planning_mode(
     print("=" * 60)
 
     task_limit = max_plan_tasks or MAX_PLAN_TASKS
+    planning_iterations_limit = max_planning_iterations or MAX_PLANNING_TOOL_ITERATIONS
     model_name = config.PLANNING_MODEL
     model_supports_tools = config.PLANNING_SUPPORTS_TOOLS
 
@@ -643,11 +646,12 @@ After gathering information with tools, generate a comprehensive execution plan 
     ]
 
     print("→ Generating execution plan...")
+    print(f"  Plan task cap: {task_limit} | Planning tool-iterations cap: {planning_iterations_limit}")
     ensure_escape_is_cleared("Planning interrupted before LLM call")
     response = _call_llm_with_tools(
         messages,
         tools,
-        max_iterations=30,
+        max_iterations=planning_iterations_limit,
         model_name=model_name,
         model_supports_tools=model_supports_tools,
     )

@@ -91,6 +91,41 @@ def test_review_plan_parses_embedded_json(monkeypatch):
     assert review.missing_tasks == ["Add implementation steps"]
 
 
+def test_review_plan_sanitizes_empty_suggestions(monkeypatch):
+    plan = ExecutionPlan()
+    plan.add_task("check sanitization")
+
+    content = (
+        "{"
+        '"decision": "approved_with_suggestions",'
+        '"overall_assessment": "ok",'
+        '"confidence_score": 0.8,'
+        '"issues": [],'
+        '"suggestions": ["", "   ", "Do X"],'
+        '"security_concerns": ["", "None"],'
+        '"missing_tasks": ["", "Add Y"],'
+        '"unnecessary_tasks": []'
+        "}"
+    )
+
+    monkeypatch.setattr(
+        reviewer,
+        "ollama_chat",
+        lambda messages, tools=None: {"message": {"content": content}},
+    )
+
+    review = reviewer.review_execution_plan(
+        plan,
+        user_request="sanitize suggestions",
+        auto_approve_low_risk=False,
+        max_parse_retries=0,
+    )
+
+    assert review.suggestions == ["Do X"]
+    assert review.security_concerns == ["None"]
+    assert review.missing_tasks == ["Add Y"]
+
+
 def test_review_action_parses_embedded_json(monkeypatch):
     def fake_chat(messages, tools=None):
         return {

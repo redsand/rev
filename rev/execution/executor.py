@@ -958,6 +958,44 @@ def execution_mode(
     model_supports_tools = config.EXECUTION_SUPPORTS_TOOLS
 
     messages = [{"role": "system", "content": system_context}]
+    message_queue = None
+    cleanup_streaming_input = lambda: None
+    redisplay_prompt = lambda: None
+    try:
+        from rev.execution.streaming import UserMessageQueue, MessagePriority
+        from rev.terminal.input import start_streaming_input, stop_streaming_input, get_streaming_handler
+        from rev.terminal.formatting import colorize, Colors
+
+        message_queue = UserMessageQueue()
+        input_handler = None
+
+        def handle_user_input(text: str):
+            if text.startswith("/stop") or text.startswith("/cancel"):
+                message_queue.submit("STOP the current task immediately.", MessagePriority.INTERRUPT)
+                print("\n  ?? [Interrupt requested]")
+            elif text.startswith("/priority "):
+                msg = text[len("/priority "):].strip()
+                if msg:
+                    message_queue.submit(msg, MessagePriority.HIGH)
+                    print("\n  ?? [High priority message queued]")
+            else:
+                message_queue.submit(text, MessagePriority.NORMAL)
+                print("\n  ?? [Guidance queued]")
+            redisplay_prompt()
+
+        input_prompt = f"{colorize('rev', Colors.BRIGHT_MAGENTA)}{colorize('>', Colors.BRIGHT_BLACK)} "
+        input_handler = start_streaming_input(on_message=handle_user_input, prompt=input_prompt)
+
+        def redisplay_prompt():
+            handler = input_handler or get_streaming_handler()
+            if handler:
+                handler.redisplay_prompt()
+
+        def cleanup_streaming_input():
+            stop_streaming_input()
+    except Exception as e:
+        print(f"  ?? Interactive input disabled: {e}")
+        message_queue = None
     max_iterations = MAX_EXECUTION_ITERATIONS
     iteration = 0
 
@@ -1008,6 +1046,7 @@ def execution_mode(
 
         print(f"\n[Task {plan.current_index + 1}/{len(plan.tasks)}] {current_task.description}")
         print(f"[Type: {current_task.action_type}]")
+        redisplay_prompt()
 
         current_task.status = TaskStatus.IN_PROGRESS
         if state_manager:
@@ -1086,7 +1125,20 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                     except Exception as e:
                         print(f"✗ Failed to save checkpoint: {e}")
 
+                cleanup_streaming_input()
                 return False
+
+            if message_queue and message_queue.has_pending():
+                pending = message_queue.get_pending()
+                for user_msg in pending:
+                    messages.append(user_msg.to_llm_message())
+                    print("\n  💬 Injected user guidance into conversation")
+                    redisplay_prompt()
+                    if "STOP" in user_msg.content.upper():
+                        print("\n⏹️  Stop requested by user")
+                        plan.mark_task_stopped(current_task)
+                        cleanup_streaming_input()
+                        return False
 
             task_iterations += 1
             if task_iterations >= warn_task_iterations and not iter_warned:
@@ -1389,6 +1441,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                         "name": tool_name,
                         "content": result
                     })
+                    redisplay_prompt()
 
                     # Track failures in session context (persists across tasks)
                     if _has_error_result(result):
@@ -1413,6 +1466,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                             rc = result_data.get("rc", 0)
                             if rc != 0:
                                 print(f"  ⚠ Tests failed (rc={rc})")
+                                redisplay_prompt()
                                 # NEW: Inject explicit feedback for the LLM in coding mode
                                 if coding_mode:
                                     messages.append({
@@ -1430,6 +1484,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
             # Check if task is complete AFTER executing tool calls
             if "TASK_COMPLETE" in content or "task complete" in content.lower():
                 print(f"  ✓ Task completed")
+                redisplay_prompt()
                 plan.mark_completed(content)
                 if state_manager:
                     state_manager.on_task_completed(current_task)
@@ -1488,7 +1543,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
         }, "INFO")
 
         # OPTIMIZATION: Manage message history to prevent unbounded growth
-        messages, _ = _trim_history_with_notice(messages, max_recent=20, tracker=session_tracker)
+        messages, _ = _trim_history_with_notice(messages, max_recent=CONTEXT_WINDOW_HISTORY, tracker=session_tracker)
 
     if not plan.is_complete() and iteration >= max_iterations:
         error_msg = "Exceeded execution iteration limit"
@@ -1956,8 +2011,10 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             except Exception:
                 pass
         _log_usage(False)
+        cleanup_streaming_input()
         return True
 
+    cleanup_streaming_input()
     _log_usage(True)
     return True
 
@@ -2310,6 +2367,9 @@ Action type: {current_task.action_type}
                         llm_msg = user_msg.to_llm_message()
                         messages.append(llm_msg)
                         print(f"\n  💬 Injected user guidance into conversation")
+                        handler = get_streaming_handler()
+                        if handler:
+                            handler.redisplay_prompt()
 
                         # Check for stop command
                         if "STOP" in user_msg.content.upper():
@@ -2486,7 +2546,7 @@ Action type: {current_task.action_type}
                 plan.mark_task_stopped(current_task)
 
             # Trim message history
-            messages, _ = _trim_history_with_notice(messages, max_recent=20, tracker=session_tracker)
+            messages, _ = _trim_history_with_notice(messages, max_recent=CONTEXT_WINDOW_HISTORY, tracker=session_tracker)
 
     finally:
         # Cleanup

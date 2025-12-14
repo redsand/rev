@@ -150,6 +150,7 @@ class OrchestratorConfig:
     # Back-compat shim (legacy)
     max_retries: Optional[int] = None
     max_plan_tasks: int = MAX_PLAN_TASKS
+    max_planning_iterations: int = config.MAX_PLANNING_TOOL_ITERATIONS
 
     def __post_init__(self):
         # Enforce strictly sequential execution (single worker only)
@@ -304,6 +305,7 @@ class Orchestrator:
         self.config.research_depth = route_research_depth or self.config.research_depth or RESEARCH_DEPTH_DEFAULT
         print(f"   Mode: {route.mode} | Research depth: {self.config.research_depth}")
         print(f"   Plan task cap: {self.config.max_plan_tasks}")
+        print(f"   Planning tool-iterations cap: {self.config.max_planning_iterations}")
         print(f"   Validation mode: {self.config.validation_mode}")
 
         # Parallel execution is disabled globally; enforce single worker
@@ -402,6 +404,7 @@ class Orchestrator:
                 user_request,
                 coding_mode=coding_mode,
                 max_plan_tasks=self.config.max_plan_tasks,
+                max_planning_iterations=self.config.max_planning_iterations,
             )
             result.plan = plan
             state_manager = StateManager(plan)
@@ -441,6 +444,7 @@ class Orchestrator:
 Regenerate the plan with at least {min_plan_tasks} distinct tasks and explicit dependencies. Avoid collapsing multi-step work into one task.""",
                             coding_mode=coding_mode,
                             max_plan_tasks=self.config.max_plan_tasks,
+                            max_planning_iterations=self.config.max_planning_iterations,
                         )
                         result.plan = plan
                         state_manager = StateManager(plan)
@@ -507,6 +511,7 @@ IMPORTANT - Address the following review feedback:
 {feedback}""",
                             coding_mode=coding_mode,
                             max_plan_tasks=self.config.max_plan_tasks,
+                            max_planning_iterations=self.config.max_planning_iterations,
                         )
                         result.plan = plan
 
@@ -873,6 +878,7 @@ addresses the failures so the goals can still be met. Keep tasks concise and exe
             followup_prompt,
             coding_mode=coding_mode,
             max_plan_tasks=self.config.max_plan_tasks,
+            max_planning_iterations=self.config.max_planning_iterations,
         )
 
     def _hold_and_retry_validation(
