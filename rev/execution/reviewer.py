@@ -85,6 +85,22 @@ def _extract_bullets(text: str) -> List[str]:
     return [b for b in bullets if b]
 
 
+def _clean_review_string(value: Any) -> str:
+    """Normalize reviewer-provided strings for display and downstream logic."""
+
+    if value is None:
+        return ""
+
+    cleaned = str(value)
+    cleaned = cleaned.translate({
+        ord("\u200B"): None,  # zero width space
+        ord("\u200C"): None,  # zero width non-joiner
+        ord("\u200D"): None,  # zero width joiner
+        ord("\uFEFF"): None,  # BOM / zero width no-break space
+    })
+    return cleaned.strip()
+
+
 def _apply_freeform_review(review: "PlanReview", content: str) -> bool:
     """Fallback parsing when the review agent returns plain text instead of JSON."""
     if not content or not content.strip():
@@ -97,7 +113,7 @@ def _apply_freeform_review(review: "PlanReview", content: str) -> bool:
     suggestions = _extract_bullets(content)
     if not suggestions:
         suggestions = [content.strip()[:200]]
-    review.suggestions = [s for s in suggestions if str(s).strip()]
+    review.suggestions = [_clean_review_string(s) for s in suggestions if _clean_review_string(s)]
     return True
 
 
@@ -391,19 +407,19 @@ Provide a thorough review."""
                 review.confidence_score = 0.7  # Default fallback for malformed LLM response
             review.issues = review_data.get("issues", []) or []
             review.suggestions = [
-                str(s).strip()
+                _clean_review_string(s)
                 for s in (review_data.get("suggestions", []) or [])
-                if str(s).strip()
+                if _clean_review_string(s)
             ]
             review.security_concerns = [
-                str(s).strip()
+                _clean_review_string(s)
                 for s in (review_data.get("security_concerns", []) or [])
-                if str(s).strip()
+                if _clean_review_string(s)
             ]
             review.missing_tasks = [
-                str(s).strip()
+                _clean_review_string(s)
                 for s in (review_data.get("missing_tasks", []) or [])
-                if str(s).strip()
+                if _clean_review_string(s)
             ]
             review.unnecessary_tasks = review_data.get("unnecessary_tasks", []) or []
             break  # Parsed successfully
