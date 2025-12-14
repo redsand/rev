@@ -122,7 +122,11 @@ def repl_mode():
                 else:
                     # Always use streaming execution in interactive mode
                     # This allows users to type messages while tasks run
-                    plan = planning_mode(user_input)
+                    plan = planning_mode(
+                        user_input,
+                        max_plan_tasks=config.MAX_PLAN_TASKS,
+                        max_planning_iterations=config.MAX_PLANNING_TOOL_ITERATIONS,
+                    )
                     tools = get_available_tools()
                     streaming_execution_mode(plan, auto_approve=True, tools=tools)
         except EscapeInterrupt:

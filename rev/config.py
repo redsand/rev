@@ -84,7 +84,7 @@ MAX_RUN_CMD_PER_TASK = int(os.getenv("REV_MAX_RUN_CMD_PER_TASK", "15"))
 MAX_EXECUTION_ITERATIONS = int(os.getenv("REV_MAX_EXEC_ITER", "25"))
 MAX_TASK_ITERATIONS = int(os.getenv("REV_MAX_TASK_ITER", "100"))
 CONTEXT_WINDOW_HISTORY = int(os.getenv("REV_CONTEXT_WINDOW_HISTORY", "40"))
-MAX_PLANNING_TOOL_ITERATIONS = int(os.getenv("REV_MAX_PLANNING_ITER", "10"))
+MAX_PLANNING_TOOL_ITERATIONS = int(os.getenv("REV_MAX_PLANNING_ITER", "25"))
 
 EXCLUDE_DIRS = {
     ".git", ".hg", ".svn", ".idea", ".vscode", "__pycache__", ".pytest_cache",
