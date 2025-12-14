@@ -2195,7 +2195,8 @@ def streaming_execution_mode(
         UserMessageQueue,
         MessagePriority,
     )
-    from rev.terminal.input import start_streaming_input, stop_streaming_input
+    from rev.terminal.input import start_streaming_input, stop_streaming_input, get_streaming_handler
+    from rev.terminal.formatting import colorize, Colors
 
     print("\n" + "=" * 60)
     print("STREAMING EXECUTION MODE")
@@ -2245,7 +2246,9 @@ def streaming_execution_mode(
             message_queue.submit(text, MessagePriority.NORMAL)
             print(f"\n  📩 [Guidance: {text[:50]}...]")
 
-    start_streaming_input(on_message=handle_user_input)
+    # Create prompt with same styling as REPL
+    input_prompt = f"{colorize('rev', Colors.BRIGHT_MAGENTA)}{colorize('>', Colors.BRIGHT_BLACK)} "
+    start_streaming_input(on_message=handle_user_input, prompt=input_prompt)
 
     try:
         # Get system info and build context
@@ -2368,6 +2371,11 @@ Action type: {current_task.action_type}
                     break
 
                 print()  # Newline after streaming output
+
+                # Re-display prompt after LLM response
+                handler = get_streaming_handler()
+                if handler:
+                    handler.redisplay_prompt()
 
                 if "error" in response:
                     print(f"  ✗ Error: {response['error']}")

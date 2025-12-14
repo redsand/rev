@@ -483,6 +483,7 @@ class StreamingInputHandler:
         self._buffer = []
         self._lock = threading.Lock()
         self._input_ready = threading.Event()
+        self._prompt_displayed = False
 
     def start(self):
         """Start the background input handler."""
@@ -492,6 +493,12 @@ class StreamingInputHandler:
         self._running = True
         self._thread = threading.Thread(target=self._input_loop, daemon=True)
         self._thread.start()
+
+        # Display initial prompt if configured
+        if self._prompt and sys.stdout.isatty():
+            sys.stdout.write(f"\n{self._prompt}")
+            sys.stdout.flush()
+            self._prompt_displayed = True
 
     def stop(self):
         """Stop the background input handler."""
@@ -539,20 +546,38 @@ class StreamingInputHandler:
                         if self._buffer:
                             line = ''.join(self._buffer)
                             self._buffer = []
+                            sys.stdout.write('\n')
+                            sys.stdout.flush()
                             self._process_input(line)
+                            # Re-display prompt after processing
+                            if self._prompt and sys.stdout.isatty():
+                                sys.stdout.write(f"{self._prompt}")
+                                sys.stdout.flush()
                     elif char == '\x1b':
                         # ESC pressed - clear buffer and signal interrupt
                         self._buffer = []
+                        sys.stdout.write('\n')
+                        sys.stdout.flush()
                         self._process_input('/stop')
+                        # Re-display prompt after processing
+                        if self._prompt and sys.stdout.isatty():
+                            sys.stdout.write(f"{self._prompt}")
+                            sys.stdout.flush()
                     elif char == '\x08':
                         # Backspace
                         if self._buffer:
                             self._buffer.pop()
+                            # Echo backspace to terminal
+                            sys.stdout.write('\b \b')
+                            sys.stdout.flush()
                     elif char == '\x03':
                         # Ctrl+C
                         self._running = False
                     elif ord(char) >= 32:
                         self._buffer.append(char)
+                        # Echo character to terminal
+                        sys.stdout.write(char)
+                        sys.stdout.flush()
             else:
                 t.sleep(0.05)  # Brief sleep to avoid busy-waiting
         except Exception:
@@ -569,6 +594,23 @@ class StreamingInputHandler:
     def is_running(self) -> bool:
         """Check if the input handler is running."""
         return self._running
+
+    def redisplay_prompt(self):
+        """Re-display the prompt (useful after LLM output).
+
+        This can be called from the main thread to show the prompt
+        after the LLM has finished generating a response.
+        """
+        if self._prompt and sys.stdout.isatty() and self._running:
+            # Only redisplay if there's no current input buffer
+            with self._lock:
+                if not self._buffer:
+                    sys.stdout.write(f"\n{self._prompt}")
+                    sys.stdout.flush()
+                else:
+                    # Redisplay prompt with current buffer
+                    sys.stdout.write(f"\n{self._prompt}{''.join(self._buffer)}")
+                    sys.stdout.flush()
 
 
 # Global streaming input handler
