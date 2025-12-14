@@ -120,9 +120,9 @@ STEP-BY-STEP WORKFLOW (follow this exactly):
    - Summarize what was accomplished
 
 CRITICAL - AVOID LOOPS AND DUPLICATE ACTIONS:
-- NEVER call the same tool with the same arguments twice. Results are cached.
+- NEVER call the same tool with the same arguments twice in a row. The previous result is cached.
 - NEVER call tree_view, list_dir, or search_code more than 2-3 times total per task.
-- If you already read a file, DO NOT read it again. Use the cached content.
+- If you just read a file, use the cached content instead of reading it again immediately.
 - If a search didn't find what you need, try ONE different pattern, then MOVE ON.
 - After 5 exploration actions (read/search/list), you MUST make an edit.
 - If you cannot find the exact location, CREATE the file/class anyway with best-effort code.
@@ -308,11 +308,11 @@ class ExecutionContext:
         return hashlib.md5(sorted_args.encode()).hexdigest()[:12]
 
     def is_duplicate_call(self, tool_name: str, tool_args: Dict[str, Any]) -> bool:
-        """Check if this exact tool call was already made."""
+        """Check if this exact tool call was just executed (prevents back-to-back repeats)."""
         args_hash = self._hash_args(tool_args)
         call_key = (tool_name, args_hash)
         with self._lock:
-            return call_key in self.tool_call_history
+            return bool(self.tool_call_history) and self.tool_call_history[-1] == call_key
 
     def record_tool_call(self, tool_name: str, tool_args: Dict[str, Any]) -> None:
         """Record a tool call for deduplication tracking."""
@@ -324,8 +324,7 @@ class ExecutionContext:
         edit_tools = {"write_file", "apply_patch"}
 
         with self._lock:
-            if call_key not in self.tool_call_history:
-                self.tool_call_history.append(call_key)
+            self.tool_call_history.append(call_key)
 
             if tool_name in exploration_tools:
                 self.exploration_count += 1
@@ -1246,16 +1245,18 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                         except:
                             tool_args = {}
 
-                    # Check for duplicate tool call (exact same args)
+                    """
+                    # Check for back-to-back duplicate tool call (exact same args)
                     if exec_context.is_duplicate_call(tool_name, tool_args):
-                        print(f"  ⚠️ Skipping duplicate {tool_name} call (already executed with same args)")
+                        print(f"  ⚠️ Skipping duplicate {tool_name} call (same args back-to-back)")
                         messages.append({
                             "role": "tool",
                             "name": tool_name,
-                            "content": f"DUPLICATE_CALL: This exact {tool_name} call was already made. Use the cached result or try different parameters."
+                            "content": f"DUPLICATE_CALL: This exact {tool_name} call was just executed. Avoid calling the same tool with identical arguments twice in a row."
                         })
                         continue
-
+                    """
+                    
                     # Check for loop pattern (same tool called repeatedly)
                     loop_warning = exec_context.detect_loop_pattern()
                     if loop_warning:
@@ -1277,7 +1278,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                         continue
 
                     # Check if too much exploration without editing (threshold lowered for faster intervention)
-                    if exec_context.is_exploration_heavy(threshold=5):
+                    if current_task.action_type in {"add", "edit"} and exec_context.is_exploration_heavy(threshold=5):
                         warning_count = exec_context.increment_force_edit_warning(current_task.action_type)
                         if warning_count == 1:
                             print(f"  ⚠️ Exploration budget exhausted - forcing edit mode (warning 1/2)")
@@ -1748,16 +1749,18 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                     except:
                         tool_args = {}
 
-                # Check for duplicate tool call (exact same args)
+                """
+                # Check for back-to-back duplicate tool call (exact same args)
                 if exec_context.is_duplicate_call(tool_name, tool_args):
-                    print(f"  ⚠️ Skipping duplicate {tool_name} call (already executed with same args)")
+                    print(f"  ⚠️ Skipping duplicate {tool_name} call (same args back-to-back)")
                     messages.append({
                         "role": "tool",
                         "name": tool_name,
-                        "content": f"DUPLICATE_CALL: This exact {tool_name} call was already made. Use the cached result or try different parameters."
+                        "content": f"DUPLICATE_CALL: This exact {tool_name} call was just executed. Avoid calling the same tool with identical arguments twice in a row."
                     })
                     continue
-
+                """
+                
                 # Check for loop pattern (same tool called repeatedly)
                 loop_warning = exec_context.detect_loop_pattern()
                 if loop_warning:
@@ -1779,7 +1782,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                     continue
 
                 # Check if too much exploration without editing (threshold lowered for faster intervention)
-                if exec_context.is_exploration_heavy(threshold=5):
+                if task.action_type in {"add", "edit"} and exec_context.is_exploration_heavy(threshold=5):
                     warning_count = exec_context.increment_force_edit_warning(task.action_type)
                     if warning_count == 1:
                         print(f"  ⚠️ Exploration budget exhausted - forcing edit mode (warning 1/2)")
@@ -2218,8 +2221,11 @@ def streaming_execution_mode(
     message_queue = UserMessageQueue()
 
     def default_chunk_handler(chunk: str):
-        """Default handler that prints chunks to stdout."""
+        """Default handler that prints chunks and keeps the prompt visible."""
         print(chunk, end='', flush=True)
+        handler = get_streaming_handler()
+        if handler:
+            handler.redisplay_prompt()
 
     chunk_handler = on_chunk or default_chunk_handler
 
@@ -2410,16 +2416,18 @@ Action type: {current_task.action_type}
                             except:
                                 tool_args = {}
 
-                        # Check for duplicate
+                        """
+                        # Check for back-to-back duplicate
                         if exec_context.is_duplicate_call(tool_name, tool_args):
-                            print(f"  ⚠️ Skipping duplicate {tool_name} call")
+                            print(f"  ⚠️ Skipping duplicate {tool_name} call (same args back-to-back)")
                             messages.append({
                                 "role": "tool",
                                 "name": tool_name,
-                                "content": "DUPLICATE_CALL: Already executed."
+                                "content": "DUPLICATE_CALL: This call was just executed in the previous step."
                             })
                             continue
-
+                        """
+                        
                         exec_context.record_tool_call(tool_name, tool_args)
 
                         # Check budget

@@ -101,6 +101,63 @@ def _apply_freeform_review(review: "PlanReview", content: str) -> bool:
     return True
 
 
+def _extract_json_substrings(content: str) -> List[str]:
+    """Extract balanced JSON object substrings from text, ignoring braces inside strings."""
+    substrings = []
+    depth = 0
+    start_idx = None
+    in_string = False
+    escape = False
+
+    for index, char in enumerate(content):
+        if char == '"' and not escape:
+            in_string = not in_string
+            escape = False
+            if in_string:
+                continue
+            else:
+                continue
+
+        if in_string:
+            if char == '\\' and not escape:
+                escape = True
+            else:
+                escape = False
+            continue
+
+        if char == '{':
+            if depth == 0:
+                start_idx = index
+            depth += 1
+        elif char == '}' and depth > 0:
+            depth -= 1
+            if depth == 0 and start_idx is not None:
+                substrings.append(content[start_idx:index + 1])
+                start_idx = None
+
+    return substrings
+
+
+def _parse_json_from_text(content: str) -> Optional[Dict[str, Any]]:
+    """Try to parse JSON from the provided text."""
+    if not content or not content.strip():
+        return None
+
+    stripped = content.strip()
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+
+    for candidate in _extract_json_substrings(content):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+
+    return None
+
+
 PLAN_REVIEW_SYSTEM = """You are an expert code review agent specializing in CI/CD workflows and software architecture.
 
 You have access to code analysis tools to verify plans:
@@ -279,9 +336,7 @@ def review_execution_plan(
         plan_summary["tasks"].append(task_info)
 
     # Get LLM review
-    messages = [
-        {"role": "system", "content": PLAN_REVIEW_SYSTEM},
-        {"role": "user", "content": f"""Review this execution plan:
+    plan_prompt = f"""Review this execution plan:
 
 {json.dumps(plan_summary, indent=2)}
 
@@ -289,7 +344,10 @@ Strictness level: {strictness.value}
 
 Return ONLY valid JSON per the schema. Do not include any other text or formatting.
 
-Provide a thorough review."""}
+Provide a thorough review."""
+    messages = [
+        {"role": "system", "content": PLAN_REVIEW_SYSTEM},
+        {"role": "user", "content": plan_prompt}
     ]
 
     print("→ Analyzing plan with review agent...")
@@ -312,13 +370,11 @@ Provide a thorough review."""}
             review.confidence_score = 0.7
             return review
 
-        content = response.get("message", {}).get("content", "")
         try:
-            json_match = re.search(r'\{.*\}', content, re.DOTALL)
-            if not json_match:
+            content = response.get("message", {}).get("content", "")
+            review_data = _parse_json_from_text(content)
+            if not review_data:
                 raise ValueError("No JSON object found in review response")
-
-            review_data = json.loads(json_match.group(0))
 
             # Map decision
             decision_str = review_data.get("decision", "approved").lower()
@@ -347,6 +403,10 @@ Provide a thorough review."""}
         except Exception as e:
             parse_attempt += 1
             print(f"⚠️  Error parsing review: {e}")
+            print("??  Review request prompt:")
+            print(plan_prompt)
+            print("??  Raw review response content:")
+            print(content)
             if parse_attempt > max_parse_retries:
                 if _apply_freeform_review(review, content):
                     print("⚠️  Falling back to freeform review parsing.")
@@ -436,9 +496,8 @@ Should this action be approved?"""}
     # Parse review
     try:
         content = response.get("message", {}).get("content", "")
-        json_match = re.search(r'\{.*\}', content, re.DOTALL)
-        if json_match:
-            review_data = json.loads(json_match.group(0))
+        review_data = _parse_json_from_text(content)
+        if review_data:
             review.approved = review_data.get("approved", True)
             review.recommendation = review_data.get("recommendation", "")
             review.concerns = review_data.get("concerns", [])
