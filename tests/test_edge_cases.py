@@ -118,6 +118,12 @@ class TestGitOperationErrors:
         # Should handle error gracefully - check for error or stderr
         assert "error" in result or "stderr" in result or "rc" in result or isinstance(result, dict)
 
+    def test_apply_patch_rejects_codex_patch_format(self):
+        """Test that Codex '*** Begin Patch' blocks are rejected with a clear error."""
+        result = json.loads(rev.apply_patch("*** Begin Patch\n*** End Patch\n"))
+        assert "error" in result
+        assert "Unsupported patch format" in result["error"]
+
     def test_git_commit_no_changes(self):
         """Test committing with no changes."""
         result = json.loads(rev.git_commit("test message"))

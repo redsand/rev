@@ -29,6 +29,7 @@ from rev.config import (
     MAX_RUN_CMD_PER_TASK,
     MAX_EXECUTION_ITERATIONS,
     MAX_TASK_ITERATIONS,
+    CONTEXT_WINDOW_HISTORY,
 )
 from rev import config
 from rev.execution.safety import (
@@ -40,111 +41,28 @@ from rev.execution.reviewer import review_action, display_action_review, format_
 from rev.execution.session import SessionTracker, create_message_summary_from_history
 from rev.debug_logger import get_logger
 
-EXECUTION_SYSTEM = """You are an autonomous CI/CD agent executing tasks.
+EXECUTION_SYSTEM = """You are an autonomous coding agent that executes planned tasks using tools.
 
-IMPORTANT - System Context:
-You will be provided with OS information. Use this to:
-- Choose correct shell commands (bash for Linux/Mac, PowerShell/cmd for Windows)
-- Select platform-specific tools and file paths
-- Use appropriate path separators (/ for Unix, \\ for Windows)
-- Adapt commands to the target environment
+System context:
+- Use the provided OS details to choose correct commands and paths.
 
-TOOL CALLING INSTRUCTIONS (CRITICAL):
-You have these tools available. You MUST call them using the exact function calling format.
+How to work:
+1) Understand the current task and its action_type.
+2) Gather minimal context with tools (list_dir, search_code, read_file) as needed.
+3) If action_type is "add" or "edit", make the change with write_file/apply_patch.
+4) If action_type is "review", do not modify files; summarize findings and move on.
+5) If action_type is "test", run tests via run_cmd/run_tests and report results.
 
-Available tools:
-- read_file: Read file contents
-  Parameters: {"path": "file/path.ext"}
-  When to use: To view existing code before making changes
+Tool discipline:
+- Do not call the same tool with identical arguments twice in a row.
+- Avoid repeated exploration loops; if searches fail, change the query once, then decide and act.
 
-- write_file: Create or modify files
-  Parameters: {"path": "file/path.ext", "content": "file contents"}
-  When to use: To create new files or completely replace existing ones
+Patch requirements:
+- apply_patch accepts only unified diffs (diff --git or ---/+++ with @@ hunks).
+- Do not output '*** Begin Patch' blocks.
 
-- list_dir: List files matching pattern
-  Parameters: {"pattern": "**/*.py"} (glob pattern)
-  When to use: To discover files in the codebase
-
-- search_code: Search code with regex
-  Parameters: {"pattern": "function_name", "include": "**/*.py"}
-  When to use: To find specific code patterns
-
-- git_diff: View current changes
-  Parameters: {}
-  When to use: To review what has been modified
-
-- apply_patch: Apply unified diff patches
-  Parameters: {"patch": "diff content"}
-  When to use: To make targeted edits to existing files
-
-- run_cmd: Execute shell commands
-  Parameters: {"cmd": "command to run"}
-  When to use: To run build/test/lint commands
-
-- run_tests: Run test suite
-  Parameters: {"cmd": "pytest -v"} (test command)
-  When to use: To validate code changes
-
-- get_repo_context: Get repo status
-  Parameters: {}
-  When to use: To understand repository structure
-
-- get_system_info: Get OS, version, architecture
-  Parameters: {}
-  When to use: To check platform details
-
-STEP-BY-STEP WORKFLOW (follow this exactly):
-1. UNDERSTAND the task
-   - Read the task description carefully
-   - Identify what needs to be changed
-
-2. GATHER information
-   - Use list_dir to find relevant files
-   - Use search_code to locate specific code
-   - Use read_file to view file contents
-   - Take notes on what you learn
-
-3. MAKE changes
-   - Use write_file for new files
-   - Use apply_patch for editing existing files
-   - Make one change at a time
-   - Keep changes minimal and focused
-
-4. VALIDATE changes
-   - Use git_diff to review your changes
-   - Use run_tests to run the test suite
-   - Fix any issues that arise
-
-5. REPORT completion
-   - Respond with "TASK_COMPLETE" when done
-   - Summarize what was accomplished
-
-CRITICAL - AVOID LOOPS AND DUPLICATE ACTIONS:
-- NEVER call the same tool with the same arguments twice in a row. The previous result is cached.
-- NEVER call tree_view, list_dir, or search_code more than 2-3 times total per task.
-- If you just read a file, use the cached content instead of reading it again immediately.
-- If a search didn't find what you need, try ONE different pattern, then MOVE ON.
-- After 5 exploration actions (read/search/list), you MUST make an edit.
-- If you cannot find the exact location, CREATE the file/class anyway with best-effort code.
-
-CRITICAL - ACTION TYPE REQUIREMENTS:
-- For "edit" or "add" tasks: You MUST use write_file or apply_patch to make changes. A task is NOT complete until you have actually created or modified files.
-- For "review" tasks: You may explore without editing, but summarize findings.
-- For "test" tasks: You MUST run tests using run_cmd or run_tests.
-- If exploration is blocked, immediately create the code with your current knowledge.
-
-Progress discipline for autonomous runs:
-- Move from discovery to editing quickly; make a concrete edit after your initial inspection.
-- Avoid repeatedly listing directories or re-reading the same file unless it changed.
-- If the task implies creating or updating a file/class/module, do so proactively with apply_patch/write_file.
-- Do not burn iterations on tree views—prefer a single listing, then edit.
-- If you feel stuck, create the best-effort patch that addresses the task instead of looping on exploration.
-- When resource/iteration budgets warn or near exhaustion, stop re-listing and commit the best feasible edit immediately.
-
-Use unified diffs (apply_patch) for editing files. Always preserve formatting.
-After making changes, run tests to ensure nothing broke.
-
-Be concise. Execute the task and report success or failure."""
+Completion:
+- Reply with TASK_COMPLETE only after the current task’s goal is satisfied (and tests run when required)."""
 
 
 CODING_EXECUTION_SUFFIX = """
@@ -156,6 +74,7 @@ When the task involves code changes:
    - Use search_code, list_dir, tree_view, and read_file to inspect the relevant code.
 2. Make changes safely:
    - Use apply_patch with unified diffs instead of overwriting files blindly.
+   - Do NOT output '*** Begin Patch' blocks; use unified diffs (diff --git or ---/+++ with @@ hunks).
    - Keep changes minimal, consistent, and well-structured.
    - If a file/class/function is missing, create it immediately instead of re-listing directories.
    - If resource or iteration budgets start warning, pause further exploration and finish the best viable patch.
@@ -689,12 +608,6 @@ def _extract_patch_from_text(content: str) -> Optional[str]:
     if not content:
         return None
 
-    # Look for Begin/End Patch blocks
-    begin_idx = content.find("*** Begin Patch")
-    end_idx = content.find("*** End Patch")
-    if begin_idx != -1 and end_idx != -1 and end_idx > begin_idx:
-        return content[begin_idx:end_idx + len("*** End Patch")].strip()
-
     # Look for ```diff ... ``` fences
     diff_match = re.search(r"```diff\s+(.*?)```", content, re.DOTALL | re.IGNORECASE)
     if diff_match:
@@ -706,6 +619,13 @@ def _extract_patch_from_text(content: str) -> Optional[str]:
         return raw_match.group(0).strip()
 
     return None
+
+
+def _looks_like_codex_patch_block(content: str) -> bool:
+    """Detect Codex-style apply_patch blocks (*** Begin Patch) which are not git-style diffs."""
+    if not content:
+        return False
+    return "*** Begin Patch" in content and "*** End Patch" in content
 
 
 def _extract_file_from_text(content: str) -> Optional[Tuple[str, str]]:
@@ -786,12 +706,28 @@ def _apply_patch_fallback(
 
 def _apply_text_fallbacks(
     content: str,
+    action_type: str,
     messages: List[Dict[str, Any]],
     session_tracker: Optional[SessionTracker],
     exec_context: Optional[ExecutionContext],
     debug_logger,
 ) -> bool:
     """Try to handle text-only responses by applying patches or writing files."""
+    if action_type not in {"add", "edit"}:
+        return False
+
+    if _looks_like_codex_patch_block(content):
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "You provided a patch in Codex '*** Begin Patch' format, which cannot be applied here. "
+                    "Use a unified diff (either start with 'diff --git', or provide '---/+++/@@' hunks inside a ```diff``` block)."
+                ),
+            }
+        )
+        return False
+
     text_patch = _extract_patch_from_text(content)
     if text_patch:
         applied = _apply_patch_fallback(text_patch, messages, session_tracker, debug_logger, exec_context)
@@ -1278,6 +1214,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                         })
                         continue
 
+                    """
                     # Check if exploration should be blocked for edit/add tasks
                     exploration_tools = {"read_file", "search_code", "list_dir", "tree_view", "get_repo_context"}
                     if tool_name in exploration_tools and exec_context.should_block_exploration(current_task.action_type):
@@ -1288,6 +1225,8 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                             "content": f"BLOCKED: Exploration is disabled. You MUST use write_file or apply_patch to make changes now. The task is '{current_task.description}'. Create the implementation with your current knowledge."
                         })
                         continue
+                    """
+
 
                     # Check if too much exploration without editing (threshold lowered for faster intervention)
                     if current_task.action_type in {"add", "edit"} and exec_context.is_exploration_heavy(threshold=5):
@@ -1503,7 +1442,14 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                 # Model is thinking/responding without tool calls
                 print(f"  → {content[:200]}")
                 no_tool_call_streak += 1
-                applied_fallback = _apply_text_fallbacks(content, messages, session_tracker, exec_context, debug_logger)
+                applied_fallback = _apply_text_fallbacks(
+                    content,
+                    current_task.action_type,
+                    messages,
+                    session_tracker,
+                    exec_context,
+                    debug_logger,
+                )
                 if applied_fallback:
                     continue
 
@@ -1794,6 +1740,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                     })
                     continue
 
+                """
                 # Check if exploration should be blocked for edit/add tasks
                 exploration_tools = {"read_file", "search_code", "list_dir", "tree_view", "get_repo_context"}
                 if tool_name in exploration_tools and exec_context.should_block_exploration(task.action_type):
@@ -1804,7 +1751,9 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         "content": f"BLOCKED: Exploration is disabled. You MUST use write_file or apply_patch to make changes now. The task is '{task.description}'. Create the implementation with your current knowledge."
                     })
                     continue
+                """
 
+                """
                 # Check if too much exploration without editing (threshold lowered for faster intervention)
                 if task.action_type in {"add", "edit"} and exec_context.is_exploration_heavy(threshold=5):
                     warning_count = exec_context.increment_force_edit_warning(task.action_type)
@@ -1822,6 +1771,8 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                             "content": f"FINAL WARNING: Exploration is now DISABLED for this task. You MUST use write_file or apply_patch immediately. The task is: '{task.description}'. Based on what you've learned, create the code NOW. Do not request any more file reads or searches."
                         })
                         # Don't reset - blocking will take over on next exploration attempt
+
+                """
 
                 # Record this tool call for deduplication tracking
                 exec_context.record_tool_call(tool_name, tool_args)
@@ -1977,7 +1928,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             # Model is thinking/responding without tool calls
             print(f"  → {content[:200]}")
             no_tool_call_streak += 1
-            applied_fallback = _apply_text_fallbacks(content, messages, None, exec_context, debug_logger)
+            applied_fallback = _apply_text_fallbacks(content, task.action_type, messages, None, exec_context, debug_logger)
             if applied_fallback:
                 continue
 

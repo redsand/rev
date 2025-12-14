@@ -344,6 +344,15 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         setter=lambda value: setattr(config, "MAX_TASK_ITERATIONS", value),
         default=config.MAX_TASK_ITERATIONS,
     ),
+    "context_window_history": RuntimeSetting(
+        key="context_window_history",
+        description="Number of recent messages retained before trimming context",
+        section="Execution Limits",
+        parser=_parse_positive_int,
+        getter=lambda: config.CONTEXT_WINDOW_HISTORY,
+        setter=lambda value: setattr(config, "CONTEXT_WINDOW_HISTORY", value),
+        default=config.CONTEXT_WINDOW_HISTORY,
+    ),
     "max_steps_per_run": RuntimeSetting(
         key="max_steps_per_run",
         description="Resource budget: maximum steps per run",
