@@ -51,7 +51,10 @@ def get_git_commit(short: bool = True) -> Optional[str]:
 
     try:
         repo_root = Path(__file__).resolve().parent.parent
-        cmd = ["git", "rev-parse", "--short" if short else "HEAD"]
+        if short:
+            cmd = ["git", "rev-parse", "--short", "HEAD"]
+        else:
+            cmd = ["git", "rev-parse", "HEAD"]
         commit = subprocess.check_output(cmd, cwd=repo_root, stderr=subprocess.DEVNULL)
         return commit.decode().strip()
     except Exception:

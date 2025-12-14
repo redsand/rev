@@ -1,8 +1,68 @@
 #!/usr/bin/env python3
 """Setup script for rev - CI/CD Agent powered by Ollama."""
 
+import subprocess
 from pathlib import Path
 from setuptools import find_packages, setup
+from setuptools.command.build_py import build_py
+from setuptools.command.install import install
+
+
+def get_git_commit():
+    """Get the current git commit hash."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=Path(__file__).parent
+        )
+        return result.stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "unknown"
+
+
+def update_version_file_with_git_hash():
+    """Update _version.py with the current git commit hash."""
+    version_file = Path(__file__).parent / "rev" / "_version.py"
+    if not version_file.exists():
+        return
+
+    git_commit = get_git_commit()
+
+    # Read current content
+    content = version_file.read_text(encoding="utf-8")
+
+    # Update the REV_GIT_COMMIT line
+    lines = content.split('\n')
+    updated_lines = []
+    for line in lines:
+        if line.startswith('REV_GIT_COMMIT'):
+            updated_lines.append(f'REV_GIT_COMMIT = "{git_commit}"')
+        else:
+            updated_lines.append(line)
+
+    # Write back
+    version_file.write_text('\n'.join(updated_lines), encoding="utf-8")
+    print(f"Updated _version.py with git commit: {git_commit}")
+
+
+class BuildPyCommand(build_py):
+    """Custom build command to capture git hash."""
+
+    def run(self):
+        update_version_file_with_git_hash()
+        super().run()
+
+
+class InstallCommand(install):
+    """Custom install command to capture git hash."""
+
+    def run(self):
+        update_version_file_with_git_hash()
+        super().run()
+
 
 # Avoid importing the package during setup to prevent dependency import errors
 version_ns = {}
@@ -41,6 +101,10 @@ setup(
         "console_scripts": [
             "rev=rev.main:main",
         ],
+    },
+    cmdclass={
+        'build_py': BuildPyCommand,
+        'install': InstallCommand,
     },
     classifiers=[
         "Development Status :: 4 - Beta",
