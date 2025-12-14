@@ -5,7 +5,7 @@
 import sys
 import re
 
-from rev.execution import planning_mode, execution_mode
+from rev.execution import planning_mode, execution_mode, streaming_execution_mode
 from rev.execution.orchestrator import run_orchestrated
 from rev.models.task import TaskStatus
 from rev import config
@@ -120,9 +120,11 @@ def repl_mode():
                     )
                     plan = result.plan if hasattr(result, "plan") and result.plan else None
                 else:
+                    # Always use streaming execution in interactive mode
+                    # This allows users to type messages while tasks run
                     plan = planning_mode(user_input)
                     tools = get_available_tools()
-                    execution_mode(plan, auto_approve=True, tools=tools)
+                    streaming_execution_mode(plan, auto_approve=True, tools=tools)
         except EscapeInterrupt:
             print(f"  {colorize('[ESC pressed - execution cancelled]', Colors.BRIGHT_YELLOW)}")
             plan = None

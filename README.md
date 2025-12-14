@@ -314,13 +314,13 @@ The agent will:
 
 ### Interactive REPL
 
-For iterative development with **session memory**:
+For iterative development with **session memory** and **real-time interaction**:
 
 ```bash
 rev --repl
 ```
 
-The REPL now maintains context across multiple prompts:
+The REPL maintains context across multiple prompts and allows **real-time guidance** during task execution:
 
 ```
 agent> Review all documentation files
@@ -343,6 +343,40 @@ Session Summary:
 - `/help` - Show all commands
 - `/exit` - Exit with session summary
 - **`/mode`** - Control execution depth and thinking level (NEW in v2.0!)
+
+### Real-Time Interaction (NEW!)
+
+**Type messages while tasks run** — just like Claude Code! When the agent is executing tasks, you can guide it in real-time:
+
+```
+agent> Add unit tests for the auth module
+
+[Task 1/3] Create test file for auth module
+============================================================
+
+  🤖 I'll start by reading the auth module to understand...
+
+focus on the login function specifically    <-- You type this while running!
+
+  💬 Injected user guidance into conversation
+
+  🤖 Understood, I'll focus specifically on the login function...
+```
+
+**How it works:**
+- **Stream output** — See LLM responses as they generate in real-time
+- **Type anytime** — Your input is captured in a background thread
+- **Single message** — Only 1 pending message at a time (new replaces old)
+- **Injected as guidance** — Your message becomes `[USER GUIDANCE]` in the conversation
+
+**Commands during execution:**
+| Input | Effect |
+|-------|--------|
+| Any text + Enter | Injects `[USER GUIDANCE] your message` |
+| `/stop` or `/cancel` | Immediately stops the current task |
+| `/priority <msg>` | Injects as `[IMPORTANT USER GUIDANCE]` |
+
+This enables a collaborative workflow where you can steer the agent without restarting tasks!
 
 ### Execution Modes (NEW!)
 

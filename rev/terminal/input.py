@@ -15,6 +15,8 @@ Features:
 
 import sys
 import platform
+import threading
+import time
 from typing import List, Tuple
 from rev.terminal.history import PromptHistory
 
@@ -453,3 +455,155 @@ def get_input_with_escape(prompt: str = "") -> Tuple[str, bool]:
         return _get_input_windows(prompt)
     else:
         return _get_input_unix(prompt)
+
+
+# =============================================================================
+# Streaming Input Handler - For real-time input during task execution
+# =============================================================================
+
+class StreamingInputHandler:
+    """Handles non-blocking input during streaming task execution.
+
+    This enables the Claude Code-like experience where users can type
+    messages while the LLM is generating responses. The input is captured
+    in a background thread and queued for injection into the conversation.
+    """
+
+    def __init__(self, on_message: callable = None, prompt: str = ""):
+        """Initialize the streaming input handler.
+
+        Args:
+            on_message: Callback called with each complete message
+            prompt: Prompt to display when ready for input
+        """
+        self._on_message = on_message
+        self._prompt = prompt
+        self._thread = None
+        self._running = False
+        self._buffer = []
+        self._lock = threading.Lock()
+        self._input_ready = threading.Event()
+
+    def start(self):
+        """Start the background input handler."""
+        if self._running:
+            return
+
+        self._running = True
+        self._thread = threading.Thread(target=self._input_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        """Stop the background input handler."""
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=0.5)
+            self._thread = None
+
+    def _input_loop(self):
+        """Background loop for reading user input during streaming."""
+        while self._running:
+            try:
+                if platform.system() != "Windows":
+                    self._input_loop_unix()
+                else:
+                    self._input_loop_windows()
+            except Exception:
+                # Don't crash on input errors
+                time.sleep(0.1)
+
+    def _input_loop_unix(self):
+        """Unix implementation of non-blocking input loop."""
+        import select as sel
+
+        # Check if input is available (non-blocking)
+        ready, _, _ = sel.select([sys.stdin], [], [], 0.1)
+        if ready:
+            try:
+                # Read available input
+                line = sys.stdin.readline()
+                if line:
+                    self._process_input(line.rstrip('\n\r'))
+            except Exception:
+                pass
+
+    def _input_loop_windows(self):
+        """Windows implementation of non-blocking input loop."""
+        import time as t
+        try:
+            if msvcrt.kbhit():
+                char = msvcrt.getwch()
+                with self._lock:
+                    if char == '\r' or char == '\n':
+                        # Enter pressed - submit the buffer
+                        if self._buffer:
+                            line = ''.join(self._buffer)
+                            self._buffer = []
+                            self._process_input(line)
+                    elif char == '\x1b':
+                        # ESC pressed - clear buffer and signal interrupt
+                        self._buffer = []
+                        self._process_input('/stop')
+                    elif char == '\x08':
+                        # Backspace
+                        if self._buffer:
+                            self._buffer.pop()
+                    elif char == '\x03':
+                        # Ctrl+C
+                        self._running = False
+                    elif ord(char) >= 32:
+                        self._buffer.append(char)
+            else:
+                t.sleep(0.05)  # Brief sleep to avoid busy-waiting
+        except Exception:
+            t.sleep(0.1)
+
+    def _process_input(self, text: str):
+        """Process a complete line of user input."""
+        if not text:
+            return
+
+        if self._on_message:
+            self._on_message(text)
+
+    def is_running(self) -> bool:
+        """Check if the input handler is running."""
+        return self._running
+
+
+# Global streaming input handler
+_streaming_handler: StreamingInputHandler = None
+
+
+def start_streaming_input(on_message: callable, prompt: str = "") -> StreamingInputHandler:
+    """Start the streaming input handler.
+
+    Args:
+        on_message: Callback called with each complete message
+        prompt: Prompt to display when ready for input
+
+    Returns:
+        The StreamingInputHandler instance
+    """
+    global _streaming_handler
+
+    if _streaming_handler and _streaming_handler.is_running():
+        _streaming_handler.stop()
+
+    _streaming_handler = StreamingInputHandler(on_message=on_message, prompt=prompt)
+    _streaming_handler.start()
+    return _streaming_handler
+
+
+def stop_streaming_input():
+    """Stop the streaming input handler."""
+    global _streaming_handler
+
+    if _streaming_handler:
+        _streaming_handler.stop()
+        _streaming_handler = None
+
+
+def get_streaming_handler() -> StreamingInputHandler:
+    """Get the current streaming input handler."""
+    return _streaming_handler
