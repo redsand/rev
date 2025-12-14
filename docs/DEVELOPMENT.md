@@ -68,7 +68,7 @@ rev/
 ```
 ┌─────────────────────────────────────────────────┐
 │  1. Default Configuration (config.py:20-21)    │
-│     OLLAMA_MODEL = "gpt-oss:120b-cloud"          │
+│     OLLAMA_MODEL = "qwen3-coder:480b-cloud"          │
 │     OLLAMA_BASE_URL = "http://localhost:11434"│
 └────────────────────┬────────────────────────────┘
                      │
@@ -104,7 +104,7 @@ Python imports create **copies** of variables at import time. If you import a va
 from rev.config import OLLAMA_MODEL  # Captures default value at import
 
 # Later, even though main.py updates config.OLLAMA_MODEL,
-# this module still uses the old value "gpt-oss:120b-cloud"
+# this module still uses the old value "qwen3-coder:480b-cloud"
 payload = {"model": OLLAMA_MODEL}  # Always uses default!
 ```
 
@@ -215,7 +215,7 @@ curl http://localhost:11434/api/version
 ollama list
 
 # Pull a model if needed
-ollama pull gpt-oss:120b-cloud
+ollama pull qwen3-coder:480b-cloud
 ```
 
 ### 2. Model Parameter Not Honored
@@ -224,9 +224,9 @@ ollama pull gpt-oss:120b-cloud
 
 **Symptom:**
 ```bash
-rev --model qwen3-coder:480b-cloud "task"
-# Shows: Model: qwen3-coder:480b-cloud
-# But actually uses: gpt-oss:120b-cloud
+rev --model llama3.1:latest "task"
+# Shows: Model: llama3.1:latest
+# But actually uses: qwen3-coder:480b-cloud
 ```
 
 **Root Cause:**
@@ -393,7 +393,7 @@ from rev.llm.client import ollama_chat
 class TestModelParameter:
     def test_default_model(self):
         """Test default model configuration"""
-        assert config.OLLAMA_MODEL == "gpt-oss:120b-cloud"
+        assert config.OLLAMA_MODEL == "qwen3-coder:480b-cloud"
 
     def test_model_override(self):
         """Test model can be changed at runtime"""
@@ -711,7 +711,7 @@ Changed from direct import to module import:
 
 **Verification:**
 ```bash
-# Before fix: Always used gpt-oss:120b-cloud
+# Before fix: Always used qwen3-coder:480b-cloud
 # After fix: Uses specified model
 rev --model qwen3-coder:480b-cloud "test"
 ```

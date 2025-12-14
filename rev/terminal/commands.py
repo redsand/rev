@@ -188,7 +188,7 @@ class ModelCommand(CommandHandler):
     def __init__(self):
         super().__init__(
             "model",
-            "View or change the AI model (e.g., /model gpt-oss:120b-cloud)"
+            "View or change the AI model (e.g., /model qwen3-coder:480b-cloud)"
         )
 
     def execute(self, args: List[str], session_context: Dict[str, Any]) -> str:

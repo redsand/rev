@@ -228,6 +228,7 @@ class ExecutionContext:
         self._lock = threading.Lock()
         # Track tool calls to detect loops and duplicates
         self.tool_call_history: List[Tuple[str, str]] = []  # (tool_name, args_hash)
+        self.max_tool_call_history = 128
         self.recent_actions: List[str] = []  # Human-readable recent actions
         self.exploration_count = 0  # Count of read/search/list calls
         self.edit_count = 0  # Count of write/patch calls
@@ -308,11 +309,13 @@ class ExecutionContext:
         return hashlib.md5(sorted_args.encode()).hexdigest()[:12]
 
     def is_duplicate_call(self, tool_name: str, tool_args: Dict[str, Any]) -> bool:
-        """Check if this exact tool call was already made."""
+        """Check if this exact tool call was already made immediately prior."""
         args_hash = self._hash_args(tool_args)
         call_key = (tool_name, args_hash)
         with self._lock:
-            return call_key in self.tool_call_history
+            if not self.tool_call_history:
+                return False
+            return self.tool_call_history[-1] == call_key
 
     def record_tool_call(self, tool_name: str, tool_args: Dict[str, Any]) -> None:
         """Record a tool call for deduplication tracking."""
@@ -324,8 +327,9 @@ class ExecutionContext:
         edit_tools = {"write_file", "apply_patch"}
 
         with self._lock:
-            if call_key not in self.tool_call_history:
-                self.tool_call_history.append(call_key)
+            self.tool_call_history.append(call_key)
+            if len(self.tool_call_history) > self.max_tool_call_history:
+                self.tool_call_history.pop(0)
 
             if tool_name in exploration_tools:
                 self.exploration_count += 1
