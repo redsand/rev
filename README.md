@@ -499,11 +499,31 @@ OLLAMA_TEMPERATURE=0.2
 OLLAMA_NUM_CTX=8192
 ```
 
+**Interactive REPL Configuration:**
+
+```bash
+# Start REPL and update settings interactively
+rev --repl
+
+# View all settings including LLM generation parameters
+/set
+
+# Update temperature for current session
+/set temperature 0.1
+
+# Update context window
+/set num_ctx 32768
+
+# Save settings for future sessions
+/save
+```
+
 **📖 Full Guide:** See [LLM Tool Calling Optimization Guide](docs/LLM_TOOL_CALLING_OPTIMIZATION.md) for:
 - Detailed parameter explanations
 - Model recommendations
 - Debugging failed tool calls
 - Performance tuning
+- Interactive `/set` command usage
 - Advanced configuration
 
 ### Command-Line Options

@@ -69,6 +69,42 @@ export OLLAMA_TOP_K=40
 export OLLAMA_DEBUG=1
 ```
 
+### Interactive Configuration (NEW!)
+
+You can also update these settings interactively in the REPL using the `/set` command:
+
+```bash
+# Start REPL mode
+rev --repl
+
+# View all settings
+/set
+
+# Update temperature
+/set temperature 0.1
+
+# Update context window
+/set num_ctx 16384
+
+# Update top-p
+/set top_p 0.9
+
+# Update top-k
+/set top_k 40
+
+# Save settings for future sessions
+/save
+
+# View current configuration
+/config
+```
+
+**Available LLM generation settings:**
+- `temperature` - LLM temperature (0.0-2.0; lower = more deterministic)
+- `num_ctx` - Context window size in tokens (e.g., 8192, 16384, 32768)
+- `top_p` - Top-p nucleus sampling (0.0-1.0)
+- `top_k` - Top-k vocabulary limiting (positive integer)
+
 ### Per-Task Configuration
 
 For specific use cases, you may want different settings:
