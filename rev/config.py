@@ -57,6 +57,22 @@ DEFAULT_SUPPORTS_TOOLS = os.getenv("REV_MODEL_SUPPORTS_TOOLS", "true").lower() =
 EXECUTION_SUPPORTS_TOOLS = os.getenv("REV_EXECUTION_SUPPORTS_TOOLS", str(DEFAULT_SUPPORTS_TOOLS)).lower() == "true"
 PLANNING_SUPPORTS_TOOLS = os.getenv("REV_PLANNING_SUPPORTS_TOOLS", str(DEFAULT_SUPPORTS_TOOLS)).lower() == "true"
 RESEARCH_SUPPORTS_TOOLS = os.getenv("REV_RESEARCH_SUPPORTS_TOOLS", str(DEFAULT_SUPPORTS_TOOLS)).lower() == "true"
+
+# LLM Generation Parameters (for improved tool calling with local models)
+# Lower temperature improves consistency and accuracy for tool calling
+# Recommended: 0.1 for tool calling, 0.7 for creative tasks
+OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.1"))
+
+# Context window size (num_ctx) - recommended 8K-16K for tool calling
+# Higher values allow for more context but use more memory
+# 8192 = 8K, 16384 = 16K, 32768 = 32K
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "16384"))
+
+# Top-p (nucleus sampling) for controlling randomness
+OLLAMA_TOP_P = float(os.getenv("OLLAMA_TOP_P", "0.9"))
+
+# Top-k for limiting vocabulary selection
+OLLAMA_TOP_K = int(os.getenv("OLLAMA_TOP_K", "40"))
 VALIDATION_MODE_DEFAULT = os.getenv("REV_VALIDATION_MODE", "targeted").lower()
 MAX_FILE_BYTES = 5 * 1024 * 1024
 READ_RETURN_LIMIT = 80_000
