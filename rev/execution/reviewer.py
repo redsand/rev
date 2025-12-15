@@ -699,7 +699,10 @@ def _display_plan_review(review: PlanReview, plan: ExecutionPlan):
                 "LOW": "🟢"
             }.get(severity, "⚪")
 
-            print(f"  {severity_emoji} [{severity}] Task #{task_id + 1}: {desc}")
+            if task_id is not None:
+                print(f"  {severity_emoji} [{severity}] Task #{task_id + 1}: {desc}")
+            else:
+                print(f"  {severity_emoji} [{severity}] {desc}")
             if impact:
                 print(f"     Impact: {impact}")
 

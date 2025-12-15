@@ -109,6 +109,19 @@ MINIMUM BREAKDOWN PATTERN:
 2. One or more implementation tasks (each doing ONE specific thing)
 3. Testing/validation task
 
+EXAMPLE for "implement features from another repository/framework":
+[
+  {"description": "Review existing codebase structure and identify integration points", "action_type": "review", "complexity": "low"},
+  {"description": "Analyze the source repository/framework to catalog available features", "action_type": "review", "complexity": "low"},
+  {"description": "Identify which features already exist to avoid duplication", "action_type": "review", "complexity": "low"},
+  {"description": "Implement first missing feature/module", "action_type": "add", "complexity": "medium"},
+  {"description": "Implement second missing feature/module", "action_type": "add", "complexity": "medium"},
+  {"description": "Implement third missing feature/module", "action_type": "add", "complexity": "medium"},
+  {"description": "Update configuration/registry to include new features", "action_type": "edit", "complexity": "low"},
+  {"description": "Write unit tests for new features", "action_type": "add", "complexity": "medium"},
+  {"description": "Run test suite to validate integration", "action_type": "test", "complexity": "low"}
+]
+
 Output format (strict): return ONLY a JSON array of objects with keys "description", "action_type", "complexity"."""
 
 
@@ -312,13 +325,33 @@ Return ONLY the JSON array. No tools, no prose, just the JSON plan."""
     return final_response
 
 
-def _is_overly_broad_task(task_description: str) -> bool:
+def _is_overly_broad_task(task_description: str, user_request: str = "") -> bool:
     """Detect if a task description is too broad and needs breakdown.
 
     Returns True if the task is likely a high-level request that should be
     broken down into multiple granular subtasks.
+
+    Args:
+        task_description: The task description to check
+        user_request: Optional original user request to compare against
     """
     description_lower = task_description.lower()
+
+    # Check if task is just restating the user request (too similar)
+    if user_request:
+        # Remove common prefixes like "Review existing code and patterns for:"
+        cleaned_task = task_description.lower()
+        for prefix in ["review existing code and patterns for:", "review existing", "implement"]:
+            if cleaned_task.startswith(prefix):
+                cleaned_task = cleaned_task[len(prefix):].strip()
+
+        # Compare word overlap
+        task_words = set(cleaned_task.split())
+        request_words = set(user_request.lower().split())
+        if len(task_words) > 5 and len(request_words) > 5:
+            overlap = len(task_words & request_words) / min(len(task_words), len(request_words))
+            if overlap > 0.7:  # More than 70% word overlap
+                return True
 
     # Indicators of broad/multi-step tasks
     broad_indicators = [
@@ -740,7 +773,7 @@ Generate a comprehensive execution plan as a JSON array NOW with AT LEAST 2 task
                 # Detect single/few broad tasks that need forced breakdown
                 is_single_broad_plan = (
                     len(tasks_data) <= 2 and
-                    any(_is_overly_broad_task(t.get("description", "")) for t in tasks_data)
+                    any(_is_overly_broad_task(t.get("description", ""), user_request) for t in tasks_data)
                 )
 
                 if is_single_broad_plan:
@@ -753,7 +786,7 @@ Generate a comprehensive execution plan as a JSON array NOW with AT LEAST 2 task
                     # Force breakdown for broad tasks when plan is too small
                     should_breakdown = (
                         complexity == "high" or
-                        (is_single_broad_plan and _is_overly_broad_task(description))
+                        (is_single_broad_plan and _is_overly_broad_task(description, user_request))
                     )
 
                     if should_breakdown:
