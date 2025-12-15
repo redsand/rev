@@ -85,6 +85,22 @@ def _extract_bullets(text: str) -> List[str]:
     return [b for b in bullets if b]
 
 
+def _clean_review_string(value: Any) -> str:
+    """Normalize reviewer-provided strings for display and downstream logic."""
+
+    if value is None:
+        return ""
+
+    cleaned = str(value)
+    cleaned = cleaned.translate({
+        ord("\u200B"): None,  # zero width space
+        ord("\u200C"): None,  # zero width non-joiner
+        ord("\u200D"): None,  # zero width joiner
+        ord("\uFEFF"): None,  # BOM / zero width no-break space
+    })
+    return cleaned.strip()
+
+
 def _apply_freeform_review(review: "PlanReview", content: str) -> bool:
     """Fallback parsing when the review agent returns plain text instead of JSON."""
     if not content or not content.strip():
@@ -97,11 +113,68 @@ def _apply_freeform_review(review: "PlanReview", content: str) -> bool:
     suggestions = _extract_bullets(content)
     if not suggestions:
         suggestions = [content.strip()[:200]]
-    review.suggestions = suggestions
+    review.suggestions = [_clean_review_string(s) for s in suggestions if _clean_review_string(s)]
     return True
 
 
-PLAN_REVIEW_SYSTEM = """You are an expert code review agent specializing in CI/CD workflows and software architecture.
+def _extract_json_substrings(content: str) -> List[str]:
+    """Extract balanced JSON object substrings from text, ignoring braces inside strings."""
+    substrings = []
+    depth = 0
+    start_idx = None
+    in_string = False
+    escape = False
+
+    for index, char in enumerate(content):
+        if char == '"' and not escape:
+            in_string = not in_string
+            escape = False
+            if in_string:
+                continue
+            else:
+                continue
+
+        if in_string:
+            if char == '\\' and not escape:
+                escape = True
+            else:
+                escape = False
+            continue
+
+        if char == '{':
+            if depth == 0:
+                start_idx = index
+            depth += 1
+        elif char == '}' and depth > 0:
+            depth -= 1
+            if depth == 0 and start_idx is not None:
+                substrings.append(content[start_idx:index + 1])
+                start_idx = None
+
+    return substrings
+
+
+def _parse_json_from_text(content: str) -> Optional[Dict[str, Any]]:
+    """Try to parse JSON from the provided text."""
+    if not content or not content.strip():
+        return None
+
+    stripped = content.strip()
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+
+    for candidate in _extract_json_substrings(content):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+
+    return None
+
+
+PLAN_REVIEW_SYSTEM = """You are an expert plan review agent.
 
 You have access to code analysis tools to verify plans:
 - analyze_ast_patterns: AST-based pattern matching for Python code
@@ -117,21 +190,17 @@ You have access to code analysis tools to verify plans:
 Use these tools to verify the plan is realistic and complete!
 
 Your job is to review execution plans and identify:
-1. **Completeness**: Are all necessary tasks included?
-2. **Correctness**: Do the tasks achieve the stated goal?
-3. **Dependencies**: Are task dependencies correct and complete?
-4. **Risk**: Are risks properly assessed and mitigated?
-5. **Security**: Are there security vulnerabilities being introduced?
-6. **Best Practices**: Does the plan follow best practices?
-7. **Edge Cases**: Are edge cases and error handling considered?
-8. **Performance**: Could the approach cause performance issues?
-9. **Maintainability**: Will the changes be maintainable?
-10. **Testing**: Is adequate testing included?
-11. **Code Reuse**: Does the plan unnecessarily duplicate existing functionality?
-    - Check for new files that could be avoided by extending existing ones
-    - Use search_code and list_dir tools to verify existing code was checked
-    - Flag tasks creating utilities/helpers when similar ones exist
-    - Prefer concentrated, well-documented modules over scattered code
+1) Completeness: Are all necessary tasks included?
+2) Correctness: Do the tasks achieve the stated goal?
+3) Dependencies: Are dependencies correct and complete?
+4) Risk: Are risks assessed and mitigated?
+5) Security: Does the plan introduce likely vulnerabilities?
+6) Best practices: Does the plan follow common patterns for this repo?
+7) Edge cases: Are relevant edge cases covered?
+8) Performance: Any likely performance pitfalls?
+9) Maintainability: Will the changes be maintainable?
+10) Testing: Are tests included and runnable?
+11) Reuse: Does the plan duplicate existing functionality? Prefer extending existing code over new files.
 
 Analyze the plan critically but constructively. Identify real issues, not nitpicks.
 
@@ -177,17 +246,17 @@ You have access to code analysis tools to help verify actions:
 
 Your job is to review individual actions (tool calls, code changes) before execution.
 
-CRITICAL DISTINCTION:
-- **Review CODE for security flaws**: Focus on code being written/modified that could introduce vulnerabilities
-- **Trust LOCAL TOOL EXECUTION**: Build tools (compilers, linkers, test runners) are trusted - don't block them
-- Only flag command execution if there's ACTUAL evidence of injection from USER INPUT
+Critical distinction:
+- Review code for security flaws introduced by the change.
+- Treat local build/test tooling as trusted; do not block standard developer commands.
+- Only flag command execution when there is evidence of injection from user-controlled input.
 
 Analyze each action for:
-1. **Security in CODE**: SQL injection, XSS, command injection in written code, exposed secrets in files
-2. **Safety**: Data loss, destructive operations, breaking changes
-3. **Correctness**: Logic errors in code, incorrect assumptions
-4. **Best Practices**: Code quality, maintainability, performance
-5. **Alternative Approaches**: Better ways to achieve the same goal
+1) Security in code: SQL injection, XSS, command injection, secrets
+2) Safety: data loss, destructive operations, breaking changes
+3) Correctness: logic errors, incorrect assumptions
+4) Best practices: maintainability, performance
+5) Alternatives: better approaches if applicable
 
 DO NOT flag as security issues:
 - Hardcoded paths in build commands (these are local development tools)
@@ -279,9 +348,7 @@ def review_execution_plan(
         plan_summary["tasks"].append(task_info)
 
     # Get LLM review
-    messages = [
-        {"role": "system", "content": PLAN_REVIEW_SYSTEM},
-        {"role": "user", "content": f"""Review this execution plan:
+    plan_prompt = f"""Review this execution plan:
 
 {json.dumps(plan_summary, indent=2)}
 
@@ -289,7 +356,10 @@ Strictness level: {strictness.value}
 
 Return ONLY valid JSON per the schema. Do not include any other text or formatting.
 
-Provide a thorough review."""}
+Provide a thorough review."""
+    messages = [
+        {"role": "system", "content": PLAN_REVIEW_SYSTEM},
+        {"role": "user", "content": plan_prompt}
     ]
 
     print("→ Analyzing plan with review agent...")
@@ -312,13 +382,11 @@ Provide a thorough review."""}
             review.confidence_score = 0.7
             return review
 
-        content = response.get("message", {}).get("content", "")
         try:
-            json_match = re.search(r'\{.*\}', content, re.DOTALL)
-            if not json_match:
+            content = response.get("message", {}).get("content", "")
+            review_data = _parse_json_from_text(content)
+            if not review_data:
                 raise ValueError("No JSON object found in review response")
-
-            review_data = json.loads(json_match.group(0))
 
             # Map decision
             decision_str = review_data.get("decision", "approved").lower()
@@ -337,16 +405,32 @@ Provide a thorough review."""}
                 review.confidence_score = float(review_data.get("confidence_score", 0.8))
             except (ValueError, TypeError):
                 review.confidence_score = 0.7  # Default fallback for malformed LLM response
-            review.issues = review_data.get("issues", [])
-            review.suggestions = review_data.get("suggestions", [])
-            review.security_concerns = review_data.get("security_concerns", [])
-            review.missing_tasks = review_data.get("missing_tasks", [])
-            review.unnecessary_tasks = review_data.get("unnecessary_tasks", [])
+            review.issues = review_data.get("issues", []) or []
+            review.suggestions = [
+                _clean_review_string(s)
+                for s in (review_data.get("suggestions", []) or [])
+                if _clean_review_string(s)
+            ]
+            review.security_concerns = [
+                _clean_review_string(s)
+                for s in (review_data.get("security_concerns", []) or [])
+                if _clean_review_string(s)
+            ]
+            review.missing_tasks = [
+                _clean_review_string(s)
+                for s in (review_data.get("missing_tasks", []) or [])
+                if _clean_review_string(s)
+            ]
+            review.unnecessary_tasks = review_data.get("unnecessary_tasks", []) or []
             break  # Parsed successfully
 
         except Exception as e:
             parse_attempt += 1
             print(f"⚠️  Error parsing review: {e}")
+            print("??  Review request prompt:")
+            print(plan_prompt)
+            print("??  Raw review response content:")
+            print(content)
             if parse_attempt > max_parse_retries:
                 if _apply_freeform_review(review, content):
                     print("⚠️  Falling back to freeform review parsing.")
@@ -436,9 +520,8 @@ Should this action be approved?"""}
     # Parse review
     try:
         content = response.get("message", {}).get("content", "")
-        json_match = re.search(r'\{.*\}', content, re.DOTALL)
-        if json_match:
-            review_data = json.loads(json_match.group(0))
+        review_data = _parse_json_from_text(content)
+        if review_data:
             review.approved = review_data.get("approved", True)
             review.recommendation = review_data.get("recommendation", "")
             review.concerns = review_data.get("concerns", [])

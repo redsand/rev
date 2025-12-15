@@ -117,33 +117,18 @@ class ResearchFindings:
         }
 
 
-RESEARCH_SYSTEM = """You are a research agent that analyzes codebases to gather context for planned changes.
+RESEARCH_SYSTEM = """You synthesize existing research notes into a concise recommendation.
 
-🎯 PRIMARY MISSION: Find existing code that can be REUSED or EXTENDED to avoid creating new files.
+Output format (strict):
+- Return ONLY a single JSON object. No prose, no markdown, no code fences.
+- The object MUST contain exactly:
+  - "suggested_approach": string (concise recommended approach, prioritizing reuse)
+  - "complexity": "low" | "medium" | "high"
+  - "warnings": array of strings
 
-Given a user request and codebase information, identify:
-1. **Existing code that already solves similar problems (TOP PRIORITY - look for reuse opportunities)**
-2. **Utilities, helpers, or modules that could be extended instead of creating new ones**
-3. Which files are most relevant to the task
-4. Existing patterns that should be followed
-5. Potential conflicts or dependencies
-6. Similar existing implementations to reference
-7. Recommended approach that MAXIMIZES code reuse and minimizes new file creation
-
-Return your analysis in JSON format:
-{
-    "relevant_files": ["path/to/file.py"],
-    "reusable_code": [{"file": "path", "can_extend_for": "describe what can be added/extended"}],
-    "patterns_to_follow": ["Pattern description"],
-    "potential_conflicts": ["Conflict warning"],
-    "similar_code": [{"file": "path", "description": "what it does"}],
-    "suggested_approach": "Recommended implementation that REUSES existing code when possible",
-    "complexity": "low|medium|high",
-    "warnings": ["Important consideration"],
-    "prefer_extending": ["List of existing files that should be extended instead of creating new ones"]
-}
-
-Be concise but thorough. Focus on actionable insights. PRIORITIZE finding code reuse opportunities."""
+Guidance:
+- Prefer reuse and extension of existing code.
+- Put risks, unknowns, or missing context into "warnings"."""
 
 
 def _rag_search(query: str, k: int = 10, budget=None, repo_stats: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

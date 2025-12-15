@@ -357,7 +357,11 @@ def main():
 
             # Standard mode - manual agent coordination
             debug_logger.log_workflow_phase("planning", {"task": task_description})
-            plan = planning_mode(task_description)
+            plan = planning_mode(
+                task_description,
+                max_plan_tasks=config.MAX_PLAN_TASKS,
+                max_planning_iterations=config.MAX_PLANNING_TOOL_ITERATIONS,
+            )
             state_manager = StateManager(plan)
             debug_logger.log("main", "PLAN_GENERATED", {
                 "task_count": len(plan.tasks),

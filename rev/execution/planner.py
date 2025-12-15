@@ -16,6 +16,7 @@ from rev.llm.client import ollama_chat
 from rev.config import (
     MAX_LLM_TOKENS_PER_RUN,
     MAX_PLAN_TASKS,
+    MAX_PLANNING_TOOL_ITERATIONS,
     ensure_escape_is_cleared,
     get_system_info_cached,
 )
@@ -24,119 +25,32 @@ from rev.tools.git_ops import get_repo_context
 from rev.tools.registry import get_available_tools, execute_tool
 
 
-PLANNING_SYSTEM = """You are an expert CI/CD agent analyzing tasks and creating execution plans.
+PLANNING_SYSTEM = """You are a planning agent. Produce an execution plan for the user request.
 
-⚠️  CRITICAL PRINCIPLE - REUSE FIRST:
-Before creating ANY new file:
-1. SEARCH for existing code that solves similar problems
-2. PREFER editing/extending existing files over creating new ones
-3. ONLY create new files when absolutely necessary
-4. AVOID duplication - reuse existing functions, classes, utilities, patterns
-5. When creating new files, include justification in task description: "No existing X found - creating new"
+Priorities:
+1) Reuse first: prefer extending existing code and patterns; avoid duplication.
+2) Make tasks executable: small, concrete, ordered, and test-aware.
+3) Limit exploration: gather only essential context, then generate the plan.
 
-TOKEN DISCIPLINE:
-- Keep every response concise (aim for <= 1,200 tokens).
-- If the request/context would exceed the budget, explicitly ask for a target token cap (e.g., "Plan this in 800 tokens") or propose splitting into smaller batches.
-- Prefer breaking large analyses into sequential tool-assisted steps instead of emitting a single giant message.
-- Respect the configured maximum conversation budget and surface when additional iterations are safer than one long response.
+Tool usage:
+- You may call 1-3 tools to gather essential context (list_dir, search_code, read_file).
+- After gathering context, IMMEDIATELY generate the plan as a JSON array.
+- Do NOT exhaustively explore - if you need more info, create review tasks in the plan.
+- If tool calling is unavailable, produce a best-effort plan with initial review tasks.
 
-STEP-BY-STEP PLANNING PROCESS (follow these steps):
+Output format (strict):
+- Return ONLY a JSON array. No prose, no markdown, no code fences.
+- Each item must be an object with exactly:
+  - "description": string
+  - "action_type": "review" | "edit" | "add" | "delete" | "test" | "doc"
+  - "complexity": "low" | "medium" | "high"
 
-STEP 1: UNDERSTAND the request
-- Read the user's request carefully
-- Identify the main goal and sub-goals
-- Note any constraints or requirements
-
-STEP 2: USE TOOLS to explore (REQUIRED - you MUST call these tools)
-- Call list_dir to discover relevant files
-- Call search_code to find existing patterns
-- Call read_file to understand current implementation
-- Call tree_view to understand directory structure
-
-STEP 3: ANALYZE findings
-- Review the tool results
-- Identify files that need modification
-- Find opportunities for code reuse
-- Note any risks or dependencies
-
-STEP 4: CREATE the plan
-- Break work into atomic tasks
-- Order tasks logically (dependencies first)
-- Include validation/testing steps
-- Return ONLY a JSON array of tasks
-
-CRITICAL: You MUST use tools to explore the codebase before planning!
-Do NOT skip STEP 2. Always call tools to gather information first.
-
-Available tools include:
-- analyze_ast_patterns: AST-based pattern matching for Python code
-- run_pylint: Comprehensive static code analysis
-- run_mypy: Static type checking
-- run_radon_complexity: Code complexity metrics
-- find_dead_code: Dead code detection
-- run_all_analysis: Combined analysis suite
-- search_code: Search code using regex patterns
-- list_dir: List files matching patterns (use this to enumerate files!)
-- read_file: Read file contents
-- tree_view: View directory tree structure
-
-PLANNING WORKFLOW:
-1. First, use tools to explore (list_dir, search_code, tree_view, read_file)
-2. For security audits: enumerate ALL relevant source files, search for unsafe patterns
-3. For multi-file changes: list all files that need modification
-4. For ANY structural changes: MUST investigate existing structures before creating new ones
-5. Based on tool results, create detailed, file-specific tasks
-
-Example for security audit:
-- Call list_dir to find all .c and .cpp files
-- Call search_code for each unsafe pattern (strcpy, malloc, etc.)
-- Create separate tasks for EACH file found
-- Add tasks for running security tools (Valgrind, AddressSanitizer, etc.)
-
-Example for structural changes (schemas, types, classes, enums, docs, config):
-- Call list_dir to find relevant files (*.prisma, *.ts, *.py, README*, config/*, etc.)
-- Call search_code to find ALL existing definitions (enum, class, interface, type, table)
-- Call read_file to review existing structures
-- Call analyze_code_structures to get comprehensive analysis
-- Check for similar or duplicate names
-- **MANDATORY: Create tasks to EXTEND/MODIFY existing structures instead of creating new ones**
-- Only create new structures if ABSOLUTELY NO suitable existing structure found
-- If creating new: Document in task why existing code cannot be reused
-
-IMPORTANT - System Context:
-You will be provided with the operating system information. Use this to:
-- Choose appropriate shell commands (bash for Linux/Mac, PowerShell for Windows)
-- Select platform-specific tools and utilities
-- Use correct path separators and file conventions
-- Adapt commands to the target environment
-
-Break down the work into atomic tasks:
-- Review: Analyze existing code
-- Edit: Modify existing files
-- Add: Create new files
-- Delete: Remove files
-- Rename: Move/rename files
-- Test: Run tests to validate changes
-
-For COMPLEX requests (e.g., "Add authentication system", "Build payment integration"):
-- Break down into HIGH-LEVEL phases first (e.g., "Design", "Implement core", "Add tests", "Documentation")
-- Then break each phase into SPECIFIC atomic tasks
-- Mark complex tasks with "complexity": "high" to enable recursive breakdown
-
-Return ONLY a JSON array of tasks in this format:
-[
-  {"description": "Review current API endpoint structure", "action_type": "review", "complexity": "low"},
-  {"description": "Add error handling to /api/users endpoint", "action_type": "edit", "complexity": "medium"},
-  {"description": "Create tests for error cases", "action_type": "add", "complexity": "low"},
-  {"description": "Run test suite to validate changes", "action_type": "test", "complexity": "low"}
-]
-
-Complexity levels:
-- low: Simple, single-file changes
-- medium: Multi-file changes or moderate logic
-- high: Major features requiring multiple steps (will be recursively broken down)
-
-Be thorough but concise. Each task should be independently executable."""
+Guidance:
+- Put review tasks first (find existing implementations and patterns).
+- For multi-feature work: one implementation task per feature.
+- For code changes: include at least one test task and name the command when possible.
+- If a task creates a new file, the description must say why reuse was not possible.
+- When in doubt, create review tasks instead of calling more tools."""
 
 
 CODING_PLANNING_SUFFIX = """
@@ -151,12 +65,12 @@ In addition to the general planning rules above, you MUST:
 3. Prefer many small, atomic tasks over a few large ones.
 
 Use these action_type values:
-- "review"  → analyzing existing code or architecture
-- "edit"    → modifying existing code
-- "add"     → creating new code or tests
-- "delete"  → deleting code or files
-- "test"    → running tests (pytest, npm test, go test, etc.)
-- "doc"     → updating docs, READMEs, or comments
+- "review": analyzing existing code or architecture
+- "edit": modifying existing code
+- "add": creating new code or tests
+- "delete": deleting code or files
+- "test": running tests (pytest, npm test, go test, etc.)
+- "doc": updating docs, READMEs, or comments
 
 When possible, include hints in the description about:
 - which test file or directory is affected
@@ -166,47 +80,15 @@ Your goal is to produce a PLAN that explicitly couples code changes with tests a
 """
 
 
-BREAKDOWN_SYSTEM = """You are an expert at breaking down complex tasks into smaller, actionable subtasks.
+BREAKDOWN_SYSTEM = """You break down a broad task into small, independently executable subtasks.
 
-Given a high-level task, break it down into SPECIFIC, ATOMIC subtasks that can be executed independently.
+Rules:
+- Each subtask does one concrete thing.
+- If the task implies multiple features/items, create one subtask per item.
+- For porting/integration work: first locate patterns, then implement one feature at a time, then add tests/integration steps.
+- Avoid a single subtask that covers the entire original task.
 
-CRITICAL RULES FOR BREAKDOWN:
-1. Each subtask must be a SINGLE, CONCRETE action (not "implement X, Y, and Z")
-2. If the task mentions "many" or "multiple" items, create a SEPARATE subtask for EACH item
-3. For integration tasks: first analyze source, then create individual tasks per feature/function
-4. Never create a single subtask that encompasses the entire original task
-5. Aim for 5-15 granular subtasks for complex integration work
-6. Each subtask should take 1-3 tool calls to complete
-
-You have access to code analysis tools to help understand the codebase:
-- analyze_ast_patterns, run_pylint, run_mypy, run_radon_complexity, find_dead_code
-- search_code, list_dir, read_file
-
-BREAKDOWN STRATEGY:
-For "implement features from X to Y" tasks:
-1. First: Review/analyze source code to identify specific features
-2. For EACH feature found: Create individual implementation subtask
-3. After features: Add integration/testing subtasks
-4. Never bundle multiple features into one subtask
-
-For "add multiple analysts/indicators/modules":
-1. Review existing code to understand patterns
-2. One subtask per analyst/indicator to add
-3. Separate subtasks for updating registries/configurations
-4. Separate subtasks for testing
-
-Return ONLY a JSON array of subtasks:
-[
-  {"description": "Review existing code to understand patterns and structure", "action_type": "review", "complexity": "low"},
-  {"description": "Analyze source code to identify available features to implement", "action_type": "review", "complexity": "low"},
-  {"description": "Implement first feature/module based on identified pattern", "action_type": "add", "complexity": "low"},
-  {"description": "Implement second feature/module based on identified pattern", "action_type": "add", "complexity": "low"},
-  {"description": "Implement third feature/module based on identified pattern", "action_type": "add", "complexity": "low"},
-  {"description": "Add unit tests for new features", "action_type": "add", "complexity": "low"},
-  {"description": "Update configuration/registry with new features", "action_type": "edit", "complexity": "low"}
-]
-
-Keep subtasks focused and executable. Each should accomplish ONE clear goal."""
+Output format (strict): return ONLY a JSON array of objects with keys "description", "action_type", "complexity"."""
 
 
 TOOL_RESULT_CHAR_LIMIT = 6000
@@ -248,19 +130,19 @@ def _format_available_tools(tools: List[Dict[str, Any]]) -> str:
 
             # Categorize tools
             if any(keyword in name for keyword in ["memory", "valgrind", "asan", "sanitizer", "leak"]):
-                category = "🔍 Memory Analysis"
+                category = "Memory Analysis"
             elif any(keyword in name for keyword in ["security", "vulnerability", "cve", "scan"]):
-                category = "🔒 Security Analysis"
+                category = "Security Analysis"
             elif any(keyword in name for keyword in ["pylint", "mypy", "radon", "analysis", "ast"]):
-                category = "📊 Static Analysis"
+                category = "Static Analysis"
             elif any(keyword in name for keyword in ["mcp", "server"]):
-                category = "🔌 MCP Servers"
+                category = "MCP Servers"
             elif any(keyword in name for keyword in ["search", "grep", "find", "list", "tree"]):
-                category = "🔎 Code Search"
+                category = "Code Search"
             elif any(keyword in name for keyword in ["read", "write", "file"]):
-                category = "📁 File Operations"
+                category = "File Operations"
             else:
-                category = "🛠️  General Tools"
+                category = "General Tools"
 
             tool_descriptions.append(f"  - {name}: {description} [{category}]")
 
@@ -338,9 +220,26 @@ def _call_llm_with_tools(
     conversation = messages.copy()
 
     for iteration in range(max_iterations):
+        # Add progressive pressure as iterations increase
+        iteration_tools = tools if (model_supports_tools is not False) else None
+
+        # Remove tools after 5 iterations to force plan generation
+        if iteration >= 5:
+            iteration_tools = None
+
+        # After 3 iterations, start pressuring to generate plan
+        if iteration >= 3 and iteration_tools:
+            # Add reminder to conversation
+            pressure_msg = {
+                "role": "user",
+                "content": f"You've used {iteration} tool calls. Generate the execution plan JSON array NOW. Stop exploring and create the plan."
+            }
+            if conversation[-1].get("role") != "user":
+                conversation.append(pressure_msg)
+
         response = ollama_chat(
             conversation,
-            tools=tools if (model_supports_tools is not False) else None,
+            tools=iteration_tools,
             model=model_name,
             supports_tools=model_supports_tools,
         ) or {}
@@ -360,7 +259,7 @@ def _call_llm_with_tools(
             # No more tool calls - return final response
             return response
 
-        print(f"\n  Planning iteration {iteration + 1}: LLM calling {len(tool_calls)} tool(s)...")
+        print(f"\n  Planning tool-iteration {iteration + 1}/{max_iterations}: LLM calling {len(tool_calls)} tool(s)...")
 
         # Add assistant message with tool calls to conversation
         conversation.append(message)
@@ -371,12 +270,25 @@ def _call_llm_with_tools(
         # Add tool results to conversation
         conversation.extend(tool_results)
 
-    # Max iterations reached
-    print(f"  Warning: Max planning iterations ({max_iterations}) reached")
+    # Max iterations reached - force plan generation
+    print(f"  Warning: Max planning tool-iterations ({max_iterations}) reached")
+    conversation.append({
+        "role": "user",
+        "content": """STOP calling tools. You have reached the iteration limit.
+
+Generate the execution plan RIGHT NOW as a JSON array with this exact format:
+[
+  {"description": "task description", "action_type": "review", "complexity": "low"},
+  {"description": "task description", "action_type": "edit", "complexity": "medium"}
+]
+
+Return ONLY the JSON array. No tools, no prose, just the JSON plan."""
+    })
+
     final_response = ollama_chat(conversation, tools=None, model=model_name, supports_tools=model_supports_tools) or {}
     if not isinstance(final_response, dict):
         return {"error": "LLM returned no response during planning (final call)"}
-    return final_response  # Final call without tools
+    return final_response
 
 
 def _is_overly_broad_task(task_description: str) -> bool:
@@ -654,7 +566,8 @@ def planning_mode(
     enable_advanced_analysis: bool = True,
     enable_recursive_breakdown: bool = True,
     coding_mode: bool = False,
-    max_plan_tasks: Optional[int] = None
+    max_plan_tasks: Optional[int] = None,
+    max_planning_iterations: Optional[int] = None,
 ) -> ExecutionPlan:
     """Generate execution plan from user request with advanced analysis.
 
@@ -676,6 +589,7 @@ def planning_mode(
     print("=" * 60)
 
     task_limit = max_plan_tasks or MAX_PLAN_TASKS
+    planning_iterations_limit = max_planning_iterations or MAX_PLANNING_TOOL_ITERATIONS
     model_name = config.PLANNING_MODEL
     model_supports_tools = config.PLANNING_SUPPORTS_TOOLS
 
@@ -739,38 +653,28 @@ User request:
 
 {plan_size_guidance}
 
-IMPORTANT: Before creating the execution plan:
-1. Use available tools to explore the codebase
-2. For security audits: enumerate C/C++ files, search for unsafe functions
-3. For multi-file tasks: use list_dir to find all relevant files
-4. For structural changes: MUST investigate existing definitions first
-5. Call tools as needed to gather information
+INSTRUCTIONS:
+1. If you need context, call 1-3 tools maximum (list_dir, search_code, or read_file)
+2. Then IMMEDIATELY generate the execution plan as a JSON array
+3. For unknown details, create review/research tasks in the plan instead of calling more tools
+4. Prefer creating review tasks over exhaustive exploration
 
-CRITICAL FOR STRUCTURAL CHANGES (schemas, types, classes, docs, config):
-- ALWAYS call search_code to find existing definitions:
-  * For schemas: search "enum ", "model ", "table ", "CREATE TABLE"
-  * For types/classes: search "interface ", "type ", "class ", "struct "
-  * For docs: search existing README, documentation structure
-  * For config: search existing config files, environment variables
-- ALWAYS call list_dir with appropriate patterns:
-  * Schemas: *.prisma, schema.*, migrations/*, *.sql
-  * Code: *.ts, *.py, *.js, *.go, *.java
-  * Docs: README*, docs/*, *.md
-  * Config: config/*, .env*, settings.*
-- ALWAYS call read_file to understand existing structures
-- ALWAYS call analyze_code_structures for comprehensive analysis
-- NEVER create new structures without checking if they already exist
-- Reuse and extend existing structures whenever possible
+GUIDELINES:
+- For structural changes: consider searching for existing patterns, OR create a review task
+- For multi-file work: consider calling list_dir once, OR create a review task to identify files
+- Avoid calling multiple tools repeatedly - gather minimal context then generate the plan
+- If uncertain, create a "Review existing X" task rather than exploring further
 
-After gathering information with tools, generate a comprehensive execution plan as a JSON array."""}
+Generate a comprehensive execution plan as a JSON array NOW."""}
     ]
 
     print("→ Generating execution plan...")
+    print(f"  Plan task cap: {task_limit} | Planning tool-iterations cap: {planning_iterations_limit}")
     ensure_escape_is_cleared("Planning interrupted before LLM call")
     response = _call_llm_with_tools(
         messages,
         tools,
-        max_iterations=30,
+        max_iterations=planning_iterations_limit,
         model_name=model_name,
         model_supports_tools=model_supports_tools,
     )
