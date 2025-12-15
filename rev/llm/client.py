@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""LLM (Language Model) client for rev using Ollama."""
+"""LLM (Language Model) client for rev with multi-provider support."""
 
 import os
 import json
@@ -15,6 +15,7 @@ import requests
 from rev import config
 from rev.cache import LLMResponseCache, get_llm_cache
 from rev.debug_logger import get_logger
+from rev.llm.provider_factory import get_provider, get_provider_for_model
 
 
 # Debug mode - set to True to see API requests/responses
@@ -298,324 +299,67 @@ def ollama_chat(
     model: Optional[str] = None,
     supports_tools: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    """Send chat request to Ollama.
+    """Send chat request to LLM using the appropriate provider.
 
-    Note: Ollama's tool/function calling support varies by model and version.
-    This implementation sends tools in OpenAI format but gracefully falls back
-    if the model doesn't support them.
+    This function now supports multiple providers (Ollama, OpenAI, Anthropic, Gemini)
+    and automatically routes to the correct provider based on the model name or
+    configuration.
 
-    For cloud models (ending with -cloud), this handles authentication flow.
+    For backward compatibility, this function defaults to Ollama if no provider
+    is specified. The provider can be explicitly set via REV_LLM_PROVIDER env var
+    or auto-detected from the model name (e.g., gpt-4 -> OpenAI, claude-3 -> Anthropic).
+
+    Args:
+        messages: List of message dicts with 'role' and 'content' keys
+        tools: Optional list of tool definitions in OpenAI format
+        model: Model name (provider will be auto-detected from name)
+        supports_tools: Whether the model supports tool calling
+
+    Returns:
+        Dict with 'message' and 'usage' keys, or 'error' key if failed
     """
-    # Setup signal handlers for interrupt handling
-    _setup_signal_handlers()
-
-    # Clear any previous interrupt flags
-    _interrupt_requested.clear()
-
-    # Enforce token limits to avoid exceeding provider constraints
-    trimmed_messages, original_tokens, trimmed_tokens, was_truncated = _enforce_token_limit(
-        messages,
-        config.MAX_LLM_TOKENS_PER_RUN,
-    )
-
-    prompt_tokens_estimate = trimmed_tokens
-
-    if was_truncated:
-        print(
-            f"⚠️  Context trimmed from ~{original_tokens:,} to ~{trimmed_tokens:,} tokens "
-            f"(limit {config.MAX_LLM_TOKENS_PER_RUN:,})."
-        )
-
-    messages = trimmed_messages
-    messages, _appended_continue = _ensure_last_user_or_tool(messages)
-
     model_name = model or config.OLLAMA_MODEL
     supports_tools = config.DEFAULT_SUPPORTS_TOOLS if supports_tools is None else supports_tools
 
-    # Get the LLM cache
+    # Get cache for checking/storing responses
     llm_cache = get_llm_cache() or LLMResponseCache()
-
     tools_provided = tools is not None and supports_tools
 
-    # Try to get cached response first (include model in cache key)
+    # Check cache first (include model in cache key)
     cached_response = llm_cache.get_response(messages, tools if tools_provided else None, model_name)
     if cached_response is not None:
         if OLLAMA_DEBUG:
             print("[DEBUG] Using cached LLM response")
-
         cached_response.setdefault("usage", _token_usage_tracker.snapshot())
-
-        # Log cache hit
         debug_logger = get_logger()
         debug_logger.log_llm_response(model_name, cached_response, cached=True)
-
         return cached_response
 
-    # All models (including cloud models) use the local Ollama instance
-    # The local Ollama instance automatically proxies cloud model requests
-    base_url = config.OLLAMA_BASE_URL
-    url = f"{base_url}/api/chat"
+    # Get the appropriate provider for the model
+    try:
+        provider = get_provider_for_model(model_name)
+    except ValueError as e:
+        return {"error": f"Provider error: {e}"}
 
-    # Notify user if using a cloud model
-    is_cloud_model = model_name.endswith("-cloud")
-    if is_cloud_model and (OLLAMA_DEBUG or not hasattr(ollama_chat, '_cloud_model_notified')):
-        print(f"ℹ️  Using cloud model: {model_name} (proxied through local Ollama)")
-        ollama_chat._cloud_model_notified = True
+    # Make the request through the provider
+    response = provider.chat(
+        messages=messages,
+        tools=tools,
+        model=model_name,
+        supports_tools=supports_tools,
+    )
 
-    # Build base payload with generation parameters
-    # These parameters improve tool calling accuracy, especially for local models
-    payload = {
-        "model": model_name,
-        "messages": messages,
-        "stream": False,
-        "options": {
-            # Lower temperature (0.1) improves consistency and accuracy for tool calling
-            "temperature": config.OLLAMA_TEMPERATURE,
-            # Larger context window (16K) allows for more complex tool interactions
-            "num_ctx": config.OLLAMA_NUM_CTX,
-            # Top-p and top-k for controlled sampling
-            "top_p": config.OLLAMA_TOP_P,
-            "top_k": config.OLLAMA_TOP_K,
-        }
-    }
+    # Track token usage if successful
+    if "usage" in response and "error" not in response:
+        _token_usage_tracker.record(
+            response["usage"].get("prompt", 0),
+            response["usage"].get("completion", 0)
+        )
 
-    # Try with tools first if provided (including an empty array to force tools mode)
-    if tools_provided:
-        payload["mode"] = "tools"
-        payload["tools"] = tools or []
+        # Cache successful response
+        llm_cache.set_response(messages, response, tools if tools_provided else None, model_name)
 
-    # Log the LLM request
-    debug_logger = get_logger()
-    debug_logger.log_llm_request(model_name, messages, tools if tools_provided else None)
-
-    if OLLAMA_DEBUG:
-        print(f"[DEBUG] Ollama request to {url}")
-        print(f"[DEBUG] Model: {model_name}")
-        print(f"[DEBUG] Generation parameters:")
-        print(f"[DEBUG]   - temperature: {config.OLLAMA_TEMPERATURE}")
-        print(f"[DEBUG]   - num_ctx: {config.OLLAMA_NUM_CTX}")
-        print(f"[DEBUG]   - top_p: {config.OLLAMA_TOP_P}")
-        print(f"[DEBUG]   - top_k: {config.OLLAMA_TOP_K}")
-        print(f"[DEBUG] Messages: {json.dumps(messages, indent=2)}")
-        if tools_provided:
-            print(f"[DEBUG] Tools: {len(tools or [])} tools provided")
-        elif tools is not None and not supports_tools:
-            print(f"[DEBUG] Tools suppressed (supports_tools=False) for model {model_name}")
-
-    # Retry with configurable limits and backoff
-    max_retries, retry_forever, retry_backoff, max_backoff, timeout_cap = _get_retry_config()
-    base_timeout = 600  # 10 minutes
-    max_attempts = max_retries if max_retries > 0 else 1  # ensure at least one attempt even when retry_forever
-
-    # Track if we've already prompted for auth in this call
-    auth_prompted = False
-
-    def _sleep_before_retry(reason: str):
-        """Sleep with capped backoff before a retry attempt."""
-        delay = min(max_backoff, retry_backoff * (attempt + 1))
-        if delay > 0:
-            debug_logger.log("llm", "LLM_RETRY_DELAY", {
-                "reason": reason,
-                "attempt": attempt + 1,
-                "delay_seconds": delay,
-            }, "INFO")
-            if OLLAMA_DEBUG:
-                print(f"[DEBUG] Sleeping {delay}s before retry ({reason})...")
-            time.sleep(delay)
-        return delay
-
-    attempt = 0
-    while attempt < max_attempts or retry_forever:
-        timeout = base_timeout * min(attempt + 1, timeout_cap)  # 600, 1200, 1800 (capped)
-
-        if attempt > 0:
-            debug_logger.log("llm", "LLM_RETRY", {
-                "attempt": attempt + 1,
-                "max_retries": max_retries,
-                "timeout_seconds": timeout,
-                "timeout_minutes": timeout // 60
-            }, "INFO")
-
-        if OLLAMA_DEBUG and attempt > 0:
-            print(f"[DEBUG] Retry attempt {attempt + 1}/{max_retries} with timeout {timeout}s ({timeout // 60}m)")
-
-        try:
-            resp = _make_request_interruptible(url, payload, timeout)
-
-            if OLLAMA_DEBUG:
-                print(f"[DEBUG] Response status: {resp.status_code}")
-                print(f"[DEBUG] Response: {resp.text[:500]}")
-
-            # Handle 401 Unauthorized for cloud models
-            if resp.status_code == 401:
-                debug_logger.log("llm", "AUTH_REQUIRED", {
-                    "status_code": 401,
-                    "model": model_name
-                }, "WARNING")
-
-                try:
-                    error_data = resp.json()
-                    signin_url = error_data.get("signin_url")
-
-                    if signin_url and not auth_prompted:
-                        auth_prompted = True
-                        debug_logger.log("llm", "AUTH_PROMPT", {
-                            "signin_url": signin_url
-                        }, "INFO")
-
-                        print("\n" + "=" * 60)
-                        print("OLLAMA CLOUD AUTHENTICATION REQUIRED")
-                        print("=" * 60)
-                        print(f"\nModel '{model_name}' requires authentication.")
-                        print(f"\nTo authenticate:")
-                        print(f"1. Visit this URL in your browser:")
-                        print(f"   {signin_url}")
-                        print(f"\n2. Sign in with your Ollama account")
-                        print(f"3. Authorize this device")
-                        print("\n" + "=" * 60)
-
-                        # Wait for user to authenticate
-                        try:
-                            input("\nPress Enter after completing authentication, or Ctrl+C to cancel...")
-                        except KeyboardInterrupt:
-                            debug_logger.log("llm", "AUTH_CANCELLED", {}, "WARNING")
-                            return {"error": "Authentication cancelled by user"}
-
-                        # Retry the request after authentication
-                        print("\nRetrying request...")
-                        debug_logger.log("llm", "AUTH_RETRY", {}, "INFO")
-                        continue
-                    else:
-                        # If we've already prompted or no signin_url, return error
-                        return {"error": f"Ollama API error: {resp.status_code} {resp.reason} - {resp.text}"}
-
-                except json.JSONDecodeError:
-                    return {"error": f"Ollama API error: {resp.status_code} {resp.reason}"}
-
-            # If we get a 400 and we sent tools, try again without tools
-            if resp.status_code == 400 and tools_provided:
-                if OLLAMA_DEBUG:
-                    print("[DEBUG] Got 400 with tools, retrying without tools...")
-
-                # Retry without tools
-                payload_no_tools = {
-                    "model": model_name,
-                    "messages": messages,
-                    "stream": False
-                }
-                resp = _make_request_interruptible(url, payload_no_tools, timeout)
-
-            resp.raise_for_status()
-            response = resp.json()
-
-            completion_tokens = _estimate_message_tokens(response.get("message", {}))
-            _token_usage_tracker.record(prompt_tokens_estimate, completion_tokens)
-            response["usage"] = {
-                "prompt": prompt_tokens_estimate,
-                "completion": completion_tokens,
-                "total": prompt_tokens_estimate + completion_tokens,
-            }
-
-            # Log successful response
-            debug_logger.log_llm_response(model_name, response, cached=False)
-
-            # Cache the successful response (include model in cache key)
-            llm_cache.set_response(messages, response, tools if tools_provided else None, model_name)
-
-            return response
-
-        except KeyboardInterrupt:
-            # Don't catch keyboard interrupts - let them propagate
-            debug_logger.log("llm", "REQUEST_CANCELLED", {}, "WARNING")
-            print("\n\nRequest cancelled by user (Ctrl+C)")
-            raise
-
-        except requests.exceptions.Timeout as e:
-            debug_logger.log("llm", "TIMEOUT", {
-                "attempt": attempt + 1,
-                "max_retries": max_retries,
-                "timeout_seconds": timeout,
-                "will_retry": attempt < max_retries - 1
-            }, "WARNING")
-
-            should_retry = retry_forever or attempt < max_attempts - 1
-            if should_retry:
-                if OLLAMA_DEBUG:
-                    print(f"[DEBUG] Request timed out after {timeout}s, will retry with longer timeout...")
-                _sleep_before_retry("timeout")
-                attempt += 1
-                continue  # Retry with longer timeout
-            else:
-                error_msg = f"Ollama API timeout after {max_retries} attempts (final timeout: {timeout}s)"
-                debug_logger.log("llm", "TIMEOUT_FINAL", {"error": error_msg}, "ERROR")
-                return {"error": error_msg}
-
-        except requests.exceptions.HTTPError as e:
-            error_detail = ""
-            try:
-                error_detail = f" - {resp.text}"
-            except Exception:
-                pass  # resp.text may not be available
-
-            # Log HTTP error
-            debug_logger.log("llm", "HTTP_ERROR", {
-                "status_code": resp.status_code if 'resp' in locals() else None,
-                "error": str(e),
-                "error_detail": error_detail[:200],
-                "attempt": attempt + 1,
-                "will_retry": resp.status_code >= 500 and attempt < max_retries - 1 if 'resp' in locals() else False
-            }, "ERROR")
-
-            # For retryable HTTP errors (5xx server errors), continue to retry
-            status_code = resp.status_code if 'resp' in locals() else None
-            retryable_http = status_code is not None and status_code >= 500
-            should_retry = retryable_http and (retry_forever or attempt < max_attempts - 1)
-            if should_retry:
-                if OLLAMA_DEBUG:
-                    print(f"[DEBUG] HTTP {resp.status_code} error, will retry (attempt {attempt + 1}/{max_retries})...")
-                _sleep_before_retry("http_error")
-                attempt += 1
-                continue
-
-            # For non-retryable errors or final attempt, return the error
-            return {"error": f"Ollama API error: {e}{error_detail}"}
-
-        except requests.exceptions.RequestException as e:
-            # Log request exception
-            debug_logger.log("llm", "REQUEST_EXCEPTION", {
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "attempt": attempt + 1,
-                "will_retry": attempt < max_retries - 1
-            }, "ERROR")
-
-            # Network-related errors (connection errors, etc.) should be retried
-            should_retry = retry_forever or attempt < max_attempts - 1
-            if should_retry:
-                if OLLAMA_DEBUG:
-                    print(f"[DEBUG] Request error: {e}, will retry (attempt {attempt + 1}/{max_retries})...")
-                _sleep_before_retry("request_exception")
-                attempt += 1
-                continue
-            return {"error": f"Ollama API error: {e}"}
-
-        except Exception as e:
-            # Log unexpected error
-            debug_logger.log("llm", "UNEXPECTED_ERROR", {
-                "error": str(e),
-                "error_type": type(e).__name__
-            }, "ERROR")
-
-            # For unexpected errors, don't retry unless explicitly configured to retry forever
-            if retry_forever:
-                _sleep_before_retry("unexpected_error")
-                attempt += 1
-                continue
-            return {"error": f"Ollama API error: {e}"}
-
-        attempt += 1
-
-    return {"error": f"Ollama API retries exhausted after {attempt} attempt(s) (retry_forever={retry_forever})"}
+    return response
 
 
 def ollama_chat_stream(
@@ -627,16 +371,16 @@ def ollama_chat_stream(
     check_interrupt: Optional[callable] = None,
     check_user_messages: Optional[callable] = None,
 ) -> Dict[str, Any]:
-    """Stream chat responses from Ollama with real-time output.
+    """Stream chat responses from LLM with real-time output.
 
-    This function provides the same interface as ollama_chat but streams
-    the response, calling on_chunk for each piece of generated text.
-    This enables a real-time experience similar to Claude Code.
+    This function now supports multiple providers (Ollama, OpenAI, Anthropic, Gemini)
+    and automatically routes to the correct provider based on the model name or
+    configuration.
 
     Args:
         messages: Chat messages in OpenAI format
         tools: Optional list of tool definitions
-        model: Model name (defaults to config.OLLAMA_MODEL)
+        model: Model name (provider will be auto-detected from name)
         supports_tools: Whether the model supports tool calling
         on_chunk: Callback called with each text chunk as it arrives
         check_interrupt: Callback to check if execution should be interrupted
@@ -645,187 +389,31 @@ def ollama_chat_stream(
     Returns:
         Complete response dict (same format as ollama_chat)
     """
-    _setup_signal_handlers()
-    _interrupt_requested.clear()
-
-    # Enforce token limits
-    trimmed_messages, original_tokens, trimmed_tokens, was_truncated = _enforce_token_limit(
-        messages,
-        config.MAX_LLM_TOKENS_PER_RUN,
-    )
-
-    prompt_tokens_estimate = trimmed_tokens
-
-    if was_truncated:
-        print(
-            f"⚠️  Context trimmed from ~{original_tokens:,} to ~{trimmed_tokens:,} tokens "
-            f"(limit {config.MAX_LLM_TOKENS_PER_RUN:,})."
-        )
-
-    messages = trimmed_messages
-    messages, _appended_continue = _ensure_last_user_or_tool(messages)
-
     model_name = model or config.OLLAMA_MODEL
     supports_tools = config.DEFAULT_SUPPORTS_TOOLS if supports_tools is None else supports_tools
 
-    tools_provided = tools is not None and supports_tools
+    # Get the appropriate provider for the model
+    try:
+        provider = get_provider_for_model(model_name)
+    except ValueError as e:
+        return {"error": f"Provider error: {e}"}
 
-    base_url = config.OLLAMA_BASE_URL
-    url = f"{base_url}/api/chat"
+    # Make the streaming request through the provider
+    response = provider.chat_stream(
+        messages=messages,
+        tools=tools,
+        model=model_name,
+        supports_tools=supports_tools,
+        on_chunk=on_chunk,
+        check_interrupt=check_interrupt,
+        check_user_messages=check_user_messages,
+    )
 
-    # Build streaming payload
-    payload = {
-        "model": model_name,
-        "messages": messages,
-        "stream": True,  # Enable streaming
-        "options": {
-            "temperature": config.OLLAMA_TEMPERATURE,
-            "num_ctx": config.OLLAMA_NUM_CTX,
-            "top_p": config.OLLAMA_TOP_P,
-            "top_k": config.OLLAMA_TOP_K,
-        }
-    }
+    # Track token usage if successful
+    if "usage" in response and "error" not in response:
+        _token_usage_tracker.record(
+            response["usage"].get("prompt", 0),
+            response["usage"].get("completion", 0)
+        )
 
-    if tools_provided:
-        payload["mode"] = "tools"
-        payload["tools"] = tools or []
-
-    # Log request
-    debug_logger = get_logger()
-    debug_logger.log_llm_request(model_name, messages, tools if tools_provided else None)
-
-    if OLLAMA_DEBUG:
-        print(f"[DEBUG] Streaming request to {url}")
-        print(f"[DEBUG] Model: {model_name}")
-
-    max_retries, retry_forever, retry_backoff, max_backoff, timeout_cap = _get_retry_config()
-    base_timeout = 600
-
-    attempt = 0
-    max_attempts = max_retries if max_retries > 0 else 1
-
-    while attempt < max_attempts or retry_forever:
-        timeout = base_timeout * min(attempt + 1, timeout_cap)
-
-        try:
-            # Make streaming request
-            response = requests.post(url, json=payload, timeout=timeout, stream=True)
-
-            if response.status_code == 400 and tools_provided:
-                # Retry without tools
-                payload_no_tools = {
-                    "model": model_name,
-                    "messages": messages,
-                    "stream": True,
-                    "options": payload.get("options", {})
-                }
-                response = requests.post(url, json=payload_no_tools, timeout=timeout, stream=True)
-
-            response.raise_for_status()
-
-            # Accumulate the streaming response
-            accumulated_content = ""
-            accumulated_tool_calls = []
-            final_message = {}
-
-            for line in response.iter_lines():
-                # Check for interrupts
-                if _interrupt_requested.is_set():
-                    raise KeyboardInterrupt("Request cancelled by user")
-
-                if check_interrupt and check_interrupt():
-                    raise KeyboardInterrupt("Execution interrupted")
-
-                # Check for user messages that should be injected
-                # (We don't inject mid-stream, but we can signal for next iteration)
-                if check_user_messages:
-                    check_user_messages()
-
-                if not line:
-                    continue
-
-                try:
-                    chunk_data = json.loads(line)
-
-                    if "error" in chunk_data:
-                        return {"error": chunk_data["error"]}
-
-                    msg = chunk_data.get("message", {})
-                    content = msg.get("content", "")
-                    tool_calls = msg.get("tool_calls", [])
-
-                    if content:
-                        accumulated_content += content
-                        if on_chunk:
-                            on_chunk(content)
-
-                    if tool_calls:
-                        accumulated_tool_calls.extend(tool_calls)
-
-                    # Check if this is the final chunk
-                    if chunk_data.get("done", False):
-                        final_message = {
-                            "role": "assistant",
-                            "content": accumulated_content,
-                        }
-                        if accumulated_tool_calls:
-                            final_message["tool_calls"] = accumulated_tool_calls
-                        break
-
-                except json.JSONDecodeError:
-                    # Skip malformed lines
-                    continue
-
-            # Build complete response
-            completion_tokens = _estimate_message_tokens(final_message)
-            _token_usage_tracker.record(prompt_tokens_estimate, completion_tokens)
-
-            result = {
-                "message": final_message,
-                "done": True,
-                "usage": {
-                    "prompt": prompt_tokens_estimate,
-                    "completion": completion_tokens,
-                    "total": prompt_tokens_estimate + completion_tokens,
-                }
-            }
-
-            debug_logger.log_llm_response(model_name, result, cached=False)
-            return result
-
-        except KeyboardInterrupt:
-            debug_logger.log("llm", "STREAM_CANCELLED", {}, "WARNING")
-            if on_chunk:
-                on_chunk("\n[Cancelled]")
-            raise
-
-        except requests.exceptions.Timeout:
-            should_retry = retry_forever or attempt < max_attempts - 1
-            if should_retry:
-                delay = min(max_backoff, retry_backoff * (attempt + 1))
-                time.sleep(delay)
-                attempt += 1
-                continue
-            return {"error": f"Streaming timeout after {attempt + 1} attempts"}
-
-        except requests.exceptions.RequestException as e:
-            should_retry = retry_forever or attempt < max_attempts - 1
-            if should_retry:
-                delay = min(max_backoff, retry_backoff * (attempt + 1))
-                time.sleep(delay)
-                attempt += 1
-                continue
-            return {"error": f"Streaming error: {e}"}
-
-        except Exception as e:
-            debug_logger.log("llm", "STREAM_ERROR", {"error": str(e)}, "ERROR")
-            if retry_forever:
-                delay = min(max_backoff, retry_backoff * (attempt + 1))
-                time.sleep(delay)
-                attempt += 1
-                continue
-            return {"error": f"Streaming error: {e}"}
-
-        attempt += 1
-
-    return {"error": f"Streaming retries exhausted after {attempt} attempt(s)"}
+    return response

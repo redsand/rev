@@ -73,6 +73,72 @@ OLLAMA_TOP_P = float(os.getenv("OLLAMA_TOP_P", "0.9"))
 
 # Top-k for limiting vocabulary selection
 OLLAMA_TOP_K = int(os.getenv("OLLAMA_TOP_K", "40"))
+
+# ============================================================================
+# Multi-Provider LLM Configuration
+# ============================================================================
+# Provider selection: ollama, openai, anthropic, gemini
+# Set REV_LLM_PROVIDER to choose which provider to use
+# Or let the system auto-detect based on model name
+LLM_PROVIDER = os.getenv("REV_LLM_PROVIDER", "ollama")
+
+# Per-phase provider overrides (optional)
+# These allow different providers for different agent phases
+EXECUTION_PROVIDER = os.getenv("REV_EXECUTION_PROVIDER", LLM_PROVIDER)
+PLANNING_PROVIDER = os.getenv("REV_PLANNING_PROVIDER", LLM_PROVIDER)
+RESEARCH_PROVIDER = os.getenv("REV_RESEARCH_PROVIDER", LLM_PROVIDER)
+
+# OpenAI Configuration
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview")
+OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.1"))
+
+# Anthropic (Claude) Configuration
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
+ANTHROPIC_TEMPERATURE = float(os.getenv("ANTHROPIC_TEMPERATURE", "0.1"))
+ANTHROPIC_MAX_TOKENS = int(os.getenv("ANTHROPIC_MAX_TOKENS", "8192"))
+
+# Google Gemini Configuration
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
+GEMINI_TEMPERATURE = float(os.getenv("GEMINI_TEMPERATURE", "0.1"))
+GEMINI_TOP_P = float(os.getenv("GEMINI_TOP_P", "0.9"))
+GEMINI_TOP_K = int(os.getenv("GEMINI_TOP_K", "40"))
+GEMINI_MAX_OUTPUT_TOKENS = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "8192"))
+
+# Load saved API keys from secrets file (if environment variables not set)
+# This is done at module load time to make saved keys available immediately
+def _load_saved_api_keys():
+    """Load saved API keys from secrets file if not already set via environment."""
+    try:
+        from rev.secrets_manager import get_api_key
+
+        global OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY
+
+        # Only load from secrets if not set in environment
+        if not OPENAI_API_KEY:
+            saved_key = get_api_key("openai")
+            if saved_key:
+                OPENAI_API_KEY = saved_key
+
+        if not ANTHROPIC_API_KEY:
+            saved_key = get_api_key("anthropic")
+            if saved_key:
+                ANTHROPIC_API_KEY = saved_key
+
+        if not GEMINI_API_KEY:
+            saved_key = get_api_key("gemini")
+            if saved_key:
+                GEMINI_API_KEY = saved_key
+    except ImportError:
+        # secrets_manager not available yet (circular import during initial load)
+        pass
+
+# Try to load saved API keys
+_load_saved_api_keys()
+# ============================================================================
+
 VALIDATION_MODE_DEFAULT = os.getenv("REV_VALIDATION_MODE", "targeted").lower()
 MAX_FILE_BYTES = 5 * 1024 * 1024
 READ_RETURN_LIMIT = 80_000

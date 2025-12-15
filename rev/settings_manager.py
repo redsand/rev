@@ -179,6 +179,31 @@ def _set_private_mode_runtime(enabled: bool) -> None:
         pass
 
 
+def _mask_api_key(api_key: str) -> str:
+    """Mask an API key for display purposes."""
+    if not api_key:
+        return "(not set)"
+    if len(api_key) <= 8:
+        return "*" * len(api_key)
+    return f"{api_key[:4]}...{api_key[-4:]}"
+
+
+def _set_api_key_runtime(provider: str, api_key: str) -> None:
+    """Set API key for a provider and save to secrets file."""
+    from rev.secrets_manager import set_api_key
+
+    # Save to secrets file
+    set_api_key(provider, api_key)
+
+    # Update config module
+    if provider == "openai":
+        config.OPENAI_API_KEY = api_key
+    elif provider == "anthropic":
+        config.ANTHROPIC_API_KEY = api_key
+    elif provider == "gemini":
+        config.GEMINI_API_KEY = api_key
+
+
 RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
     "model": RuntimeSetting(
         key="model",
@@ -561,6 +586,44 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         getter=lambda: config.SIMILARITY_THRESHOLD,
         setter=lambda value: setattr(config, "SIMILARITY_THRESHOLD", value),
         default=config.SIMILARITY_THRESHOLD,
+    ),
+    "openai_api_key": RuntimeSetting(
+        key="openai_api_key",
+        description="OpenAI API key (saved securely in .rev/secrets.json)",
+        section="API Keys",
+        parser=lambda value: str(value).strip(),
+        getter=lambda: _mask_api_key(config.OPENAI_API_KEY),
+        setter=lambda value: _set_api_key_runtime("openai", value),
+        default="",
+    ),
+    "anthropic_api_key": RuntimeSetting(
+        key="anthropic_api_key",
+        description="Anthropic API key (saved securely in .rev/secrets.json)",
+        section="API Keys",
+        parser=lambda value: str(value).strip(),
+        getter=lambda: _mask_api_key(config.ANTHROPIC_API_KEY),
+        setter=lambda value: _set_api_key_runtime("anthropic", value),
+        default="",
+    ),
+    "gemini_api_key": RuntimeSetting(
+        key="gemini_api_key",
+        description="Google Gemini API key (saved securely in .rev/secrets.json)",
+        section="API Keys",
+        parser=lambda value: str(value).strip(),
+        getter=lambda: _mask_api_key(config.GEMINI_API_KEY),
+        setter=lambda value: _set_api_key_runtime("gemini", value),
+        default="",
+    ),
+    "llm_provider": RuntimeSetting(
+        key="llm_provider",
+        description="Active LLM provider (ollama, openai, anthropic, gemini)",
+        section="API Keys",
+        parser=lambda value: _parse_choice(
+            value, choices={"ollama", "openai", "anthropic", "gemini"}
+        ),
+        getter=lambda: config.LLM_PROVIDER,
+        setter=lambda value: setattr(config, "LLM_PROVIDER", value),
+        default=config.LLM_PROVIDER,
     ),
     "private_mode": RuntimeSetting(
         key="private_mode",
