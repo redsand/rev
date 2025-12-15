@@ -32,6 +32,12 @@ Priorities:
 2) Make tasks executable: small, concrete, ordered, and test-aware.
 3) Limit exploration: gather only essential context, then generate the plan.
 
+CRITICAL REQUIREMENT:
+- You MUST generate AT LEAST 2 distinct tasks
+- NEVER collapse everything into a single task
+- Break down work into review/analysis + implementation + testing phases
+- If you're unsure, create separate tasks for: review, implementation, and validation
+
 Tool usage:
 - You may call 1-3 tools to gather essential context (list_dir, search_code, read_file).
 - After gathering context, IMMEDIATELY generate the plan as a JSON array.
@@ -50,7 +56,12 @@ Guidance:
 - For multi-feature work: one implementation task per feature.
 - For code changes: include at least one test task and name the command when possible.
 - If a task creates a new file, the description must say why reuse was not possible.
-- When in doubt, create review tasks instead of calling more tools."""
+- When in doubt, create review tasks instead of calling more tools.
+
+MINIMUM TASK BREAKDOWN:
+- At minimum: [review/analysis task] + [implementation task]
+- Better: [review] + [implementation] + [test]
+- Best: [review] + [multiple specific implementation tasks] + [test] + [validation]"""
 
 
 CODING_PLANNING_SUFFIX = """
@@ -82,11 +93,21 @@ Your goal is to produce a PLAN that explicitly couples code changes with tests a
 
 BREAKDOWN_SYSTEM = """You break down a broad task into small, independently executable subtasks.
 
+CRITICAL REQUIREMENT:
+- You MUST return AT LEAST 3 subtasks (minimum)
+- NEVER return a single task that just rephrases the original request
+- Break work into distinct phases: review/research, implementation(s), testing
+
 Rules:
 - Each subtask does one concrete thing.
 - If the task implies multiple features/items, create one subtask per item.
 - For porting/integration work: first locate patterns, then implement one feature at a time, then add tests/integration steps.
 - Avoid a single subtask that covers the entire original task.
+
+MINIMUM BREAKDOWN PATTERN:
+1. Review/research task (understand existing code/patterns)
+2. One or more implementation tasks (each doing ONE specific thing)
+3. Testing/validation task
 
 Output format (strict): return ONLY a JSON array of objects with keys "description", "action_type", "complexity"."""
 
@@ -653,6 +674,11 @@ User request:
 
 {plan_size_guidance}
 
+CRITICAL REQUIREMENTS:
+- You MUST generate AT LEAST 2 distinct tasks (minimum)
+- NEVER return a single task that just restates the user request
+- Break down work into phases: review/analysis → implementation → testing/validation
+
 INSTRUCTIONS:
 1. If you need context, call 1-3 tools maximum (list_dir, search_code, or read_file)
 2. Then IMMEDIATELY generate the execution plan as a JSON array
@@ -665,7 +691,14 @@ GUIDELINES:
 - Avoid calling multiple tools repeatedly - gather minimal context then generate the plan
 - If uncertain, create a "Review existing X" task rather than exploring further
 
-Generate a comprehensive execution plan as a JSON array NOW."""}
+MINIMUM ACCEPTABLE PLAN STRUCTURE:
+[
+  {{"description": "Review existing code/patterns relevant to request", "action_type": "review", "complexity": "low"}},
+  {{"description": "Implement specific change/feature", "action_type": "add", "complexity": "medium"}},
+  {{"description": "Run tests to validate changes", "action_type": "test", "complexity": "low"}}
+]
+
+Generate a comprehensive execution plan as a JSON array NOW with AT LEAST 2 tasks."""}
     ]
 
     print("→ Generating execution plan...")
@@ -751,10 +784,42 @@ Generate a comprehensive execution plan as a JSON array NOW."""}
                     plan.tasks[-1].complexity = task_data.get("complexity", "low")
         else:
             print("Warning: Could not parse JSON plan, using fallback")
+            # Fallback: split into review + implementation
+            plan.add_task(f"Review existing code and patterns for: {user_request}", "review")
             plan.add_task(user_request, "general")
     except Exception as e:
         print(f"Warning: Error parsing plan: {e}")
+        # Fallback: split into review + implementation
+        plan.add_task(f"Review existing code and patterns for: {user_request}", "review")
         plan.add_task(user_request, "general")
+
+    # CRITICAL VALIDATION: Ensure we have at least 2 tasks
+    if len(plan.tasks) == 1:
+        print("  ⚠️  Plan contains only 1 task - forcing split into review + implementation")
+        single_task = plan.tasks[0]
+        plan.tasks = []
+
+        # Create review task
+        plan.add_task(
+            f"Review existing code, patterns, and implementations relevant to: {single_task.description}",
+            "review"
+        )
+        plan.tasks[-1].complexity = "low"
+
+        # Keep original task as implementation
+        plan.add_task(
+            single_task.description,
+            single_task.action_type if single_task.action_type != "general" else "add"
+        )
+        plan.tasks[-1].complexity = single_task.complexity
+
+        # Add test task if it's a code change
+        if plan.tasks[-1].action_type in {"add", "edit"}:
+            plan.add_task(
+                "Run automated tests to validate the changes",
+                "test"
+            )
+            plan.tasks[-1].complexity = "low"
 
     original_task_count = len(plan.tasks)
     capped_from = _cap_plan_tasks(plan, task_limit)
