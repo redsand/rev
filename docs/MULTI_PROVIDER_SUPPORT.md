@@ -28,24 +28,23 @@ pip install google-generativeai
 
 You have three options for setting API keys:
 
-#### Option A: Use the CLI Tool (Recommended)
-The easiest way to save your API keys securely:
+#### Option A: Use the /api-key Command (Recommended)
+The easiest way - use Rev's built-in command:
 
 ```bash
-# Set OpenAI API key
-python set_api_key.py openai sk-your-openai-key-here
+# Start Rev
+python -m rev
 
-# Set Anthropic API key
-python set_api_key.py anthropic sk-ant-your-anthropic-key-here
-
-# Set Gemini API key
-python set_api_key.py gemini your-gemini-key-here
+# Set API keys interactively (input will be hidden)
+/api-key set openai
+/api-key set anthropic
+/api-key set gemini
 
 # View saved keys (masked for security)
-python set_api_key.py --list
+/api-key list
 
 # Delete a key
-python set_api_key.py --delete openai
+/api-key delete openai
 ```
 
 Keys are stored securely in `.rev/secrets.json` with restricted file permissions (owner read/write only).

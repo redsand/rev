@@ -87,7 +87,7 @@ class HelpCommand(CommandHandler):
         categories = {
             "Session Management": ["clear", "save", "reset", "exit"],
             "Information": ["status", "cost", "config", "doctor", "version"],
-            "Model & Configuration": ["model", "mode", "set", "private", "add-dir"],
+            "Model & Configuration": ["model", "mode", "set", "api-key", "private", "add-dir"],
             "Code Review & Validation": ["review", "validate"],
             "Project Setup": ["init", "export"],
             "Help": ["help"]
@@ -188,44 +188,38 @@ class ModelCommand(CommandHandler):
     def __init__(self):
         super().__init__(
             "model",
-            "View or change the AI model (e.g., /model qwen3-coder:480b-cloud)"
+            "View or change the AI model (supports Ollama, OpenAI, Anthropic, Gemini)"
         )
 
     def execute(self, args: List[str], session_context: Dict[str, Any]) -> str:
+        from rev.llm.provider_factory import detect_provider_from_model, get_provider
+
         if not args:
             # Show current model and available models
-            output = [create_header("Available Models", width=80)]
-            output.append(create_section("Current Model"))
-            output.append(f"  {colorize(Symbols.ARROW, Colors.BRIGHT_GREEN)} {config.OLLAMA_MODEL}")
+            output = [create_header("LLM Models", width=80)]
+            output.append(create_section("Current Configuration"))
 
-            # Fetch available models from Ollama
-            output.append(create_section("Available Models (Pulled)"))
+            current_provider = config.LLM_PROVIDER
+            detected_provider = detect_provider_from_model(config.OLLAMA_MODEL)
+
+            output.append(create_item("Active Model", colorize(config.OLLAMA_MODEL, Colors.BRIGHT_CYAN, bold=True)))
+            output.append(create_item("Provider", f"{current_provider} (detected: {detected_provider})"))
+
+            # Show Ollama models
+            output.append(create_section("Ollama Models (Local)"))
             import requests
             try:
                 response = requests.get(f"{config.OLLAMA_BASE_URL}/api/tags", timeout=5)
                 if response.status_code == 200:
                     models = response.json().get("models", [])
                     if models:
-                        # Sort models by name
                         models_sorted = sorted(models, key=lambda x: x['name'])
                         for model in models_sorted:
                             model_name = model['name']
                             is_current = model_name == config.OLLAMA_MODEL
 
-                            # Format size
                             size_bytes = model.get('size', 0)
-                            if size_bytes > 1_000_000_000:
-                                size_str = f"{size_bytes / 1_000_000_000:.1f}GB"
-                            else:
-                                size_str = f"{size_bytes / 1_000_000:.0f}MB"
-
-                            # Format modified date if available
-                            modified = model.get('modified_at', '')
-                            if modified:
-                                # Extract just the date part
-                                date_str = modified.split('T')[0] if 'T' in modified else modified[:10]
-                            else:
-                                date_str = "Unknown"
+                            size_str = f"{size_bytes / 1_000_000_000:.1f}GB" if size_bytes > 1_000_000_000 else f"{size_bytes / 1_000_000:.0f}MB"
 
                             if is_current:
                                 marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN)
@@ -234,16 +228,48 @@ class ModelCommand(CommandHandler):
                                 marker = "  "
                                 name_colored = model_name
 
-                            output.append(f"  {marker}{name_colored:<45} {colorize(size_str, Colors.BRIGHT_BLACK):<10} {colorize(date_str, Colors.BRIGHT_BLACK)}")
+                            output.append(f"  {marker}{name_colored:<45} {colorize(size_str, Colors.BRIGHT_BLACK)}")
                     else:
                         output.append(create_bullet_item("No models found", 'warning'))
-                        output.append(f"  Pull a model with: ollama pull <model_name>")
+                        output.append(f"  {colorize('Pull a model with: ollama pull <model_name>', Colors.DIM)}")
                 else:
                     output.append(create_bullet_item(f"Failed to fetch models (HTTP {response.status_code})", 'cross'))
             except Exception as e:
                 output.append(create_bullet_item(f"Error connecting to Ollama: {str(e)[:50]}", 'cross'))
 
+            # Show commercial provider models
+            output.append(create_section("Commercial Providers"))
+
+            # OpenAI
+            output.append(f"\n  {colorize('OpenAI (ChatGPT):', Colors.BRIGHT_WHITE, bold=True)}")
+            openai_models = ["gpt-4-turbo-preview", "gpt-4", "gpt-3.5-turbo", "gpt-3.5-turbo-16k"]
+            for model in openai_models:
+                is_current = model == config.OLLAMA_MODEL
+                marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN) if is_current else "    "
+                name_colored = colorize(model, Colors.BRIGHT_CYAN, bold=True) if is_current else model
+                output.append(f"  {marker}{name_colored}")
+
+            # Anthropic
+            output.append(f"\n  {colorize('Anthropic (Claude):', Colors.BRIGHT_WHITE, bold=True)}")
+            anthropic_models = ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229", "claude-3-sonnet-20240229"]
+            for model in anthropic_models:
+                is_current = model == config.OLLAMA_MODEL
+                marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN) if is_current else "    "
+                name_colored = colorize(model, Colors.BRIGHT_CYAN, bold=True) if is_current else model
+                output.append(f"  {marker}{name_colored}")
+
+            # Gemini
+            output.append(f"\n  {colorize('Google Gemini:', Colors.BRIGHT_WHITE, bold=True)}")
+            gemini_models = ["gemini-2.0-flash-exp", "gemini-pro", "gemini-pro-vision"]
+            for model in gemini_models:
+                is_current = model == config.OLLAMA_MODEL
+                marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN) if is_current else "    "
+                name_colored = colorize(model, Colors.BRIGHT_CYAN, bold=True) if is_current else model
+                output.append(f"  {marker}{name_colored}")
+
             output.append(f"\n  {colorize('Usage: /model <model_name>', Colors.DIM)}")
+            output.append(f"  {colorize('Provider auto-detected from model name', Colors.DIM)}")
+            output.append(f"  {colorize('Set API keys with: /api-key set <provider>', Colors.DIM)}")
             return "\n".join(output)
 
         # Change model
@@ -251,7 +277,21 @@ class ModelCommand(CommandHandler):
         old_model = config.OLLAMA_MODEL
         config.set_model(new_model)
 
-        return f"\n{colorize('Model changed:', Colors.BRIGHT_WHITE, bold=True)} {old_model} {colorize(Symbols.ARROW, Colors.BRIGHT_GREEN)} {colorize(new_model, Colors.BRIGHT_CYAN, bold=True)}"
+        # Detect provider
+        provider = detect_provider_from_model(new_model)
+
+        output = [f"\n{colorize('Model changed:', Colors.BRIGHT_WHITE, bold=True)} {old_model} {colorize(Symbols.ARROW, Colors.BRIGHT_GREEN)} {colorize(new_model, Colors.BRIGHT_CYAN, bold=True)}"]
+        output.append(f"  {colorize(f'Provider: {provider}', Colors.DIM)}")
+
+        # Check if API key is set for commercial providers
+        if provider != "ollama":
+            from rev.secrets_manager import get_api_key
+            api_key = get_api_key(provider)
+            if not api_key:
+                output.append(f"  {colorize('⚠  No API key set for ' + provider, Colors.BRIGHT_YELLOW)}")
+                output.append(f"  {colorize(f'Set with: /api-key set {provider}', Colors.DIM)}")
+
+        return "\n".join(output)
 
 
 class ConfigCommand(CommandHandler):
@@ -955,6 +995,109 @@ Example: /mode advanced
         return "\n".join(output)
 
 
+class ApiKeyCommand(CommandHandler):
+    """Manage API keys for commercial LLM providers."""
+
+    def __init__(self):
+        super().__init__(
+            "api-key",
+            "Manage API keys for commercial LLM providers (OpenAI, Anthropic, Gemini)",
+            aliases=["apikey", "keys"]
+        )
+
+    def get_help(self) -> str:
+        return f"""
+{self.description}
+
+Commands:
+  /api-key list              - Show all saved API keys (masked)
+  /api-key set <provider>    - Set API key for a provider (interactive)
+  /api-key delete <provider> - Delete API key for a provider
+
+Providers: openai, anthropic, gemini
+
+Examples:
+  /api-key list
+  /api-key set openai
+  /api-key delete anthropic
+
+Note: API keys are stored securely in .rev/secrets.json with restricted permissions.
+You can also use: /set openai_api_key <key> to set keys directly.
+"""
+
+    def execute(self, args: List[str], session_context: Dict[str, Any]) -> str:
+        from rev.secrets_manager import get_api_key, set_api_key, delete_api_key, mask_api_key
+
+        if not args:
+            # Show help
+            return self.get_help()
+
+        action = args[0].lower()
+
+        # List keys
+        if action == "list":
+            output = [create_header("Saved API Keys", width=80)]
+            output.append(create_section("Commercial LLM Providers"))
+
+            for provider in ["openai", "anthropic", "gemini"]:
+                api_key = get_api_key(provider)
+                masked = mask_api_key(api_key) if api_key else colorize("(not set)", Colors.DIM)
+                output.append(create_item(provider.capitalize(), masked))
+
+            output.append(f"\n  {colorize('Keys stored in .rev/secrets.json', Colors.DIM)}")
+            output.append(f"  {colorize('Use /api-key set <provider> to add keys', Colors.DIM)}")
+
+            return "\n".join(output)
+
+        # Set key
+        elif action == "set":
+            if len(args) < 2:
+                return create_bullet_item("Error: Missing provider name", 'cross') + "\n  Usage: /api-key set <provider>"
+
+            provider = args[1].lower()
+            if provider not in ["openai", "anthropic", "gemini"]:
+                return create_bullet_item(f"Error: Invalid provider '{provider}'", 'cross') + "\n  Valid providers: openai, anthropic, gemini"
+
+            # Get API key from user (without echoing)
+            import getpass
+            print(f"\nEnter {provider.capitalize()} API key (input hidden):")
+            try:
+                api_key = getpass.getpass("API Key: ").strip()
+            except (KeyboardInterrupt, EOFError):
+                return "\n" + create_bullet_item("Cancelled", 'cross')
+
+            if not api_key:
+                return create_bullet_item("Error: API key cannot be empty", 'cross')
+
+            # Save the key
+            set_api_key(provider, api_key)
+
+            output = [create_header(f"{provider.capitalize()} API Key", width=80)]
+            output.append(create_bullet_item(f"Successfully saved {provider} API key", 'check'))
+            output.append(create_item("Key", mask_api_key(api_key)))
+            output.append(f"\n  {colorize('✓ Key stored securely in .rev/secrets.json', Colors.BRIGHT_GREEN)}")
+            output.append(f"  {colorize(f'Use /set llm_provider {provider} to activate', Colors.DIM)}")
+
+            return "\n".join(output)
+
+        # Delete key
+        elif action == "delete":
+            if len(args) < 2:
+                return create_bullet_item("Error: Missing provider name", 'cross') + "\n  Usage: /api-key delete <provider>"
+
+            provider = args[1].lower()
+            if provider not in ["openai", "anthropic", "gemini"]:
+                return create_bullet_item(f"Error: Invalid provider '{provider}'", 'cross') + "\n  Valid providers: openai, anthropic, gemini"
+
+            if delete_api_key(provider):
+                return create_bullet_item(f"Deleted {provider} API key", 'check')
+            else:
+                return create_bullet_item(f"No API key found for {provider}", 'info')
+
+        else:
+            return create_bullet_item(f"Unknown action: {action}", 'cross') + "\n" + self.get_help()
+
+
 # Command registry - dictionary for O(1) lookup
 def _build_command_registry() -> Dict[str, CommandHandler]:
     """Build the command registry with all available commands."""
@@ -980,7 +1123,8 @@ def _build_command_registry() -> Dict[str, CommandHandler]:
         PermissionsCommand(),
         AgentsCommand(),
         ModeCommand(),
-        PrivateCommand()
+        PrivateCommand(),
+        ApiKeyCommand()
     ]
 
     registry = {}
