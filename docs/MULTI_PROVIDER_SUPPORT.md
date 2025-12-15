@@ -26,6 +26,31 @@ pip install google-generativeai
 
 ### 2. Configure API Keys
 
+You have three options for setting API keys:
+
+#### Option A: Use the CLI Tool (Recommended)
+The easiest way to save your API keys securely:
+
+```bash
+# Set OpenAI API key
+python set_api_key.py openai sk-your-openai-key-here
+
+# Set Anthropic API key
+python set_api_key.py anthropic sk-ant-your-anthropic-key-here
+
+# Set Gemini API key
+python set_api_key.py gemini your-gemini-key-here
+
+# View saved keys (masked for security)
+python set_api_key.py --list
+
+# Delete a key
+python set_api_key.py --delete openai
+```
+
+Keys are stored securely in `.rev/secrets.json` with restricted file permissions (owner read/write only).
+
+#### Option B: Use Environment Variables
 Create a `.env` file (or copy from `.env.example`):
 
 ```bash
@@ -41,6 +66,27 @@ ANTHROPIC_MODEL=claude-3-5-sonnet-20241022
 GEMINI_API_KEY=your-gemini-api-key-here
 GEMINI_MODEL=gemini-2.0-flash-exp
 ```
+
+#### Option C: Use Runtime Settings
+Set API keys from within the Rev REPL:
+
+```bash
+# Start Rev
+python -m rev
+
+# Set API keys using the /set command
+/set openai_api_key sk-your-openai-key-here
+/set anthropic_api_key sk-ant-your-anthropic-key-here
+/set gemini_api_key your-gemini-key-here
+
+# View current keys (masked)
+/settings
+```
+
+**Priority Order:**
+1. Environment variables (highest priority)
+2. Saved secrets in `.rev/secrets.json`
+3. Not set (will error when trying to use that provider)
 
 ### 3. Select Provider
 
