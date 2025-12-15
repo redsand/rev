@@ -484,6 +484,7 @@ class StreamingInputHandler:
         self._lock = threading.Lock()
         self._input_ready = threading.Event()
         self._prompt_displayed = False
+        self._use_stdio_reader = False
 
     def start(self):
         """Start the background input handler."""
@@ -494,8 +495,11 @@ class StreamingInputHandler:
         self._thread = threading.Thread(target=self._input_loop, daemon=True)
         self._thread.start()
 
+        if platform.system() == "Windows":
+            self._use_stdio_reader = not _stdin_is_windows_console()
+
         # Display initial prompt if configured
-        if self._prompt and sys.stdout.isatty():
+        if self._prompt:
             sys.stdout.write(f"\n{self._prompt}")
             sys.stdout.flush()
             self._prompt_displayed = True
@@ -504,7 +508,11 @@ class StreamingInputHandler:
         """Stop the background input handler."""
         self._running = False
         if self._thread:
-            self._thread.join(timeout=0.5)
+            # If we are using blocking stdin.readline(), the thread may not be able to
+            # exit promptly. Avoid hanging the caller while still allowing the daemon
+            # thread to exit on process termination.
+            timeout = 0.0 if self._use_stdio_reader else 0.5
+            self._thread.join(timeout=timeout)
             self._thread = None
 
     def _input_loop(self):
@@ -514,7 +522,10 @@ class StreamingInputHandler:
                 if platform.system() != "Windows":
                     self._input_loop_unix()
                 else:
-                    self._input_loop_windows()
+                    if self._use_stdio_reader:
+                        self._input_loop_windows_stdio()
+                    else:
+                        self._input_loop_windows()
             except Exception:
                 # Don't crash on input errors
                 time.sleep(0.1)
@@ -583,6 +594,24 @@ class StreamingInputHandler:
         except Exception:
             t.sleep(0.1)
 
+    def _input_loop_windows_stdio(self):
+        """Windows fallback for PTY environments where msvcrt input is unavailable."""
+        try:
+            line = sys.stdin.readline()
+        except Exception:
+            time.sleep(0.1)
+            return
+
+        if not line:
+            time.sleep(0.1)
+            return
+
+        self._process_input(line.rstrip("\n\r"))
+
+        if self._prompt:
+            sys.stdout.write(f"{self._prompt}")
+            sys.stdout.flush()
+
     def _process_input(self, text: str):
         """Process a complete line of user input."""
         if not text:
@@ -601,16 +630,29 @@ class StreamingInputHandler:
         This can be called from the main thread to show the prompt
         after the LLM has finished generating a response.
         """
-        if self._prompt and sys.stdout.isatty() and self._running:
-            # Only redisplay if there's no current input buffer
+        if self._prompt and self._running:
             with self._lock:
                 if not self._buffer:
                     sys.stdout.write(f"\n{self._prompt}")
-                    sys.stdout.flush()
                 else:
-                    # Redisplay prompt with current buffer
                     sys.stdout.write(f"\n{self._prompt}{''.join(self._buffer)}")
-                    sys.stdout.flush()
+                sys.stdout.flush()
+
+
+def _stdin_is_windows_console() -> bool:
+    """Return True if stdin is a real Windows console (not a PTY/pipe)."""
+    if platform.system() != "Windows":
+        return False
+
+    try:
+        import ctypes
+        import msvcrt
+
+        handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+        mode = ctypes.c_uint32()
+        return bool(ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
+    except Exception:
+        return False
 
 
 # Global streaming input handler

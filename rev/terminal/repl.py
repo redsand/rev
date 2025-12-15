@@ -34,7 +34,7 @@ def repl_mode():
         return
 
     # Print welcome message with styling
-    print(f"\n{colorize('rev Interactive REPL', Colors.BRIGHT_CYAN, bold=True)}")
+    print(f"{colorize('rev Interactive REPL', Colors.BRIGHT_CYAN, bold=True)}")
     print(f"{colorize('-' * 80, Colors.BRIGHT_BLACK)}")
     print(f"  {colorize('[i] Type /help for commands', Colors.BRIGHT_BLUE)}")
     print(f"  {colorize('[i] Running in autonomous mode - destructive operations will prompt', Colors.BRIGHT_YELLOW)}")
@@ -43,8 +43,6 @@ def repl_mode():
     # Show color status if disabled
     if not Colors.is_enabled():
         print(f"  [!]  {get_color_status()}")
-
-    print()
 
     default_mode_name, default_mode_config = get_default_mode()
 
@@ -65,8 +63,8 @@ def repl_mode():
 
     while True:
         try:
-            sys.stdout.flush()
             prompt = f"\n{colorize('rev', Colors.BRIGHT_MAGENTA)}{colorize('>', Colors.BRIGHT_BLACK)} "
+            sys.stdout.flush()
             user_input, escape_pressed = get_input_with_escape(prompt)
             user_input = user_input.strip()
             if escape_pressed:
@@ -122,11 +120,15 @@ def repl_mode():
                 else:
                     # Always use streaming execution in interactive mode
                     # This allows users to type messages while tasks run
-                    plan = planning_mode(user_input)
+                    plan = planning_mode(
+                        user_input,
+                        max_plan_tasks=config.MAX_PLAN_TASKS,
+                        max_planning_iterations=config.MAX_PLANNING_TOOL_ITERATIONS,
+                    )
                     tools = get_available_tools()
                     streaming_execution_mode(plan, auto_approve=True, tools=tools)
         except EscapeInterrupt:
-            print(f"  {colorize('[ESC pressed - execution cancelled]', Colors.BRIGHT_YELLOW)}")
+            print(f"\n  {colorize('[ESC pressed - execution cancelled]', Colors.BRIGHT_YELLOW)}")
             plan = None
         finally:
             set_escape_interrupt(False)

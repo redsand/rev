@@ -29,6 +29,7 @@ from rev.config import (
     MAX_RUN_CMD_PER_TASK,
     MAX_EXECUTION_ITERATIONS,
     MAX_TASK_ITERATIONS,
+    CONTEXT_WINDOW_HISTORY,
 )
 from rev import config
 from rev.execution.safety import (
@@ -40,111 +41,28 @@ from rev.execution.reviewer import review_action, display_action_review, format_
 from rev.execution.session import SessionTracker, create_message_summary_from_history
 from rev.debug_logger import get_logger
 
-EXECUTION_SYSTEM = """You are an autonomous CI/CD agent executing tasks.
+EXECUTION_SYSTEM = """You are an autonomous coding agent that executes planned tasks using tools.
 
-IMPORTANT - System Context:
-You will be provided with OS information. Use this to:
-- Choose correct shell commands (bash for Linux/Mac, PowerShell/cmd for Windows)
-- Select platform-specific tools and file paths
-- Use appropriate path separators (/ for Unix, \\ for Windows)
-- Adapt commands to the target environment
+System context:
+- Use the provided OS details to choose correct commands and paths.
 
-TOOL CALLING INSTRUCTIONS (CRITICAL):
-You have these tools available. You MUST call them using the exact function calling format.
+How to work:
+1) Understand the current task and its action_type.
+2) Gather minimal context with tools (list_dir, search_code, read_file) as needed.
+3) If action_type is "add" or "edit", make the change with write_file/apply_patch.
+4) If action_type is "review", do not modify files; summarize findings and move on.
+5) If action_type is "test", run tests via run_cmd/run_tests and report results.
 
-Available tools:
-- read_file: Read file contents
-  Parameters: {"path": "file/path.ext"}
-  When to use: To view existing code before making changes
+Tool discipline:
+- Do not call the same tool with identical arguments twice in a row.
+- Avoid repeated exploration loops; if searches fail, change the query once, then decide and act.
 
-- write_file: Create or modify files
-  Parameters: {"path": "file/path.ext", "content": "file contents"}
-  When to use: To create new files or completely replace existing ones
+Patch requirements:
+- apply_patch accepts only unified diffs (diff --git or ---/+++ with @@ hunks).
+- Do not output '*** Begin Patch' blocks.
 
-- list_dir: List files matching pattern
-  Parameters: {"pattern": "**/*.py"} (glob pattern)
-  When to use: To discover files in the codebase
-
-- search_code: Search code with regex
-  Parameters: {"pattern": "function_name", "include": "**/*.py"}
-  When to use: To find specific code patterns
-
-- git_diff: View current changes
-  Parameters: {}
-  When to use: To review what has been modified
-
-- apply_patch: Apply unified diff patches
-  Parameters: {"patch": "diff content"}
-  When to use: To make targeted edits to existing files
-
-- run_cmd: Execute shell commands
-  Parameters: {"cmd": "command to run"}
-  When to use: To run build/test/lint commands
-
-- run_tests: Run test suite
-  Parameters: {"cmd": "pytest -v"} (test command)
-  When to use: To validate code changes
-
-- get_repo_context: Get repo status
-  Parameters: {}
-  When to use: To understand repository structure
-
-- get_system_info: Get OS, version, architecture
-  Parameters: {}
-  When to use: To check platform details
-
-STEP-BY-STEP WORKFLOW (follow this exactly):
-1. UNDERSTAND the task
-   - Read the task description carefully
-   - Identify what needs to be changed
-
-2. GATHER information
-   - Use list_dir to find relevant files
-   - Use search_code to locate specific code
-   - Use read_file to view file contents
-   - Take notes on what you learn
-
-3. MAKE changes
-   - Use write_file for new files
-   - Use apply_patch for editing existing files
-   - Make one change at a time
-   - Keep changes minimal and focused
-
-4. VALIDATE changes
-   - Use git_diff to review your changes
-   - Use run_tests to run the test suite
-   - Fix any issues that arise
-
-5. REPORT completion
-   - Respond with "TASK_COMPLETE" when done
-   - Summarize what was accomplished
-
-CRITICAL - AVOID LOOPS AND DUPLICATE ACTIONS:
-- NEVER call the same tool with the same arguments twice. Results are cached.
-- NEVER call tree_view, list_dir, or search_code more than 2-3 times total per task.
-- If you already read a file, DO NOT read it again. Use the cached content.
-- If a search didn't find what you need, try ONE different pattern, then MOVE ON.
-- After 5 exploration actions (read/search/list), you MUST make an edit.
-- If you cannot find the exact location, CREATE the file/class anyway with best-effort code.
-
-CRITICAL - ACTION TYPE REQUIREMENTS:
-- For "edit" or "add" tasks: You MUST use write_file or apply_patch to make changes. A task is NOT complete until you have actually created or modified files.
-- For "review" tasks: You may explore without editing, but summarize findings.
-- For "test" tasks: You MUST run tests using run_cmd or run_tests.
-- If exploration is blocked, immediately create the code with your current knowledge.
-
-Progress discipline for autonomous runs:
-- Move from discovery to editing quickly; make a concrete edit after your initial inspection.
-- Avoid repeatedly listing directories or re-reading the same file unless it changed.
-- If the task implies creating or updating a file/class/module, do so proactively with apply_patch/write_file.
-- Do not burn iterations on tree views—prefer a single listing, then edit.
-- If you feel stuck, create the best-effort patch that addresses the task instead of looping on exploration.
-- When resource/iteration budgets warn or near exhaustion, stop re-listing and commit the best feasible edit immediately.
-
-Use unified diffs (apply_patch) for editing files. Always preserve formatting.
-After making changes, run tests to ensure nothing broke.
-
-Be concise. Execute the task and report success or failure."""
+Completion:
+- Reply with TASK_COMPLETE only after the current task’s goal is satisfied (and tests run when required)."""
 
 
 CODING_EXECUTION_SUFFIX = """
@@ -156,6 +74,7 @@ When the task involves code changes:
    - Use search_code, list_dir, tree_view, and read_file to inspect the relevant code.
 2. Make changes safely:
    - Use apply_patch with unified diffs instead of overwriting files blindly.
+   - Do NOT output '*** Begin Patch' blocks; use unified diffs (diff --git or ---/+++ with @@ hunks).
    - Keep changes minimal, consistent, and well-structured.
    - If a file/class/function is missing, create it immediately instead of re-listing directories.
    - If resource or iteration budgets start warning, pause further exploration and finish the best viable patch.
@@ -570,9 +489,11 @@ def _prepare_llm_messages(
     messages: List[Dict],
     exec_context: ExecutionContext,
     tracker: Optional[SessionTracker] = None,
-    max_recent: int = 10,
+    max_recent: Optional[int] = None,
 ) -> List[Dict]:
     """Prepare a trimmed, context-rich message list for the LLM."""
+    if max_recent is None:
+        max_recent = config.CONTEXT_WINDOW_HISTORY
     trimmed = _manage_message_history(messages, max_recent=max_recent, tracker=tracker)
     prepared: List[Dict[str, Any]] = []
 
@@ -694,12 +615,6 @@ def _extract_patch_from_text(content: str) -> Optional[str]:
     if not content:
         return None
 
-    # Look for Begin/End Patch blocks
-    begin_idx = content.find("*** Begin Patch")
-    end_idx = content.find("*** End Patch")
-    if begin_idx != -1 and end_idx != -1 and end_idx > begin_idx:
-        return content[begin_idx:end_idx + len("*** End Patch")].strip()
-
     # Look for ```diff ... ``` fences
     diff_match = re.search(r"```diff\s+(.*?)```", content, re.DOTALL | re.IGNORECASE)
     if diff_match:
@@ -711,6 +626,13 @@ def _extract_patch_from_text(content: str) -> Optional[str]:
         return raw_match.group(0).strip()
 
     return None
+
+
+def _looks_like_codex_patch_block(content: str) -> bool:
+    """Detect Codex-style apply_patch blocks (*** Begin Patch) which are not git-style diffs."""
+    if not content:
+        return False
+    return "*** Begin Patch" in content and "*** End Patch" in content
 
 
 def _extract_file_from_text(content: str) -> Optional[Tuple[str, str]]:
@@ -791,12 +713,28 @@ def _apply_patch_fallback(
 
 def _apply_text_fallbacks(
     content: str,
+    action_type: str,
     messages: List[Dict[str, Any]],
     session_tracker: Optional[SessionTracker],
     exec_context: Optional[ExecutionContext],
     debug_logger,
 ) -> bool:
     """Try to handle text-only responses by applying patches or writing files."""
+    if action_type not in {"add", "edit"}:
+        return False
+
+    if _looks_like_codex_patch_block(content):
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "You provided a patch in Codex '*** Begin Patch' format, which cannot be applied here. "
+                    "Use a unified diff (either start with 'diff --git', or provide '---/+++/@@' hunks inside a ```diff``` block)."
+                ),
+            }
+        )
+        return False
+
     text_patch = _extract_patch_from_text(content)
     if text_patch:
         applied = _apply_patch_fallback(text_patch, messages, session_tracker, debug_logger, exec_context)
@@ -825,6 +763,47 @@ def _apply_text_fallbacks(
             if debug_logger:
                 debug_logger.log("executor", "TEXT_WRITE_FAILED", {"error": str(exc)}, "ERROR")
     return False
+
+
+def _build_task_constraints(task: Task) -> str:
+    """Build task-specific constraints to enforce boundaries.
+
+    Args:
+        task: The task to build constraints for
+
+    Returns:
+        Constraint string to add to task prompt
+    """
+    action_type = task.action_type.lower()
+    constraints = []
+
+    # Action-type specific constraints
+    if action_type == "review":
+        constraints.append("⚠️ REVIEW TASK: You may ONLY read files and search code. Do NOT write, edit, or modify any files.")
+        constraints.append("Expected output: A brief summary (3-5 sentences) of what you found.")
+    elif action_type == "add":
+        constraints.append("⚠️ ADD TASK: You MUST create or add new code. Use write_file or apply_patch.")
+        constraints.append("Focus ONLY on adding the specific feature mentioned in the task description.")
+    elif action_type == "edit":
+        constraints.append("⚠️ EDIT TASK: You MUST modify existing code. Use apply_patch or write_file.")
+        constraints.append("Edit ONLY the specific files/sections mentioned in the task description.")
+    elif action_type == "test":
+        constraints.append("⚠️ TEST TASK: You MUST run tests. Use run_tests or run_cmd.")
+        constraints.append("Expected output: Test results showing pass/fail status.")
+    elif action_type == "doc":
+        constraints.append("⚠️ DOC TASK: You MUST update documentation files only.")
+        constraints.append("Focus ONLY on documentation changes mentioned in the task description.")
+
+    # General constraints for all tasks
+    constraints.append("\n🎯 TASK BOUNDARIES:")
+    constraints.append("- Complete ONLY this specific task, nothing more")
+    constraints.append("- Do NOT work on other tasks from the plan")
+    constraints.append("- Do NOT explore unrelated files")
+    constraints.append("- If you already read a file in THIS task, do NOT read it again")
+    constraints.append("- Maximum 3 file reads per task - use them wisely")
+    constraints.append("- After exploration, make your changes immediately")
+
+    return "\n".join(constraints)
 
 
 def _build_execution_system_context(sys_info: Dict[str, Any], coding_mode: bool = False) -> str:
@@ -899,7 +878,7 @@ def _summarize_old_messages(messages: List[Dict], tracker: 'SessionTracker' = No
     return "\n".join(summary_parts) if summary_parts else "Previous work completed successfully."
 
 
-def _manage_message_history(messages: List[Dict], max_recent: int = 20, tracker: 'SessionTracker' = None) -> List[Dict]:
+def _manage_message_history(messages: List[Dict], max_recent: Optional[int] = None, tracker: 'SessionTracker' = None) -> List[Dict]:
     """Keep recent messages and summarize old ones to prevent unbounded growth.
 
     This optimization prevents token explosion in long-running sessions by:
@@ -909,12 +888,14 @@ def _manage_message_history(messages: List[Dict], max_recent: int = 20, tracker:
 
     Args:
         messages: Current message history
-        max_recent: Number of recent messages to keep (default: 20)
+        max_recent: Number of recent messages to keep (default: from config.CONTEXT_WINDOW_HISTORY)
         tracker: Optional SessionTracker for enhanced summaries
 
     Returns:
         Trimmed message list with summary of old messages
     """
+    if max_recent is None:
+        max_recent = config.CONTEXT_WINDOW_HISTORY
     if len(messages) <= max_recent + 1:  # +1 for system message
         return messages
 
@@ -946,7 +927,7 @@ def _manage_message_history(messages: List[Dict], max_recent: int = 20, tracker:
 
 
 def _trim_history_with_notice(
-    messages: List[Dict], max_recent: int = 20, tracker: 'SessionTracker' = None
+    messages: List[Dict], max_recent: Optional[int] = None, tracker: 'SessionTracker' = None
 ) -> Tuple[List[Dict], bool]:
     """Trim and summarize history while warning the user when context is reduced.
 
@@ -958,6 +939,8 @@ def _trim_history_with_notice(
     Returns:
         A tuple of (trimmed messages, whether trimming occurred)
     """
+    if max_recent is None:
+        max_recent = config.CONTEXT_WINDOW_HISTORY
 
     if len(messages) <= max_recent + 1:  # +1 for optional system prompt
         return messages, False
@@ -1027,6 +1010,44 @@ def execution_mode(
     model_supports_tools = config.EXECUTION_SUPPORTS_TOOLS
 
     messages = [{"role": "system", "content": system_context}]
+    message_queue = None
+    cleanup_streaming_input = lambda: None
+    redisplay_prompt = lambda: None
+    try:
+        from rev.execution.streaming import UserMessageQueue, MessagePriority
+        from rev.terminal.input import start_streaming_input, stop_streaming_input, get_streaming_handler
+        from rev.terminal.formatting import colorize, Colors
+
+        message_queue = UserMessageQueue()
+        input_handler = None
+
+        def handle_user_input(text: str):
+            if text.startswith("/stop") or text.startswith("/cancel"):
+                message_queue.submit("STOP the current task immediately.", MessagePriority.INTERRUPT)
+                print("\n  ?? [Interrupt requested]")
+            elif text.startswith("/priority "):
+                msg = text[len("/priority "):].strip()
+                if msg:
+                    message_queue.submit(msg, MessagePriority.HIGH)
+                    print("\n  ?? [High priority message queued]")
+            else:
+                message_queue.submit(text, MessagePriority.NORMAL)
+                print("\n  ?? [Guidance queued]")
+            redisplay_prompt()
+
+        input_prompt = f"{colorize('rev', Colors.BRIGHT_MAGENTA)}{colorize('>', Colors.BRIGHT_BLACK)} "
+        input_handler = start_streaming_input(on_message=handle_user_input, prompt=input_prompt)
+
+        def redisplay_prompt():
+            handler = input_handler or get_streaming_handler()
+            if handler:
+                handler.redisplay_prompt()
+
+        def cleanup_streaming_input():
+            stop_streaming_input()
+    except Exception as e:
+        print(f"  ?? Interactive input disabled: {e}")
+        message_queue = None
     max_iterations = MAX_EXECUTION_ITERATIONS
     iteration = 0
 
@@ -1077,6 +1098,7 @@ def execution_mode(
 
         print(f"\n[Task {plan.current_index + 1}/{len(plan.tasks)}] {current_task.description}")
         print(f"[Type: {current_task.action_type}]")
+        redisplay_prompt()
 
         current_task.status = TaskStatus.IN_PROGRESS
         if state_manager:
@@ -1104,9 +1126,14 @@ def execution_mode(
         # Get session context (learnings from previous tasks in this run)
         session_context = exec_context.get_session_context()
 
-        # Add task to conversation with session context
+        # Build task-specific constraints
+        task_constraints = _build_task_constraints(current_task)
+
+        # Add task to conversation with session context and constraints
         task_prompt = f"""Task: {current_task.description}
 Action type: {current_task.action_type}
+
+{task_constraints}
 """
         if session_context:
             task_prompt += f"""
@@ -1155,7 +1182,20 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                     except Exception as e:
                         print(f"✗ Failed to save checkpoint: {e}")
 
+                cleanup_streaming_input()
                 return False
+
+            if message_queue and message_queue.has_pending():
+                pending = message_queue.get_pending()
+                for user_msg in pending:
+                    messages.append(user_msg.to_llm_message())
+                    print("\n  💬 Injected user guidance into conversation")
+                    redisplay_prompt()
+                    if "STOP" in user_msg.content.upper():
+                        print("\n⏹️  Stop requested by user")
+                        plan.mark_task_stopped(current_task)
+                        cleanup_streaming_input()
+                        return False
 
             task_iterations += 1
             if task_iterations >= warn_task_iterations and not iter_warned:
@@ -1250,16 +1290,18 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                         except:
                             tool_args = {}
 
-                    # Check for duplicate tool call (exact same args)
+                    """
+                    # Check for back-to-back duplicate tool call (exact same args)
                     if exec_context.is_duplicate_call(tool_name, tool_args):
-                        print(f"  ⚠️ Skipping duplicate {tool_name} call (already executed with same args)")
+                        print(f"  ⚠️ Skipping duplicate {tool_name} call (same args back-to-back)")
                         messages.append({
                             "role": "tool",
                             "name": tool_name,
-                            "content": f"DUPLICATE_CALL: This exact {tool_name} call was already made. Use the cached result or try different parameters."
+                            "content": f"DUPLICATE_CALL: This exact {tool_name} call was just executed. Avoid calling the same tool with identical arguments twice in a row."
                         })
                         continue
-
+                    
+                    
                     # Check for loop pattern (same tool called repeatedly)
                     loop_warning = exec_context.detect_loop_pattern()
                     if loop_warning:
@@ -1268,7 +1310,20 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                             "role": "user",
                             "content": f"WARNING: {loop_warning}. Stop exploring and make a concrete edit using write_file or apply_patch NOW."
                         })
+                    """
 
+                    # Prevent review tasks from performing edits
+                    edit_tools = {"write_file", "apply_patch"}
+                    if current_task.action_type == "review" and tool_name in edit_tools:
+                        print(f"  ?? Blocking {tool_name} during review task")
+                        messages.append({
+                            "role": "tool",
+                            "name": tool_name,
+                            "content": f"BLOCKED: Review tasks must not modify files. Complete the review for '{current_task.description}' and move to the next task."
+                        })
+                        continue
+
+                    """
                     # Check if exploration should be blocked for edit/add tasks
                     exploration_tools = {"read_file", "search_code", "list_dir", "tree_view", "get_repo_context"}
                     if tool_name in exploration_tools and exec_context.should_block_exploration(current_task.action_type):
@@ -1279,9 +1334,11 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                             "content": f"BLOCKED: Exploration is disabled. You MUST use write_file or apply_patch to make changes now. The task is '{current_task.description}'. Create the implementation with your current knowledge."
                         })
                         continue
+                    """
+
 
                     # Check if too much exploration without editing (threshold lowered for faster intervention)
-                    if exec_context.is_exploration_heavy(threshold=5):
+                    if current_task.action_type in {"add", "edit"} and exec_context.is_exploration_heavy(threshold=5):
                         warning_count = exec_context.increment_force_edit_warning(current_task.action_type)
                         if warning_count == 1:
                             print(f"  ⚠️ Exploration budget exhausted - forcing edit mode (warning 1/2)")
@@ -1441,6 +1498,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                         "name": tool_name,
                         "content": result
                     })
+                    redisplay_prompt()
 
                     # Track failures in session context (persists across tasks)
                     if _has_error_result(result):
@@ -1465,6 +1523,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                             rc = result_data.get("rc", 0)
                             if rc != 0:
                                 print(f"  ⚠ Tests failed (rc={rc})")
+                                redisplay_prompt()
                                 # NEW: Inject explicit feedback for the LLM in coding mode
                                 if coding_mode:
                                     messages.append({
@@ -1482,6 +1541,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
             # Check if task is complete AFTER executing tool calls
             if "TASK_COMPLETE" in content or "task complete" in content.lower():
                 print(f"  ✓ Task completed")
+                redisplay_prompt()
                 plan.mark_completed(content)
                 if state_manager:
                     state_manager.on_task_completed(current_task)
@@ -1494,7 +1554,14 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                 # Model is thinking/responding without tool calls
                 print(f"  → {content[:200]}")
                 no_tool_call_streak += 1
-                applied_fallback = _apply_text_fallbacks(content, messages, session_tracker, exec_context, debug_logger)
+                applied_fallback = _apply_text_fallbacks(
+                    content,
+                    current_task.action_type,
+                    messages,
+                    session_tracker,
+                    exec_context,
+                    debug_logger,
+                )
                 if applied_fallback:
                     continue
 
@@ -1533,7 +1600,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
         }, "INFO")
 
         # OPTIMIZATION: Manage message history to prevent unbounded growth
-        messages, _ = _trim_history_with_notice(messages, max_recent=20, tracker=session_tracker)
+        messages, _ = _trim_history_with_notice(messages, max_recent=CONTEXT_WINDOW_HISTORY, tracker=session_tracker)
 
     if not plan.is_complete() and iteration >= max_iterations:
         error_msg = "Exceeded execution iteration limit"
@@ -1639,11 +1706,14 @@ def execute_single_task(
 
     messages = [{"role": "system", "content": system_context}]
 
-    # Add task to conversation
+    # Add task to conversation with constraints
+    task_constraints = _build_task_constraints(task)
     messages.append({
         "role": "user",
         "content": f"""Task: {task.description}
 Action type: {task.action_type}
+
+{task_constraints}
 
 Execute this task completely. When done, respond with TASK_COMPLETE."""
     })
@@ -1752,16 +1822,18 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                     except:
                         tool_args = {}
 
-                # Check for duplicate tool call (exact same args)
+                """
+                # Check for back-to-back duplicate tool call (exact same args)
                 if exec_context.is_duplicate_call(tool_name, tool_args):
-                    print(f"  ⚠️ Skipping duplicate {tool_name} call (already executed with same args)")
+                    print(f"  ⚠️ Skipping duplicate {tool_name} call (same args back-to-back)")
                     messages.append({
                         "role": "tool",
                         "name": tool_name,
-                        "content": f"DUPLICATE_CALL: This exact {tool_name} call was already made. Use the cached result or try different parameters."
+                        "content": f"DUPLICATE_CALL: This exact {tool_name} call was just executed. Avoid calling the same tool with identical arguments twice in a row."
                     })
                     continue
-
+                
+                
                 # Check for loop pattern (same tool called repeatedly)
                 loop_warning = exec_context.detect_loop_pattern()
                 if loop_warning:
@@ -1770,7 +1842,20 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         "role": "user",
                         "content": f"WARNING: {loop_warning}. Stop exploring and make a concrete edit using write_file or apply_patch NOW."
                     })
+                """
 
+                # Prevent review tasks from performing edits
+                edit_tools = {"write_file", "apply_patch"}
+                if task.action_type == "review" and tool_name in edit_tools:
+                    print(f"  ?? Blocking {tool_name} during review task")
+                    messages.append({
+                        "role": "tool",
+                        "name": tool_name,
+                        "content": f"BLOCKED: Review tasks must not modify files. Gather the context for '{task.description}' and let the next task handle edits."
+                    })
+                    continue
+
+                """
                 # Check if exploration should be blocked for edit/add tasks
                 exploration_tools = {"read_file", "search_code", "list_dir", "tree_view", "get_repo_context"}
                 if tool_name in exploration_tools and exec_context.should_block_exploration(task.action_type):
@@ -1781,9 +1866,11 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         "content": f"BLOCKED: Exploration is disabled. You MUST use write_file or apply_patch to make changes now. The task is '{task.description}'. Create the implementation with your current knowledge."
                     })
                     continue
+                """
 
+                """
                 # Check if too much exploration without editing (threshold lowered for faster intervention)
-                if exec_context.is_exploration_heavy(threshold=5):
+                if task.action_type in {"add", "edit"} and exec_context.is_exploration_heavy(threshold=5):
                     warning_count = exec_context.increment_force_edit_warning(task.action_type)
                     if warning_count == 1:
                         print(f"  ⚠️ Exploration budget exhausted - forcing edit mode (warning 1/2)")
@@ -1799,6 +1886,8 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                             "content": f"FINAL WARNING: Exploration is now DISABLED for this task. You MUST use write_file or apply_patch immediately. The task is: '{task.description}'. Based on what you've learned, create the code NOW. Do not request any more file reads or searches."
                         })
                         # Don't reset - blocking will take over on next exploration attempt
+
+                """
 
                 # Record this tool call for deduplication tracking
                 exec_context.record_tool_call(tool_name, tool_args)
@@ -1954,7 +2043,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             # Model is thinking/responding without tool calls
             print(f"  → {content[:200]}")
             no_tool_call_streak += 1
-            applied_fallback = _apply_text_fallbacks(content, messages, None, exec_context, debug_logger)
+            applied_fallback = _apply_text_fallbacks(content, task.action_type, messages, None, exec_context, debug_logger)
             if applied_fallback:
                 continue
 
@@ -1982,8 +2071,10 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             except Exception:
                 pass
         _log_usage(False)
+        cleanup_streaming_input()
         return True
 
+    cleanup_streaming_input()
     _log_usage(True)
     return True
 
@@ -2222,8 +2313,11 @@ def streaming_execution_mode(
     message_queue = UserMessageQueue()
 
     def default_chunk_handler(chunk: str):
-        """Default handler that prints chunks to stdout."""
+        """Default handler that prints chunks and keeps the prompt visible."""
         print(chunk, end='', flush=True)
+        handler = get_streaming_handler()
+        if handler:
+            handler.redisplay_prompt()
 
     chunk_handler = on_chunk or default_chunk_handler
 
@@ -2298,10 +2392,13 @@ def streaming_execution_mode(
 
             exec_context.reset_for_new_task()
 
-            # Build task prompt
+            # Build task prompt with constraints
             session_context = exec_context.get_session_context()
+            task_constraints = _build_task_constraints(current_task)
             task_prompt = f"""Task: {current_task.description}
 Action type: {current_task.action_type}
+
+{task_constraints}
 """
             if session_context:
                 task_prompt += f"\nSESSION CONTEXT:\n{session_context}\n"
@@ -2333,6 +2430,9 @@ Action type: {current_task.action_type}
                         llm_msg = user_msg.to_llm_message()
                         messages.append(llm_msg)
                         print(f"\n  💬 Injected user guidance into conversation")
+                        handler = get_streaming_handler()
+                        if handler:
+                            handler.redisplay_prompt()
 
                         # Check for stop command
                         if "STOP" in user_msg.content.upper():
@@ -2414,13 +2514,26 @@ Action type: {current_task.action_type}
                             except:
                                 tool_args = {}
 
-                        # Check for duplicate
+                        """
+                        # Check for back-to-back duplicate
                         if exec_context.is_duplicate_call(tool_name, tool_args):
-                            print(f"  ⚠️ Skipping duplicate {tool_name} call")
+                            print(f"  ⚠️ Skipping duplicate {tool_name} call (same args back-to-back)")
                             messages.append({
                                 "role": "tool",
                                 "name": tool_name,
-                                "content": "DUPLICATE_CALL: Already executed."
+                                "content": "DUPLICATE_CALL: This call was just executed in the previous step."
+                            })
+                            continue
+                        """
+
+                        # Prevent review tasks from performing edits
+                        edit_tools = {"write_file", "apply_patch"}
+                        if current_task.action_type == "review" and tool_name in edit_tools:
+                            print(f"  ?? Blocking {tool_name} during review task")
+                            messages.append({
+                                "role": "tool",
+                                "name": tool_name,
+                                "content": f"BLOCKED: Review tasks must not modify files. Gather the context for '{current_task.description}' and let the next task handle edits."
                             })
                             continue
 
@@ -2496,7 +2609,7 @@ Action type: {current_task.action_type}
                 plan.mark_task_stopped(current_task)
 
             # Trim message history
-            messages, _ = _trim_history_with_notice(messages, max_recent=20, tracker=session_tracker)
+            messages, _ = _trim_history_with_notice(messages, max_recent=CONTEXT_WINDOW_HISTORY, tracker=session_tracker)
 
     finally:
         # Cleanup

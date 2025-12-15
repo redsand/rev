@@ -278,6 +278,21 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
     """
 
     normalized_patch = _normalize_patch_text(patch)
+    if normalized_patch.lstrip().startswith("*** Begin Patch"):
+        return json.dumps(
+            {
+                "success": False,
+                "rc": 1,
+                "stdout": "",
+                "stderr": "",
+                "dry_run": dry_run,
+                "phase": "check",
+                "error": (
+                    "Unsupported patch format: received a Codex '*** Begin Patch' block. "
+                    "Provide a unified diff (diff --git / ---/+++ with @@ hunks) for apply_patch."
+                ),
+            }
+        )
     if not normalized_patch.endswith("\n"):
         normalized_patch = f"{normalized_patch}\n"
 
