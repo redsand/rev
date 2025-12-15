@@ -4,6 +4,7 @@ import os
 import json
 from typing import Any, Callable, Dict, List, Optional
 
+from rev import config
 from rev.debug_logger import get_logger
 from .base import LLMProvider
 
@@ -14,7 +15,8 @@ class GeminiProvider(LLMProvider):
     def __init__(self, api_key: Optional[str] = None):
         super().__init__()
         self.name = "gemini"
-        self.api_key = api_key or os.getenv("GEMINI_API_KEY", "")
+        # Check: 1) passed parameter, 2) environment variable, 3) config module
+        self.api_key = api_key or os.getenv("GEMINI_API_KEY", "") or config.GEMINI_API_KEY
         self._genai = None
         self._client = None
 
