@@ -147,6 +147,7 @@ class ExecutionContext:
         self._lock = threading.Lock()
         # Track tool calls to detect loops and duplicates
         self.tool_call_history: List[Tuple[str, str]] = []  # (tool_name, args_hash)
+        self.max_tool_call_history = 128
         self.recent_actions: List[str] = []  # Human-readable recent actions
         self.exploration_count = 0  # Count of read/search/list calls
         self.edit_count = 0  # Count of write/patch calls
@@ -244,6 +245,8 @@ class ExecutionContext:
 
         with self._lock:
             self.tool_call_history.append(call_key)
+            if len(self.tool_call_history) > self.max_tool_call_history:
+                self.tool_call_history.pop(0)
 
             if tool_name in exploration_tools:
                 self.exploration_count += 1

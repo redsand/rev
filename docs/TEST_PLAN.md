@@ -24,10 +24,10 @@ This document outlines a comprehensive test strategy for rev, focusing on model 
 **TC-1.1.1: Default Configuration Values**
 ```python
 def test_default_ollama_model():
-    """Verify default OLLAMA_MODEL is 'gpt-oss:120b-cloud'"""
+    """Verify default OLLAMA_MODEL is 'qwen3-coder:480b-cloud'"""
     from rev import config
     # Reset to default if changed
-    assert config.OLLAMA_MODEL == "gpt-oss:120b-cloud"
+    assert config.OLLAMA_MODEL == "qwen3-coder:480b-cloud"
 
 def test_default_ollama_base_url():
     """Verify default OLLAMA_BASE_URL is 'http://localhost:11434'"""
@@ -712,7 +712,7 @@ jobs:
         run: curl -fsSL https://ollama.ai/install.sh | sh
 
       - name: Pull test model
-        run: ollama pull gpt-oss:120b-cloud
+        run: ollama pull qwen3-coder:480b-cloud
 
       - name: Run integration tests
         run: pytest tests/ -v -m integration

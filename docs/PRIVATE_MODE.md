@@ -199,7 +199,7 @@ for name, config in DEFAULT_MCP_SERVERS.items():
 # Project .env file
 REV_PRIVATE_MODE=true
 OLLAMA_BASE_URL=http://localhost:11434  # Local Ollama
-OLLAMA_MODEL=gpt-oss:120b-cloud
+OLLAMA_MODEL=qwen3-coder:480b-cloud
 
 # Start rev
 python -m rev --repl
