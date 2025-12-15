@@ -302,11 +302,16 @@ GOOD SPECIFIC TASKS TO APPROVE:
 - "Implement 'calculate_rsi' function in indicators.py"
 - "Add 'BollingerBandAnalyst' to the matrix_recipes.py registry"
 
-WHEN YOU DETECT VAGUE TASKS:
+WHEN YOU DETECT VAGUE TASKS (Discovery Phase Needed):
 1. Set decision to "requires_changes"
 2. In your suggestions, INSTRUCT the planner to switch to a RESEARCH/DISCOVERY phase first
 3. Specify: "Before implementation, create tasks to IDENTIFY and LIST the specific items to port/implement"
-4. Example suggestion: "Add a discovery task: 'Scan ../external-repo to list all Analyst classes available for porting'"
+4. Example suggestions:
+   - "Replace vague implementation tasks with discovery tasks to identify specific items first"
+   - "Add discovery task: 'Scan ../external-repo to list all Analyst classes available for porting'"
+   - "Add discovery task: 'List all files in [directory] matching [pattern] to identify modules'"
+   - "Add discovery task: 'Grep for [pattern] in [source] to find specific class/function names'"
+5. In your overall_assessment, include the phrase "Discovery phase needed" to trigger the correct workflow
 
 REQUIREMENTS COVERAGE:
 Check if the user request contains explicit constraints (e.g., "do not duplicate", "add to matrix recipes").

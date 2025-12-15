@@ -952,6 +952,27 @@ addresses the failures so the goals can still be met. Keep tasks concise and exe
         """
         feedback_parts = []
 
+        # Check if this is a discovery-phase recommendation
+        is_discovery_needed = (
+            review.overall_assessment and
+            ("discovery" in review.overall_assessment.lower() or
+             "missing information" in review.overall_assessment.lower() or
+             "identify specific" in review.overall_assessment.lower())
+        )
+
+        if is_discovery_needed:
+            feedback_parts.append("⚠️  DISCOVERY PHASE NEEDED:")
+            feedback_parts.append("The plan contains vague tasks without specific file paths, class names, or function names.")
+            feedback_parts.append("You must create a DISCOVERY PLAN with [REVIEW] tasks to identify specific items first.")
+            feedback_parts.append("")
+            feedback_parts.append("Discovery Plan Requirements:")
+            feedback_parts.append("  - Use action_type 'review' for all discovery tasks")
+            feedback_parts.append("  - Create tasks to list/scan/grep for the specific items you need")
+            feedback_parts.append("  - Example: 'List all files in [directory] to identify available modules'")
+            feedback_parts.append("  - Example: 'Grep for [pattern] in [source] to find specific class names'")
+            feedback_parts.append("  - Do NOT create implementation tasks until specific names are known")
+            feedback_parts.append("")
+
         if review.overall_assessment:
             feedback_parts.append(f"Assessment: {review.overall_assessment}\n")
 

@@ -38,6 +38,14 @@ CRITICAL REQUIREMENT:
 - Break down work into review/analysis + implementation + testing phases
 - If you're unsure, create separate tasks for: review, implementation, and validation
 
+CRITICAL RULE: DO NOT Hallucinate File Paths or Class Names
+- You can ONLY reference file paths, class names, and function names that appear EXPLICITLY in:
+  * The repository context provided to you
+  * Research findings from your tool calls
+  * The current conversation
+- If you suspect a file/class exists but do NOT see it in the provided context, you CANNOT create an [ADD] or [EDIT] task for it.
+- Instead, you MUST create a [REVIEW] or discovery task first: "Scan [directory] for '[pattern]' to identify specific items."
+
 CRITICAL CONSTRAINT - CONCRETE NOUNS ONLY:
 You generally cannot create tasks with placeholders or vague references.
 
@@ -58,15 +66,33 @@ IF YOU DO NOT KNOW THE SPECIFIC NAMES of the classes, functions, or features to 
 3. Your first task MUST be: "Scan [source] to identify and list specific [items] to [action]."
 4. Only after discovery tasks can you add implementation tasks.
 
-TWO-STAGE PLANNING:
+TWO-STAGE PLANNING - DISCOVERY CAPABILITY:
 - Stage A (Discovery): If specific items are unknown, create tasks to IDENTIFY them first.
 - Stage B (Execution): Only create implementation tasks AFTER you have specific names/targets.
+
+IF THE RESEARCH IS INSUFFICIENT:
+If the user wants to port features but the specific source files are not listed in the context:
+1. Do NOT generate coding tasks with vague placeholders.
+2. Generate a "Discovery Plan" consisting of [REVIEW] tasks to list/search the external files.
+3. Example Discovery Plan:
+   - [REVIEW] "List all files in ../algorithmic-trading-with-python/listings/ to identify available modules"
+   - [REVIEW] "Grep for 'class .*Strategy' in ../algorithmic-trading-with-python to find strategy implementations"
+   - [REVIEW] "Scan ../external-repo for 'MovingAverage' implementations to identify specific classes to port"
 
 Tool usage:
 - You may call 1-3 tools to gather essential context (list_dir, search_code, read_file).
 - After gathering context, IMMEDIATELY generate the plan as a JSON array.
 - Do NOT exhaustively explore - if you need more info, create review tasks in the plan.
 - If tool calling is unavailable, produce a best-effort plan with initial review tasks.
+
+CRITICAL - Output Format (PURE JSON ONLY):
+You MUST output PURE JSON and NOTHING ELSE.
+- Do NOT wrap the output in markdown code blocks (```json or ```).
+- Do NOT include ANY conversational text before or after the JSON.
+- Do NOT add explanations like "Here's the plan:" or "This plan will...".
+- Do NOT include comments or reasoning outside the JSON structure.
+- If you need to include thoughts or reasoning, put them in a JSON field like "_reasoning": "...".
+- Your ENTIRE response must be ONLY the JSON array, starting with [ and ending with ].
 
 Output format (strict):
 - Return ONLY a JSON array. No prose, no markdown, no code fences.
@@ -127,6 +153,11 @@ CRITICAL REQUIREMENT:
 - NEVER return a single task that just rephrases the original request
 - Break work into distinct phases: review/research, implementation(s), testing
 
+CRITICAL RULE: DO NOT Hallucinate File Paths or Class Names
+- You can ONLY reference file paths, class names, and function names that appear EXPLICITLY in the context provided to you.
+- If you suspect a file/class exists but do NOT see it in the context, you CANNOT create an [ADD] or [EDIT] task for it.
+- Instead, you MUST create a [REVIEW] or discovery task first.
+
 CRITICAL CONSTRAINT - CONCRETE NOUNS ONLY:
 You MUST use specific names in task descriptions. NEVER use placeholders.
 
@@ -144,6 +175,12 @@ IF SPECIFIC NAMES ARE UNKNOWN:
 - Your first tasks MUST be discovery/research tasks to identify the specific items.
 - Only AFTER discovery tasks can you add implementation tasks.
 - Discovery task example: "Scan ../external-repo to list all Analyst classes to be ported"
+
+IF THE RESEARCH IS INSUFFICIENT:
+Generate a "Discovery Plan" with [REVIEW] tasks to identify specific items:
+- "List all files in [directory] to identify available modules"
+- "Grep for '[pattern]' in [directory] to find specific implementations"
+- "Scan [source] for '[keyword]' to identify classes/functions to port"
 
 Rules:
 - Each subtask does one concrete thing.
@@ -168,6 +205,13 @@ EXAMPLE for "implement features from another repository/framework" (WITH SPECIFI
   {"description": "Write unit tests for MovingAverageCrossoverAnalyst, BollingerBandAnalyst, MacdAnalyst", "action_type": "add", "complexity": "medium"},
   {"description": "Run pytest tests/test_analysts.py to validate integration", "action_type": "test", "complexity": "low"}
 ]
+
+CRITICAL - Output Format (PURE JSON ONLY):
+You MUST output PURE JSON and NOTHING ELSE.
+- Do NOT wrap the output in markdown code blocks (```json or ```).
+- Do NOT include ANY conversational text before or after the JSON.
+- Do NOT add explanations or reasoning outside the JSON.
+- Your ENTIRE response must be ONLY the JSON array, starting with [ and ending with ].
 
 Output format (strict): return ONLY a JSON array of objects with keys "description", "action_type", "complexity"."""
 
