@@ -237,35 +237,42 @@ class ModelCommand(CommandHandler):
             except Exception as e:
                 output.append(create_bullet_item(f"Error connecting to Ollama: {str(e)[:50]}", 'cross'))
 
-            # Show commercial provider models
-            output.append(create_section("Commercial Providers"))
-
-            # OpenAI
-            output.append(f"\n  {colorize('OpenAI (ChatGPT):', Colors.BRIGHT_WHITE, bold=True)}")
-            openai_models = ["gpt-4-turbo-preview", "gpt-4", "gpt-3.5-turbo", "gpt-3.5-turbo-16k"]
-            for model in openai_models:
-                is_current = model == config.OLLAMA_MODEL
-                marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN) if is_current else "    "
-                name_colored = colorize(model, Colors.BRIGHT_CYAN, bold=True) if is_current else model
-                output.append(f"  {marker}{name_colored}")
-
-            # Anthropic
-            output.append(f"\n  {colorize('Anthropic (Claude):', Colors.BRIGHT_WHITE, bold=True)}")
-            anthropic_models = ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229", "claude-3-sonnet-20240229"]
-            for model in anthropic_models:
-                is_current = model == config.OLLAMA_MODEL
-                marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN) if is_current else "    "
-                name_colored = colorize(model, Colors.BRIGHT_CYAN, bold=True) if is_current else model
-                output.append(f"  {marker}{name_colored}")
-
-            # Gemini - dynamically fetch models if API key is set
-            output.append(f"\n  {colorize('Google Gemini:', Colors.BRIGHT_WHITE, bold=True)}")
-
-            # Check if Gemini API key is configured
+            # Show commercial provider models - only if API keys are configured
             from rev.secrets_manager import get_api_key
+
+            # Check which API keys are set
+            openai_api_key = get_api_key("openai")
+            anthropic_api_key = get_api_key("anthropic")
             gemini_api_key = get_api_key("gemini")
 
+            has_commercial_providers = openai_api_key or anthropic_api_key or gemini_api_key
+
+            if has_commercial_providers:
+                output.append(create_section("Commercial Providers"))
+
+            # OpenAI - only show if API key is set
+            if openai_api_key:
+                output.append(f"\n  {colorize('OpenAI (ChatGPT):', Colors.BRIGHT_WHITE, bold=True)}")
+                openai_models = ["gpt-4-turbo-preview", "gpt-4", "gpt-3.5-turbo", "gpt-3.5-turbo-16k"]
+                for model in openai_models:
+                    is_current = model == config.OLLAMA_MODEL
+                    marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN) if is_current else "    "
+                    name_colored = colorize(model, Colors.BRIGHT_CYAN, bold=True) if is_current else model
+                    output.append(f"  {marker}{name_colored}")
+
+            # Anthropic - only show if API key is set
+            if anthropic_api_key:
+                output.append(f"\n  {colorize('Anthropic (Claude):', Colors.BRIGHT_WHITE, bold=True)}")
+                anthropic_models = ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229", "claude-3-sonnet-20240229"]
+                for model in anthropic_models:
+                    is_current = model == config.OLLAMA_MODEL
+                    marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN) if is_current else "    "
+                    name_colored = colorize(model, Colors.BRIGHT_CYAN, bold=True) if is_current else model
+                    output.append(f"  {marker}{name_colored}")
+
+            # Gemini - only show if API key is set, dynamically fetch models
             if gemini_api_key:
+                output.append(f"\n  {colorize('Google Gemini:', Colors.BRIGHT_WHITE, bold=True)}")
                 try:
                     # Dynamically fetch available Gemini models (silent mode to avoid debug prints)
                     from rev.llm.providers.gemini_provider import GeminiProvider
@@ -289,16 +296,6 @@ class ModelCommand(CommandHandler):
                         marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN) if is_current else "    "
                         name_colored = colorize(model, Colors.BRIGHT_CYAN, bold=True) if is_current else model
                         output.append(f"  {marker}{name_colored}")
-            else:
-                # No API key set - show common models and a message
-                output.append(f"    {colorize('(API key not set - showing common models)', Colors.DIM)}")
-                common_models = ["gemini-2.0-flash-exp", "gemini-1.5-pro", "gemini-1.5-flash"]
-                for model in common_models:
-                    is_current = model == config.OLLAMA_MODEL
-                    marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN) if is_current else "    "
-                    name_colored = colorize(model, Colors.BRIGHT_CYAN, bold=True) if is_current else model
-                    output.append(f"  {marker}{name_colored}")
-                output.append(f"    {colorize('Set API key with: /api-key set gemini', Colors.DIM)}")
 
             output.append(f"\n  {colorize('Usage: /model <model_name>', Colors.DIM)}")
             output.append(f"  {colorize('Provider auto-detected from model name', Colors.DIM)}")
