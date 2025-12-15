@@ -174,6 +174,90 @@ def _parse_json_from_text(content: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _detect_vague_tasks_in_plan(plan: "ExecutionPlan") -> List[Dict[str, Any]]:
+    """Detect tasks with vague placeholders in an execution plan.
+
+    This is a pre-LLM check to quickly identify plans that need discovery phases.
+
+    Args:
+        plan: The execution plan to check
+
+    Returns:
+        List of vague task info dicts with task_id, description, and reason
+    """
+    vague_tasks = []
+
+    # Vague placeholder patterns
+    vague_patterns = [
+        ("first identified", "Uses ordinal placeholder 'first identified' - specify the actual name"),
+        ("second identified", "Uses ordinal placeholder - specify the actual name"),
+        ("third identified", "Uses ordinal placeholder - specify the actual name"),
+        ("the identified", "Uses generic 'the identified' - specify what was identified"),
+        ("identified feature", "Uses vague 'identified feature' - name the specific feature"),
+        ("identified analyst", "Uses vague 'identified analyst' - name the specific analyst class"),
+        ("identified class", "Uses vague 'identified class' - name the specific class"),
+        ("relevant code", "Uses vague 'relevant code' - specify which code"),
+        ("relevant functionality", "Uses vague 'relevant functionality' - specify what functionality"),
+        ("missing feature", "Uses vague 'missing feature' - name the specific feature"),
+        ("missing module", "Uses vague 'missing module' - name the specific module"),
+        ("from the other", "Uses vague 'from the other' - specify the source path and item"),
+        ("from external", "Uses vague 'from external' - specify the source path and item"),
+        ("first new", "Uses ordinal placeholder - specify the actual item name"),
+        ("second new", "Uses ordinal placeholder - specify the actual item name"),
+        ("port each", "Uses batch placeholder - create individual tasks per item"),
+        ("implement each", "Uses batch placeholder - create individual tasks per item"),
+    ]
+
+    for task in plan.tasks:
+        desc_lower = task.description.lower()
+        for pattern, reason in vague_patterns:
+            if pattern in desc_lower:
+                vague_tasks.append({
+                    "task_id": task.task_id,
+                    "description": task.description,
+                    "reason": reason
+                })
+                break  # Only report first match per task
+
+    return vague_tasks
+
+
+def _check_requirements_coverage(plan: "ExecutionPlan", user_request: str) -> List[str]:
+    """Check if user request requirements are covered in the plan.
+
+    Args:
+        plan: The execution plan to check
+        user_request: The original user request
+
+    Returns:
+        List of uncovered requirements
+    """
+    uncovered = []
+    request_lower = user_request.lower()
+
+    # Check for common requirements
+    requirement_checks = [
+        ("matrix recipe", "add to matrix recipe", "No task addresses adding to matrix recipes"),
+        ("registry", "register", "No task addresses registration requirement"),
+        ("config", "configuration", "No task addresses configuration update"),
+        ("do not duplicate", "duplicate", "No task addresses duplicate avoidance check"),
+        ("avoid duplicate", "duplicate", "No task addresses duplicate avoidance check"),
+        ("test", "test", "No task addresses testing requirement"),
+    ]
+
+    for keyword, plan_keyword, message in requirement_checks:
+        if keyword in request_lower:
+            # Check if any task mentions this
+            covered = any(
+                plan_keyword in t.description.lower()
+                for t in plan.tasks
+            )
+            if not covered and message not in uncovered:
+                uncovered.append(message)
+
+    return uncovered
+
+
 PLAN_REVIEW_SYSTEM = """You are an expert plan review agent.
 
 You have access to code analysis tools to verify plans:
@@ -201,6 +285,32 @@ Your job is to review execution plans and identify:
 9) Maintainability: Will the changes be maintainable?
 10) Testing: Are tests included and runnable?
 11) Reuse: Does the plan duplicate existing functionality? Prefer extending existing code over new files.
+12) SPECIFICITY: Do tasks contain SPECIFIC names (classes, functions, files) or VAGUE placeholders?
+
+CRITICAL - VAGUE PLACEHOLDER DETECTION:
+If a plan contains vague terms like "the identified feature", "the first analyst", "relevant code",
+or "missing functionality", this implies the agent does NOT actually know what it is building.
+
+VAGUE TASKS TO REJECT:
+- "Implement the first identified analyst" -> REJECT: Which analyst? Name it.
+- "Port the feature from the other repo" -> REJECT: Which feature? Name the class/function.
+- "Add relevant functionality" -> REJECT: What functionality specifically?
+- "Implement missing features" -> REJECT: Which features? List them by name.
+
+GOOD SPECIFIC TASKS TO APPROVE:
+- "Port 'MovingAverageCrossover' class from ../external/analysts.py"
+- "Implement 'calculate_rsi' function in indicators.py"
+- "Add 'BollingerBandAnalyst' to the matrix_recipes.py registry"
+
+WHEN YOU DETECT VAGUE TASKS:
+1. Set decision to "requires_changes"
+2. In your suggestions, INSTRUCT the planner to switch to a RESEARCH/DISCOVERY phase first
+3. Specify: "Before implementation, create tasks to IDENTIFY and LIST the specific items to port/implement"
+4. Example suggestion: "Add a discovery task: 'Scan ../external-repo to list all Analyst classes available for porting'"
+
+REQUIREMENTS COVERAGE:
+Check if the user request contains explicit constraints (e.g., "do not duplicate", "add to matrix recipes").
+If these constraints are NOT addressed by any task in the plan, flag them as missing_tasks.
 
 Analyze the plan critically but constructively. Identify real issues, not nitpicks.
 
@@ -235,7 +345,8 @@ STRICT JSON OUTPUT REQUIREMENTS:
 - Do NOT include any explanatory text before or after the JSON.
 - If uncertain about a value, use an empty list or null-equivalent in JSON.
 
-Be thorough but practical. Focus on issues that could cause real problems."""
+Be thorough but practical. Focus on issues that could cause real problems.
+PRIORITIZE specificity - vague plans cannot be executed correctly."""
 
 
 ACTION_REVIEW_SYSTEM = """You are an expert security and best practices review agent.
@@ -319,11 +430,50 @@ def review_execution_plan(
 
     review = PlanReview()
 
+    # PRE-LLM CHECK: Detect vague placeholder tasks
+    print("→ Checking for vague placeholder tasks...")
+    vague_tasks = _detect_vague_tasks_in_plan(plan)
+    if vague_tasks:
+        print(f"  ⚠️  Found {len(vague_tasks)} task(s) with vague placeholders:")
+        for vt in vague_tasks:
+            print(f"     Task #{vt['task_id'] + 1}: {vt['reason']}")
+            review.issues.append({
+                "severity": "high",
+                "task_id": vt["task_id"],
+                "description": f"Vague task: {vt['reason']}",
+                "impact": "Cannot execute tasks without knowing specific targets"
+            })
+
+        # Auto-reject if vague tasks found (high severity)
+        review.decision = ReviewDecision.REQUIRES_CHANGES
+        review.overall_assessment = (
+            f"Plan contains {len(vague_tasks)} vague task(s) with placeholder references. "
+            "The planner must first run a DISCOVERY phase to identify specific class/function names."
+        )
+        review.suggestions.append(
+            "Switch to RESEARCH/DISCOVERY phase: Add tasks to scan and list specific items before implementing"
+        )
+        review.suggestions.append(
+            "Replace vague tasks like 'implement the identified X' with specific tasks like 'implement ClassNameHere'"
+        )
+        review.confidence_score = 0.90
+        _display_plan_review(review, plan)
+        return review
+
+    # PRE-LLM CHECK: Verify requirements coverage
+    print("→ Checking requirements coverage...")
+    uncovered_requirements = _check_requirements_coverage(plan, user_request)
+    if uncovered_requirements:
+        print(f"  ⚠️  Found {len(uncovered_requirements)} uncovered requirement(s):")
+        for ureq in uncovered_requirements:
+            print(f"     - {ureq}")
+            review.missing_tasks.append(ureq)
+
     # Quick check: If all tasks are low risk, auto-approve if enabled
-    if auto_approve_low_risk:
+    if auto_approve_low_risk and not uncovered_requirements:
         all_low_risk = all(task.risk_level == RiskLevel.LOW for task in plan.tasks)
         if all_low_risk and len(plan.tasks) > 0:
-            print("→ All tasks are low-risk. Auto-approving.")
+            print("→ All tasks are low-risk and requirements covered. Auto-approving.")
             review.decision = ReviewDecision.APPROVED
             review.overall_assessment = "Plan approved: All tasks are low-risk."
             review.confidence_score = 0.95

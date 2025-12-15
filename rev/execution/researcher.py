@@ -8,10 +8,11 @@ Supports both symbolic search (keyword/regex) and semantic search (RAG/TF-IDF).
 """
 
 import json
+import os
 import re
 import signal
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass, field
 
 from rev.tools.registry import execute_tool
@@ -98,6 +99,10 @@ class ResearchFindings:
     existing_utilities: List[str] = field(default_factory=list)
     reuse_opportunities: List[str] = field(default_factory=list)
     files_to_extend: List[str] = field(default_factory=list)
+    # External path findings (for porting/integration tasks)
+    external_findings: List[Dict[str, Any]] = field(default_factory=list)
+    external_classes: List[str] = field(default_factory=list)  # Specific class names from external sources
+    external_functions: List[str] = field(default_factory=list)  # Specific function names from external sources
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -114,6 +119,9 @@ class ResearchFindings:
             "existing_utilities": self.existing_utilities,
             "reuse_opportunities": self.reuse_opportunities,
             "files_to_extend": self.files_to_extend,
+            "external_findings": self.external_findings,
+            "external_classes": self.external_classes,
+            "external_functions": self.external_functions,
         }
 
 
@@ -128,7 +136,279 @@ Output format (strict):
 
 Guidance:
 - Prefer reuse and extension of existing code.
-- Put risks, unknowns, or missing context into "warnings"."""
+- Put risks, unknowns, or missing context into "warnings".
+
+CRITICAL - External Path Handling:
+- Check the user prompt for external directory paths (e.g., ../other-repo, ..\other-repo, absolute paths).
+- If found, you MUST explicitly list the files in that directory and read the contents of relevant files
+  to understand what needs to be ported/referenced.
+- Do NOT assume context is limited to the current directory when external paths are mentioned.
+- When porting code from another location, you MUST identify specific class/function names."""
+
+
+def _detect_external_paths(user_request: str) -> List[str]:
+    """Detect external directory paths mentioned in user request.
+
+    This is a "Pre-Flight" capability to detect file paths in the user prompt
+    that are outside the current working directory (CWD).
+
+    Args:
+        user_request: The user's task request
+
+    Returns:
+        List of detected external paths (relative or absolute)
+    """
+    external_paths = []
+
+    # Pattern for relative paths starting with ../ or ..\
+    relative_pattern = r'(?:\.\.[\\/])+[^\s\'"<>|]*'
+
+    # Pattern for absolute paths (Unix or Windows)
+    unix_abs_pattern = r'(?<!\w)/(?:home|usr|opt|var|tmp|etc|mnt|media|srv)[^\s\'"<>|]*'
+    windows_abs_pattern = r'[A-Za-z]:\\[^\s\'"<>|]*'
+
+    # Find all relative external paths
+    for match in re.finditer(relative_pattern, user_request):
+        path = match.group().strip().rstrip('.,;:')
+        if path and path not in external_paths:
+            external_paths.append(path)
+
+    # Find all absolute Unix paths
+    for match in re.finditer(unix_abs_pattern, user_request):
+        path = match.group().strip().rstrip('.,;:')
+        if path and path not in external_paths:
+            external_paths.append(path)
+
+    # Find all absolute Windows paths
+    for match in re.finditer(windows_abs_pattern, user_request):
+        path = match.group().strip().rstrip('.,;:')
+        if path and path not in external_paths:
+            external_paths.append(path)
+
+    return external_paths
+
+
+def _scan_external_directory(path: str, max_depth: int = 3) -> Dict[str, Any]:
+    """Scan an external directory to understand its structure and contents.
+
+    Args:
+        path: Path to the external directory
+        max_depth: Maximum directory depth to scan
+
+    Returns:
+        Dict with directory structure and key findings
+    """
+    result = {
+        "path": path,
+        "exists": False,
+        "is_directory": False,
+        "files": [],
+        "classes": [],
+        "functions": [],
+        "modules": [],
+        "error": None
+    }
+
+    try:
+        resolved_path = Path(path).resolve()
+        result["exists"] = resolved_path.exists()
+
+        if not resolved_path.exists():
+            result["error"] = f"Path does not exist: {path}"
+            return result
+
+        result["is_directory"] = resolved_path.is_dir()
+
+        if resolved_path.is_file():
+            # Single file - read and analyze it
+            result["files"] = [str(resolved_path)]
+            content = _read_external_file(str(resolved_path))
+            if content:
+                classes, functions = _extract_definitions(content, str(resolved_path))
+                result["classes"] = classes
+                result["functions"] = functions
+            return result
+
+        # Directory - walk and collect files
+        code_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.cs', '.go', '.rs', '.c', '.cpp', '.h'}
+
+        for root, dirs, files in os.walk(resolved_path):
+            # Limit depth
+            rel_depth = len(Path(root).relative_to(resolved_path).parts)
+            if rel_depth >= max_depth:
+                dirs.clear()
+                continue
+
+            # Skip common non-source directories
+            dirs[:] = [d for d in dirs if d not in {'.git', 'node_modules', '__pycache__', 'venv', '.venv', 'build', 'dist'}]
+
+            for fname in files:
+                fpath = Path(root) / fname
+                if fpath.suffix.lower() in code_extensions:
+                    rel_path = str(fpath.relative_to(resolved_path))
+                    result["files"].append(rel_path)
+
+                    # Analyze Python files for classes and functions
+                    if fpath.suffix.lower() == '.py':
+                        content = _read_external_file(str(fpath))
+                        if content:
+                            classes, functions = _extract_definitions(content, rel_path)
+                            result["classes"].extend(classes)
+                            result["functions"].extend(functions)
+
+                            # Extract module name
+                            module_name = fpath.stem
+                            if module_name not in ['__init__', '__main__']:
+                                result["modules"].append({
+                                    "name": module_name,
+                                    "path": rel_path,
+                                    "classes": [c["name"] for c in classes if c.get("file") == rel_path],
+                                    "functions": [f["name"] for f in functions if f.get("file") == rel_path]
+                                })
+
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
+def _read_external_file(filepath: str, max_lines: int = 500) -> Optional[str]:
+    """Read content from an external file.
+
+    Args:
+        filepath: Path to the file
+        max_lines: Maximum lines to read
+
+    Returns:
+        File content or None if read fails
+    """
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            lines = []
+            for i, line in enumerate(f):
+                if i >= max_lines:
+                    break
+                lines.append(line)
+            return ''.join(lines)
+    except Exception:
+        return None
+
+
+def _extract_definitions(content: str, filepath: str) -> Tuple[List[Dict], List[Dict]]:
+    """Extract class and function definitions from code content.
+
+    Args:
+        content: Source code content
+        filepath: Path to the source file
+
+    Returns:
+        Tuple of (classes, functions) where each is a list of dicts
+    """
+    classes = []
+    functions = []
+
+    # Extract Python classes
+    class_pattern = r'^class\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^)]*\))?\s*:'
+    for match in re.finditer(class_pattern, content, re.MULTILINE):
+        classes.append({
+            "name": match.group(1),
+            "file": filepath,
+            "line": content[:match.start()].count('\n') + 1
+        })
+
+    # Extract Python functions (top-level and methods)
+    func_pattern = r'^(?:    )?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*\)\s*(?:->.*?)?:'
+    for match in re.finditer(func_pattern, content, re.MULTILINE):
+        func_name = match.group(1)
+        if not func_name.startswith('_') or func_name.startswith('__'):  # Include dunder methods
+            functions.append({
+                "name": func_name,
+                "file": filepath,
+                "line": content[:match.start()].count('\n') + 1
+            })
+
+    # Extract JavaScript/TypeScript classes and functions
+    if filepath.endswith(('.js', '.ts', '.jsx', '.tsx')):
+        # JS classes
+        js_class_pattern = r'(?:export\s+)?class\s+([A-Za-z_][A-Za-z0-9_]*)'
+        for match in re.finditer(js_class_pattern, content):
+            classes.append({
+                "name": match.group(1),
+                "file": filepath,
+                "line": content[:match.start()].count('\n') + 1
+            })
+
+        # JS functions
+        js_func_pattern = r'(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)'
+        for match in re.finditer(js_func_pattern, content):
+            functions.append({
+                "name": match.group(1),
+                "file": filepath,
+                "line": content[:match.start()].count('\n') + 1
+            })
+
+    return classes, functions
+
+
+def _format_external_findings(scan_results: List[Dict[str, Any]]) -> str:
+    """Format external directory scan results for display and LLM context.
+
+    Args:
+        scan_results: List of scan result dictionaries
+
+    Returns:
+        Formatted string summary
+    """
+    if not scan_results:
+        return ""
+
+    parts = ["=" * 60, "EXTERNAL DIRECTORY ANALYSIS", "=" * 60]
+
+    for result in scan_results:
+        parts.append(f"\n📂 External Path: {result['path']}")
+
+        if not result.get("exists"):
+            parts.append(f"   ❌ Path does not exist")
+            continue
+
+        if result.get("error"):
+            parts.append(f"   ⚠️  Error: {result['error']}")
+            continue
+
+        file_count = len(result.get("files", []))
+        class_count = len(result.get("classes", []))
+        func_count = len(result.get("functions", []))
+
+        parts.append(f"   Files: {file_count} | Classes: {class_count} | Functions: {func_count}")
+
+        # List key classes found
+        if result.get("classes"):
+            parts.append("\n   📋 Classes Found:")
+            for cls in result["classes"][:15]:  # Limit display
+                parts.append(f"      - {cls['name']} ({cls['file']}:{cls.get('line', '?')})")
+            if len(result["classes"]) > 15:
+                parts.append(f"      ... and {len(result['classes']) - 15} more")
+
+        # List key functions found
+        if result.get("functions"):
+            parts.append("\n   🔧 Top Functions/Methods Found:")
+            for func in result["functions"][:10]:  # Limit display
+                parts.append(f"      - {func['name']} ({func['file']}:{func.get('line', '?')})")
+            if len(result["functions"]) > 10:
+                parts.append(f"      ... and {len(result['functions']) - 10} more")
+
+        # List modules
+        if result.get("modules"):
+            parts.append("\n   📦 Modules Found:")
+            for mod in result["modules"][:10]:
+                class_list = ', '.join(mod.get('classes', [])[:3])
+                if class_list:
+                    parts.append(f"      - {mod['name']}: {class_list}")
+                else:
+                    parts.append(f"      - {mod['name']}")
+
+    parts.append("=" * 60)
+    return '\n'.join(parts)
 
 
 def _rag_search(query: str, k: int = 10, budget=None, repo_stats: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -201,6 +481,75 @@ def research_codebase(
     print("=" * 60)
 
     findings = ResearchFindings()
+
+    # PRE-FLIGHT: Detect and scan external paths mentioned in the request
+    external_paths = _detect_external_paths(user_request)
+    external_scan_results = []
+
+    if external_paths:
+        print(f"\n🔍 PRE-FLIGHT: Detected {len(external_paths)} external path(s)")
+        for ext_path in external_paths:
+            print(f"   → Scanning external path: {ext_path}")
+            scan_result = _scan_external_directory(ext_path)
+            external_scan_results.append(scan_result)
+
+            # Add external classes/functions to findings with specific names
+            if scan_result.get("classes"):
+                for cls in scan_result["classes"]:
+                    class_name = cls['name']
+                    # Track the specific class name for planner use
+                    findings.external_classes.append(class_name)
+                    findings.similar_implementations.append({
+                        "file": f"{ext_path}/{cls['file']}",
+                        "description": f"Class '{class_name}' from external source (line {cls.get('line', '?')})"
+                    })
+
+            if scan_result.get("functions"):
+                for func in scan_result["functions"]:
+                    func_name = func['name']
+                    # Track the specific function name for planner use
+                    findings.external_functions.append(func_name)
+
+            if scan_result.get("modules"):
+                for mod in scan_result["modules"]:
+                    if mod.get("classes"):
+                        findings.architecture_notes.append(
+                            f"External module '{mod['name']}' contains: {', '.join(mod['classes'][:5])}"
+                        )
+
+        # Store full external findings for downstream use
+        findings.external_findings = external_scan_results
+
+        # Display external findings
+        if external_scan_results:
+            ext_summary = _format_external_findings(external_scan_results)
+            if ext_summary:
+                print(ext_summary)
+
+            # Add warning if external paths couldn't be accessed
+            for result in external_scan_results:
+                if not result.get("exists"):
+                    findings.warnings.append(
+                        f"External path '{result['path']}' does not exist or cannot be accessed. "
+                        "Cannot identify specific items to port."
+                    )
+                elif not result.get("classes") and not result.get("functions"):
+                    findings.warnings.append(
+                        f"External path '{result['path']}' exists but no classes/functions were found. "
+                        "Manual inspection may be needed."
+                    )
+
+            # If we found external items, add them as a summary note
+            if findings.external_classes:
+                findings.architecture_notes.append(
+                    f"EXTERNAL CLASSES TO PORT: {', '.join(findings.external_classes[:20])}"
+                )
+            if findings.external_functions:
+                top_funcs = [f for f in findings.external_functions if not f.startswith('test_')][:10]
+                if top_funcs:
+                    findings.architecture_notes.append(
+                        f"EXTERNAL FUNCTIONS TO PORT: {', '.join(top_funcs)}"
+                    )
 
     # Extract keywords for searching
     keywords = _extract_search_keywords(user_request)
