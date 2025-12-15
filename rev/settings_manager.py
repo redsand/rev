@@ -571,6 +571,33 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         setter=_set_private_mode_runtime,
         default=config.DEFAULT_PRIVATE_MODE,
     ),
+    "mcp_memory_enabled": RuntimeSetting(
+        key="mcp_memory_enabled",
+        description="Enable MCP memory server for persistent context",
+        section="MCP Servers",
+        parser=_parse_bool,
+        getter=lambda: config.DEFAULT_MCP_SERVERS.get("memory", {}).get("enabled", False),
+        setter=lambda value: config.DEFAULT_MCP_SERVERS.get("memory", {}).update({"enabled": value}) if "memory" in config.DEFAULT_MCP_SERVERS else None,
+        default=False,
+    ),
+    "mcp_sequential_thinking_enabled": RuntimeSetting(
+        key="mcp_sequential_thinking_enabled",
+        description="Enable MCP sequential thinking server",
+        section="MCP Servers",
+        parser=_parse_bool,
+        getter=lambda: config.DEFAULT_MCP_SERVERS.get("sequential-thinking", {}).get("enabled", True),
+        setter=lambda value: config.DEFAULT_MCP_SERVERS.get("sequential-thinking", {}).update({"enabled": value}) if "sequential-thinking" in config.DEFAULT_MCP_SERVERS else None,
+        default=True,
+    ),
+    "mcp_fetch_enabled": RuntimeSetting(
+        key="mcp_fetch_enabled",
+        description="Enable MCP fetch server for HTTP requests",
+        section="MCP Servers",
+        parser=_parse_bool,
+        getter=lambda: config.DEFAULT_MCP_SERVERS.get("fetch", {}).get("enabled", True),
+        setter=lambda value: config.DEFAULT_MCP_SERVERS.get("fetch", {}).update({"enabled": value}) if "fetch" in config.DEFAULT_MCP_SERVERS else None,
+        default=True,
+    ),
 }
 
 

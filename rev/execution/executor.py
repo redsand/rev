@@ -228,11 +228,13 @@ class ExecutionContext:
         return hashlib.md5(sorted_args.encode()).hexdigest()[:12]
 
     def is_duplicate_call(self, tool_name: str, tool_args: Dict[str, Any]) -> bool:
-        """Check if this exact tool call was just executed (prevents back-to-back repeats)."""
+        """Check if this exact tool call was already made immediately prior."""
         args_hash = self._hash_args(tool_args)
         call_key = (tool_name, args_hash)
         with self._lock:
-            return bool(self.tool_call_history) and self.tool_call_history[-1] == call_key
+            if not self.tool_call_history:
+                return False
+            return self.tool_call_history[-1] == call_key
 
     def record_tool_call(self, tool_name: str, tool_args: Dict[str, Any]) -> None:
         """Record a tool call for deduplication tracking."""
@@ -487,9 +489,11 @@ def _prepare_llm_messages(
     messages: List[Dict],
     exec_context: ExecutionContext,
     tracker: Optional[SessionTracker] = None,
-    max_recent: int = 10,
+    max_recent: Optional[int] = None,
 ) -> List[Dict]:
     """Prepare a trimmed, context-rich message list for the LLM."""
+    if max_recent is None:
+        max_recent = config.CONTEXT_WINDOW_HISTORY
     trimmed = _manage_message_history(messages, max_recent=max_recent, tracker=tracker)
     prepared: List[Dict[str, Any]] = []
 
@@ -761,6 +765,47 @@ def _apply_text_fallbacks(
     return False
 
 
+def _build_task_constraints(task: Task) -> str:
+    """Build task-specific constraints to enforce boundaries.
+
+    Args:
+        task: The task to build constraints for
+
+    Returns:
+        Constraint string to add to task prompt
+    """
+    action_type = task.action_type.lower()
+    constraints = []
+
+    # Action-type specific constraints
+    if action_type == "review":
+        constraints.append("⚠️ REVIEW TASK: You may ONLY read files and search code. Do NOT write, edit, or modify any files.")
+        constraints.append("Expected output: A brief summary (3-5 sentences) of what you found.")
+    elif action_type == "add":
+        constraints.append("⚠️ ADD TASK: You MUST create or add new code. Use write_file or apply_patch.")
+        constraints.append("Focus ONLY on adding the specific feature mentioned in the task description.")
+    elif action_type == "edit":
+        constraints.append("⚠️ EDIT TASK: You MUST modify existing code. Use apply_patch or write_file.")
+        constraints.append("Edit ONLY the specific files/sections mentioned in the task description.")
+    elif action_type == "test":
+        constraints.append("⚠️ TEST TASK: You MUST run tests. Use run_tests or run_cmd.")
+        constraints.append("Expected output: Test results showing pass/fail status.")
+    elif action_type == "doc":
+        constraints.append("⚠️ DOC TASK: You MUST update documentation files only.")
+        constraints.append("Focus ONLY on documentation changes mentioned in the task description.")
+
+    # General constraints for all tasks
+    constraints.append("\n🎯 TASK BOUNDARIES:")
+    constraints.append("- Complete ONLY this specific task, nothing more")
+    constraints.append("- Do NOT work on other tasks from the plan")
+    constraints.append("- Do NOT explore unrelated files")
+    constraints.append("- If you already read a file in THIS task, do NOT read it again")
+    constraints.append("- Maximum 3 file reads per task - use them wisely")
+    constraints.append("- After exploration, make your changes immediately")
+
+    return "\n".join(constraints)
+
+
 def _build_execution_system_context(sys_info: Dict[str, Any], coding_mode: bool = False) -> str:
     """Build the system context string for execution, optionally with coding suffix.
 
@@ -833,7 +878,7 @@ def _summarize_old_messages(messages: List[Dict], tracker: 'SessionTracker' = No
     return "\n".join(summary_parts) if summary_parts else "Previous work completed successfully."
 
 
-def _manage_message_history(messages: List[Dict], max_recent: int = 20, tracker: 'SessionTracker' = None) -> List[Dict]:
+def _manage_message_history(messages: List[Dict], max_recent: Optional[int] = None, tracker: 'SessionTracker' = None) -> List[Dict]:
     """Keep recent messages and summarize old ones to prevent unbounded growth.
 
     This optimization prevents token explosion in long-running sessions by:
@@ -843,12 +888,14 @@ def _manage_message_history(messages: List[Dict], max_recent: int = 20, tracker:
 
     Args:
         messages: Current message history
-        max_recent: Number of recent messages to keep (default: 20)
+        max_recent: Number of recent messages to keep (default: from config.CONTEXT_WINDOW_HISTORY)
         tracker: Optional SessionTracker for enhanced summaries
 
     Returns:
         Trimmed message list with summary of old messages
     """
+    if max_recent is None:
+        max_recent = config.CONTEXT_WINDOW_HISTORY
     if len(messages) <= max_recent + 1:  # +1 for system message
         return messages
 
@@ -880,7 +927,7 @@ def _manage_message_history(messages: List[Dict], max_recent: int = 20, tracker:
 
 
 def _trim_history_with_notice(
-    messages: List[Dict], max_recent: int = 20, tracker: 'SessionTracker' = None
+    messages: List[Dict], max_recent: Optional[int] = None, tracker: 'SessionTracker' = None
 ) -> Tuple[List[Dict], bool]:
     """Trim and summarize history while warning the user when context is reduced.
 
@@ -892,6 +939,8 @@ def _trim_history_with_notice(
     Returns:
         A tuple of (trimmed messages, whether trimming occurred)
     """
+    if max_recent is None:
+        max_recent = config.CONTEXT_WINDOW_HISTORY
 
     if len(messages) <= max_recent + 1:  # +1 for optional system prompt
         return messages, False
@@ -1077,9 +1126,14 @@ def execution_mode(
         # Get session context (learnings from previous tasks in this run)
         session_context = exec_context.get_session_context()
 
-        # Add task to conversation with session context
+        # Build task-specific constraints
+        task_constraints = _build_task_constraints(current_task)
+
+        # Add task to conversation with session context and constraints
         task_prompt = f"""Task: {current_task.description}
 Action type: {current_task.action_type}
+
+{task_constraints}
 """
         if session_context:
             task_prompt += f"""
@@ -1652,11 +1706,14 @@ def execute_single_task(
 
     messages = [{"role": "system", "content": system_context}]
 
-    # Add task to conversation
+    # Add task to conversation with constraints
+    task_constraints = _build_task_constraints(task)
     messages.append({
         "role": "user",
         "content": f"""Task: {task.description}
 Action type: {task.action_type}
+
+{task_constraints}
 
 Execute this task completely. When done, respond with TASK_COMPLETE."""
     })
@@ -2335,10 +2392,13 @@ def streaming_execution_mode(
 
             exec_context.reset_for_new_task()
 
-            # Build task prompt
+            # Build task prompt with constraints
             session_context = exec_context.get_session_context()
+            task_constraints = _build_task_constraints(current_task)
             task_prompt = f"""Task: {current_task.description}
 Action type: {current_task.action_type}
+
+{task_constraints}
 """
             if session_context:
                 task_prompt += f"\nSESSION CONTEXT:\n{session_context}\n"
