@@ -30,10 +30,13 @@ PLANNING_SYSTEM = """You are a planning agent. Produce an execution plan for the
 Priorities:
 1) Reuse first: prefer extending existing code and patterns; avoid duplication.
 2) Make tasks executable: small, concrete, ordered, and test-aware.
+3) Limit exploration: gather only essential context, then generate the plan.
 
 Tool usage:
-- Use tools (list_dir, search_code, read_file, tree_view) to inspect the repository before producing the plan.
-- If tool calling is unavailable, produce a best-effort plan and include initial review tasks to inspect likely files.
+- You may call 1-3 tools to gather essential context (list_dir, search_code, read_file).
+- After gathering context, IMMEDIATELY generate the plan as a JSON array.
+- Do NOT exhaustively explore - if you need more info, create review tasks in the plan.
+- If tool calling is unavailable, produce a best-effort plan with initial review tasks.
 
 Output format (strict):
 - Return ONLY a JSON array. No prose, no markdown, no code fences.
@@ -46,7 +49,8 @@ Guidance:
 - Put review tasks first (find existing implementations and patterns).
 - For multi-feature work: one implementation task per feature.
 - For code changes: include at least one test task and name the command when possible.
-- If a task creates a new file, the description must say why reuse was not possible."""
+- If a task creates a new file, the description must say why reuse was not possible.
+- When in doubt, create review tasks instead of calling more tools."""
 
 
 CODING_PLANNING_SUFFIX = """
@@ -216,9 +220,26 @@ def _call_llm_with_tools(
     conversation = messages.copy()
 
     for iteration in range(max_iterations):
+        # Add progressive pressure as iterations increase
+        iteration_tools = tools if (model_supports_tools is not False) else None
+
+        # Remove tools after 5 iterations to force plan generation
+        if iteration >= 5:
+            iteration_tools = None
+
+        # After 3 iterations, start pressuring to generate plan
+        if iteration >= 3 and iteration_tools:
+            # Add reminder to conversation
+            pressure_msg = {
+                "role": "user",
+                "content": f"You've used {iteration} tool calls. Generate the execution plan JSON array NOW. Stop exploring and create the plan."
+            }
+            if conversation[-1].get("role") != "user":
+                conversation.append(pressure_msg)
+
         response = ollama_chat(
             conversation,
-            tools=tools if (model_supports_tools is not False) else None,
+            tools=iteration_tools,
             model=model_name,
             supports_tools=model_supports_tools,
         ) or {}
@@ -238,7 +259,7 @@ def _call_llm_with_tools(
             # No more tool calls - return final response
             return response
 
-        print(f"\n  Planning tool-iteration {iteration + 1}: LLM calling {len(tool_calls)} tool(s)...")
+        print(f"\n  Planning tool-iteration {iteration + 1}/{max_iterations}: LLM calling {len(tool_calls)} tool(s)...")
 
         # Add assistant message with tool calls to conversation
         conversation.append(message)
@@ -249,12 +270,25 @@ def _call_llm_with_tools(
         # Add tool results to conversation
         conversation.extend(tool_results)
 
-    # Max iterations reached
+    # Max iterations reached - force plan generation
     print(f"  Warning: Max planning tool-iterations ({max_iterations}) reached")
+    conversation.append({
+        "role": "user",
+        "content": """STOP calling tools. You have reached the iteration limit.
+
+Generate the execution plan RIGHT NOW as a JSON array with this exact format:
+[
+  {"description": "task description", "action_type": "review", "complexity": "low"},
+  {"description": "task description", "action_type": "edit", "complexity": "medium"}
+]
+
+Return ONLY the JSON array. No tools, no prose, just the JSON plan."""
+    })
+
     final_response = ollama_chat(conversation, tools=None, model=model_name, supports_tools=model_supports_tools) or {}
     if not isinstance(final_response, dict):
         return {"error": "LLM returned no response during planning (final call)"}
-    return final_response  # Final call without tools
+    return final_response
 
 
 def _is_overly_broad_task(task_description: str) -> bool:
@@ -619,30 +653,19 @@ User request:
 
 {plan_size_guidance}
 
-IMPORTANT: Before creating the execution plan:
-1. Use available tools to explore the codebase
-2. For security audits: enumerate C/C++ files, search for unsafe functions
-3. For multi-file tasks: use list_dir to find all relevant files
-4. For structural changes: MUST investigate existing definitions first
-5. Call tools as needed to gather information
+INSTRUCTIONS:
+1. If you need context, call 1-3 tools maximum (list_dir, search_code, or read_file)
+2. Then IMMEDIATELY generate the execution plan as a JSON array
+3. For unknown details, create review/research tasks in the plan instead of calling more tools
+4. Prefer creating review tasks over exhaustive exploration
 
-CRITICAL FOR STRUCTURAL CHANGES (schemas, types, classes, docs, config):
-- ALWAYS call search_code to find existing definitions:
-  * For schemas: search "enum ", "model ", "table ", "CREATE TABLE"
-  * For types/classes: search "interface ", "type ", "class ", "struct "
-  * For docs: search existing README, documentation structure
-  * For config: search existing config files, environment variables
-- ALWAYS call list_dir with appropriate patterns:
-  * Schemas: *.prisma, schema.*, migrations/*, *.sql
-  * Code: *.ts, *.py, *.js, *.go, *.java
-  * Docs: README*, docs/*, *.md
-  * Config: config/*, .env*, settings.*
-- ALWAYS call read_file to understand existing structures
-- Use run_all_analysis (or similar) if available for broader checks
-- NEVER create new structures without checking if they already exist
-- Reuse and extend existing structures whenever possible
+GUIDELINES:
+- For structural changes: consider searching for existing patterns, OR create a review task
+- For multi-file work: consider calling list_dir once, OR create a review task to identify files
+- Avoid calling multiple tools repeatedly - gather minimal context then generate the plan
+- If uncertain, create a "Review existing X" task rather than exploring further
 
-After gathering information with tools, generate a comprehensive execution plan as a JSON array."""}
+Generate a comprehensive execution plan as a JSON array NOW."""}
     ]
 
     print("→ Generating execution plan...")
