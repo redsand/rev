@@ -12,9 +12,10 @@ from .base import LLMProvider
 class GeminiProvider(LLMProvider):
     """Google Gemini LLM provider."""
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, silent: bool = False):
         super().__init__()
         self.name = "gemini"
+        self.silent = silent  # Suppress debug prints when True
         # Check: 1) passed parameter, 2) environment variable, 3) config module
         self.api_key = api_key or os.getenv("GEMINI_API_KEY", "") or config.GEMINI_API_KEY
 
@@ -29,11 +30,13 @@ class GeminiProvider(LLMProvider):
                 "key_preview": masked_key,
                 "key_length": len(self.api_key)
             }, "DEBUG")
-            print(f"🔑 Gemini API key loaded from {key_source}: {masked_key} (length: {len(self.api_key)})")
+            if not silent:
+                print(f"🔑 Gemini API key loaded from {key_source}: {masked_key} (length: {len(self.api_key)})")
         else:
             logger.log("llm", "GEMINI_API_KEY_MISSING", {}, "ERROR")
-            print("⚠️  WARNING: No Gemini API key found!")
-            print("   Set GEMINI_API_KEY environment variable or use 'rev save-api-key gemini YOUR_KEY'")
+            if not silent:
+                print("⚠️  WARNING: No Gemini API key found!")
+                print("   Set GEMINI_API_KEY environment variable or use 'rev save-api-key gemini YOUR_KEY'")
 
         self._genai = None
         self._client = None
@@ -53,10 +56,12 @@ class GeminiProvider(LLMProvider):
                         "key_preview": masked_key,
                         "key_length": len(self.api_key)
                     }, "DEBUG")
-                    print(f"🔧 Configuring Gemini with API key: {masked_key} (length: {len(self.api_key)})")
+                    if not self.silent:
+                        print(f"🔧 Configuring Gemini with API key: {masked_key} (length: {len(self.api_key)})")
                 else:
                     logger.log("llm", "GEMINI_CONFIGURE_NO_KEY", {}, "ERROR")
-                    print("❌ ERROR: Attempting to configure Gemini with empty API key!")
+                    if not self.silent:
+                        print("❌ ERROR: Attempting to configure Gemini with empty API key!")
 
                 genai.configure(api_key=self.api_key)
             except ImportError:
