@@ -699,8 +699,9 @@ def _display_plan_review(review: PlanReview, plan: ExecutionPlan):
                 "LOW": "🟢"
             }.get(severity, "⚪")
 
-            if task_id is not None:
-                print(f"  {severity_emoji} [{severity}] Task #{task_id + 1}: {desc}")
+            # Check if task_id is a valid integer before trying to add to it
+            if isinstance(task_id, (int, float)) and task_id is not None:
+                print(f"  {severity_emoji} [{severity}] Task #{int(task_id) + 1}: {desc}")
             else:
                 print(f"  {severity_emoji} [{severity}] {desc}")
             if impact:
