@@ -258,14 +258,47 @@ class ModelCommand(CommandHandler):
                 name_colored = colorize(model, Colors.BRIGHT_CYAN, bold=True) if is_current else model
                 output.append(f"  {marker}{name_colored}")
 
-            # Gemini
+            # Gemini - dynamically fetch models if API key is set
             output.append(f"\n  {colorize('Google Gemini:', Colors.BRIGHT_WHITE, bold=True)}")
-            gemini_models = ["gemini-2.0-flash-exp", "gemini-pro", "gemini-pro-vision"]
-            for model in gemini_models:
-                is_current = model == config.OLLAMA_MODEL
-                marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN) if is_current else "    "
-                name_colored = colorize(model, Colors.BRIGHT_CYAN, bold=True) if is_current else model
-                output.append(f"  {marker}{name_colored}")
+
+            # Check if Gemini API key is configured
+            from rev.secrets_manager import get_api_key
+            gemini_api_key = get_api_key("gemini")
+
+            if gemini_api_key:
+                try:
+                    # Dynamically fetch available Gemini models (silent mode to avoid debug prints)
+                    from rev.llm.providers.gemini_provider import GeminiProvider
+                    provider = GeminiProvider(api_key=gemini_api_key, silent=True)
+                    gemini_models = provider.get_model_list()
+
+                    if gemini_models:
+                        for model in gemini_models:
+                            is_current = model == config.OLLAMA_MODEL
+                            marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN) if is_current else "    "
+                            name_colored = colorize(model, Colors.BRIGHT_CYAN, bold=True) if is_current else model
+                            output.append(f"  {marker}{name_colored}")
+                    else:
+                        output.append(f"    {colorize('No models available', Colors.DIM)}")
+                except Exception as e:
+                    # Fallback to default list if API call fails
+                    output.append(f"    {colorize(f'Unable to fetch models: {str(e)[:50]}', Colors.BRIGHT_BLACK)}")
+                    fallback_models = ["gemini-2.0-flash-exp", "gemini-1.5-pro", "gemini-1.5-flash"]
+                    for model in fallback_models:
+                        is_current = model == config.OLLAMA_MODEL
+                        marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN) if is_current else "    "
+                        name_colored = colorize(model, Colors.BRIGHT_CYAN, bold=True) if is_current else model
+                        output.append(f"  {marker}{name_colored}")
+            else:
+                # No API key set - show common models and a message
+                output.append(f"    {colorize('(API key not set - showing common models)', Colors.DIM)}")
+                common_models = ["gemini-2.0-flash-exp", "gemini-1.5-pro", "gemini-1.5-flash"]
+                for model in common_models:
+                    is_current = model == config.OLLAMA_MODEL
+                    marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN) if is_current else "    "
+                    name_colored = colorize(model, Colors.BRIGHT_CYAN, bold=True) if is_current else model
+                    output.append(f"  {marker}{name_colored}")
+                output.append(f"    {colorize('Set API key with: /api-key set gemini', Colors.DIM)}")
 
             output.append(f"\n  {colorize('Usage: /model <model_name>', Colors.DIM)}")
             output.append(f"  {colorize('Provider auto-detected from model name', Colors.DIM)}")
