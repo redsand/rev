@@ -38,6 +38,30 @@ CRITICAL REQUIREMENT:
 - Break down work into review/analysis + implementation + testing phases
 - If you're unsure, create separate tasks for: review, implementation, and validation
 
+CRITICAL CONSTRAINT - CONCRETE NOUNS ONLY:
+You generally cannot create tasks with placeholders or vague references.
+
+BAD (too vague - will be REJECTED):
+- "Implement the first identified analyst."
+- "Port the feature from the other repo."
+- "Add the identified functionality."
+- "Implement relevant code from external source."
+
+GOOD (specific and actionable):
+- "Port 'RSI_Strategy' class from '../other-repo/strategies.py' to 'lib/analysts.py'."
+- "Implement 'MovingAverageCrossover' analyst based on existing 'BollingerBand' pattern."
+- "Add 'calculate_macd' function to indicators.py following existing indicator pattern."
+
+IF YOU DO NOT KNOW THE SPECIFIC NAMES of the classes, functions, or features to implement:
+1. Do NOT generate an implementation plan with placeholders.
+2. Generate a RESEARCH/DISCOVERY plan first to identify the specific items.
+3. Your first task MUST be: "Scan [source] to identify and list specific [items] to [action]."
+4. Only after discovery tasks can you add implementation tasks.
+
+TWO-STAGE PLANNING:
+- Stage A (Discovery): If specific items are unknown, create tasks to IDENTIFY them first.
+- Stage B (Execution): Only create implementation tasks AFTER you have specific names/targets.
+
 Tool usage:
 - You may call 1-3 tools to gather essential context (list_dir, search_code, read_file).
 - After gathering context, IMMEDIATELY generate the plan as a JSON array.
@@ -53,15 +77,20 @@ Output format (strict):
 
 Guidance:
 - Put review tasks first (find existing implementations and patterns).
-- For multi-feature work: one implementation task per feature.
+- For multi-feature work: one implementation task per feature with SPECIFIC names.
 - For code changes: include at least one test task and name the command when possible.
 - If a task creates a new file, the description must say why reuse was not possible.
 - When in doubt, create review tasks instead of calling more tools.
+- ALWAYS include specific file paths, class names, or function names in task descriptions.
 
 MINIMUM TASK BREAKDOWN:
 - At minimum: [review/analysis task] + [implementation task]
 - Better: [review] + [implementation] + [test]
-- Best: [review] + [multiple specific implementation tasks] + [test] + [validation]"""
+- Best: [review] + [multiple specific implementation tasks] + [test] + [validation]
+
+REQUIREMENTS CHECKLIST:
+When the user request contains specific constraints (e.g., "do not duplicate", "add to registry",
+"include in config"), ensure EVERY constraint has a corresponding task in your plan."""
 
 
 CODING_PLANNING_SUFFIX = """
@@ -98,28 +127,46 @@ CRITICAL REQUIREMENT:
 - NEVER return a single task that just rephrases the original request
 - Break work into distinct phases: review/research, implementation(s), testing
 
+CRITICAL CONSTRAINT - CONCRETE NOUNS ONLY:
+You MUST use specific names in task descriptions. NEVER use placeholders.
+
+BAD (WILL BE REJECTED):
+- "Implement first missing feature/module"
+- "Port the identified analyst"
+- "Add relevant functionality"
+
+GOOD (SPECIFIC AND ACTIONABLE):
+- "Implement 'BollingerBandAnalyst' class in lib/analysts.py"
+- "Port 'MacdStrategy' from ../external/strategies.py to lib/strategies.py"
+- "Add 'calculate_rsi' function to indicators.py"
+
+IF SPECIFIC NAMES ARE UNKNOWN:
+- Your first tasks MUST be discovery/research tasks to identify the specific items.
+- Only AFTER discovery tasks can you add implementation tasks.
+- Discovery task example: "Scan ../external-repo to list all Analyst classes to be ported"
+
 Rules:
 - Each subtask does one concrete thing.
-- If the task implies multiple features/items, create one subtask per item.
-- For porting/integration work: first locate patterns, then implement one feature at a time, then add tests/integration steps.
+- If the task implies multiple features/items, create one subtask per item WITH SPECIFIC NAMES.
+- For porting/integration work: first IDENTIFY specific items, then implement one at a time, then add tests.
 - Avoid a single subtask that covers the entire original task.
 
 MINIMUM BREAKDOWN PATTERN:
-1. Review/research task (understand existing code/patterns)
-2. One or more implementation tasks (each doing ONE specific thing)
+1. Review/research task (understand existing code/patterns, IDENTIFY specific items)
+2. One or more implementation tasks (each doing ONE specific thing WITH NAMED TARGET)
 3. Testing/validation task
 
-EXAMPLE for "implement features from another repository/framework":
+EXAMPLE for "implement features from another repository/framework" (WITH SPECIFIC NAMES):
 [
-  {"description": "Review existing codebase structure and identify integration points", "action_type": "review", "complexity": "low"},
-  {"description": "Analyze the source repository/framework to catalog available features", "action_type": "review", "complexity": "low"},
-  {"description": "Identify which features already exist to avoid duplication", "action_type": "review", "complexity": "low"},
-  {"description": "Implement first missing feature/module", "action_type": "add", "complexity": "medium"},
-  {"description": "Implement second missing feature/module", "action_type": "add", "complexity": "medium"},
-  {"description": "Implement third missing feature/module", "action_type": "add", "complexity": "medium"},
-  {"description": "Update configuration/registry to include new features", "action_type": "edit", "complexity": "low"},
-  {"description": "Write unit tests for new features", "action_type": "add", "complexity": "medium"},
-  {"description": "Run test suite to validate integration", "action_type": "test", "complexity": "low"}
+  {"description": "Review existing codebase structure in lib/analysts.py to identify integration points", "action_type": "review", "complexity": "low"},
+  {"description": "Scan ../algorithmic-trading-with-python to list all Analyst classes available", "action_type": "review", "complexity": "low"},
+  {"description": "Compare external analysts with existing ones to identify non-duplicates", "action_type": "review", "complexity": "low"},
+  {"description": "Port 'MovingAverageCrossoverAnalyst' from ../algorithmic-trading-with-python/analysts.py", "action_type": "add", "complexity": "medium"},
+  {"description": "Port 'BollingerBandAnalyst' from ../algorithmic-trading-with-python/analysts.py", "action_type": "add", "complexity": "medium"},
+  {"description": "Port 'MacdAnalyst' from ../algorithmic-trading-with-python/analysts.py", "action_type": "add", "complexity": "medium"},
+  {"description": "Register new analysts in matrix_recipes.py configuration", "action_type": "edit", "complexity": "low"},
+  {"description": "Write unit tests for MovingAverageCrossoverAnalyst, BollingerBandAnalyst, MacdAnalyst", "action_type": "add", "complexity": "medium"},
+  {"description": "Run pytest tests/test_analysts.py to validate integration", "action_type": "test", "complexity": "low"}
 ]
 
 Output format (strict): return ONLY a JSON array of objects with keys "description", "action_type", "complexity"."""
@@ -382,6 +429,128 @@ def _is_overly_broad_task(task_description: str, user_request: str = "") -> bool
     has_multiple_actions = action_count >= 2
 
     return has_broad_indicator or is_long_description or has_multiple_actions
+
+
+def _has_vague_placeholder(task_description: str) -> bool:
+    """Detect if a task description contains vague placeholders instead of specific names.
+
+    This implements the "Concrete Nouns" enforcement - tasks must have specific
+    class names, function names, or file paths, not abstract references.
+
+    Args:
+        task_description: The task description to check
+
+    Returns:
+        True if the task contains vague placeholders that should be rejected
+    """
+    description_lower = task_description.lower()
+
+    # Vague placeholder patterns that indicate the planner doesn't know what to do
+    vague_patterns = [
+        # Ordinal placeholders
+        "first identified", "second identified", "third identified",
+        "first missing", "second missing", "third missing",
+        "first new", "second new", "third new",
+        "first feature", "second feature", "third feature",
+        # Generic references
+        "the identified", "the relevant", "the appropriate",
+        "identified feature", "identified analyst", "identified class",
+        "identified function", "identified module", "identified item",
+        "relevant feature", "relevant code", "relevant functionality",
+        "appropriate feature", "appropriate implementation",
+        # Placeholder phrases
+        "from the other", "from external", "from source",
+        "missing feature", "missing module", "missing functionality",
+        "new feature/module", "feature/module",
+        # Abstract implementation references
+        "implement each", "implement all", "port each", "port all",
+        "add each", "add all remaining",
+        # Unknown targets
+        "unknown target", "to be determined", "tbd",
+    ]
+
+    # Check for vague patterns
+    for pattern in vague_patterns:
+        if pattern in description_lower:
+            return True
+
+    # Check for ordinal + generic noun combinations
+    ordinal_pattern = r'\b(first|second|third|fourth|fifth|next|remaining)\s+(identified|missing|new|relevant|appropriate)\b'
+    if re.search(ordinal_pattern, description_lower):
+        return True
+
+    # Check for "the X" where X is a generic term without a specific name
+    generic_the_pattern = r'\bthe\s+(feature|analyst|class|function|module|item|code|functionality)\b'
+    matches = re.findall(generic_the_pattern, description_lower)
+    if matches:
+        # Only flag if there's no quoted specific name nearby
+        if "'" not in task_description and '"' not in task_description:
+            return True
+
+    return False
+
+
+def _extract_requirements_from_request(user_request: str) -> List[str]:
+    """Extract explicit requirements/constraints from user request.
+
+    This implements the "Requirements Checklist" feature - extracting constraints
+    that the plan must address.
+
+    Args:
+        user_request: The user's task request
+
+    Returns:
+        List of extracted requirement strings
+    """
+    requirements = []
+    request_lower = user_request.lower()
+
+    # Negative constraints (things to avoid)
+    negative_patterns = [
+        (r"(?:do\s+)?not\s+duplicate", "Avoid duplicating existing functionality"),
+        (r"without\s+(?:any\s+)?duplicate", "Avoid duplicating existing functionality"),
+        (r"no\s+duplicate", "Avoid duplicating existing functionality"),
+        (r"avoid\s+duplicate", "Avoid duplicating existing functionality"),
+        (r"don't\s+(?:re)?create", "Do not recreate existing implementations"),
+        (r"skip\s+existing", "Skip items that already exist"),
+    ]
+
+    # Positive constraints (things to include)
+    positive_patterns = [
+        (r"add\s+(?:them\s+)?to\s+(?:the\s+)?(\w+)", r"Add items to \1"),
+        (r"register\s+(?:them\s+)?(?:in|with)\s+(?:the\s+)?(\w+)", r"Register items in \1"),
+        (r"include\s+(?:them\s+)?in\s+(?:the\s+)?(\w+)", r"Include items in \1"),
+        (r"update\s+(?:the\s+)?(\w+)\s+(?:to\s+include|with)", r"Update \1 with new items"),
+        (r"(?:matrix|config|registry)\s*(?:recipes?)?", "Update configuration/registry with new items"),
+    ]
+
+    # Check negative patterns
+    for pattern, requirement in negative_patterns:
+        if re.search(pattern, request_lower):
+            if requirement not in requirements:
+                requirements.append(requirement)
+
+    # Check positive patterns
+    for pattern, requirement_template in positive_patterns:
+        match = re.search(pattern, request_lower)
+        if match:
+            if r"\1" in requirement_template:
+                # Template with capture group
+                requirement = re.sub(r"\\1", match.group(1) if match.lastindex else "", requirement_template)
+            else:
+                requirement = requirement_template
+            if requirement not in requirements:
+                requirements.append(requirement)
+
+    # Check for explicit test requirements
+    if any(word in request_lower for word in ["test", "tests", "testing", "unit test"]):
+        requirements.append("Include tests for new functionality")
+
+    # Check for documentation requirements
+    if any(word in request_lower for word in ["document", "documentation", "readme", "docstring"]):
+        requirements.append("Include documentation updates")
+
+    return requirements
 
 
 def _recursive_breakdown(task_description: str, action_type: str, context: str, max_depth: int = 2, current_depth: int = 0, tools: list = None, force_breakdown: bool = False) -> List[Dict[str, Any]]:
@@ -805,6 +974,65 @@ Generate a comprehensive execution plan as a JSON array NOW with AT LEAST 2 task
                     else:
                         expanded_tasks.append(task_data)
                 tasks_data = expanded_tasks
+
+            # VAGUE PLACEHOLDER DETECTION: Check for tasks with abstract placeholders
+            print("→ Validating task specificity...")
+            vague_task_count = 0
+            for task_data in tasks_data:
+                description = task_data.get("description", "")
+                if _has_vague_placeholder(description):
+                    vague_task_count += 1
+                    print(f"  ⚠️  Vague task detected: '{description[:60]}...'")
+
+            if vague_task_count > 0:
+                print(f"  ⚠️  {vague_task_count} task(s) contain vague placeholders - adding discovery task")
+                # Prepend a discovery task if we have vague tasks
+                discovery_task = {
+                    "description": f"Scan and identify specific classes/functions to implement for: {user_request[:100]}",
+                    "action_type": "review",
+                    "complexity": "low"
+                }
+                # Only add if not already present
+                has_discovery = any(
+                    "scan" in t.get("description", "").lower() and "identify" in t.get("description", "").lower()
+                    for t in tasks_data
+                )
+                if not has_discovery:
+                    tasks_data.insert(0, discovery_task)
+
+            # REQUIREMENTS CHECKLIST: Extract and validate requirements
+            requirements = _extract_requirements_from_request(user_request)
+            if requirements:
+                print(f"→ Extracted {len(requirements)} requirement(s) from user request:")
+                for req in requirements:
+                    print(f"   - {req}")
+
+                # Check if requirements are covered in the plan
+                missing_requirements = []
+                for req in requirements:
+                    req_lower = req.lower()
+                    covered = False
+                    for task_data in tasks_data:
+                        desc_lower = task_data.get("description", "").lower()
+                        # Check for keyword overlap
+                        req_keywords = set(req_lower.split())
+                        desc_keywords = set(desc_lower.split())
+                        if len(req_keywords & desc_keywords) >= 2:
+                            covered = True
+                            break
+                    if not covered:
+                        missing_requirements.append(req)
+
+                if missing_requirements:
+                    print(f"  ⚠️  {len(missing_requirements)} requirement(s) may not be covered in plan:")
+                    for missing in missing_requirements:
+                        print(f"     - {missing}")
+                        # Add a task for the missing requirement
+                        tasks_data.append({
+                            "description": f"Ensure: {missing}",
+                            "action_type": "review" if "avoid" in missing.lower() else "edit",
+                            "complexity": "low"
+                        })
 
             # Add all tasks to plan
             for task_data in tasks_data:
