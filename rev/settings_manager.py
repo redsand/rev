@@ -696,9 +696,19 @@ def set_runtime_setting(key: str, raw_value: Any) -> Any:
 
 
 def get_runtime_settings_snapshot() -> Dict[str, Any]:
-    """Return a snapshot of runtime setting values for persistence."""
+    """Return a snapshot of runtime setting values for persistence.
 
-    return {key: setting.getter() for key, setting in RUNTIME_SETTINGS.items()}
+    Note: API keys are excluded from snapshots as they are stored separately
+    in secrets.json to avoid saving masked values.
+    """
+    # Exclude API keys from snapshots - they're stored in secrets.json
+    api_key_settings = {"openai_api_key", "anthropic_api_key", "gemini_api_key"}
+
+    return {
+        key: setting.getter()
+        for key, setting in RUNTIME_SETTINGS.items()
+        if key not in api_key_settings
+    }
 
 
 def apply_runtime_settings(saved: Dict[str, Any]) -> None:
