@@ -71,6 +71,26 @@ class GeminiProvider(LLMProvider):
 
         return system_instruction.strip(), converted
 
+    def _remove_default_fields(self, schema: Dict[str, Any]) -> Dict[str, Any]:
+        """Recursively remove 'default' fields from schema (Gemini doesn't support them)."""
+        if not isinstance(schema, dict):
+            return schema
+
+        result = {}
+        for key, value in schema.items():
+            if key == "default":
+                continue  # Skip 'default' fields
+            elif isinstance(value, dict):
+                result[key] = self._remove_default_fields(value)
+            elif isinstance(value, list):
+                result[key] = [
+                    self._remove_default_fields(item) if isinstance(item, dict) else item
+                    for item in value
+                ]
+            else:
+                result[key] = value
+        return result
+
     def _convert_tools(self, tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
         """Convert OpenAI-style tool definitions to Gemini format."""
         if not tools:
@@ -80,11 +100,13 @@ class GeminiProvider(LLMProvider):
         for tool in tools:
             if tool.get("type") == "function":
                 func = tool.get("function", {})
+                # Remove 'default' fields from parameters as Gemini doesn't support them
+                parameters = self._remove_default_fields(func.get("parameters", {}))
                 converted.append({
                     "function_declarations": [{
                         "name": func.get("name", ""),
                         "description": func.get("description", ""),
-                        "parameters": func.get("parameters", {}),
+                        "parameters": parameters,
                     }]
                 })
 
