@@ -78,13 +78,12 @@ MAX_FILE_BYTES = 5 * 1024 * 1024
 READ_RETURN_LIMIT = 80_000
 SEARCH_MATCH_LIMIT = 2000
 LIST_LIMIT = 2000
-MAX_READ_FILE_PER_TASK = int(os.getenv("REV_MAX_READ_FILE_PER_TASK", "15"))
-MAX_SEARCH_CODE_PER_TASK = int(os.getenv("REV_MAX_SEARCH_CODE_PER_TASK", "15"))
-MAX_RUN_CMD_PER_TASK = int(os.getenv("REV_MAX_RUN_CMD_PER_TASK", "15"))
-MAX_EXECUTION_ITERATIONS = int(os.getenv("REV_MAX_EXEC_ITER", "25"))
-MAX_TASK_ITERATIONS = int(os.getenv("REV_MAX_TASK_ITER", "100"))
-CONTEXT_WINDOW_HISTORY = int(os.getenv("REV_CONTEXT_WINDOW_HISTORY", "40"))
-MAX_PLANNING_TOOL_ITERATIONS = int(os.getenv("REV_MAX_PLANNING_ITER", "10"))
+MAX_READ_FILE_PER_TASK = int(os.getenv("REV_MAX_READ_FILE_PER_TASK", "5"))
+MAX_SEARCH_CODE_PER_TASK = int(os.getenv("REV_MAX_SEARCH_CODE_PER_TASK", "5"))
+MAX_RUN_CMD_PER_TASK = int(os.getenv("REV_MAX_RUN_CMD_PER_TASK", "10"))
+MAX_EXECUTION_ITERATIONS = int(os.getenv("REV_MAX_EXEC_ITER", "15"))
+MAX_TASK_ITERATIONS = int(os.getenv("REV_MAX_TASK_ITER", "15"))
+CONTEXT_WINDOW_HISTORY = int(os.getenv("REV_CONTEXT_WINDOW_HISTORY", "8"))
 
 EXCLUDE_DIRS = {
     ".git", ".hg", ".svn", ".idea", ".vscode", "__pycache__", ".pytest_cache",
@@ -101,10 +100,10 @@ ALLOW_CMDS = {
 MAX_STEPS_PER_RUN = int(os.getenv("REV_MAX_STEPS", "500"))
 # Keep token budget comfortably below the provider cap to avoid hard failures when the heuristic
 # token estimates differ from true usage.
-MAX_LLM_TOKENS_PER_RUN = int(os.getenv("REV_MAX_TOKENS", str(2_000_000)))
+MAX_LLM_TOKENS_PER_RUN = int(os.getenv("REV_MAX_TOKENS", str(1_000_000)))
 MAX_WALLCLOCK_SECONDS = int(os.getenv("REV_MAX_SECONDS", "3600"))  # 60 minutes default
-MAX_PLAN_TASKS = int(os.getenv("REV_MAX_PLAN_TASKS", "12"))
-RESEARCH_DEPTH_DEFAULT = os.getenv("REV_RESEARCH_DEPTH", "medium").lower()
+MAX_PLAN_TASKS = int(os.getenv("REV_MAX_PLAN_TASKS", "8"))
+RESEARCH_DEPTH_DEFAULT = os.getenv("REV_RESEARCH_DEPTH", "shallow").lower()
 MAX_ORCHESTRATOR_RETRIES = int(os.getenv("REV_MAX_ORCH_RETRIES", "2"))
 MAX_PLAN_REGEN_RETRIES = int(os.getenv("REV_MAX_PLAN_REGEN_RETRIES", "2"))
 MAX_VALIDATION_RETRIES = int(os.getenv("REV_MAX_VALIDATION_RETRIES", "2"))
@@ -147,7 +146,7 @@ DEFAULT_MCP_SERVERS = {
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-memory"],
         "description": "Persistent memory storage for AI context across sessions",
-        "enabled": os.getenv("REV_MCP_MEMORY", "true").lower() == "true",
+        "enabled": os.getenv("REV_MCP_MEMORY", "false").lower() == "true",
         "public": True
     },
     "sequential-thinking": {

@@ -472,7 +472,7 @@ Even in autonomous mode, the agent will **always prompt** for potentially destru
 ```bash
 # Ollama configuration
 export OLLAMA_BASE_URL="http://localhost:11434"  # Default
-export OLLAMA_MODEL="gpt-oss:120b-cloud"           # Default
+export OLLAMA_MODEL="qwen3-coder:480b-cloud"           # Default
 
 # LLM Generation Parameters (NEW - for improved tool calling accuracy)
 export OLLAMA_TEMPERATURE=0.1                   # Lower = more accurate tool calls (0.0-2.0)
@@ -567,7 +567,7 @@ rev [OPTIONS] "task description"
 
 Options:
   --repl                       Interactive REPL mode
-  --model MODEL                Ollama model to use (default: gpt-oss:120b-cloud)
+  --model MODEL                Ollama model to use (default: qwen3-coder:480b-cloud)
   --base-url URL               Ollama API URL (default: http://localhost:11434)
   --prompt                     Prompt for approval before execution (default: auto-approve)
   -j N, --parallel N           Number of concurrent tasks (default: 2, use 1 for sequential)
@@ -816,7 +816,7 @@ ollama serve
 Pull the model first:
 
 ```bash
-ollama pull gpt-oss:120b-cloud
+ollama pull qwen3-coder:480b-cloud
 ```
 
 ### "401 Unauthorized" for Cloud Models
@@ -1459,7 +1459,7 @@ The agent detects test frameworks automatically, but you can customize:
 
 ```bash
 # For Python projects
-rev "Fix failing tests" --model gpt-oss:120b-cloud
+rev "Fix failing tests" --model qwen3-coder:480b-cloud
 
 # For Node.js projects
 rev "Add tests for new API endpoints"
