@@ -661,7 +661,14 @@ class Orchestrator:
         print("STEP-BY-STEP TASK EXECUTION MODE (Claude Code Style)")
         print("=" * 60)
         analysis = analyze_request_mode(user_request, coding_mode=coding_mode)
-        self.context.plan = ExecutionPlan()  # Start with empty plan
+
+        # Keep the original plan that was generated in the planning phase
+        # Don't overwrite it - we'll use it as reference for remaining work
+        original_plan = self.context.plan
+        pending_count = len(original_plan.tasks) if original_plan else 0
+
+        if pending_count > 0:
+            print(f"\n📋 Reference Plan: {pending_count} tasks identified in planning phase")
 
         while iteration < max_iterations:
             iteration += 1
@@ -675,6 +682,17 @@ class Orchestrator:
             else:
                 completed_summary = "(Starting - no tasks completed yet)"
 
+            # Build list of pending/remaining tasks from original plan
+            pending_tasks_summary = ""
+            if original_plan and original_plan.tasks:
+                remaining_tasks = [t for t in original_plan.tasks if t.status not in [TaskStatus.COMPLETED, TaskStatus.FAILED]]
+                if remaining_tasks:
+                    pending_tasks_summary = "\n📝 Remaining tasks from plan:\n"
+                    for i, task in enumerate(remaining_tasks[:8], 1):  # Show first 8 remaining
+                        pending_tasks_summary += f"  {i}. [{task.action_type}] {task.description[:60]}\n"
+                    if len(remaining_tasks) > 8:
+                        pending_tasks_summary += f"  ... and {len(remaining_tasks) - 8} more tasks\n"
+
             # Get current file state
             self.context.update_repo_context()
             # repo_context is a string, extract status information
@@ -684,11 +702,10 @@ class Orchestrator:
                 "files_created": len([f for f in repo_str.split('\n') if f.strip().startswith('?? ')]),
             }
 
-            # Determine next single action
-            print(f"  → Determining next action...")
+            # Determine next single action, providing context about remaining tasks
             next_task = determine_next_action(
                 user_request=user_request,
-                completed_work=completed_summary,
+                completed_work=completed_summary + pending_tasks_summary,
                 current_file_state=current_file_state,
                 analysis_context=analysis,
             )
@@ -697,6 +714,13 @@ class Orchestrator:
             if next_task.description.strip().upper() == "GOAL_ACHIEVED":
                 print(f"  ✓ Goal achieved!")
                 return True
+
+            # Check if there are no more tasks to do
+            if original_plan and original_plan.tasks:
+                remaining_tasks = [t for t in original_plan.tasks if t.status not in [TaskStatus.COMPLETED, TaskStatus.FAILED]]
+                if not remaining_tasks:
+                    print(f"  ✓ All planned tasks have been completed!")
+                    return True
 
             print(f"  → Next action: [{next_task.action_type.upper()}] {next_task.description[:70]}")
 
@@ -716,6 +740,22 @@ class Orchestrator:
             if next_task.status == TaskStatus.COMPLETED:
                 print(f"  ✓ Task completed successfully")
                 completed_tasks.append(next_task.description)
+
+                # Mark similar tasks from original plan as complete
+                if original_plan and original_plan.tasks:
+                    for plan_task in original_plan.tasks:
+                        # Check if plan task matches this completed task (by action type and key words in description)
+                        if (plan_task.status != TaskStatus.COMPLETED and
+                            plan_task.action_type == next_task.action_type):
+                            # Simple heuristic: if descriptions have common keywords, mark as complete
+                            next_desc_lower = next_task.description.lower()
+                            plan_desc_lower = plan_task.description.lower()
+                            # Check for matching key terms (files, directories, class names, etc)
+                            if any(word in plan_desc_lower for word in next_desc_lower.split() if len(word) > 3):
+                                plan_task.status = TaskStatus.COMPLETED
+                                print(f"    → Marked original plan task as complete: [{plan_task.action_type}] {plan_task.description[:50]}")
+                                break
+
             elif next_task.status == TaskStatus.FAILED:
                 print(f"  ✗ Task failed: {next_task.error}")
                 # Continue anyway - next action determination will factor this in
