@@ -138,7 +138,8 @@ class Orchestrator:
         """Updates the current phase and logs the transition."""
         if self.context:
             self.context.set_current_phase(new_phase)
-            print(f"\nðŸ”¸ Entering phase: {new_phase.value}")
+            if config.EXECUTION_MODE != 'sub-agent':
+                print(f"\nðŸ”¸ Entering phase: {new_phase.value}")
 
     def _collect_repo_stats(self) -> Dict[str, Any]:
         """Collects relevant repository statistics for routing decisions."""
@@ -552,20 +553,20 @@ class Orchestrator:
                     if result.startswith("[RECOVERY_REQUESTED]"):
                         # Agent needs replanning - don't mark complete
                         task.status = TaskStatus.FAILED
-                        task.error = result[len("[RECOVERY_REQUESTED]"):].strip()
+                        task.error = result[len("[RECOVERY_REQUESTED]"):]
                         print(f"  ⚠️ Task {task.task_id} requested recovery: {task.error[:100]}")
                         overall_success = False
                     elif result.startswith("[FINAL_FAILURE]"):
                         # Agent exhausted recovery attempts
                         task.status = TaskStatus.FAILED
-                        task.error = result[len("[FINAL_FAILURE]"):].strip()
+                        task.error = result[len("[FINAL_FAILURE]"):]
                         print(f"  ✗ Task {task.task_id} failed after recovery attempts: {task.error[:100]}")
                         context.add_error(f"Task {task.task_id}: {task.error}")
                         overall_success = False
                     elif result.startswith("[USER_REJECTED]"):
                         # User rejected the change
                         task.status = TaskStatus.STOPPED
-                        task.error = result[len("[USER_REJECTED]"):].strip()
+                        task.error = result[len("[USER_REJECTED]"):]
                         print(f"  ⏭️  Task {task.task_id} rejected by user: {task.error[:100]}")
                         overall_success = False
                     else:
@@ -631,168 +632,121 @@ class Orchestrator:
 
     def _continuous_sub_agent_execution(self, user_request: str, coding_mode: bool) -> bool:
         """
-        Execute tasks using step-by-step "next action" determination.
-
-        Similar to Claude Code and Codex, this mode:
-        1. Analyzes the user request (no upfront planning)
-        2. Determines the SINGLE next action to take
-        3. Executes that action
-        4. Checks if goal is achieved
-        5. Repeats until done
-
-        This avoids the problem of generating 60+ tasks upfront and instead
-        makes incremental decisions based on actual current state.
-
-        Args:
-            user_request: The original user request
-            coding_mode: Whether coding mode is enabled
-
-        Returns:
-            True if goal achieved or max iterations reached, False only on critical error
+        Execute tasks using step-by-step "next action" determination, with proper state tracking.
         """
         from rev.execution.planner import analyze_request_mode, determine_next_action
 
         iteration = 0
-        completed_tasks = []  # Track completed task descriptions
-
-        # Initial analysis of the request (no upfront planning)
+        
         print("\n" + "=" * 60)
         print("STEP-BY-STEP TASK EXECUTION MODE (Claude Code Style)")
         print("=" * 60)
         analysis = analyze_request_mode(user_request, coding_mode=coding_mode)
 
-        # Keep the original plan that was generated in the planning phase
-        # Don't overwrite it - we'll use it as reference for remaining work
         original_plan = self.context.plan
-        pending_count = len(original_plan.tasks) if original_plan else 0
+        if not original_plan or not original_plan.tasks:
+            print("  ⚠️ No reference plan found. Sub-agent mode requires an initial plan.")
+            return False
+        
+        pending_count = len(original_plan.tasks)
+        print(f"\n📋 Reference Plan: {pending_count} tasks identified in planning phase")
 
-        if pending_count > 0:
-            print(f"\n📋 Reference Plan: {pending_count} tasks identified in planning phase")
-
-        # Execute tasks until: all completed, goal achieved, or resource budget exceeded
         while True:
             iteration += 1
 
-            # Build summary of completed work
+            if self.context.resource_budget.is_exceeded():
+                print(f"\n⚠️ Resource budget exceeded at step {iteration}")
+                return True
+
+            # Build summaries based on the TRUE state of the original_plan
+            completed_tasks_from_plan = [t for t in original_plan.tasks if t.status == TaskStatus.COMPLETED]
+            remaining_tasks_from_plan = [t for t in original_plan.tasks if t.status not in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.STOPPED]]
+
+            if not remaining_tasks_from_plan:
+                print(f"\n🎉 All {len(original_plan.tasks)} planned tasks have been completed!")
+                return True
+
+            # --- Build Context for Next Action ---
             completed_summary = ""
-            if completed_tasks:
-                completed_summary = "✓ Completed:\n"
-                for desc in completed_tasks[-3:]:  # Show last 3 completed tasks
-                    completed_summary += f"  - {desc[:70]}\n"
-            else:
-                completed_summary = "(Starting - first task to execute)"
+            if completed_tasks_from_plan:
+                completed_summary = "✓ Recently Completed:\n"
+                for task in completed_tasks_from_plan[-3:]: # Show last 3
+                    completed_summary += f"  - {task.description[:80]}\n"
 
-            # Build list of pending/remaining tasks from original plan
-            pending_tasks_summary = ""
-            if original_plan and original_plan.tasks:
-                remaining_tasks = [t for t in original_plan.tasks if t.status not in [TaskStatus.COMPLETED, TaskStatus.FAILED]]
-                total_tasks = len(original_plan.tasks)
-
-                if remaining_tasks:
-                    completed_count = total_tasks - len(remaining_tasks)
-                    pending_tasks_summary = f"\n📋 PLAN STATUS: {completed_count}/{total_tasks} tasks complete\n"
-                    pending_tasks_summary += "📝 REMAINING TASKS (must complete all):\n"
-
-                    for i, task in enumerate(remaining_tasks[:10], 1):  # Show first 10 remaining
-                        status_indicator = "⏳" if i <= 3 else " "
-                        pending_tasks_summary += f"  {status_indicator} {i}. [{task.action_type.upper()}] {task.description[:65]}\n"
-
-                    if len(remaining_tasks) > 10:
-                        pending_tasks_summary += f"\n  ⏸️  ... and {len(remaining_tasks) - 10} more tasks below the fold\n"
-                    else:
-                        pending_tasks_summary += f"\n  ✓ These are ALL remaining tasks - complete them in order\n"
-
-            # Get current file state
+            pending_summary = f"\n📋 PLAN STATUS: {len(completed_tasks_from_plan)}/{len(original_plan.tasks)} tasks complete.\n"
+            pending_summary += "📝 REMAINING TASKS:\n"
+            for i, task in enumerate(remaining_tasks_from_plan[:10], 1):
+                pending_summary += f"  - [{task.action_type.upper()}] {task.description[:80]}\n"
+            if len(remaining_tasks_from_plan) > 10:
+                pending_summary += f"  ... and {len(remaining_tasks_from_plan) - 10} more.\n"
+            
             self.context.update_repo_context()
-            # repo_context is a string, extract status information
             repo_str = self.context.repo_context if isinstance(self.context.repo_context, str) else str(self.context.repo_context)
-            current_file_state = {
-                "files_changed": len([f for f in repo_str.split('\n') if f.strip().startswith('M ')]),
-                "files_created": len([f for f in repo_str.split('\n') if f.strip().startswith('?? ')]),
-            }
+            current_file_state = {"files_changed": len(repo_str.splitlines()), "files_created": 0}
 
-            # Determine next single action, providing context about remaining tasks
+            # Determine next single action
             next_task = determine_next_action(
                 user_request=user_request,
-                completed_work=completed_summary + pending_tasks_summary,
+                completed_work=completed_summary + pending_summary,
                 current_file_state=current_file_state,
                 analysis_context=analysis,
             )
 
-            # Check if goal is achieved
             if next_task.description.strip().upper() == "GOAL_ACHIEVED":
-                print(f"  ✓ Goal achieved!")
+                print(f"\n✅ Goal achieved according to planner!")
                 return True
 
-            # Check if there are no more tasks to do
-            if original_plan and original_plan.tasks:
-                remaining_tasks = [t for t in original_plan.tasks if t.status not in [TaskStatus.COMPLETED, TaskStatus.FAILED]]
-                if not remaining_tasks:
-                    print(f"  ✓ All planned tasks have been completed!")
-                    return True
+            print(f"\n  → Next action: [{next_task.action_type.upper()}] {next_task.description[:80]}")
 
-            print(f"  → Next action: [{next_task.action_type.upper()}] {next_task.description[:70]}")
-
-            # Verification: Don't consolidate/update until all extractions are done
-            # Pattern: If this is an edit/update/consolidation task, ensure all ADD/extract tasks are complete first
-            if next_task.action_type in ["edit", "refactor"]:
-                # Check for keywords that indicate consolidation/update (not extraction)
-                consolidation_keywords = ["update", "import", "export", "consolidate", "re-export", "refactor"]
-                is_consolidation = any(kw in next_task.description.lower() for kw in consolidation_keywords)
-
-                if is_consolidation and original_plan and original_plan.tasks:
-                    # Check if there are still ADD/extraction tasks pending
-                    pending_adds = [t for t in original_plan.tasks
-                                   if t.action_type == "add" and
-                                   t.status not in [TaskStatus.COMPLETED, TaskStatus.FAILED]]
-
-                    if pending_adds:
-                        print(f"\n  ⚠️  VERIFICATION: Cannot consolidate yet")
-                        print(f"     {len(pending_adds)} file creation task(s) still pending:")
-                        for t in pending_adds[:3]:
-                            print(f"       - {t.description[:60]}")
-                        if len(pending_adds) > 3:
-                            print(f"       ... and {len(pending_adds) - 3} more")
-                        print(f"\n  → Deferring consolidation. Continuing with file creation first.\n")
-                        continue  # Skip this task and move to next
-
-            # Execute the single task (isolated from reference plan)
-            # Create a temporary plan with just this one task
+            # Create a temporary plan for execution
             temp_plan = ExecutionPlan()
             next_task.task_id = 0
             temp_plan.tasks = [next_task]
 
-            # Swap plans, execute, then restore reference plan
+            # Swap plans, execute, then restore
             saved_plan = self.context.plan
             self.context.plan = temp_plan
-
+            
             print(f"  → Executing task...")
             success = self._dispatch_to_sub_agents(self.context)
 
             # Restore the reference plan
             self.context.plan = saved_plan
 
-            # Update state
             self.context.update_repo_context()
             clear_analysis_caches()
 
-            # Check for task completion
+            # **THE FIX**: Update the status in the original plan
             if next_task.status == TaskStatus.COMPLETED:
                 print(f"  ✓ Task completed successfully")
-                completed_tasks.append(next_task.description)
-                # Note: Not marking original plan tasks as complete - they have their own state
-                # The LLM will track progress based on the complete remaining task list shown in prompts
+                # Find the corresponding task in the original plan and mark it as complete.
+                # This is fragile (matches by description) but necessary.
+                found_match = False
+                for original_task in remaining_tasks_from_plan:
+                    if original_task.description.strip() == next_task.description.strip():
+                        original_task.status = TaskStatus.COMPLETED
+                        print(f"  → Marked reference task '{original_task.task_id}' as complete.")
+                        found_match = True
+                        break
+                if not found_match:
+                    print(f"  ⚠️ Could not find matching task in reference plan to mark as complete.")
 
             elif next_task.status == TaskStatus.FAILED:
                 print(f"  ✗ Task failed: {next_task.error}")
-                # Continue anyway - next action determination will factor this in
-            else:
-                print(f"  ⚠ Task status: {next_task.status.value}")
-
-            # Check resource budget
-            if self.context.resource_budget.is_exceeded():
-                print(f"\n⚠️ Resource budget exceeded at step {iteration}")
-                return True
+                # Mark as failed in original plan to avoid retrying indefinitely
+                for original_task in remaining_tasks_from_plan:
+                    if original_task.description.strip() == next_task.description.strip():
+                        original_task.status = TaskStatus.FAILED
+                        original_task.error = next_task.error
+                        break
+            else: # STOPPED, etc.
+                print(f"  ℹ️ Task finished with status: {next_task.status.value}")
+                # Mark as stopped in original plan
+                for original_task in remaining_tasks_from_plan:
+                    if original_task.description.strip() == next_task.description.strip():
+                        original_task.status = TaskStatus.STOPPED
+                        original_task.error = next_task.error
+                        break
 
     def _run_single_attempt(self, user_request: str) -> OrchestratorResult:
         """Run a single orchestration attempt."""
@@ -825,94 +779,103 @@ class Orchestrator:
             run_mode=run_mode,
         )
 
+        # In sub-agent mode, we want a cleaner, more REPL-like experience.
+        # The following block is silenced to reduce verbosity.
+        if config.EXECUTION_MODE != 'sub-agent':
+            # Apply routing decision to config (if not explicitly overridden)
+            print(f"\n🔀 Routing Decision: {route.mode}")
+            print(f"   Reasoning: {route.reasoning}")
 
-        # Apply routing decision to config (if not explicitly overridden)
-        print(f"\n🔀 Routing Decision: {route.mode}")
-        print(f"   Reasoning: {route.reasoning}")
+            route_research_depth = getattr(route, "research_depth", None)
+            if not self._user_config_provided:
+                self.config.validation_mode = getattr(route, "validation_mode", self.config.validation_mode)
 
+            # Update config based on route (only if using default config)
+            coding_modes = {"quick_edit", "focused_feature", "full_feature", "refactor", "test_focus"}
+            coding_mode = route.mode in coding_modes
+            if not self._user_config_provided:
+                self.config.enable_learning = route.enable_learning
+                self.config.enable_research = route.enable_research
+                self.config.enable_review = route.enable_review
+                self.config.enable_validation = route.enable_validation
+                self.config.review_strictness = ReviewStrictness(route.review_strictness)
+                self.config.parallel_workers = route.parallel_workers
+                self.config.enable_action_review = route.enable_action_review
+                self.config.auto_approve = getattr(route, "auto_approve", self.config.auto_approve)
+                self.config.orchestrator_retries = route.max_retries
+                self.config.plan_regen_retries = route.max_retries
+                self.config.validation_retries = route.max_retries
+                self.config.enable_auto_fix = getattr(route, "enable_auto_fix", self.config.enable_auto_fix)
+                route_plan_cap = getattr(route, "max_plan_tasks", None)
+                if route_plan_cap:
+                    self.config.max_plan_tasks = route_plan_cap
+                # Mode-based agent toggles
+                if route.mode in {"quick_edit", "test_focus"}:
+                    self.config.enable_learning = False
+                    self.config.enable_validation = True
+                    if route_research_depth not in {"shallow", "off"}:
+                        self.config.enable_research = False
+                        route_research_depth = "off"
+                    if not getattr(route, "validation_mode", None):
+                        self.config.validation_mode = "smoke"
+                elif route.mode == "exploration":
+                    self.config.enable_learning = True
+                    self.config.enable_research = True
+                    self.config.enable_validation = False
+
+            self.config.research_depth = route_research_depth or self.config.research_depth or RESEARCH_DEPTH_DEFAULT
+            print(f"   Mode: {route.mode} | Research depth: {self.config.research_depth}")
+            print(f"   Plan task cap: {self.config.max_plan_tasks}")
+            print(f"   Planning tool-iterations cap: {self.config.max_planning_iterations}")
+            print(f"   Validation mode: {self.config.validation_mode}")
+
+            # Parallel execution is disabled globally; enforce single worker
+            self.config.parallel_workers = 1
+
+            route_agents = []
+            if route.enable_learning:
+                route_agents.append("Learning")
+            if route.enable_research:
+                route_agents.append("Research")
+            route_agents.append("Planning")
+            if route.enable_review:
+                route_agents.append("Review")
+            route_agents.append("Execution")
+            if route.enable_validation:
+                route_agents.append("Validation")
+            print(f"   Router agents: {', '.join(route_agents)}")
+
+            print(f"\nAgents enabled: ", end="")
+            agents = []
+            if self.config.enable_learning:
+                agents.append("Learning")
+            if self.config.enable_research:
+                agents.append("Research")
+            agents.append("Planning")
+            if self.config.enable_review:
+                agents.append("Review")
+            agents.append("Execution")
+            if self.config.enable_validation:
+                agents.append("Validation")
+            print(", ".join(agents))
+            if coding_mode:
+                print("   🔧 Coding mode: ENABLED (test + doc enforcement)")
+            print("=" * 60)
+
+        # This block needs to be outside the conditional to set coding_mode
         route_research_depth = getattr(route, "research_depth", None)
-        if not self._user_config_provided:
-            self.config.validation_mode = getattr(route, "validation_mode", self.config.validation_mode)
-
-        # Update config based on route (only if using default config)
         coding_modes = {"quick_edit", "focused_feature", "full_feature", "refactor", "test_focus"}
         coding_mode = route.mode in coding_modes
-        if not self._user_config_provided:
-            self.config.enable_learning = route.enable_learning
-            self.config.enable_research = route.enable_research
-            self.config.enable_review = route.enable_review
-            self.config.enable_validation = route.enable_validation
-            self.config.review_strictness = ReviewStrictness(route.review_strictness)
-            self.config.parallel_workers = route.parallel_workers
-            self.config.enable_action_review = route.enable_action_review
-            self.config.auto_approve = getattr(route, "auto_approve", self.config.auto_approve)
-            self.config.orchestrator_retries = route.max_retries
-            self.config.plan_regen_retries = route.max_retries
-            self.config.validation_retries = route.max_retries
-            self.config.enable_auto_fix = getattr(route, "enable_auto_fix", self.config.enable_auto_fix)
-            route_plan_cap = getattr(route, "max_plan_tasks", None)
-            if route_plan_cap:
-                self.config.max_plan_tasks = route_plan_cap
-            # Mode-based agent toggles
-            if route.mode in {"quick_edit", "test_focus"}:
-                self.config.enable_learning = False
-                self.config.enable_validation = True
-                if route_research_depth not in {"shallow", "off"}:
-                    self.config.enable_research = False
-                    route_research_depth = "off"
-                if not getattr(route, "validation_mode", None):
-                    self.config.validation_mode = "smoke"
-            elif route.mode == "exploration":
-                self.config.enable_learning = True
-                self.config.enable_research = True
-                self.config.enable_validation = False
-
-        self.config.research_depth = route_research_depth or self.config.research_depth or RESEARCH_DEPTH_DEFAULT
-        print(f"   Mode: {route.mode} | Research depth: {self.config.research_depth}")
-        print(f"   Plan task cap: {self.config.max_plan_tasks}")
-        print(f"   Planning tool-iterations cap: {self.config.max_planning_iterations}")
-        print(f"   Validation mode: {self.config.validation_mode}")
-
-        # Parallel execution is disabled globally; enforce single worker
-        self.config.parallel_workers = 1
-
-        route_agents = []
-        if route.enable_learning:
-            route_agents.append("Learning")
-        if route.enable_research:
-            route_agents.append("Research")
-        route_agents.append("Planning")
-        if route.enable_review:
-            route_agents.append("Review")
-        route_agents.append("Execution")
-        if route.enable_validation:
-            route_agents.append("Validation")
-        print(f"   Router agents: {', '.join(route_agents)}")
-
-        print(f"\nAgents enabled: ", end="")
-        agents = []
-        if self.config.enable_learning:
-            agents.append("Learning")
-        if self.config.enable_research:
-            agents.append("Research")
-        agents.append("Planning")
-        if self.config.enable_review:
-            agents.append("Review")
-        agents.append("Execution")
-        if self.config.enable_validation:
-            agents.append("Validation")
-        print(", ".join(agents))
-        if coding_mode:
-            print("   🔧 Coding mode: ENABLED (test + doc enforcement)")
-        print("=" * 60)
 
         # Initialize resource budget tracking
         self.context.set_current_phase(AgentPhase.LEARNING)
         self.context.resource_budget = ResourceBudget()
 
-        # Display resource budgets
-        print(f"\n📊 Resource Budgets:")
-        print(f"   Steps: {self.context.resource_budget.max_steps} | Tokens: {self.context.resource_budget.max_tokens} | Time: {self.context.resource_budget.max_seconds}s")
+        # Display resource budgets only if not in sub-agent mode
+        if config.EXECUTION_MODE != 'sub-agent':
+            print(f"\n📊 Resource Budgets:")
+            print(f"   Steps: {self.context.resource_budget.max_steps} | Tokens: {self.context.resource_budget.max_tokens} | Time: {self.context.resource_budget.max_seconds}s")
+
 
         try:
             # Phase 1: Learning Agent - Get historical insights
@@ -1016,7 +979,7 @@ class Orchestrator:
                         planning_retry_count += 1
                         print(f"\n⚠️  Plan too small (only {len(self.context.plan.tasks)} task(s)); regenerating {planning_retry_count}/{max_plan_retries}")
                         plan = planning_mode(
-                            f"""{self.context.user_request}\n\nRegenerate the plan with at least {min_plan_tasks} distinct tasks and explicit dependencies. Avoid collapsing multi-step work into one task.""",
+                            f"{{{self.context.user_request}}}\n\nRegenerate the plan with at least {min_plan_tasks} distinct tasks and explicit dependencies. Avoid collapsing multi-step work into one task.",
                             coding_mode=coding_mode,
                             max_plan_tasks=self.config.max_plan_tasks,
                             max_planning_iterations=self.config.max_planning_iterations,
@@ -1078,7 +1041,7 @@ class Orchestrator:
 
                         # Regenerate plan with feedback
                         plan = planning_mode(
-                            f"""{self.context.user_request}\n\nIMPORTANT - Address the following review feedback:\n{feedback}""",
+                            f"{{{self.context.user_request}}}\n\nIMPORTANT - Address the following review feedback:\n{feedback}",
                             coding_mode=coding_mode,
                             max_plan_tasks=self.config.max_plan_tasks,
                             max_planning_iterations=self.config.max_planning_iterations,
@@ -1175,7 +1138,7 @@ class Orchestrator:
                     followup_prompt_suffix += f"\n\nPrevious execution was interrupted by an agent request for replanning due to: {request_details.get('reason', 'unspecified reason')}"
 
                 followup_plan = self._regenerate_followup_plan(
-                    f"""{self.context.user_request}{followup_prompt_suffix}""", 
+                    f"{{{self.context.user_request}}}{followup_prompt_suffix}", 
                     self.context.plan,
                     coding_mode,
                 )
