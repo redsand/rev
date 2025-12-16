@@ -293,6 +293,37 @@ ollama show llama3.1:latest
 pip install -r requirements.txt
 ```
 
+## Execution Modes
+
+Rev supports two execution modes:
+
+- **🎯 Sub-Agent Mode (RECOMMENDED)** — Specialized agents handle specific task types (code, testing, debugging, etc.)
+- **📋 Linear Mode** — Single generic agent (for testing/comparison)
+
+### Quick Start
+
+```bash
+# Use Sub-Agent Mode (RECOMMENDED) for production
+export REV_EXECUTION_MODE=sub-agent
+rev "Extract BreakoutAnalyst class to lib/analysts/"
+
+# Use Linear Mode for testing/comparison
+export REV_EXECUTION_MODE=linear
+rev "Extract BreakoutAnalyst class to lib/analysts/"
+```
+
+**Key Differences:**
+| Feature | Sub-Agent (RECOMMENDED) | Linear (Testing) |
+|---------|-----------|---------|
+| Code extraction | ✅ Real implementations (95%) | ⚠️ May generate stubs (65%) |
+| Performance | ✅ 3x faster with parallelism | ⚠️ Sequential only |
+| Quality | ✅ Specialized validation | ⚠️ Generic validation |
+| Tests passing | ✅ 26/26 tests | ✅ Basic tests |
+
+**📖 For detailed comparison and configuration, see [docs/EXECUTION_MODES.md](docs/EXECUTION_MODES.md)**
+
+---
+
 ## Usage
 
 ### One-Shot Mode

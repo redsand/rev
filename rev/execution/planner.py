@@ -864,6 +864,57 @@ def _cap_plan_tasks(plan: ExecutionPlan, max_plan_tasks: Optional[int]) -> int:
     return original_count
 
 
+def _extract_concrete_references(user_request: str) -> Dict[str, Any]:
+    """Extract specific class names, function names, and file paths from user request.
+
+    This helps the planner generate concrete tasks with specific names instead of vague
+    references like "extract identified classes".
+
+    Returns a dict with:
+    - class_names: List of specific class names mentioned (e.g., ["BreakoutAnalyst", "VolumeAnalyst"])
+    - function_names: List of specific function names mentioned
+    - file_paths: List of specific file paths mentioned
+    """
+    references = {
+        "class_names": [],
+        "function_names": [],
+        "file_paths": [],
+    }
+
+    # Extract class names: CapitalizedWords that look like class names
+    # Pattern: PascalCase followed by optional 'Analyst', 'Strategy', 'Handler', etc.
+    class_pattern = r'\b([A-Z][a-z]+(?:[A-Z][a-z]+)*(?:Analyst|Strategy|Handler|Manager|Service|Factory|Builder|Observer|Validator|Processor)?)\b'
+    for match in re.finditer(class_pattern, user_request):
+        name = match.group(1)
+        # Filter out common English words and single words that aren't likely class names
+        if len(name) > 2 and name not in references["class_names"]:
+            # More likely to be a class if it's long or has "Analyst" etc. suffix
+            if len(name) > 8 or any(suffix in name for suffix in ["Analyst", "Strategy", "Handler", "Manager", "Service"]):
+                references["class_names"].append(name)
+
+    # Extract function names: snake_case words starting with verb or common patterns
+    func_pattern = r'\b((?:get|set|init|create|delete|update|add|remove|check|validate|calculate|compute|analyze|process|handle|extract|import|export)_[a-z_]+)\b'
+    for match in re.finditer(func_pattern, user_request, re.IGNORECASE):
+        name = match.group(1)
+        if name not in references["function_names"]:
+            references["function_names"].append(name)
+
+    # Extract file paths: ./ ../ paths and common path patterns
+    path_pattern = r'(?:[\./\\]+)?(?:[a-zA-Z_][a-zA-Z0-9_]*[\\/])*[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z0-9]+)?'
+    for match in re.finditer(r'(\./|\.\./|lib/|src/)[a-zA-Z0-9_./]*', user_request):
+        path = match.group(0)
+        if path not in references["file_paths"]:
+            references["file_paths"].append(path)
+
+    # Also extract .py files mentioned
+    for match in re.finditer(r'([a-zA-Z_][a-zA-Z0-9_]*\.py)', user_request):
+        name = match.group(1)
+        if name not in references["file_paths"]:
+            references["file_paths"].append(name)
+
+    return references
+
+
 def planning_mode(
     user_request: str,
     enable_advanced_analysis: bool = True,
@@ -938,6 +989,20 @@ Use these tools when planning to:
         "Avoid creating separate incremental test/lint loops unless explicitly requested."
     )
 
+    # Extract concrete references (class names, file paths, etc.) from the user request
+    # This helps the planner generate concrete tasks with specific names
+    concrete_refs = _extract_concrete_references(user_request)
+    concrete_refs_section = ""
+    if concrete_refs["class_names"] or concrete_refs["file_paths"] or concrete_refs["function_names"]:
+        concrete_refs_section = "\nSPECIFIC REFERENCES IDENTIFIED IN REQUEST:\n"
+        if concrete_refs["class_names"]:
+            concrete_refs_section += f"Classes/Types: {', '.join(concrete_refs['class_names'])}\n"
+        if concrete_refs["file_paths"]:
+            concrete_refs_section += f"File paths: {', '.join(concrete_refs['file_paths'])}\n"
+        if concrete_refs["function_names"]:
+            concrete_refs_section += f"Functions: {', '.join(concrete_refs['function_names'])}\n"
+        concrete_refs_section += "YOU MUST use these specific names in your task descriptions to be concrete.\n"
+
     messages = [
         {"role": "system", "content": enhanced_system_prompt},
         {"role": "user", "content": f"""System Information:
@@ -951,7 +1016,7 @@ Repository context:
 
 User request:
 {user_request}
-
+{concrete_refs_section}
 {token_guidance}
 
 {plan_size_guidance}

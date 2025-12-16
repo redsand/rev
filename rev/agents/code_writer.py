@@ -7,18 +7,41 @@ from rev.core.context import RevContext
 from rev.execution.safety import is_scary_operation, prompt_scary_operation
 from difflib import unified_diff
 from typing import Tuple
+import re
+from pathlib import Path
 
 CODE_WRITER_SYSTEM_PROMPT = """You are a specialized Code Writer agent. Your sole purpose is to execute a single coding task by calling the appropriate tool (`write_file` or `replace_in_file`).
 
 You will be given a task description and context about the repository. Analyze them carefully.
 
-CRITICAL RULES:
+CRITICAL RULES FOR IMPLEMENTATION QUALITY:
 1.  You MUST respond with a single tool call in JSON format. Do NOT provide any other text, explanations, or markdown.
 2.  Based on the task, decide whether to create a new file (`write_file`) or modify an existing one (`replace_in_file`).
 3.  If using `replace_in_file`, you MUST provide the *exact* `old_string` content to be replaced, including all original indentation and surrounding lines for context. Use the provided file content to construct this.
 4.  Ensure the `new_string` is complete and correctly indented to match the surrounding code.
-5.  If creating a new file, ensure the full file content is provided to the `write_file` tool.
+5.  If creating a new file, ensure the COMPLETE, FULL file content is provided to the `write_file` tool - not stubs or placeholders.
 6.  Your response MUST be a single, valid JSON object representing the tool call.
+
+CRITICAL RULES FOR CODE EXTRACTION:
+7.  When extracting code from other files or refactoring:
+    - DO extract the COMPLETE implementation, not stubs with "pass" statements
+    - DO include ALL methods, properties, and logic from the source
+    - DO NOT create placeholder implementations or TODO comments
+    - DO preserve all original logic, error handling, and edge cases
+    - If extracting from another file, read and understand the ENTIRE class/function before copying
+
+8.  When the task mentions extracting or porting code:
+    - Look for existing implementations in the repository that you can reference
+    - If similar code exists, study it to understand patterns and style
+    - Use those patterns when implementing new features
+    - Document how the new code follows or differs from existing patterns
+
+9.  Quality standards for implementation:
+    - No stubs, placeholders, or TODO comments in new implementations
+    - Full methods with complete logic (not "def method(): pass")
+    - All imports and dependencies included
+    - Proper error handling and validation
+    - Docstrings explaining non-obvious logic
 
 Example for `replace_in_file`:
 {
@@ -53,6 +76,56 @@ class CodeWriterAgent(BaseAgent):
     _COLOR_GREEN = "\033[32m"    # Additions
     _COLOR_CYAN = "\033[36m"     # Headers
     _COLOR_RESET = "\033[0m"
+
+    def _validate_import_targets(self, file_path: str, content: str) -> Tuple[bool, str]:
+        """Validate that import statements target files that actually exist.
+
+        Args:
+            file_path: Path to the file being written
+            content: Content being written to the file
+
+        Returns:
+            Tuple of (is_valid, warning_message)
+        """
+        # Only validate .py files
+        if not file_path.endswith('.py'):
+            return True, ""
+
+        # Find import statements with relative or absolute paths
+        # Pattern: from .module_name import ClassName or from module_name import ClassName
+        import_pattern = r'from\s+(\.[a-zA-Z0-9._]+|[a-zA-Z0-9._]+)\s+import'
+        matches = re.finditer(import_pattern, content)
+
+        warnings = []
+        base_dir = Path.cwd()
+
+        for match in matches:
+            import_path = match.group(1)
+
+            # Skip imports that don't start with . (they might be standard library or external packages)
+            if not import_path.startswith('.'):
+                continue
+
+            # Convert relative import to file path
+            # .module_name.submodule -> module_name/submodule.py
+            # .module_name -> module_name.py or module_name/__init__.py
+            module_parts = import_path.lstrip('.').replace('.', '/')
+
+            # Check if file exists
+            file_candidates = [
+                base_dir / f"{module_parts}.py",
+                base_dir / f"{module_parts}/__init__.py",
+            ]
+
+            file_exists = any(f.exists() for f in file_candidates)
+
+            if not file_exists:
+                warnings.append(f"Import target '{import_path}' does not exist (checked: {module_parts}.py or {module_parts}/__init__.py)")
+
+        if warnings:
+            return False, "; ".join(warnings)
+
+        return True, ""
 
     def _color_diff_line(self, line: str) -> str:
         """Apply color coding to diff lines (matching linear mode formatting)."""
@@ -175,9 +248,22 @@ class CodeWriterAgent(BaseAgent):
 
         available_tools = [tool for tool in get_available_tools() if tool['function']['name'] in ['write_file', 'replace_in_file']]
 
+        # Build enhanced user message with extraction guidance
+        task_guidance = f"Task: {task.description}"
+
+        # Add extraction guidance based on task type
+        if any(word in task.description.lower() for word in ["extract", "port", "move", "refactor", "create"]):
+            task_guidance += """\n\nEXTRACTION GUIDANCE:
+- Look for existing similar implementations in the codebase to understand patterns
+- Extract COMPLETE implementations, not stubs or placeholders
+- Include ALL methods, properties, and business logic from the source
+- Preserve error handling and edge cases
+- Do NOT use "pass" statements or TODO comments in new code
+- Document any assumptions or changes from original implementation"""
+
         messages = [
             {"role": "system", "content": CODE_WRITER_SYSTEM_PROMPT},
-            {"role": "user", "content": f"Task: {task.description}\n\nRepository Context:\n{context.repo_context}"}
+            {"role": "user", "content": f"{task_guidance}\n\nRepository Context:\n{context.repo_context}"}
         ]
 
         try:
@@ -227,8 +313,17 @@ class CodeWriterAgent(BaseAgent):
                         if tool_name in ["write_file", "replace_in_file"]:
                             self._display_change_preview(tool_name, arguments)
 
-                            # Ask for user approval
+                            # Validate import targets before proceeding
                             file_path = arguments.get("file_path", "unknown")
+                            if tool_name == "write_file":
+                                content = arguments.get("content", "")
+                                is_valid, warning_msg = self._validate_import_targets(file_path, content)
+                                if not is_valid:
+                                    print(f"\n  ⚠️  Import validation warning:")
+                                    print(f"  {warning_msg}")
+                                    print(f"  Note: This file has imports that may not exist. Proceed with caution.")
+
+                            # Ask for user approval
                             if not self._prompt_for_approval(tool_name, file_path):
                                 print(f"  ✗ Change rejected by user")
                                 return "[USER_REJECTED] Change was not approved by user"

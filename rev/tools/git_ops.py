@@ -720,8 +720,54 @@ def run_tests(cmd: str = "pytest -q", timeout: int = 600) -> str:
         return json.dumps({"timeout": timeout, "cmd": cmd})
 
 
+def _get_detailed_file_structure(root_path=None, max_depth: int = 2, max_files: int = 50):
+    """Get detailed file structure for the repository.
+
+    Args:
+        root_path: Root directory to scan (defaults to repo root)
+        max_depth: Maximum directory depth to scan
+        max_files: Maximum number of files to list
+
+    Returns:
+        List of file info dicts with paths and types
+    """
+    if root_path is None:
+        root_path = config.ROOT
+
+    from rev.config import EXCLUDE_DIRS
+    file_list = []
+
+    def scan_dir(path, depth=0):
+        if depth > max_depth or len(file_list) >= max_files:
+            return
+
+        try:
+            for item in sorted(path.iterdir()):
+                if item.name.startswith('.'):
+                    continue
+                if item.name in EXCLUDE_DIRS:
+                    continue
+
+                rel_path = str(item.relative_to(root_path))
+                file_type = "directory" if item.is_dir() else "file"
+
+                file_list.append({
+                    "path": rel_path,
+                    "type": file_type,
+                    "depth": depth
+                })
+
+                if item.is_dir() and depth < max_depth:
+                    scan_dir(item, depth + 1)
+        except (PermissionError, OSError):
+            pass
+
+    scan_dir(root_path)
+    return file_list
+
+
 def get_repo_context(commits: int = 6) -> str:
-    """Get repository context."""
+    """Get repository context with detailed file structure."""
     from rev.cache import get_repo_cache
 
     # Try to get from cache first
@@ -742,10 +788,15 @@ def get_repo_context(commits: int = 6) -> str:
             continue
         top.append({"name": p.name, "type": ("dir" if p.is_dir() else "file")})
 
+    # Include detailed file structure for better CodeWriterAgent context
+    file_structure = _get_detailed_file_structure(max_depth=2, max_files=100)
+
     context = json.dumps({
         "status": st.stdout,
         "log": lg.stdout,
-        "top_level": top[:100]
+        "top_level": top[:100],
+        "file_structure": file_structure[:50],  # Include key files and directories
+        "file_structure_note": "Key files in repository for reference when writing code"
     })
 
     # Cache it
