@@ -46,13 +46,18 @@ Now, generate the tool call to complete the refactoring request.
 class RefactoringAgent(BaseAgent):
     """
     A sub-agent that specializes in code refactoring for improved quality.
+    Implements intelligent error recovery with retry limits.
     """
 
     def execute(self, task: Task, context: RevContext) -> str:
         """
         Executes a refactoring task by calling an LLM to generate a tool call.
+        Implements error recovery with intelligent retry logic.
         """
         print(f"RefactoringAgent executing task: {task.description}")
+
+        # Track recovery attempts
+        recovery_attempts = self.increment_recovery_attempts(task, context)
 
         available_tools = [tool for tool in get_available_tools() if tool['function']['name'] in ['write_file', 'replace_in_file', 'read_file']]
 
@@ -63,42 +68,77 @@ class RefactoringAgent(BaseAgent):
 
         try:
             response = ollama_chat(messages, tools=available_tools)
+            error_type = None
+            error_detail = None
 
-            if not response or "message" not in response or "tool_calls" not in response["message"]:
-                error_reason = "LLM did not produce a valid tool call structure."
-                context.add_error(f"RefactoringAgent: {error_reason}")
-                self.request_replan(context, "Invalid LLM response for tool call", detailed_reason=error_reason)
-                raise ValueError(error_reason)
-
-            tool_calls = response["message"]["tool_calls"]
-            if not tool_calls:
-                error_reason = "LLM response did not contain any tool calls."
-                context.add_error(f"RefactoringAgent: {error_reason}")
-                self.request_replan(context, "LLM produced no tool calls", detailed_reason=error_reason)
-                raise ValueError(error_reason)
-
-            tool_call = tool_calls[0]
-            tool_name = tool_call['function']['name']
-            arguments_str = tool_call['function']['arguments']
-
-            if isinstance(arguments_str, dict):
-                arguments = arguments_str
+            if not response:
+                error_type = "empty_response"
+                error_detail = "LLM returned None/empty response"
+            elif "message" not in response:
+                error_type = "missing_message_key"
+                error_detail = f"Response missing 'message' key: {list(response.keys())}"
+            elif "tool_calls" not in response["message"]:
+                if "content" in response["message"]:
+                    error_type = "text_instead_of_tool_call"
+                    error_detail = f"LLM returned text instead of tool call: {response['message']['content'][:200]}"
+                else:
+                    error_type = "missing_tool_calls"
+                    error_detail = f"Response missing 'tool_calls': {list(response['message'].keys())}"
             else:
-                try:
-                    arguments = json.loads(arguments_str)
-                except json.JSONDecodeError:
-                    error_msg = f"RefactoringAgent: LLM returned invalid JSON for arguments: {arguments_str}"
-                    context.add_error(error_msg)
-                    self.request_replan(context, "Invalid JSON arguments from LLM", detailed_reason=error_msg)
-                    return error_msg
+                tool_calls = response["message"]["tool_calls"]
+                if not tool_calls:
+                    error_type = "empty_tool_calls"
+                    error_detail = "tool_calls array is empty"
+                else:
+                    # Success path
+                    tool_call = tool_calls[0]
+                    tool_name = tool_call['function']['name']
+                    arguments_str = tool_call['function']['arguments']
 
-            print(f"  → RefactoringAgent will call tool '{tool_name}' with arguments: {arguments}")
+                    if isinstance(arguments_str, dict):
+                        arguments = arguments_str
+                    else:
+                        try:
+                            arguments = json.loads(arguments_str)
+                        except json.JSONDecodeError:
+                            error_type = "invalid_json"
+                            error_detail = f"Invalid JSON in tool arguments: {arguments_str[:200]}"
 
-            result = execute_tool(tool_name, arguments)
-            return result
+                    if not error_type:
+                        print(f"  → RefactoringAgent will call tool '{tool_name}' with arguments: {arguments}")
+                        result = execute_tool(tool_name, arguments)
+                        return result
+
+            # Error handling
+            if error_type:
+                print(f"  ⚠️ RefactoringAgent: {error_detail}")
+
+                if self.should_attempt_recovery(task, context):
+                    print(f"  → Requesting replan (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
+                    self.request_replan(
+                        context,
+                        reason="Tool call generation failed",
+                        detailed_reason=f"Error type: {error_type}. Details: {error_detail}. Please provide clearer refactoring instructions."
+                    )
+                    return self.make_recovery_request(error_type, error_detail)
+                else:
+                    print(f"  → Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
+                    context.add_error(f"RefactoringAgent: {error_detail} (after {recovery_attempts} recovery attempts)")
+                    return self.make_failure_signal(error_type, error_detail)
 
         except Exception as e:
-            error_msg = f"Error executing task in RefactoringAgent: {e}"
-            context.add_error(error_msg)
-            self.request_replan(context, "Exception during tool execution", detailed_reason=error_msg)
-            return error_msg
+            error_msg = f"Exception in RefactoringAgent: {e}"
+            print(f"  ⚠️ {error_msg}")
+
+            if self.should_attempt_recovery(task, context):
+                print(f"  → Requesting replan due to exception (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
+                self.request_replan(
+                    context,
+                    reason="Exception during refactoring",
+                    detailed_reason=str(e)
+                )
+                return self.make_recovery_request("exception", str(e))
+            else:
+                print(f"  → Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
+                context.add_error(error_msg)
+                return self.make_failure_signal("exception", error_msg)

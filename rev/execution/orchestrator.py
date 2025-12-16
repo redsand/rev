@@ -545,6 +545,12 @@ class Orchestrator:
                         print(f"  ✗ Task {task.task_id} failed after recovery attempts: {task.error[:100]}")
                         context.add_error(f"Task {task.task_id}: {task.error}")
                         overall_success = False
+                    elif result.startswith("[USER_REJECTED]"):
+                        # User rejected the change
+                        task.status = TaskStatus.STOPPED
+                        task.error = result[len("[USER_REJECTED]"):].strip()
+                        print(f"  ⏭️  Task {task.task_id} rejected by user: {task.error[:100]}")
+                        overall_success = False
                     else:
                         # Normal success
                         task.status = TaskStatus.COMPLETED
