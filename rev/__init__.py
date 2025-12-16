@@ -30,7 +30,6 @@ from rev.cache import (
 # Terminal utilities
 from rev.terminal import (
     get_input_with_escape,
-    repl_mode,
 )
 
 # Tool functions - All functions from tools module
@@ -146,7 +145,6 @@ __all__ = [
     "initialize_caches",
     # Terminal
     "get_input_with_escape",
-    "repl_mode",
     # File operations
     "read_file",
     "write_file",

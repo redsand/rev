@@ -9,3 +9,5 @@ pywinrm
 playwright
 colorama
 setuptools
+anthropic
+google-generativeai

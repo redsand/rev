@@ -13,6 +13,7 @@ from enum import Enum
 from rev.models.task import ExecutionPlan, Task, RiskLevel
 from rev.llm.client import ollama_chat
 from rev.tools.registry import get_available_tools
+from rev import config
 
 
 class ReviewStrictness(Enum):
@@ -520,7 +521,7 @@ Provide a thorough review."""
     print("→ Analyzing plan with review agent...")
     parse_attempt = 0
     while parse_attempt <= max_parse_retries:
-        response = ollama_chat(messages, tools=tools) or {}
+        response = ollama_chat(messages, tools=tools, model_name=config.REVIEW_MODEL) or {}
 
         if not isinstance(response, dict):
             print("⚠️  Review agent returned no response; approving with suggestions by default")
