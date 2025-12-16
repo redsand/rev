@@ -1495,11 +1495,14 @@ def determine_next_action(
         if the goal is fully accomplished
     """
 
+    # Valid action types that the system supports
+    VALID_ACTION_TYPES = ["edit", "add", "delete", "rename", "test", "review", "general"]
+
     model_name = config.PLANNING_MODEL
     tools = get_available_tools()
     tools_description = _format_available_tools(tools)
 
-    # Build prompt for next action determination
+    # Build prompt for next action determination with EXPLICIT constraints
     next_action_prompt = f"""You are helping complete this request: {user_request}
 
 CURRENT PROGRESS:
@@ -1512,29 +1515,40 @@ Current file state:
 TASK:
 Based on the current progress and file state, what is the SINGLE NEXT ACTION we should take?
 
-RULES:
-1. Respond with ONLY ONE action (not a list, not multiple options)
-2. If the goal is FULLY ACHIEVED (all work complete), respond with: "GOAL_ACHIEVED"
-3. Be specific about files, classes, and functions to modify
-4. Consider what's been done - DO NOT suggest repeating completed work
-5. Suggest the most logical next step to progress toward the goal
+⚠️  STRICT RULES (DO NOT VIOLATE):
+1. ONLY ONE action - no lists, no multiple options
+2. If goal is FULLY ACHIEVED, respond with: {{"action_type": "review", "description": "GOAL_ACHIEVED"}}
+3. action_type MUST be EXACTLY one of: edit, add, delete, rename, test, review, general
+4. NO OTHER action types are allowed (not create_directory, not mkdir, not create, etc)
+5. Be specific about files, classes, and functions
+6. DO NOT suggest repeating completed work
+7. Suggest the most logical next step to progress toward the goal
 
-RESPONSE FORMAT:
-Return ONLY a JSON object with:
+VALID ACTION TYPES (pick exactly ONE):
+- "edit" = modify existing file
+- "add" = create new file or add code
+- "delete" = delete a file
+- "rename" = rename/move a file
+- "test" = run tests or validation
+- "review" = analyze or review code
+- "general" = other general task
+
+RESPONSE FORMAT (STRICT):
+Return ONLY a JSON object, no other text:
 {{
-  "action_type": "edit|add|delete|test|review",
+  "action_type": "edit|add|delete|rename|test|review|general",
   "description": "Specific description of the single action to take next"
 }}
 
-Or if goal is achieved:
-{{
-  "action_type": "review",
-  "description": "GOAL_ACHIEVED"
-}}
+EXAMPLES:
+{{"action_type": "add", "description": "Create lib/analysts/breakout.py with BreakoutAnalyst class"}}
+{{"action_type": "edit", "description": "Update lib/__init__.py to import new analyst modules"}}
+{{"action_type": "test", "description": "Run pytest to verify refactoring is successful"}}
+{{"action_type": "review", "description": "GOAL_ACHIEVED"}}
 
 Available tools: {tools_description}
 
-JSON only - no explanation."""
+NOW RESPOND WITH ONLY THE JSON OBJECT."""
 
     messages = [
         {"role": "user", "content": next_action_prompt}
@@ -1562,10 +1576,30 @@ JSON only - no explanation."""
         else:
             action_data = json.loads(content)
 
+        description = action_data.get("description", "Unknown action")
+        action_type = action_data.get("action_type", "general").lower()
+
+        # Validate action_type and convert if needed
+        if action_type not in VALID_ACTION_TYPES:
+            print(f"⚠️  Invalid action type '{action_type}' suggested by LLM")
+            print(f"   Converting to 'add' (valid action type)")
+            # Map common invalid types to valid ones
+            if any(x in action_type for x in ["create", "mkdir", "directory"]):
+                action_type = "add"
+                description = f"Create directory/files: {description}"
+            elif any(x in action_type for x in ["copy", "duplicate"]):
+                action_type = "add"
+                description = f"Create: {description}"
+            elif any(x in action_type for x in ["remove", "clean"]):
+                action_type = "delete"
+            else:
+                # Default to general for unknown types
+                action_type = "general"
+
         # Create task from response
         task = Task(
-            description=action_data.get("description", "Unknown action"),
-            action_type=action_data.get("action_type", "general"),
+            description=description,
+            action_type=action_type,
         )
         return task
 
