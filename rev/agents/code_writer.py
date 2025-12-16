@@ -10,16 +10,17 @@ from typing import Tuple
 import re
 from pathlib import Path
 
-CODE_WRITER_SYSTEM_PROMPT = """You are a specialized Code Writer agent. Your sole purpose is to execute a single coding task by calling the appropriate tool (`write_file`, `replace_in_file`, or `create_directory`).
+CODE_WRITER_SYSTEM_PROMPT = """You are a specialized Code Writer agent. Your sole purpose is to execute a single coding task by calling the ONLY available tool for this specific task.
 
-You will be given a task description and context about the repository. Analyze them carefully.
+You will be given a task description, action_type, and repository context. Analyze them carefully.
 
 CRITICAL RULES FOR IMPLEMENTATION QUALITY:
 1.  You MUST respond with a single tool call in JSON format. Do NOT provide any other text, explanations, or markdown.
-2.  Based on the task, decide the appropriate action:
-    - Use `create_directory` to create a directory structure
-    - Use `write_file` to create a new file with content
-    - Use `replace_in_file` to modify an existing file
+2.  Use ONLY the tool(s) provided for this task's action_type. Other tools are NOT available:
+    - For action_type="create_directory": ONLY use `create_directory`
+    - For action_type="add": ONLY use `write_file`
+    - For action_type="edit": ONLY use `replace_in_file`
+    - For action_type="refactor": use `write_file` or `replace_in_file` as needed
 3.  If using `replace_in_file`, you MUST provide the *exact* `old_string` content to be replaced, including all original indentation and surrounding lines for context. Use the provided file content to construct this.
 4.  Ensure the `new_string` is complete and correctly indented to match the surrounding code.
 5.  If creating a new file, ensure the COMPLETE, FULL file content is provided to the `write_file` tool - not stubs or placeholders.
@@ -262,10 +263,30 @@ class CodeWriterAgent(BaseAgent):
         # Track recovery attempts
         recovery_attempts = self.increment_recovery_attempts(task, context)
 
-        available_tools = [tool for tool in get_available_tools() if tool['function']['name'] in ['write_file', 'replace_in_file', 'create_directory']]
+        # Constrain available tools based on task action_type
+        all_tools = get_available_tools()
+
+        # Determine which tools are appropriate for this action_type
+        if task.action_type == "create_directory":
+            # Directory creation tasks only get create_directory tool
+            tool_names = ['create_directory']
+        elif task.action_type == "add":
+            # File creation tasks only get write_file tool
+            tool_names = ['write_file']
+        elif task.action_type == "edit":
+            # File modification tasks only get replace_in_file tool
+            tool_names = ['replace_in_file']
+        elif task.action_type == "refactor":
+            # Refactoring may need to create or modify files
+            tool_names = ['write_file', 'replace_in_file']
+        else:
+            # Unknown action types get all tools (fallback)
+            tool_names = ['write_file', 'replace_in_file', 'create_directory']
+
+        available_tools = [tool for tool in all_tools if tool['function']['name'] in tool_names]
 
         # Build enhanced user message with extraction guidance
-        task_guidance = f"Task: {task.description}"
+        task_guidance = f"Task (action_type: {task.action_type}): {task.description}"
 
         # Add extraction guidance based on task type
         if any(word in task.description.lower() for word in ["extract", "port", "move", "refactor", "create"]):
