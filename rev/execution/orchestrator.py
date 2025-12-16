@@ -652,7 +652,6 @@ class Orchestrator:
         """
         from rev.execution.planner import analyze_request_mode, determine_next_action
 
-        max_iterations = 10  # Allow more iterations since each one is a single task
         iteration = 0
         completed_tasks = []  # Track completed task descriptions
 
@@ -670,7 +669,8 @@ class Orchestrator:
         if pending_count > 0:
             print(f"\n📋 Reference Plan: {pending_count} tasks identified in planning phase")
 
-        while iteration < max_iterations:
+        # Execute tasks until: all completed, goal achieved, or resource budget exceeded
+        while True:
             iteration += 1
 
             # Build summary of completed work
@@ -774,12 +774,6 @@ class Orchestrator:
             if self.context.resource_budget.is_exceeded():
                 print(f"\n⚠️ Resource budget exceeded at step {iteration}")
                 return True
-
-        # Reached max iterations
-        print(f"\n⚠️ Reached maximum steps ({max_iterations})")
-        print(f"   Completed: {len(completed_tasks)} tasks")
-
-        return True
 
     def _run_single_attempt(self, user_request: str) -> OrchestratorResult:
         """Run a single orchestration attempt."""
