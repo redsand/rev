@@ -1503,26 +1503,38 @@ def determine_next_action(
     tools_description = _format_available_tools(tools)
 
     # Build prompt for next action determination with EXPLICIT constraints
+    # Separate remaining tasks from completed work for clarity
+    remaining_marker = "📝 REMAINING TASKS" if "REMAINING TASKS" in (completed_work or "") else ""
+
     next_action_prompt = f"""You are helping complete this request: {user_request}
 
 CURRENT PROGRESS:
-Work completed so far:
-{completed_work if completed_work else "  (Nothing completed yet - this is the first action)"}
+{completed_work if completed_work else "  (Starting - no tasks completed yet)\n  (All planned tasks are still pending)"}
 
 Current file state:
 {json.dumps(current_file_state, indent=2) if current_file_state else "  (No files changed)"}
 
+CRITICAL: Check if \"REMAINING TASKS\" section above is empty:
+- If it shows tasks, you MUST pick the next one
+- If it shows \"These are ALL remaining tasks - complete them in order\", those are the final tasks
+- NEVER say GOAL_ACHIEVED if remaining tasks exist
+
 TASK:
-Based on the current progress and file state, what is the SINGLE NEXT ACTION we should take?
+Based on the current progress and remaining tasks, what is the SINGLE NEXT ACTION we should take?
 
 ⚠️  STRICT RULES (DO NOT VIOLATE):
 1. ONLY ONE action - no lists, no multiple options
-2. If goal is FULLY ACHIEVED, respond with: {{"action_type": "review", "description": "GOAL_ACHIEVED"}}
+2. ONLY declare "GOAL_ACHIEVED" if:
+   - ALL remaining tasks above are COMPLETE (empty list)
+   - AND user's original request is 100% satisfied
+   - Answer: {{"action_type": "review", "description": "GOAL_ACHIEVED"}}
+   - If ANY remaining tasks exist, do NOT say goal achieved
 3. action_type MUST be EXACTLY one of: edit, add, delete, rename, test, review, create_directory, general
 4. NO OTHER action types are allowed
 5. Be specific about files, classes, and functions
 6. DO NOT suggest repeating completed work
-7. Suggest the most logical next step to progress toward the goal
+7. If remaining tasks exist, pick the NEXT ONE from the list above
+8. Suggest the most logical next step to progress toward the goal
 
 VALID ACTION TYPES (pick exactly ONE):
 - "edit" = modify existing file
