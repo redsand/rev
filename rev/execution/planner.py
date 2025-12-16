@@ -1396,3 +1396,181 @@ Generate a comprehensive execution plan as a JSON array NOW with AT LEAST 2 task
         print("=" * 60)
 
     return plan
+
+
+def analyze_request_mode(
+    user_request: str,
+    coding_mode: bool = False,
+) -> Dict[str, Any]:
+    """Analyze a user request without generating a full task plan.
+
+    This function analyzes the user's request and gathers context about the
+    repository, but does NOT generate tasks. Instead, it returns analysis
+    information that can be used for step-by-step "next action" determination.
+
+    Used for Claude Code-style incremental execution where tasks are generated
+    one at a time based on current state.
+
+    Args:
+        user_request: The user's task request
+        coding_mode: Enable coding-specific analysis
+
+    Returns:
+        Dict with keys:
+        - user_request: The original request
+        - repo_context: Repository structure and context
+        - sys_info: System information
+        - concrete_refs: Concrete references (classes, files, functions) in request
+        - relevant_files: Files identified as relevant to the request
+    """
+    print("=" * 60)
+    print("ANALYZING REQUEST (Step-by-Step Mode)")
+    print("=" * 60)
+
+    # Get system and repository context
+    print("→ Analyzing system and repository...")
+    sys_info = get_system_info_cached()
+    repo_context = get_repo_context()
+
+    ensure_escape_is_cleared("Analysis interrupted")
+
+    # Extract concrete references from request
+    print("→ Extracting concrete references from request...")
+    concrete_refs = _extract_concrete_references(user_request)
+
+    if concrete_refs["class_names"]:
+        print(f"  Classes/Types: {', '.join(concrete_refs['class_names'])}")
+    if concrete_refs["file_paths"]:
+        print(f"  File paths: {', '.join(concrete_refs['file_paths'])}")
+    if concrete_refs["function_names"]:
+        print(f"  Functions: {', '.join(concrete_refs['function_names'])}")
+
+    # Identify relevant files mentioned in request
+    print("→ Identifying relevant files...")
+    relevant_files = concrete_refs["file_paths"]
+    if not relevant_files:
+        # Try to infer from repo context if no explicit paths mentioned
+        print("  (No explicit file paths in request)")
+    else:
+        print(f"  Found {len(relevant_files)} relevant file path(s)")
+
+    analysis = {
+        "user_request": user_request,
+        "repo_context": repo_context,
+        "sys_info": sys_info,
+        "concrete_refs": concrete_refs,
+        "relevant_files": relevant_files,
+        "coding_mode": coding_mode,
+    }
+
+    print("=" * 60)
+    print("REQUEST ANALYSIS COMPLETE")
+    print("=" * 60)
+
+    return analysis
+
+
+def determine_next_action(
+    user_request: str,
+    completed_work: str,
+    current_file_state: Dict[str, Any],
+    analysis_context: Optional[Dict[str, Any]] = None,
+) -> Task:
+    """Determine the next single action to take given current progress.
+
+    This function asks the LLM "What is the SINGLE next action we should take?"
+    given the user's request, what has been completed so far, and the current
+    file state.
+
+    Used for Claude Code-style step-by-step execution.
+
+    Args:
+        user_request: Original user request
+        completed_work: Summary of what has been completed so far
+        current_file_state: Dict with info about current files (e.g., files_created, files_changed, files_deleted)
+        analysis_context: Optional context from analyze_request_mode()
+
+    Returns:
+        Task object with the next action, or a Task with description="GOAL_ACHIEVED"
+        if the goal is fully accomplished
+    """
+
+    model_name = config.PLANNING_MODEL
+    tools = get_available_tools()
+    tools_description = _format_available_tools(tools)
+
+    # Build prompt for next action determination
+    next_action_prompt = f"""You are helping complete this request: {user_request}
+
+CURRENT PROGRESS:
+Work completed so far:
+{completed_work if completed_work else "  (Nothing completed yet - this is the first action)"}
+
+Current file state:
+{json.dumps(current_file_state, indent=2) if current_file_state else "  (No files changed)"}
+
+TASK:
+Based on the current progress and file state, what is the SINGLE NEXT ACTION we should take?
+
+RULES:
+1. Respond with ONLY ONE action (not a list, not multiple options)
+2. If the goal is FULLY ACHIEVED (all work complete), respond with: "GOAL_ACHIEVED"
+3. Be specific about files, classes, and functions to modify
+4. Consider what's been done - DO NOT suggest repeating completed work
+5. Suggest the most logical next step to progress toward the goal
+
+RESPONSE FORMAT:
+Return ONLY a JSON object with:
+{{
+  "action_type": "edit|add|delete|test|review",
+  "description": "Specific description of the single action to take next"
+}}
+
+Or if goal is achieved:
+{{
+  "action_type": "review",
+  "description": "GOAL_ACHIEVED"
+}}
+
+Available tools: {tools_description}
+
+JSON only - no explanation."""
+
+    messages = [
+        {"role": "user", "content": next_action_prompt}
+    ]
+
+    print("→ Determining next action...")
+    ensure_escape_is_cleared("Next action determination interrupted")
+
+    # Call LLM to get next action
+    response = ollama_chat(messages, model=model_name) or {}
+
+    if "error" in response:
+        print(f"⚠️  Error determining next action: {response['error']}")
+        # Return a review task as fallback
+        return Task(description="Review current progress and files", action_type="review")
+
+    content = response.get("message", {}).get("content", "")
+
+    # Parse response
+    try:
+        # Try to extract JSON from response
+        json_match = re.search(r'\{[^}]+\}', content, re.DOTALL)
+        if json_match:
+            action_data = json.loads(json_match.group())
+        else:
+            action_data = json.loads(content)
+
+        # Create task from response
+        task = Task(
+            description=action_data.get("description", "Unknown action"),
+            action_type=action_data.get("action_type", "general"),
+        )
+        return task
+
+    except Exception as e:
+        print(f"⚠️  Error parsing next action response: {e}")
+        print(f"  Response: {content[:100]}...")
+        # Return a review task as fallback
+        return Task(description="Review current progress and determine next steps", action_type="review")

@@ -573,21 +573,6 @@ class Orchestrator:
                         task.status = TaskStatus.COMPLETED
                         print(f"  ✓ Task {task.task_id} completed successfully")
 
-                        # CRITICAL: Per-task evaluation - check if plan needs updating IMMEDIATELY after each task
-                        if self._should_pause_for_task_reevaluation(task, context):
-                            print(f"\n  ⚠️  Task {task.task_id} changed file state. Pausing for plan re-evaluation...")
-                            context.update_repo_context()
-                            clear_analysis_caches()
-                            # Signal caller to exit dispatch loop and replan
-                            context.agent_requests.append({
-                                "type": "replan_immediately",
-                                "reason": f"File state changed after task {task.task_id}",
-                                "completed_task": task.task_id
-                            })
-                            # Return early - stop executing remaining tasks in this batch
-                            print(f"  → Stopping task batch execution to replan based on new file state")
-                            return overall_success
-
                 else:
                     # Non-string result = execution error
                     task.status = TaskStatus.FAILED
@@ -614,115 +599,6 @@ class Orchestrator:
 
         return overall_success and len(failed_tasks) == 0
 
-    def _should_pause_for_task_reevaluation(self, completed_task: Task, context: RevContext) -> bool:
-        """
-        Determine if we should pause execution and re-evaluate the plan after this task.
-
-        Returns True if:
-        1. Task was destructive (extract, delete, modify, remove)
-        2. AND there are pending tasks that reference affected files
-        3. AND those pending tasks might need adjustment
-
-        This ensures we don't delete source files before dependent tasks confirm they have the data.
-        """
-        task_desc = completed_task.description.lower()
-
-        # Check if this is a destructive operation
-        is_destructive = any(keyword in task_desc for keyword in [
-            "extract", "delete", "remove", "refactor", "modify", "split", "create"
-        ])
-
-        if not is_destructive:
-            return False
-
-        # Check if there are any pending tasks
-        pending_tasks = [t for t in context.plan.tasks if t.status == TaskStatus.PENDING]
-        if not pending_tasks:
-            return False
-
-        # Extract files mentioned in completed task
-        import re
-        completed_task_files = set(re.findall(
-            r'(?:lib/|src/|tests/)[a-zA-Z0-9_./\-]+\.py',
-            completed_task.description
-        ))
-
-        if not completed_task_files:
-            return False
-
-        # Check if any pending tasks reference the modified files
-        for pending_task in pending_tasks:
-            pending_task_files = set(re.findall(
-                r'(?:lib/|src/|tests/)[a-zA-Z0-9_./\-]+\.py',
-                pending_task.description
-            ))
-
-            # If pending task mentions a file from completed task, we need to replan
-            if completed_task_files & pending_task_files:
-                print(f"    └─ Pending task {pending_task.task_id} references files from completed task")
-                print(f"       Completed task files: {completed_task_files}")
-                print(f"       Pending task files: {pending_task_files}")
-                print(f"       Overlap: {completed_task_files & pending_task_files}")
-                return True
-
-        return False
-
-    def _check_for_immediate_replan_after_destructive_task(self, plan: ExecutionPlan) -> bool:
-        """
-        Check if a destructive task just completed and has dependent pending tasks.
-
-        This implements PER-TASK REPLANNING: after a destructive operation (extract, modify, etc),
-        immediately replan to ensure subsequent tasks still make sense given the new file state.
-
-        Returns: True if immediate replan should be triggered
-        """
-        # Find recently completed destructive tasks
-        completed_destructive_tasks = []
-
-        for task in plan.tasks:
-            if task.status != TaskStatus.COMPLETED:
-                continue
-
-            # Check if task is destructive
-            if not any(word in task.description.lower()
-                      for word in ["extract", "refactor", "delete", "remove", "modify"]):
-                continue
-
-            # Check if there are pending tasks that might be affected
-            pending_tasks = [t for t in plan.tasks if t.status == TaskStatus.PENDING]
-            if not pending_tasks:
-                continue
-
-            # Extract files mentioned in the completed destructive task
-            import re
-            completed_files = re.findall(
-                r'(?:lib/|src/|tests/)[a-zA-Z0-9_./\-]+\.py',
-                task.description
-            )
-
-            # Check if any pending task mentions the same files
-            for pending_task in pending_tasks:
-                pending_files = re.findall(
-                    r'(?:lib/|src/|tests/)[a-zA-Z0-9_./\-]+\.py',
-                    pending_task.description
-                )
-
-                # If overlap, we should replan
-                if any(f in pending_files for f in completed_files):
-                    completed_destructive_tasks.append({
-                        'destructive': task,
-                        'affected': pending_task,
-                        'files': [f for f in completed_files if f in pending_files]
-                    })
-
-        if completed_destructive_tasks:
-            print(f"\n  ⚠️ IMMEDIATE REPLAN NEEDED: Destructive operation(s) detected")
-            for issue in completed_destructive_tasks:
-                print(f"     - Task '{issue['destructive'].description[:50]}...' modified {issue['files']}")
-                print(f"       Pending task '{issue['affected'].description[:50]}...' may be affected")
-            return True
-
-        return False
 
     def _should_adaptively_replan(self, plan: ExecutionPlan, execution_success: bool, budget: ResourceBudget, adaptive_attempt: int) -> bool:
         """Determines if adaptive replanning should be triggered.
@@ -755,221 +631,106 @@ class Orchestrator:
 
     def _continuous_sub_agent_execution(self, user_request: str, coding_mode: bool) -> bool:
         """
-        Execute tasks using sub-agents in a continuous loop with intelligent recovery.
-        After each batch of tasks completes, evaluates progress and generates new tasks dynamically.
+        Execute tasks using step-by-step "next action" determination.
 
-        This implements iterative problem-solving where the system:
-        1. Executes current plan's tasks
-        2. Evaluates whether the goal is achieved
-        3. If not, generates follow-up tasks with failure feedback
-        4. Repeats until goal is achieved or max iterations reached
-        5. Prompts user if stuck
+        Similar to Claude Code and Codex, this mode:
+        1. Analyzes the user request (no upfront planning)
+        2. Determines the SINGLE next action to take
+        3. Executes that action
+        4. Checks if goal is achieved
+        5. Repeats until done
+
+        This avoids the problem of generating 60+ tasks upfront and instead
+        makes incremental decisions based on actual current state.
 
         Args:
             user_request: The original user request
             coding_mode: Whether coding mode is enabled
 
         Returns:
-            True if goal achieved or recovery options exhausted, False only on critical error
+            True if goal achieved or max iterations reached, False only on critical error
         """
-        max_iterations = 5
+        from rev.execution.planner import analyze_request_mode, determine_next_action
+
+        max_iterations = 10  # Allow more iterations since each one is a single task
         iteration = 0
-        previous_failed_tasks = set()  # Track which tasks have failed before
-        consecutive_stuck_iterations = 0  # Count how many iterations without progress
-        previous_followup_descriptions = set()  # Detect if planner suggests same tasks again
-        same_plan_iterations = 0  # Count iterations with same follow-up tasks
+        completed_tasks = []  # Track completed task descriptions
+
+        # Initial analysis of the request (no upfront planning)
+        print("\n" + "=" * 60)
+        print("STEP-BY-STEP TASK EXECUTION MODE (Claude Code Style)")
+        print("=" * 60)
+        analysis = analyze_request_mode(user_request, coding_mode=coding_mode)
+        self.context.plan = ExecutionPlan()  # Start with empty plan
 
         while iteration < max_iterations:
             iteration += 1
             print(f"\n{'='*60}")
-            print(f"Sub-Agent Execution Iteration {iteration}/{max_iterations}")
+            print(f"Step {iteration}/{max_iterations}")
             print(f"{'='*60}")
 
-            # Execute current plan's tasks
-            self.context.update_repo_context()
-            execution_success = self._dispatch_to_sub_agents(self.context)
+            # Build summary of completed work
+            completed_summary = ""
+            if completed_tasks:
+                completed_summary = "✓ Completed:\n"
+                for desc in completed_tasks[-5:]:  # Show last 5 completed tasks
+                    completed_summary += f"  - {desc[:70]}\n"
+            else:
+                completed_summary = "(Starting - no tasks completed yet)"
 
-            # Update repo context after tasks complete to reflect file changes
+            # Get current file state
             self.context.update_repo_context()
+            current_file_state = {
+                "files_changed": len([f for f in self.context.repo_context.get("status", "").split('\n') if f.strip().startswith('M ')]),
+                "files_created": len([f for f in self.context.repo_context.get("status", "").split('\n') if f.strip().startswith('?? ')]),
+            }
 
-            # Clear analysis caches that become stale when files change
-            # This ensures next planning iteration gets fresh analysis
+            # Determine next single action
+            print(f"  → Determining next action...")
+            next_task = determine_next_action(
+                user_request=user_request,
+                completed_work=completed_summary,
+                current_file_state=current_file_state,
+                analysis_context=analysis,
+            )
+
+            # Check if goal is achieved
+            if next_task.description.strip().upper() == "GOAL_ACHIEVED":
+                print(f"  ✓ Goal achieved!")
+                return True
+
+            print(f"  → Next action: [{next_task.action_type.upper()}] {next_task.description[:70]}")
+
+            # Execute the single task
+            task_index = len(self.context.plan.tasks)
+            next_task.task_id = task_index
+            self.context.plan.tasks.append(next_task)
+
+            print(f"  → Executing task...")
+            success = self._dispatch_to_sub_agents(self.context, [next_task])
+
+            # Update state
+            self.context.update_repo_context()
             clear_analysis_caches()
 
-            # CHECK 1: Per-task reevaluation request (task detected state change mid-execution)
-            should_replan_immediately = False
-            for request in self.context.agent_requests:
-                if request.get("type") == "replan_immediately":
-                    should_replan_immediately = True
-                    print(f"\n  ⚠️  Per-task reevaluation triggered: {request.get('reason')}")
-                    break
-
-            # CHECK 2: Immediate replan after destructive operation
-            # This implements PER-TASK REPLANNING to adapt to actual file state changes
-            if should_replan_immediately or self._check_for_immediate_replan_after_destructive_task(self.context.plan):
-                print(f"  → Triggering immediate replan due to destructive operation...")
-                evaluation_prompt = f"""
-A destructive operation just completed (file extraction/modification).
-Review the updated file state and determine what tasks still need to be done.
-
-Original request: {user_request}
-
-Given the recent changes, what new tasks should we execute next?
-If everything is complete, respond with: "GOAL_ACHIEVED"
-"""
-                followup_plan = self._regenerate_followup_plan(
-                    evaluation_prompt,
-                    self.context.plan,
-                    coding_mode,
-                )
-
-                if followup_plan and followup_plan.tasks:
-                    # Clear pending tasks and replace with new plan
-                    for t in self.context.plan.tasks:
-                        if t.status == TaskStatus.PENDING:
-                            t.status = TaskStatus.STOPPED  # Mark old pending tasks as stopped
-
-                    # Add new replanned tasks
-                    self.context.plan.tasks.extend(followup_plan.tasks)
-                    print(f"  → Plan updated with {len(followup_plan.tasks)} new task(s)")
-                    self.context.agent_requests = []  # Clear replan requests after handling
-                    continue  # Restart execution loop with new tasks
-
-            # Clear any remaining agent requests
-            self.context.agent_requests = []
-
-            # Collect failed tasks and their error reasons for feedback
-            failed_tasks = [t for t in self.context.plan.tasks if t.status == TaskStatus.FAILED]
-            failed_task_summary = ""
-            if failed_tasks:
-                failed_task_summary = "\n\nFailed tasks from previous execution:\n"
-                for t in failed_tasks:
-                    failed_task_summary += f"  - {t.task_id}: {t.description[:60]}...\n"
-                    if t.error:
-                        failed_task_summary += f"    Error: {t.error[:100]}\n"
-
-            # Check if agents requested recovery (normal in continuous mode)
-            if self.context.agent_requests:
-                print(f"  → {len(self.context.agent_requests)} agent recovery request(s)")
-                for req in self.context.agent_requests:
-                    reason = req.get('details', {}).get('reason', 'unknown')
-                    print(f"    - {reason[:80]}")
-
-            # Clear agent requests - continuous loop handles recovery internally
-            self.context.agent_requests = []
-
-            # Track progress
-            currently_failed = set(t.task_id for t in failed_tasks)
-            if currently_failed == previous_failed_tasks and len(failed_tasks) > 0:
-                consecutive_stuck_iterations += 1
-                print(f"  ⚠️ Same tasks failing (stuck iteration {consecutive_stuck_iterations}/{2})")
+            # Check for task completion
+            if next_task.status == TaskStatus.COMPLETED:
+                print(f"  ✓ Task completed successfully")
+                completed_tasks.append(next_task.description)
+            elif next_task.status == TaskStatus.FAILED:
+                print(f"  ✗ Task failed: {next_task.error}")
+                # Continue anyway - next action determination will factor this in
             else:
-                consecutive_stuck_iterations = 0
-
-            print(f"  → Tasks: {len([t for t in self.context.plan.tasks if t.status == TaskStatus.COMPLETED])} completed, {len(failed_tasks)} failed")
+                print(f"  ⚠ Task status: {next_task.status.value}")
 
             # Check resource budget
             if self.context.resource_budget.is_exceeded():
-                print(f"\n⚠️ Resource budget exceeded at iteration {iteration}")
-                return True  # Did what we could with available resources
-
-            # Check if stuck in recovery loop (same tasks failing repeatedly)
-            if consecutive_stuck_iterations >= 2 and len(failed_tasks) > 0:
-                print(f"\n⚠️ System appears stuck: same {len(failed_tasks)} task(s) failing repeatedly")
-                print(f"   Failed tasks: {', '.join(t.description[:40] for t in failed_tasks)}")
-                # Prompt user for help
-                should_continue = self._prompt_user_on_stuck_execution(failed_tasks, user_request)
-                if not should_continue:
-                    print(f"  ✗ User aborted execution while stuck")
-                    return False  # Return False to indicate user abort, not completion
-                # If user wants to continue, reset stuck counter and proceed
-                consecutive_stuck_iterations = 0
-
-            previous_failed_tasks = currently_failed
-
-            # After executing tasks, evaluate if goal is achieved
-            print(f"\n  → Evaluating progress toward goal...")
-            evaluation_prompt = f"""
-Original user request: {user_request}
-
-After executing the planned tasks, have we successfully completed the user's request?
-If not, what additional tasks need to be done?
-
-{failed_task_summary}
-
-Please generate the next set of tasks if the goal has not been achieved.
-If the goal IS achieved, respond with: "GOAL_ACHIEVED"
-"""
-
-            # Generate follow-up plan
-            followup_plan = self._regenerate_followup_plan(
-                evaluation_prompt,
-                self.context.plan,
-                coding_mode,
-            )
-
-            if not followup_plan or not followup_plan.tasks:
-                print(f"  → No follow-up tasks generated. Goal achieved.")
+                print(f"\n⚠️ Resource budget exceeded at step {iteration}")
                 return True
 
-            # Detect if planner is stuck generating same follow-up tasks
-            current_followup_descriptions = set(t.description.lower() for t in followup_plan.tasks)
-            if current_followup_descriptions == previous_followup_descriptions:
-                same_plan_iterations += 1
-                print(f"  ⚠️ Planner suggesting same tasks again (repetition {same_plan_iterations})")
-            else:
-                same_plan_iterations = 0
-
-            if same_plan_iterations >= 2:
-                print(f"  ⚠️ Planner stuck: same follow-up tasks suggested {same_plan_iterations} times")
-                print(f"   Tasks: {', '.join(t.description[:40] for t in followup_plan.tasks)}")
-                should_continue = self._prompt_user_on_stuck_execution(followup_plan.tasks, user_request)
-                if not should_continue:
-                    print(f"  ✗ User aborted execution due to planner being stuck")
-                    return False  # Return False to indicate user abort
-                same_plan_iterations = 0
-
-            previous_followup_descriptions = current_followup_descriptions
-
-            # Check if planner indicated goal achievement
-            if len(followup_plan.tasks) <= 1:
-                task_descriptions = [t.description.lower() for t in followup_plan.tasks]
-                # Only treat as verification if PURELY verification (not mixed)
-                verify_keywords = ['verify', 'test', 'check', 'confirm', 'validate']
-                is_pure_verification = (
-                    len(followup_plan.tasks) == 1 and
-                    any(keyword in task_descriptions[0] for keyword in verify_keywords)
-                )
-                if is_pure_verification:
-                    print(f"  → Executing verification task before concluding...")
-                    self.context.update_plan(followup_plan)
-                    self._dispatch_to_sub_agents(self.context)
-                    # Update repo context after verification completes
-                    self.context.update_repo_context()
-                    self.context.agent_requests = []
-                    return True
-
-            # Update plan with follow-up tasks
-            print(f"  → Generated {len(followup_plan.tasks)} follow-up task(s)")
-            self.context.update_plan(followup_plan)
-            # Continue loop to execute new tasks
-
         # Reached max iterations
-        print(f"\n⚠️ Reached maximum iterations ({max_iterations})")
-        print(f"   Total completed: {len([t for t in self.context.plan.tasks if t.status == TaskStatus.COMPLETED])}")
-        print(f"   Total failed: {len([t for t in self.context.plan.tasks if t.status == TaskStatus.FAILED])}")
-
-        # Prompt user about partial completion
-        failed_count = len([t for t in self.context.plan.tasks if t.status == TaskStatus.FAILED])
-        if failed_count > 0:
-            user_accepted_partial = self._prompt_user_on_max_iterations(failed_count)
-            if not user_accepted_partial:
-                # Mark failed tasks as STOPPED so they're not retried
-                for task in self.context.plan.tasks:
-                    if task.status == TaskStatus.FAILED:
-                        task.status = TaskStatus.STOPPED
-            # In either case, return True (we're at max iterations, can't continue)
-            # The validation phase will handle the final outcome
+        print(f"\n⚠️ Reached maximum steps ({max_iterations})")
+        print(f"   Completed: {len(completed_tasks)} tasks")
 
         return True
 

@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git log:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(python:*)",
+      "Bash(rev --execution-mode:*)",
+      "Bash(GEMINI_API_KEY=gem_key ANTHROPIC_API_KEY=ant_key OPENAI_API_KEY=openai_key python:*)",
+      "Bash(GEMINI_API_KEY=gem_key ANTHROPIC_API_KEY=ant_key REV_LLM_PROVIDER=anthropic python:*)",
+      "Bash(OLLAMA_DEBUG=1 python:*)",
+      "Bash(find:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}
