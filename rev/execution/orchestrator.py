@@ -709,7 +709,7 @@ class Orchestrator:
             self.context.plan.tasks.append(next_task)
 
             print(f"  → Executing task...")
-            success = self._dispatch_to_sub_agents(self.context, [next_task])
+            success = self._dispatch_to_sub_agents(self.context)
 
             # Update state
             self.context.update_repo_context()
