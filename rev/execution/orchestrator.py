@@ -294,15 +294,15 @@ class Orchestrator:
                 user_input = input("> ").strip().lower()
 
                 if user_input == "resume":
-                    print("✓ Resuming execution...")
+                    print("[OK] Resuming execution...")
                     return True
                 elif user_input == "abort":
-                    print("✗ Aborting execution...")
+                    print("[ABORT] Aborting execution...")
                     return False
                 else:
                     print("Invalid input. Type 'resume' or 'abort':")
             except (EOFError, KeyboardInterrupt):
-                print("\n✗ User interrupted - aborting execution")
+                print("\n[ABORT] User interrupted - aborting execution")
                 return False
 
     def _prompt_user_on_stuck_execution(self, failed_tasks: list, user_request: str) -> bool:
@@ -406,43 +406,55 @@ class Orchestrator:
         Returns:
             Updated ValidationReport after user intervention and re-validation.
         """
-        print("\n" + "=" * 60)
-        print("VALIDATION HOLD - MANUAL INTERVENTION REQUIRED")
-        print("=" * 60)
-        print("Validation has failed after all automatic retry attempts.")
-        print("\nFailed checks:")
-        for i, result in enumerate(validation.results, 1):
-            if result.status == ValidationStatus.FAILED:
-                print(f"  {i}. {result.name}: {result.message}")
-        print("\nPlease manually fix the issues and type 'resume' to retry validation.")
-        print("=" * 60)
+        max_manual_retries = 3
+        manual_retry_count = 0
+        current_validation = validation
 
-        # Wait for user to signal they're ready
-        should_resume = self._wait_for_user_resume()
+        while manual_retry_count < max_manual_retries:
+            manual_retry_count += 1
 
-        if not should_resume:
-            print("  → User aborted. Returning failed validation.")
-            return validation
+            print("\n" + "=" * 60)
+            print("VALIDATION HOLD - MANUAL INTERVENTION REQUIRED")
+            print("=" * 60)
+            print(f"Validation failed ({manual_retry_count}/{max_manual_retries} manual retry attempt)")
+            print("\nFailed checks:")
+            for i, result in enumerate(current_validation.results, 1):
+                if result.status == ValidationStatus.FAILED:
+                    print(f"  {i}. {result.name}: {result.message}")
+            print("\nPlease manually fix the issues and type 'resume' to retry validation.")
+            print("Type 'abort' to give up on validation and return to main prompt.")
+            print("=" * 60)
 
-        # Re-run validation
-        print("\n  → Re-running validation after user intervention...")
-        updated_validation = validate_execution(
-            plan,
-            user_request,
-            run_tests=True,
-            run_linter=True,
-            check_syntax=True,
-            enable_auto_fix=False,
-            validation_mode=self.config.validation_mode,
-        )
+            # Wait for user to signal they're ready
+            should_resume = self._wait_for_user_resume()
 
-        if updated_validation.overall_status == ValidationStatus.FAILED:
-            print("  ⚠️ Validation still failing. Entering another hold...")
-            # Recursive call for another round
-            return self._hold_and_retry_validation(plan, user_request, updated_validation)
-        else:
-            print("  ✓ Validation passed after user intervention!")
-            return updated_validation
+            if not should_resume:
+                print("  → User aborted validation. Returning to main prompt.")
+                return current_validation
+
+            # Re-run validation
+            print("\n  → Re-running validation after user intervention...")
+            current_validation = validate_execution(
+                plan,
+                user_request,
+                run_tests=True,
+                run_linter=True,
+                check_syntax=True,
+                enable_auto_fix=False,
+                validation_mode=self.config.validation_mode,
+            )
+
+            if current_validation.overall_status != ValidationStatus.FAILED:
+                print("  ✓ Validation passed after user intervention!")
+                return current_validation
+            else:
+                print(f"  ⚠️ Validation still failing. ({manual_retry_count}/{max_manual_retries} attempts)")
+                if manual_retry_count >= max_manual_retries:
+                    print(f"  → Max manual retry attempts ({max_manual_retries}) reached.")
+                    break
+
+        print(f"\n  → Giving up on manual validation after {manual_retry_count} attempt(s).")
+        return current_validation
 
     def _emit_run_metrics(self, plan: Optional[ExecutionPlan], result: OrchestratorResult, budget: ResourceBudget):
         """Emits run metrics for logging and analysis."""
@@ -688,8 +700,8 @@ class Orchestrator:
                 # Prompt user for help
                 should_continue = self._prompt_user_on_stuck_execution(failed_tasks, user_request)
                 if not should_continue:
-                    print(f"  User requested to stop execution")
-                    return True
+                    print(f"  ✗ User aborted execution while stuck")
+                    return False  # Return False to indicate user abort, not completion
                 # If user wants to continue, reset stuck counter and proceed
                 consecutive_stuck_iterations = 0
 
@@ -733,7 +745,8 @@ If the goal IS achieved, respond with: "GOAL_ACHIEVED"
                 print(f"   Tasks: {', '.join(t.description[:40] for t in followup_plan.tasks)}")
                 should_continue = self._prompt_user_on_stuck_execution(followup_plan.tasks, user_request)
                 if not should_continue:
-                    return True
+                    print(f"  ✗ User aborted execution due to planner being stuck")
+                    return False  # Return False to indicate user abort
                 same_plan_iterations = 0
 
             previous_followup_descriptions = current_followup_descriptions
@@ -767,10 +780,14 @@ If the goal IS achieved, respond with: "GOAL_ACHIEVED"
         # Prompt user about partial completion
         failed_count = len([t for t in self.context.plan.tasks if t.status == TaskStatus.FAILED])
         if failed_count > 0:
-            should_continue = self._prompt_user_on_max_iterations(failed_count)
-            if not should_continue:
-                return True
-            # If user continues, still return True (we've done our best)
+            user_accepted_partial = self._prompt_user_on_max_iterations(failed_count)
+            if not user_accepted_partial:
+                # Mark failed tasks as STOPPED so they're not retried
+                for task in self.context.plan.tasks:
+                    if task.status == TaskStatus.FAILED:
+                        task.status = TaskStatus.STOPPED
+            # In either case, return True (we're at max iterations, can't continue)
+            # The validation phase will handle the final outcome
 
         return True
 
@@ -1078,12 +1095,16 @@ If the goal IS achieved, respond with: "GOAL_ACHIEVED"
                 if config.EXECUTION_MODE == 'sub-agent':
                     print("  → Executing with Sub-Agent architecture (continuous mode)...")
                     execution_success = self._continuous_sub_agent_execution(user_request, coding_mode)
-                    print(f"  ✓ Sub-Agent execution phase complete. Success: {execution_success}")
-                    # After continuous sub-agent execution, ensure tasks are marked as completed if no errors occurred
-                    if execution_success and not self.context.agent_requests:
-                        for task in self.context.plan.tasks:
-                            if task.status != TaskStatus.FAILED and task.action_type in AgentRegistry.get_registered_action_types():
-                                task.status = TaskStatus.COMPLETED
+                    if execution_success:
+                        print(f"  ✓ Sub-Agent execution phase complete. Success: {execution_success}")
+                        # After continuous sub-agent execution, ensure tasks are marked as completed if no errors occurred
+                        if not self.context.agent_requests:
+                            for task in self.context.plan.tasks:
+                                if task.status != TaskStatus.FAILED and task.action_type in AgentRegistry.get_registered_action_types():
+                                    task.status = TaskStatus.COMPLETED
+                    else:
+                        print(f"  ⚠️ Sub-Agent execution stopped by user")
+                        self.context.add_error("Sub-agent execution stopped by user")
                     # In continuous mode, we handle replanning internally, so skip adaptive replan
                     # Just validate the results and move on
                     break
