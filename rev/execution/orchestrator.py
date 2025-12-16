@@ -680,9 +680,11 @@ class Orchestrator:
 
             # Get current file state
             self.context.update_repo_context()
+            # repo_context is a string, extract status information
+            repo_str = self.context.repo_context if isinstance(self.context.repo_context, str) else str(self.context.repo_context)
             current_file_state = {
-                "files_changed": len([f for f in self.context.repo_context.get("status", "").split('\n') if f.strip().startswith('M ')]),
-                "files_created": len([f for f in self.context.repo_context.get("status", "").split('\n') if f.strip().startswith('?? ')]),
+                "files_changed": len([f for f in repo_str.split('\n') if f.strip().startswith('M ')]),
+                "files_created": len([f for f in repo_str.split('\n') if f.strip().startswith('?? ')]),
             }
 
             # Determine next single action
