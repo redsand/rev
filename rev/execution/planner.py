@@ -1496,7 +1496,7 @@ def determine_next_action(
     """
 
     # Valid action types that the system supports
-    VALID_ACTION_TYPES = ["edit", "add", "delete", "rename", "test", "review", "general"]
+    VALID_ACTION_TYPES = ["edit", "add", "delete", "rename", "test", "review", "create_directory", "general"]
 
     model_name = config.PLANNING_MODEL
     tools = get_available_tools()
@@ -1518,8 +1518,8 @@ Based on the current progress and file state, what is the SINGLE NEXT ACTION we 
 ⚠️  STRICT RULES (DO NOT VIOLATE):
 1. ONLY ONE action - no lists, no multiple options
 2. If goal is FULLY ACHIEVED, respond with: {{"action_type": "review", "description": "GOAL_ACHIEVED"}}
-3. action_type MUST be EXACTLY one of: edit, add, delete, rename, test, review, general
-4. NO OTHER action types are allowed (not create_directory, not mkdir, not create, etc)
+3. action_type MUST be EXACTLY one of: edit, add, delete, rename, test, review, create_directory, general
+4. NO OTHER action types are allowed
 5. Be specific about files, classes, and functions
 6. DO NOT suggest repeating completed work
 7. Suggest the most logical next step to progress toward the goal
@@ -1531,6 +1531,7 @@ VALID ACTION TYPES (pick exactly ONE):
 - "rename" = rename/move a file
 - "test" = run tests or validation
 - "review" = analyze or review code
+- "create_directory" = create a directory
 - "general" = other general task
 
 RESPONSE FORMAT (STRICT):
@@ -1554,7 +1555,6 @@ NOW RESPOND WITH ONLY THE JSON OBJECT."""
         {"role": "user", "content": next_action_prompt}
     ]
 
-    print("→ Determining next action...")
     ensure_escape_is_cleared("Next action determination interrupted")
 
     # Call LLM to get next action

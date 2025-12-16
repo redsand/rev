@@ -10,13 +10,16 @@ from typing import Tuple
 import re
 from pathlib import Path
 
-CODE_WRITER_SYSTEM_PROMPT = """You are a specialized Code Writer agent. Your sole purpose is to execute a single coding task by calling the appropriate tool (`write_file` or `replace_in_file`).
+CODE_WRITER_SYSTEM_PROMPT = """You are a specialized Code Writer agent. Your sole purpose is to execute a single coding task by calling the appropriate tool (`write_file`, `replace_in_file`, or `create_directory`).
 
 You will be given a task description and context about the repository. Analyze them carefully.
 
 CRITICAL RULES FOR IMPLEMENTATION QUALITY:
 1.  You MUST respond with a single tool call in JSON format. Do NOT provide any other text, explanations, or markdown.
-2.  Based on the task, decide whether to create a new file (`write_file`) or modify an existing one (`replace_in_file`).
+2.  Based on the task, decide the appropriate action:
+    - Use `create_directory` to create a directory structure
+    - Use `write_file` to create a new file with content
+    - Use `replace_in_file` to modify an existing file
 3.  If using `replace_in_file`, you MUST provide the *exact* `old_string` content to be replaced, including all original indentation and surrounding lines for context. Use the provided file content to construct this.
 4.  Ensure the `new_string` is complete and correctly indented to match the surrounding code.
 5.  If creating a new file, ensure the COMPLETE, FULL file content is provided to the `write_file` tool - not stubs or placeholders.
@@ -59,6 +62,14 @@ Example for `write_file`:
   "arguments": {
     "file_path": "path/to/new_file.py",
     "content": "full content of the new file"
+  }
+}
+
+Example for `create_directory`:
+{
+  "tool_name": "create_directory",
+  "arguments": {
+    "path": "path/to/new/directory"
   }
 }
 
@@ -200,6 +211,11 @@ class CodeWriterAgent(BaseAgent):
             if len(content.splitlines()) > 20:
                 print(f"  ... ({len(content.splitlines()) - 20} more lines)")
 
+        elif tool_name == "create_directory":
+            dir_path = arguments.get("path", "unknown")
+            print(f"\nDirectory: {dir_path}")
+            print(f"Action: {self._COLOR_GREEN}CREATE DIRECTORY{self._COLOR_RESET}")
+
         print(f"\n{'='*70}")
 
     def _prompt_for_approval(self, tool_name: str, file_path: str) -> bool:
@@ -246,7 +262,7 @@ class CodeWriterAgent(BaseAgent):
         # Track recovery attempts
         recovery_attempts = self.increment_recovery_attempts(task, context)
 
-        available_tools = [tool for tool in get_available_tools() if tool['function']['name'] in ['write_file', 'replace_in_file']]
+        available_tools = [tool for tool in get_available_tools() if tool['function']['name'] in ['write_file', 'replace_in_file', 'create_directory']]
 
         # Build enhanced user message with extraction guidance
         task_guidance = f"Task: {task.description}"
@@ -309,8 +325,8 @@ class CodeWriterAgent(BaseAgent):
                     if not error_type:
                         print(f"  → CodeWriterAgent will call tool '{tool_name}'")
 
-                        # Display change preview for write and replace operations
-                        if tool_name in ["write_file", "replace_in_file"]:
+                        # Display change preview for write, replace, and create_directory operations
+                        if tool_name in ["write_file", "replace_in_file", "create_directory"]:
                             self._display_change_preview(tool_name, arguments)
 
                             # Validate import targets before proceeding

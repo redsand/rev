@@ -665,9 +665,6 @@ class Orchestrator:
 
         while iteration < max_iterations:
             iteration += 1
-            print(f"\n{'='*60}")
-            print(f"Step {iteration}/{max_iterations}")
-            print(f"{'='*60}")
 
             # Build summary of completed work
             completed_summary = ""

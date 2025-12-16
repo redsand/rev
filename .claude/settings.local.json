@@ -9,7 +9,9 @@
       "Bash(GEMINI_API_KEY=gem_key ANTHROPIC_API_KEY=ant_key REV_LLM_PROVIDER=anthropic python:*)",
       "Bash(OLLAMA_DEBUG=1 python:*)",
       "Bash(find:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nImplement step-by-step task execution (Claude Code style)\n\nReplace batch planning with incremental \"next action\" determination:\n\nBEFORE:\n- Generated 60+ tasks upfront\n- Executed all in batch without pausing\n- Destructive ops could run before dependent tasks\n- Complex per-task reevaluation logic\n- Loops and plan regeneration\n\nAFTER:\n- No upfront planning, just request analysis\n- Determine SINGLE next action after each task\n- Each decision based on actual current state\n- LLM asks \"what 's next?\" after every action\n- Goal checking after every task\n- Simpler, more interactive flow\n\nCHANGES:\n- Added analyze_request_mode() in planner.py\n  └─ Analyzes request without generating plan\n- Added determine_next_action() in planner.py\n  └─ LLM determines single next action\n- Rewrote _continuous_sub_agent_execution() in orchestrator.py\n  └─ Step-by-step loop instead of batch execution\n- Removed per-task reevaluation methods\n  └─ No longer needed with step-by-step approach\n- Deleted test_per_task_reevaluation.py\n  └─ Tests were for old approach\n\nRESULT:\n✓ No more 60+ task generation\n✓ Each decision adaptive to actual state\n✓ Better sequencing of operations\n✓ Simpler code (~100 lines vs ~220)\n✓ More iterations allowed (10 vs 5)\n✓ Interactive, Claude Code-like behavior\n\n🤖 Generated with Claude Code\nCo-Authored-By: Claude Haiku 4.5 <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(git commit:*)"
     ]
   }
 }
