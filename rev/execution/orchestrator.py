@@ -724,6 +724,29 @@ class Orchestrator:
 
             print(f"  → Next action: [{next_task.action_type.upper()}] {next_task.description[:70]}")
 
+            # Verification: Don't consolidate/update until all extractions are done
+            # Pattern: If this is an edit/update/consolidation task, ensure all ADD/extract tasks are complete first
+            if next_task.action_type in ["edit", "refactor"]:
+                # Check for keywords that indicate consolidation/update (not extraction)
+                consolidation_keywords = ["update", "import", "export", "consolidate", "re-export", "refactor"]
+                is_consolidation = any(kw in next_task.description.lower() for kw in consolidation_keywords)
+
+                if is_consolidation and original_plan and original_plan.tasks:
+                    # Check if there are still ADD/extraction tasks pending
+                    pending_adds = [t for t in original_plan.tasks
+                                   if t.action_type == "add" and
+                                   t.status not in [TaskStatus.COMPLETED, TaskStatus.FAILED]]
+
+                    if pending_adds:
+                        print(f"\n  ⚠️  VERIFICATION: Cannot consolidate yet")
+                        print(f"     {len(pending_adds)} file creation task(s) still pending:")
+                        for t in pending_adds[:3]:
+                            print(f"       - {t.description[:60]}")
+                        if len(pending_adds) > 3:
+                            print(f"       ... and {len(pending_adds) - 3} more")
+                        print(f"\n  → Deferring consolidation. Continuing with file creation first.\n")
+                        continue  # Skip this task and move to next
+
             # Execute the single task (isolated from reference plan)
             # Create a temporary plan with just this one task
             temp_plan = ExecutionPlan()
@@ -751,17 +774,38 @@ class Orchestrator:
 
                 # Mark similar tasks from original plan as complete
                 if original_plan and original_plan.tasks:
+                    matched = False
+                    next_desc_lower = next_task.description.lower()
+
                     for plan_task in original_plan.tasks:
-                        # Check if plan task matches this completed task (by action type and key words in description)
-                        if (plan_task.status != TaskStatus.COMPLETED and
-                            plan_task.action_type == next_task.action_type):
-                            # Simple heuristic: if descriptions have common keywords, mark as complete
-                            next_desc_lower = next_task.description.lower()
-                            plan_desc_lower = plan_task.description.lower()
-                            # Check for matching key terms (files, directories, class names, etc)
-                            if any(word in plan_desc_lower for word in next_desc_lower.split() if len(word) > 3):
+                        if plan_task.status == TaskStatus.COMPLETED:
+                            continue
+                        if plan_task.action_type != next_task.action_type:
+                            continue
+
+                        plan_desc_lower = plan_task.description.lower()
+
+                        # For "add" tasks: check if same specific identifier is mentioned (class, file name, etc)
+                        if plan_task.action_type == "add":
+                            # Extract meaningful words from both descriptions (5+ chars, likely class/file names)
+                            next_words = set(w.lower() for w in next_desc_lower.split() if len(w) > 4 and w.isidentifier())
+                            plan_words = set(w.lower() for w in plan_desc_lower.split() if len(w) > 4 and w.isidentifier())
+
+                            # Check for meaningful overlap
+                            if next_words & plan_words:  # Set intersection
                                 plan_task.status = TaskStatus.COMPLETED
-                                print(f"    → Marked original plan task as complete: [{plan_task.action_type}] {plan_task.description[:50]}")
+                                print(f"    → Marked plan task complete: [add] {plan_task.description[:50]}")
+                                matched = True
+                                break
+
+                        # For "edit" tasks: check for specific file path matches
+                        else:
+                            # Look for matching file paths or significant terms
+                            file_paths = [w for w in next_desc_lower.split() if "/" in w or w.endswith(".py")]
+                            if any(path in plan_desc_lower for path in file_paths):
+                                plan_task.status = TaskStatus.COMPLETED
+                                print(f"    → Marked plan task complete: [{plan_task.action_type}] {plan_task.description[:50]}")
+                                matched = True
                                 break
 
             elif next_task.status == TaskStatus.FAILED:
