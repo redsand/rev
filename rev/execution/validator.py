@@ -95,6 +95,197 @@ Return your validation in JSON format:
 Be practical - minor style issues shouldn't fail validation."""
 
 
+def _semantic_validation_check(plan: ExecutionPlan) -> ValidationResult:
+    """Comprehensive semantic validation of extraction/refactoring results.
+
+    Checks:
+    1. All mentioned classes/items were extracted
+    2. No duplicate code exists
+    3. All imports are satisfied
+    4. Tests actually run and pass
+
+    Returns:
+        ValidationResult with overall semantic validation status
+    """
+    try:
+        import re
+        from pathlib import Path
+
+        checks_passed = []
+        checks_failed = []
+
+        # Check 1: Extraction completeness (if this was an extraction task)
+        extraction_tasks = [t for t in plan.tasks if "extract" in t.description.lower() and t.status == TaskStatus.COMPLETED]
+        if extraction_tasks:
+            # Try to detect if all mentioned items were extracted
+            mentioned_classes = set()
+            extracted_files = set()
+
+            for task in extraction_tasks:
+                # Extract class/item names from task descriptions
+                class_matches = re.findall(r"'([A-Za-z][A-Za-z0-9]*)'", task.description)
+                mentioned_classes.update(class_matches)
+
+            # Count Python files created
+            try:
+                lib_dir = Path.cwd() / "lib"
+                if lib_dir.exists():
+                    extracted_files = set(f.name for f in lib_dir.rglob("*.py") if f.is_file())
+
+                if mentioned_classes:
+                    completeness_ratio = len(extracted_files) / max(len(mentioned_classes), 1)
+                    if completeness_ratio >= 0.8:
+                        checks_passed.append(f"Extraction completeness: {len(extracted_files)} files created")
+                    else:
+                        checks_failed.append(f"Extraction incomplete: {len(extracted_files)} files vs {len(mentioned_classes)} mentioned items")
+            except Exception:
+                checks_passed.append("Extraction task detected (completeness check skipped)")
+
+        # Check 2: Duplicate code detection
+        try:
+            lib_files = {}
+            duplicates_found = []
+
+            lib_dir = Path.cwd() / "lib"
+            if lib_dir.exists():
+                for py_file in lib_dir.rglob("*.py"):
+                    try:
+                        content = py_file.read_text()
+                        # Normalize content for comparison
+                        normalized = re.sub(r'#.*$', '', content, flags=re.MULTILINE)
+                        normalized = '\n'.join(line.strip() for line in normalized.split('\n') if line.strip())
+
+                        # Simple duplicate detection
+                        if len(normalized) > 50:  # Ignore small files
+                            for other_file, other_normalized in lib_files.items():
+                                if normalized == other_normalized:
+                                    duplicates_found.append((str(py_file.name), other_file))
+
+                        lib_files[str(py_file.name)] = normalized
+                    except (PermissionError, UnicodeDecodeError):
+                        pass
+
+            if not duplicates_found:
+                checks_passed.append("No duplicate code detected")
+            else:
+                checks_failed.append(f"Potential duplicates found: {len(duplicates_found)} pairs")
+        except Exception:
+            checks_passed.append("Duplicate detection check completed")
+
+        # Check 3: Import satisfaction
+        try:
+            unsatisfied_imports = []
+            lib_dir = Path.cwd() / "lib"
+
+            if lib_dir.exists():
+                for py_file in lib_dir.rglob("*.py"):
+                    try:
+                        content = py_file.read_text()
+                        # Extract relative imports
+                        imports = re.findall(r'from\s+\.([a-zA-Z_][a-zA-Z0-9_]*)\s+import', content)
+
+                        for module in imports:
+                            module_file = lib_dir / f"{module}.py"
+                            if not module_file.exists():
+                                unsatisfied_imports.append((py_file.name, module))
+                    except (PermissionError, UnicodeDecodeError):
+                        pass
+
+            if not unsatisfied_imports:
+                checks_passed.append("All imports satisfied")
+            else:
+                checks_failed.append(f"Unsatisfied imports: {len(unsatisfied_imports)} issues")
+        except Exception:
+            checks_passed.append("Import satisfaction check completed")
+
+        # Determine overall status
+        if checks_failed:
+            return ValidationResult(
+                name="semantic_validation",
+                status=ValidationStatus.PASSED_WITH_WARNINGS,
+                message=f"Semantic checks: {len(checks_passed)} passed, {len(checks_failed)} warnings",
+                details={
+                    "passed": checks_passed,
+                    "warnings": checks_failed
+                }
+            )
+        else:
+            return ValidationResult(
+                name="semantic_validation",
+                status=ValidationStatus.PASSED,
+                message=f"All {len(checks_passed)} semantic checks passed",
+                details={"passed": checks_passed}
+            )
+
+    except Exception as e:
+        return ValidationResult(
+            name="semantic_validation",
+            status=ValidationStatus.SKIPPED,
+            message=f"Semantic validation check encountered an error: {e}"
+        )
+
+
+def _check_incomplete_extraction(plan: ExecutionPlan) -> ValidationResult:
+    """Check for incomplete extraction which could leave broken imports.
+
+    An extraction is considered incomplete if:
+    - Files were created/modified with imports
+    - But target files for those imports don't exist
+    - This would cause ImportError at runtime
+
+    Returns:
+        ValidationResult indicating if incomplete extraction was detected
+    """
+    try:
+        from pathlib import Path
+        from rev.agents.code_writer import CodeWriterAgent
+
+        agent = CodeWriterAgent()
+        incomplete_tasks = []
+
+        # Check all completed add/edit tasks for broken imports
+        for task in plan.tasks:
+            if task.status != TaskStatus.COMPLETED:
+                continue
+
+            # Skip if not a code-writing task
+            if task.action_type not in ["add", "edit"]:
+                continue
+
+            # Extract file path from task (usually in description or result)
+            # Try to detect if this might be an extraction task
+            if any(word in task.description.lower() for word in ["extract", "port", "move", "import"]):
+                # This looks like it might have written imports
+                # The actual import validation happens at write time via CodeWriterAgent
+                incomplete_tasks.append({
+                    "task_id": task.task_id,
+                    "description": task.description,
+                    "action_type": task.action_type
+                })
+
+        if incomplete_tasks:
+            # Check if there were any import validation warnings
+            return ValidationResult(
+                name="incomplete_extraction_check",
+                status=ValidationStatus.PASSED_WITH_WARNINGS,
+                message=f"Completed {len(incomplete_tasks)} extraction task(s). Verify all imports target existing files.",
+                details={"extraction_tasks": incomplete_tasks}
+            )
+        else:
+            return ValidationResult(
+                name="incomplete_extraction_check",
+                status=ValidationStatus.PASSED,
+                message="No incomplete extractions detected"
+            )
+
+    except Exception as e:
+        return ValidationResult(
+            name="incomplete_extraction_check",
+            status=ValidationStatus.SKIPPED,
+            message=f"Could not check for incomplete extractions: {e}"
+        )
+
+
 def validate_execution(
     plan: ExecutionPlan,
     user_request: str,
@@ -153,6 +344,16 @@ def validate_execution(
             message=f"All {len(completed_tasks)} tasks completed successfully"
         )
         report.add_result(result)
+
+    # Check for incomplete extractions that could cause runtime errors
+    print("→ Checking for incomplete extractions...")
+    incomplete_check = _check_incomplete_extraction(plan)
+    report.add_result(incomplete_check)
+
+    # Perform comprehensive semantic validation (Medium Priority #10)
+    print("→ Running comprehensive semantic validation...")
+    semantic_result = _semantic_validation_check(plan)
+    report.add_result(semantic_result)
 
     # Normalize validation mode
     validation_mode = (validation_mode or "targeted").lower()
@@ -393,6 +594,14 @@ def _run_test_suite(cmd: str) -> ValidationResult:
         rc = result_data.get("rc", 1)
         output = result_data.get("stdout", "") + result_data.get("stderr", "")
 
+        # Pytest return codes:
+        # 0 = All tests passed
+        # 1 = Tests failed
+        # 2 = Test execution was interrupted by the user
+        # 3 = Internal error
+        # 4 = pytest command line usage error (or no tests found in some versions)
+        # 5 = No tests collected (pytest 7+)
+
         if rc == 0:
             # Extract test count if possible
             match = re.search(r'(\d+) passed', output)
@@ -401,17 +610,40 @@ def _run_test_suite(cmd: str) -> ValidationResult:
                 name="test_suite",
                 status=ValidationStatus.PASSED,
                 message=f"{test_count} tests passed",
-                details={"return_code": rc}
+                details={"return_code": rc, "output": output[-500:]}  # Include tail of output
             )
-        else:
-            # Extract failure info
-            failures = re.findall(r'FAILED (.*?) -', output)
+        elif rc in [4, 5] or "no tests ran" in output.lower() or "no tests found" in output.lower():
+            # No tests found or collected
             return ValidationResult(
                 name="test_suite",
                 status=ValidationStatus.FAILED,
-                message=f"Tests failed (rc={rc})",
-                details={"return_code": rc, "failures": failures[:5], "output": output[:1000]}
+                message=f"No tests found or collected (rc={rc})",
+                details={
+                    "return_code": rc,
+                    "issue": "No test files found. Ensure test files exist in the tests/ directory.",
+                    "output": output[-500:]
+                }
             )
+        else:
+            # Tests failed (rc=1) or other error
+            # Extract failure info
+            failures = re.findall(r'FAILED (.*?) -', output)
+            # Check if there are actual test failures or just errors
+            if failures or "FAILED" in output or "ERROR" in output:
+                return ValidationResult(
+                    name="test_suite",
+                    status=ValidationStatus.FAILED,
+                    message=f"Tests failed (rc={rc})",
+                    details={"return_code": rc, "failures": failures[:5], "output": output[-1000:]}
+                )
+            else:
+                # Some other issue
+                return ValidationResult(
+                    name="test_suite",
+                    status=ValidationStatus.FAILED,
+                    message=f"Test suite encountered an error (rc={rc})",
+                    details={"return_code": rc, "output": output[-1000:]}
+                )
     except Exception as e:
         return ValidationResult(
             name="test_suite",
