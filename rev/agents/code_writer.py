@@ -166,9 +166,9 @@ class CodeWriterAgent(BaseAgent):
         print(f"{'='*70}")
 
         if tool_name == "replace_in_file":
-            file_path = arguments.get("file_path", "unknown")
-            old_string = arguments.get("old_string", "")
-            new_string = arguments.get("new_string", "")
+            file_path = arguments.get("path", "unknown")
+            old_string = arguments.get("find", "")
+            new_string = arguments.get("replace", "")
 
             print(f"\nFile: {file_path}")
             print(f"\n{self._COLOR_CYAN}--- Original Content{self._COLOR_RESET}")
@@ -184,7 +184,7 @@ class CodeWriterAgent(BaseAgent):
             print(f"\n{self._COLOR_CYAN}Changes:{self._COLOR_RESET} {old_lines} → {new_lines} lines")
 
         elif tool_name == "write_file":
-            file_path = arguments.get("file_path", "unknown")
+            file_path = arguments.get("path", "unknown")
             content = arguments.get("content", "")
             lines = len(content.splitlines())
 
@@ -314,7 +314,7 @@ class CodeWriterAgent(BaseAgent):
                             self._display_change_preview(tool_name, arguments)
 
                             # Validate import targets before proceeding
-                            file_path = arguments.get("file_path", "unknown")
+                            file_path = arguments.get("path", "unknown")
                             if tool_name == "write_file":
                                 content = arguments.get("content", "")
                                 is_valid, warning_msg = self._validate_import_targets(file_path, content)
@@ -329,7 +329,7 @@ class CodeWriterAgent(BaseAgent):
                                 return "[USER_REJECTED] Change was not approved by user"
 
                         # Execute the tool
-                        print(f"  ⏳ Applying {tool_name} to {arguments.get('file_path', 'file')}...")
+                        print(f"  ⏳ Applying {tool_name} to {arguments.get('path', 'file')}...")
                         result = execute_tool(tool_name, arguments)
                         print(f"  ✓ Successfully applied {tool_name}")
                         return result

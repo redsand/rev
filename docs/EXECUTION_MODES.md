@@ -34,7 +34,7 @@ Sub-Agent Mode dispatches each task to a specialized agent based on its `action_
 ### Supported Sub-Agents
 
 | Agent | Action Types | Specialization |
-|-------|-------------|-----------------|
+|-------|-------------|----|
 | **CodeWriterAgent** | `add`, `edit` | Writing and modifying code files with validation |
 | **RefactoringAgent** | `refactor` | Restructuring code for quality and maintainability |
 | **TestExecutorAgent** | `test` | Running and analyzing test suites |
@@ -43,41 +43,13 @@ Sub-Agent Mode dispatches each task to a specialized agent based on its `action_
 | **ResearchAgent** | `research`, `investigate` | Exploring codebase and gathering context |
 | **AnalysisAgent** | `analyze`, `review` | Code analysis and architectural review |
 
-### Architecture
-
-```
-USER REQUEST
-    │
-    ▼
-ORCHESTRATOR (Coordinates all agents)
-    │
-    ├─ PLANNING AGENT
-    │  └─ Generates tasks with specific action_types
-    │
-    ▼
-TASK DISPATCH
-    │
-    ├─ Action Type: "add" ──→ CodeWriterAgent
-    ├─ Action Type: "test" ──→ TestExecutorAgent
-    ├─ Action Type: "debug" ──→ DebuggingAgent
-    ├─ Action Type: "refactor" ──→ RefactoringAgent
-    ├─ Action Type: "document" ──→ DocumentationAgent
-    └─ Action Type: "research" ──→ ResearchAgent
-    │
-    ▼
-VALIDATION AGENT (Post-execution verification)
-    │
-    ▼
-RESULTS & REPORT
-```
-
 ### Enable Sub-Agent Mode
 
 ```bash
 # Method 1: CLI Flag
 rev --execution-mode sub-agent "Extract analyst classes to lib/analysts/"
 
-# Method 2: Environment Variable
+# Method 2: Environment Variable (recommended)
 export REV_EXECUTION_MODE=sub-agent
 rev "Your task"
 
@@ -92,25 +64,23 @@ config.set_execution_mode("sub-agent")
 
 Each agent is optimized for its domain:
 
-```
-CodeWriterAgent optimizations:
+**CodeWriterAgent optimizations:**
 - Specialized prompt for code extraction
 - Import validation before writing
 - Syntax checking integration
 - Diff display for review
 
-TestExecutorAgent optimizations:
+**TestExecutorAgent optimizations:**
 - Test output parsing
 - Coverage tracking
 - Failure analysis
 - Auto-fix suggestions
 
-DebuggingAgent optimizations:
+**DebuggingAgent optimizations:**
 - Stack trace analysis
 - Root cause identification
 - Fix suggestion logic
 - Regression prevention
-```
 
 #### ✅ Parallel Execution
 
@@ -121,9 +91,9 @@ Sub-agents can run tasks in parallel:
 rev --parallel 4 "Add feature X, add feature Y, add feature Z"
 
 # Process:
-# Task 1 (add) ──→ CodeWriterAgent (fast)
-# Task 2 (add) ──→ CodeWriterAgent (fast)
-# Task 3 (add) ──→ CodeWriterAgent (fast)
+# Task 1 (add) --> CodeWriterAgent (fast)
+# Task 2 (add) --> CodeWriterAgent (fast)
+# Task 3 (add) --> CodeWriterAgent (fast)
 # Total time: ~1/3 of sequential
 ```
 
@@ -131,19 +101,19 @@ rev --parallel 4 "Add feature X, add feature Y, add feature Z"
 
 Sub-agents include built-in validation:
 
-```python
-# CodeWriterAgent validates:
+```
+CodeWriterAgent validates:
 ✓ Import targets exist (prevents broken imports)
 ✓ Syntax is correct
 ✓ Code follows patterns
 ✓ No duplicate implementations
 
-# TestExecutorAgent validates:
+TestExecutorAgent validates:
 ✓ Tests actually run (not just "found")
 ✓ Tests pass with correct output
 ✓ Coverage meets thresholds
 
-# DebuggingAgent validates:
+DebuggingAgent validates:
 ✓ Bug is actually fixed
 ✓ No new bugs introduced
 ✓ Original functionality preserved
@@ -153,7 +123,7 @@ Sub-agents include built-in validation:
 
 Each agent has recovery strategies for its domain:
 
-```python
+```
 CodeWriterAgent Recovery:
 - Detect text responses, retry
 - Recover from import errors
@@ -180,36 +150,36 @@ Task: "Extract BreakoutAnalyst and VolumeAnalyst to lib/analysts/"
 Execution Mode: SUB-AGENT
 
 Entering phase: planning
-  → Analyzing request...
-  → Generated 5 concrete tasks with specific class names
+  -> Analyzing request...
+  -> Generated 5 concrete tasks with specific class names
 
 Entering phase: execution
-  → Executing with Sub-Agent architecture...
-  → Registered action types: add, edit, refactor, test, debug, fix, document, docs
+  -> Executing with Sub-Agent architecture...
+  -> Registered action types: add, edit, refactor, test, debug, fix, document, docs
 
-  🤖 Task 1 [add]: Extract BreakoutAnalyst class
-     → Dispatching to CodeWriterAgent
-     → Agent validates imports...
-     → File written to lib/analysts/breakout_analyst.py
-     ✓ Task 1 completed successfully
+  [OK] Task 1 [add]: Extract BreakoutAnalyst class
+     -> Dispatching to CodeWriterAgent
+     -> Agent validates imports...
+     -> File written to lib/analysts/breakout_analyst.py
+     [OK] Task 1 completed successfully
 
-  🤖 Task 2 [add]: Extract VolumeAnalyst class
-     → Dispatching to CodeWriterAgent
-     → Agent validates imports...
-     → File written to lib/analysts/volume_analyst.py
-     ✓ Task 2 completed successfully
+  [OK] Task 2 [add]: Extract VolumeAnalyst class
+     -> Dispatching to CodeWriterAgent
+     -> Agent validates imports...
+     -> File written to lib/analysts/volume_analyst.py
+     [OK] Task 2 completed successfully
 
-  🤖 Task 3 [test]: Run tests for extracted code
-     → Dispatching to TestExecutorAgent
-     → Running: pytest tests/ -q
-     → Tests: 8 passed in 0.3s
-     ✓ Task 3 completed successfully
+  [OK] Task 3 [test]: Run tests for extracted code
+     -> Dispatching to TestExecutorAgent
+     -> Running: pytest tests/ -q
+     -> Tests: 8 passed in 0.3s
+     [OK] Task 3 completed successfully
 
 Entering phase: validation
-  → Semantic validation: All analyst classes extracted
-  → Duplicate detection: No duplicate code found
-  → Import satisfaction: All imports satisfied
-  → Tests: All tests passing
+  -> Semantic validation: All analyst classes extracted
+  -> Duplicate detection: No duplicate code found
+  -> Import satisfaction: All imports satisfied
+  -> Tests: All tests passing
 
 ============================================================
 EXECUTION COMPLETE - ALL GOALS ACHIEVED
@@ -226,21 +196,21 @@ Linear Mode uses a single agent to execute all tasks sequentially. It's simpler 
 
 ```
 ORCHESTRATOR
-    │
-    ▼
+    |
+    V
 PLANNING (Generate tasks)
-    │
-    ▼
+    |
+    V
 GENERIC AGENT
     ├─ Execute Task 1 (any type)
     ├─ Execute Task 2 (any type)
     ├─ Execute Task 3 (any type)
     └─ ...
-    │
-    ▼
+    |
+    V
 VALIDATION
-    │
-    ▼
+    |
+    V
 RESULTS
 ```
 
@@ -261,21 +231,21 @@ config.set_execution_mode("linear")
 
 ### Linear Mode Characteristics
 
-#### Generic Agent
+**Generic Agent:**
 - Single system prompt for all tasks
 - No specialization per action type
 - Generic tool selection
 - Standard error handling
 
-#### Sequential Execution
+**Sequential Execution:**
 - One task at a time
 - No parallelism
 - Simpler error tracking
 - Predictable execution order
 
-#### Use Cases
+### Use Cases
 
-✅ **When to use Linear Mode:**
+**When to use Linear Mode:**
 - Testing and validation
 - Comparing against sub-agent results
 - Debugging specific agents
@@ -283,54 +253,12 @@ config.set_execution_mode("linear")
 - Educational/learning purposes
 - Simple sequential tasks
 
-❌ **When NOT to use Linear Mode:**
+**When NOT to use Linear Mode:**
 - Production deployments
 - Complex multi-task requests
 - Time-critical operations
 - High-quality code generation
 - Tasks requiring specialization
-
-### Linear Mode in Action
-
-```
-============================================================
-ORCHESTRATOR - LINEAR EXECUTION MODE
-============================================================
-Task: "Extract BreakoutAnalyst and VolumeAnalyst to lib/analysts/"
-Execution Mode: LINEAR
-
-Entering phase: planning
-  → Analyzing request...
-  → Generated 5 tasks
-
-Entering phase: execution
-  → Executing with Linear architecture...
-
-  Task 1 [add]: Extract BreakoutAnalyst class
-     → Dispatching to GenericAgent
-     → Executing with generic tools
-     → File written to lib/analysts/breakout_analyst.py
-     ✓ Task 1 completed
-
-  Task 2 [add]: Extract VolumeAnalyst class
-     → Dispatching to GenericAgent
-     → Executing with generic tools
-     → File written to lib/analysts/volume_analyst.py
-     ✓ Task 2 completed
-
-  Task 3 [test]: Run tests for extracted code
-     → Dispatching to GenericAgent
-     → Running: pytest tests/ -q
-     → Tests: 8 passed in 0.3s
-     ✓ Task 3 completed
-
-Entering phase: validation
-  → Checking execution results...
-
-============================================================
-EXECUTION COMPLETE
-============================================================
-```
 
 ---
 
@@ -392,7 +320,7 @@ EXECUTION COMPLETE
 
 ### Implementation Quality Metrics
 
-Based on testing (see IMPLEMENTATION_SUMMARY.md):
+Based on comprehensive testing (26/26 tests passing):
 
 | Metric | Sub-Agent | Linear |
 |--------|-----------|--------|
@@ -435,100 +363,6 @@ pytest tests/test_critical_fixes_verified.py \
 
 # Expected: 26/26 tests passing
 ```
-
-### Comparison Scenarios
-
-**Scenario 1: Code Extraction**
-```bash
-# Sub-Agent (recommended)
-rev --execution-mode sub-agent \
-  "Extract BreakoutAnalyst class to lib/analysts/breakout.py"
-
-# Linear (for comparison)
-rev --execution-mode linear \
-  "Extract BreakoutAnalyst class to lib/analysts/breakout.py"
-
-# Compare: Sub-Agent produces complete implementation,
-# Linear may produce stubs
-```
-
-**Scenario 2: Test Validation**
-```bash
-# Sub-Agent (recommended)
-rev --execution-mode sub-agent \
-  "Add tests and verify they pass"
-
-# Linear (for comparison)
-rev --execution-mode linear \
-  "Add tests and verify they pass"
-
-# Compare: Sub-Agent validates test output,
-# Linear only checks return code
-```
-
-**Scenario 3: Bug Fixing**
-```bash
-# Sub-Agent (recommended)
-rev --execution-mode sub-agent \
-  "Fix the authentication bug"
-
-# Linear (for comparison)
-rev --execution-mode linear \
-  "Fix the authentication bug"
-
-# Compare: Sub-Agent specialized debugging,
-# Linear generic approach
-```
-
----
-
-## 🚀 Migration Guide: Linear → Sub-Agent
-
-If you're currently using Linear mode, here's how to migrate:
-
-### Step 1: Understand Your Tasks
-
-```python
-# List all tasks and their action_types
-for task in plan.tasks:
-    print(f"Task: {task.description}")
-    print(f"Action: {task.action_type}")
-    # Ensure action_types match supported agents
-```
-
-### Step 2: Enable Sub-Agent Mode
-
-```bash
-# Option 1: Environment variable (recommended)
-export REV_EXECUTION_MODE=sub-agent
-
-# Option 2: CLI flag
-rev --execution-mode sub-agent "Your task"
-
-# Option 3: Config file
-echo "execution_mode: sub-agent" >> ~/.rev/config.yaml
-```
-
-### Step 3: Run and Compare
-
-```bash
-# Run with sub-agent
-rev "Your task"
-
-# If issues, run with linear for comparison
-REV_EXECUTION_MODE=linear rev "Your task"
-
-# Compare outputs
-diff sub-agent-output.txt linear-output.txt
-```
-
-### Step 4: Verify Improvements
-
-Expected improvements with Sub-Agent mode:
-- ✅ Better code quality (no stubs)
-- ✅ Faster execution (if parallel enabled)
-- ✅ More reliable validation
-- ✅ Better error recovery
 
 ---
 
@@ -578,25 +412,6 @@ tail -f ~/.rev/logs/agents.log
 
 ## 🔍 Configuration
 
-### Default Settings
-
-```yaml
-# ~/.rev/config.yaml or environment variables
-
-# Execution mode
-execution_mode: sub-agent  # Recommended
-
-# Parallelism (sub-agent only)
-parallel_workers: 4
-
-# Validation
-validation_mode: targeted
-
-# Recovery
-enable_recovery: true
-max_recovery_attempts: 3
-```
-
 ### Environment Variables
 
 ```bash
@@ -645,7 +460,7 @@ METRICS:
 ├────────────────────┼──────────────┼──────────────┤
 │ Execution Time     │ 8.2s (4 workers) │ 24.5s    │
 │ Code Quality       │ 95%          │ 65%          │
-│ Import Validation  │ ✅ Full      │ ⚠️ Basic     │
+│ Import Validation  │ [OK] Full    │ [WARN] Basic │
 │ Tests Passing      │ 8/8          │ 7/8          │
 │ Errors Caught      │ 2            │ 0            │
 │ Manual Fixes       │ 0            │ 3            │
@@ -655,15 +470,6 @@ SPEEDUP: 3x faster with sub-agent mode
 QUALITY: 30% higher code quality
 RELIABILITY: 2 additional issues caught
 ```
-
----
-
-## 📚 Related Documentation
-
-- [IMPLEMENTATION_SUMMARY.md](./IMPLEMENTATION_SUMMARY.md) - All fixes and improvements
-- [CRITICAL_FIXES_SUMMARY.md](../CRITICAL_FIXES_SUMMARY.md) - Critical issues fixed
-- [ARCHITECTURE.md](./ARCHITECTURE.md) - System architecture details
-- [demo_execution_modes.md](../demo_execution_modes.md) - Quick demo
 
 ---
 
@@ -686,15 +492,6 @@ A: Try linear mode for comparison, check agent logs, or file an issue.
 
 **Q: Is linear mode deprecated?**
 A: No, it's useful for testing and comparison, just not recommended for production.
-
----
-
-## 🔗 Quick Links
-
-- **Enable Sub-Agent Mode:** `export REV_EXECUTION_MODE=sub-agent`
-- **Run Tests:** `pytest tests/test_*_fixes.py -v`
-- **View Logs:** `tail -f ~/.rev/logs/agents.log`
-- **Check Status:** `rev --version`
 
 ---
 

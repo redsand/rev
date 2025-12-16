@@ -593,6 +593,63 @@ class Orchestrator:
 
         return overall_success and len(failed_tasks) == 0
 
+    def _check_for_immediate_replan_after_destructive_task(self, plan: ExecutionPlan) -> bool:
+        """
+        Check if a destructive task just completed and has dependent pending tasks.
+
+        This implements PER-TASK REPLANNING: after a destructive operation (extract, modify, etc),
+        immediately replan to ensure subsequent tasks still make sense given the new file state.
+
+        Returns: True if immediate replan should be triggered
+        """
+        # Find recently completed destructive tasks
+        completed_destructive_tasks = []
+
+        for task in plan.tasks:
+            if task.status != TaskStatus.COMPLETED:
+                continue
+
+            # Check if task is destructive
+            if not any(word in task.description.lower()
+                      for word in ["extract", "refactor", "delete", "remove", "modify"]):
+                continue
+
+            # Check if there are pending tasks that might be affected
+            pending_tasks = [t for t in plan.tasks if t.status == TaskStatus.PENDING]
+            if not pending_tasks:
+                continue
+
+            # Extract files mentioned in the completed destructive task
+            import re
+            completed_files = re.findall(
+                r'(?:lib/|src/|tests/)[a-zA-Z0-9_./\-]+\.py',
+                task.description
+            )
+
+            # Check if any pending task mentions the same files
+            for pending_task in pending_tasks:
+                pending_files = re.findall(
+                    r'(?:lib/|src/|tests/)[a-zA-Z0-9_./\-]+\.py',
+                    pending_task.description
+                )
+
+                # If overlap, we should replan
+                if any(f in pending_files for f in completed_files):
+                    completed_destructive_tasks.append({
+                        'destructive': task,
+                        'affected': pending_task,
+                        'files': [f for f in completed_files if f in pending_files]
+                    })
+
+        if completed_destructive_tasks:
+            print(f"\n  ⚠️ IMMEDIATE REPLAN NEEDED: Destructive operation(s) detected")
+            for issue in completed_destructive_tasks:
+                print(f"     - Task '{issue['destructive'].description[:50]}...' modified {issue['files']}")
+                print(f"       Pending task '{issue['affected'].description[:50]}...' may be affected")
+            return True
+
+        return False
+
     def _should_adaptively_replan(self, plan: ExecutionPlan, execution_success: bool, budget: ResourceBudget, adaptive_attempt: int) -> bool:
         """Determines if adaptive replanning should be triggered.
 
@@ -657,6 +714,36 @@ class Orchestrator:
             # Execute current plan's tasks
             self.context.update_repo_context()
             execution_success = self._dispatch_to_sub_agents(self.context)
+
+            # CHECK FOR IMMEDIATE REPLAN: If destructive task completed with dependent pending tasks
+            # This implements PER-TASK REPLANNING to adapt to actual file state changes
+            if self._check_for_immediate_replan_after_destructive_task(self.context.plan):
+                print(f"  → Triggering immediate replan due to destructive operation...")
+                evaluation_prompt = f"""
+A destructive operation just completed (file extraction/modification).
+Review the updated file state and determine what tasks still need to be done.
+
+Original request: {user_request}
+
+Given the recent changes, what new tasks should we execute next?
+If everything is complete, respond with: "GOAL_ACHIEVED"
+"""
+                followup_plan = self._regenerate_followup_plan(
+                    evaluation_prompt,
+                    self.context.plan,
+                    coding_mode,
+                )
+
+                if followup_plan and followup_plan.tasks:
+                    # Clear pending tasks and replace with new plan
+                    for t in self.context.plan.tasks:
+                        if t.status == TaskStatus.PENDING:
+                            t.status = TaskStatus.STOPPED  # Mark old pending tasks as stopped
+
+                    # Add new replanned tasks
+                    self.context.plan.tasks.extend(followup_plan.tasks)
+                    print(f"  → Plan updated with {len(followup_plan.tasks)} new task(s)")
+                    continue  # Restart execution loop with new tasks
 
             # Collect failed tasks and their error reasons for feedback
             failed_tasks = [t for t in self.context.plan.tasks if t.status == TaskStatus.FAILED]

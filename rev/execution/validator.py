@@ -983,6 +983,82 @@ def format_validation_feedback_for_llm(report: ValidationReport, user_request: s
     return "\n".join(feedback_parts)
 
 
+def validate_no_destructive_interdependencies(plan: ExecutionPlan) -> ValidationResult:
+    """
+    PRE-EXECUTION validation: Check that destructive operations don't break subsequent tasks.
+
+    CRITICAL: This prevents the situation where:
+    - Task 1: Extract BreakoutAnalyst from lib/analysts.py (DESTRUCTIVE - truncates file)
+    - Task 2: Extract VolumeAnalyst from lib/analysts.py (FAILS - file already truncated)
+
+    Args:
+        plan: The execution plan to validate
+
+    Returns:
+        ValidationResult indicating if plan has destructive interdependencies
+
+    The rule: Do NOT allow destructive operations on files if subsequent tasks read from those files.
+    """
+    # Identify destructive tasks (write_file, replace_in_file) and what files they modify
+    destructive_tasks = []  # List of (task_idx, file_path, task_description)
+
+    for idx, task in enumerate(plan.tasks):
+        # Tasks that modify files are destructive
+        if any(word in task.description.lower() for word in ["extract", "refactor", "remove", "delete", "modify"]):
+            # Tasks mentioning file operations are potentially destructive
+            # Extract likely files from description
+            mentioned_files = re.findall(r'(?:lib/|src/|tests/)[a-zA-Z0-9_./\-]+\.py', task.description)
+            if mentioned_files:
+                destructive_tasks.append((idx, mentioned_files, task.description))
+
+    if not destructive_tasks:
+        # No destructive tasks, so no interdependency issues
+        return ValidationResult(
+            name="destructive_interdependency_check",
+            status=ValidationStatus.PASSED,
+            message="No destructive file operations detected"
+        )
+
+    # Check if any subsequent task reads from files modified by earlier destructive tasks
+    issues = []
+
+    for destructive_idx, modified_files, destructive_desc in destructive_tasks:
+        # Check all tasks AFTER this destructive task
+        for subsequent_idx in range(destructive_idx + 1, len(plan.tasks)):
+            subsequent_task = plan.tasks[subsequent_idx]
+            subsequent_desc = subsequent_task.description.lower()
+
+            # Check if subsequent task tries to read from the modified files
+            for modified_file in modified_files:
+                # If the subsequent task mentions the same file or trying to extract from it
+                if modified_file in subsequent_desc:
+                    # If it's trying to extract/read from the same file
+                    if any(word in subsequent_desc for word in ["extract", "read", "from", "in"]):
+                        issues.append({
+                            "destructive_task": destructive_desc,
+                            "destructive_file": modified_file,
+                            "dependent_task": subsequent_task.description,
+                            "line": f"Task {destructive_idx + 1} modifies '{modified_file}' but Task {subsequent_idx + 1} tries to read from it"
+                        })
+
+    if issues:
+        return ValidationResult(
+            name="destructive_interdependency_check",
+            status=ValidationStatus.FAILED,
+            message=f"CRITICAL: {len(issues)} destructive operation(s) break subsequent task dependencies",
+            details={
+                "issues": issues,
+                "recommendation": "Either: (1) Reorder tasks so all reads happen before writes, or (2) Use COPY instead of EXTRACT (don't truncate source file)"
+            }
+        )
+
+    return ValidationResult(
+        name="destructive_interdependency_check",
+        status=ValidationStatus.PASSED,
+        message=f"Checked {len(destructive_tasks)} destructive task(s) - no dependency violations found"
+    )
+
+
 def quick_validate(plan: ExecutionPlan) -> bool:
     """Quick validation - just check if tasks completed and run tests.
 
