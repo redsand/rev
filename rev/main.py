@@ -3,6 +3,7 @@
 """Main entry point for rev CLI."""
 
 import sys
+import os
 import argparse
 from typing import Optional
 
@@ -152,6 +153,21 @@ def main():
         help="List all available checkpoints"
     )
     parser.add_argument(
+        "--optimize-prompt",
+        action="store_true",
+        help="Enable prompt optimization - analyzes and suggests improvements to vague requests"
+    )
+    parser.add_argument(
+        "--no-optimize-prompt",
+        action="store_true",
+        help="Disable prompt optimization"
+    )
+    parser.add_argument(
+        "--auto-optimize",
+        action="store_true",
+        help="Auto-optimize prompts without asking user (implies --optimize-prompt)"
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable detailed debug logging to file for LLM review"
@@ -184,6 +200,26 @@ def main():
     if args.execution_mode:
         config.set_execution_mode(args.execution_mode)
 
+    # Determine prompt optimization settings
+    # Priority: CLI flags > Environment variables > defaults
+    enable_prompt_optimization = True  # Default
+    auto_optimize_prompt = False  # Default
+
+    # Check environment variables
+    if os.getenv("REV_OPTIMIZE_PROMPT", "").lower() == "false":
+        enable_prompt_optimization = False
+    if os.getenv("REV_AUTO_OPTIMIZE", "").lower() == "true":
+        auto_optimize_prompt = True
+
+    # Override with CLI flags (highest priority)
+    if args.no_optimize_prompt:
+        enable_prompt_optimization = False
+    if args.optimize_prompt:
+        enable_prompt_optimization = True
+    if args.auto_optimize:
+        enable_prompt_optimization = True
+        auto_optimize_prompt = True
+
     if args.version:
         from rev.versioning import build_version_output
 
@@ -205,6 +241,8 @@ def main():
         "learn_enabled": args.learn,
         "action_review_enabled": args.action_review,
         "auto_fix_enabled": args.auto_fix,
+        "prompt_optimization_enabled": enable_prompt_optimization,
+        "auto_optimize_prompt": auto_optimize_prompt,
     })
 
     # Handle list-checkpoints command
@@ -360,7 +398,9 @@ def main():
                     enable_auto_fix=args.auto_fix,
                     parallel_workers=args.parallel,
                     auto_approve=not args.prompt,
-                    research_depth=args.research_depth
+                    research_depth=args.research_depth,
+                    enable_prompt_optimization=enable_prompt_optimization,
+                    auto_optimize_prompt=auto_optimize_prompt
                 )
                 if not result.success:
                     sys.exit(1)

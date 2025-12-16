@@ -16,7 +16,7 @@ from pathlib import Path
 from collections import defaultdict
 
 from rev import config
-from rev.models.task import ExecutionPlan, TaskStatus
+from rev.models.task import ExecutionPlan, TaskStatus, Task
 from rev.execution.planner import planning_mode
 from rev.execution.reviewer import review_execution_plan, ReviewStrictness, ReviewDecision
 from rev.execution.validator import (
@@ -29,6 +29,7 @@ from rev.execution.researcher import research_codebase, ResearchFindings
 from rev.execution.learner import LearningAgent, display_learning_suggestions
 from rev.execution.executor import execution_mode, concurrent_execution_mode, fix_validation_failures
 from rev.execution.state_manager import StateManager
+from rev.execution.prompt_optimizer import optimize_prompt_if_needed
 from rev.tools.registry import get_available_tools, get_repo_context
 from rev.config import (
     MAX_PLAN_TASKS,
@@ -46,6 +47,7 @@ from rev.llm.client import get_token_usage
 from rev.core.context import RevContext, ResourceBudget # Import ResourceBudget from context
 from rev.core.shared_enums import AgentPhase # Import AgentPhase from shared_enums
 from rev.core.agent_registry import AgentRegistry # Import AgentRegistry
+from rev.cache import clear_analysis_caches # Clear analysis caches between iterations
 
 
 @dataclass
@@ -66,6 +68,9 @@ class OrchestratorConfig:
     plan_regen_retries: int = MAX_PLAN_REGEN_RETRIES
     validation_retries: int = MAX_VALIDATION_RETRIES
     adaptive_replan_attempts: int = MAX_ADAPTIVE_REPLANS
+    # Prompt optimization
+    enable_prompt_optimization: bool = True
+    auto_optimize_prompt: bool = False
     # Back-compat shim (legacy)
     max_retries: Optional[int] = None
     max_plan_tasks: int = MAX_PLAN_TASKS
@@ -567,6 +572,22 @@ class Orchestrator:
                         # Normal success
                         task.status = TaskStatus.COMPLETED
                         print(f"  ✓ Task {task.task_id} completed successfully")
+
+                        # CRITICAL: Per-task evaluation - check if plan needs updating IMMEDIATELY after each task
+                        if self._should_pause_for_task_reevaluation(task, context):
+                            print(f"\n  ⚠️  Task {task.task_id} changed file state. Pausing for plan re-evaluation...")
+                            context.update_repo_context()
+                            clear_analysis_caches()
+                            # Signal caller to exit dispatch loop and replan
+                            context.agent_requests.append({
+                                "type": "replan_immediately",
+                                "reason": f"File state changed after task {task.task_id}",
+                                "completed_task": task.task_id
+                            })
+                            # Return early - stop executing remaining tasks in this batch
+                            print(f"  → Stopping task batch execution to replan based on new file state")
+                            return overall_success
+
                 else:
                     # Non-string result = execution error
                     task.status = TaskStatus.FAILED
@@ -592,6 +613,59 @@ class Orchestrator:
         print(f"\n  📊 Sub-agent execution summary: {len(completed_tasks)}/{len(agent_tasks)} completed, {len(failed_tasks)} failed")
 
         return overall_success and len(failed_tasks) == 0
+
+    def _should_pause_for_task_reevaluation(self, completed_task: Task, context: RevContext) -> bool:
+        """
+        Determine if we should pause execution and re-evaluate the plan after this task.
+
+        Returns True if:
+        1. Task was destructive (extract, delete, modify, remove)
+        2. AND there are pending tasks that reference affected files
+        3. AND those pending tasks might need adjustment
+
+        This ensures we don't delete source files before dependent tasks confirm they have the data.
+        """
+        task_desc = completed_task.description.lower()
+
+        # Check if this is a destructive operation
+        is_destructive = any(keyword in task_desc for keyword in [
+            "extract", "delete", "remove", "refactor", "modify", "split", "create"
+        ])
+
+        if not is_destructive:
+            return False
+
+        # Check if there are any pending tasks
+        pending_tasks = [t for t in context.plan.tasks if t.status == TaskStatus.PENDING]
+        if not pending_tasks:
+            return False
+
+        # Extract files mentioned in completed task
+        import re
+        completed_task_files = set(re.findall(
+            r'(?:lib/|src/|tests/)[a-zA-Z0-9_./\-]+\.py',
+            completed_task.description
+        ))
+
+        if not completed_task_files:
+            return False
+
+        # Check if any pending tasks reference the modified files
+        for pending_task in pending_tasks:
+            pending_task_files = set(re.findall(
+                r'(?:lib/|src/|tests/)[a-zA-Z0-9_./\-]+\.py',
+                pending_task.description
+            ))
+
+            # If pending task mentions a file from completed task, we need to replan
+            if completed_task_files & pending_task_files:
+                print(f"    └─ Pending task {pending_task.task_id} references files from completed task")
+                print(f"       Completed task files: {completed_task_files}")
+                print(f"       Pending task files: {pending_task_files}")
+                print(f"       Overlap: {completed_task_files & pending_task_files}")
+                return True
+
+        return False
 
     def _check_for_immediate_replan_after_destructive_task(self, plan: ExecutionPlan) -> bool:
         """
@@ -715,9 +789,24 @@ class Orchestrator:
             self.context.update_repo_context()
             execution_success = self._dispatch_to_sub_agents(self.context)
 
-            # CHECK FOR IMMEDIATE REPLAN: If destructive task completed with dependent pending tasks
+            # Update repo context after tasks complete to reflect file changes
+            self.context.update_repo_context()
+
+            # Clear analysis caches that become stale when files change
+            # This ensures next planning iteration gets fresh analysis
+            clear_analysis_caches()
+
+            # CHECK 1: Per-task reevaluation request (task detected state change mid-execution)
+            should_replan_immediately = False
+            for request in self.context.agent_requests:
+                if request.get("type") == "replan_immediately":
+                    should_replan_immediately = True
+                    print(f"\n  ⚠️  Per-task reevaluation triggered: {request.get('reason')}")
+                    break
+
+            # CHECK 2: Immediate replan after destructive operation
             # This implements PER-TASK REPLANNING to adapt to actual file state changes
-            if self._check_for_immediate_replan_after_destructive_task(self.context.plan):
+            if should_replan_immediately or self._check_for_immediate_replan_after_destructive_task(self.context.plan):
                 print(f"  → Triggering immediate replan due to destructive operation...")
                 evaluation_prompt = f"""
 A destructive operation just completed (file extraction/modification).
@@ -743,7 +832,11 @@ If everything is complete, respond with: "GOAL_ACHIEVED"
                     # Add new replanned tasks
                     self.context.plan.tasks.extend(followup_plan.tasks)
                     print(f"  → Plan updated with {len(followup_plan.tasks)} new task(s)")
+                    self.context.agent_requests = []  # Clear replan requests after handling
                     continue  # Restart execution loop with new tasks
+
+            # Clear any remaining agent requests
+            self.context.agent_requests = []
 
             # Collect failed tasks and their error reasons for feedback
             failed_tasks = [t for t in self.context.plan.tasks if t.status == TaskStatus.FAILED]
@@ -851,6 +944,8 @@ If the goal IS achieved, respond with: "GOAL_ACHIEVED"
                     print(f"  → Executing verification task before concluding...")
                     self.context.update_plan(followup_plan)
                     self._dispatch_to_sub_agents(self.context)
+                    # Update repo context after verification completes
+                    self.context.update_repo_context()
                     self.context.agent_requests = []
                     return True
 
@@ -1037,6 +1132,22 @@ If the goal IS achieved, respond with: "GOAL_ACHIEVED"
                     "warnings": len(research_findings.warnings)
                 }
 
+            # Phase 2b: Prompt Optimization (optional)
+            if self.config.enable_prompt_optimization:
+                original_request = self.context.user_request
+                optimized_request, was_optimized = optimize_prompt_if_needed(
+                    self.context.user_request,
+                    auto_optimize=self.config.auto_optimize_prompt
+                )
+                if was_optimized:
+                    print(f"\n✓ Request optimized for clarity")
+                    self.context.user_request = optimized_request
+                    self.context.add_insight("optimization", "prompt_optimized", True)
+                    self.context.agent_insights["prompt_optimization"] = {
+                        "optimized": True,
+                        "original": original_request[:100],
+                        "improved": optimized_request[:100]
+                    }
 
             # Phase 3: Planning Agent - Create execution plan
             self._update_phase(AgentPhase.PLANNING)
@@ -1044,7 +1155,7 @@ If the goal IS achieved, respond with: "GOAL_ACHIEVED"
             if self.context.resource_budget.is_exceeded():
                 self.context.add_error(f"Resource budget exceeded during planning phase! Usage: {self.context.resource_budget.get_usage_summary()}")
                 raise Exception("Resource budget exceeded.")
-            
+
             plan = planning_mode(
                 self.context.user_request,
                 coding_mode=coding_mode,
@@ -1493,6 +1604,8 @@ def run_orchestrated(
     orchestrator_retries: int = MAX_ORCHESTRATOR_RETRIES,
     plan_regen_retries: int = MAX_PLAN_REGEN_RETRIES,
     validation_retries: int = MAX_VALIDATION_RETRIES,
+    enable_prompt_optimization: bool = True,
+    auto_optimize_prompt: bool = False,
 ) -> OrchestratorResult:
     """Run a task through the orchestrated multi-agent pipeline.
 
@@ -1529,6 +1642,8 @@ def run_orchestrated(
         orchestrator_retries=orchestrator_retries,
         plan_regen_retries=plan_regen_retries,
         validation_retries=validation_retries,
+        enable_prompt_optimization=enable_prompt_optimization,
+        auto_optimize_prompt=auto_optimize_prompt,
     )
 
     orchestrator = Orchestrator(project_root, config_obj)

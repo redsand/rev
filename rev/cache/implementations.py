@@ -50,6 +50,14 @@ class FileContentCache(IntelligentCache):
         cache_key = f"{file_path}:{mtime}"
         self.set(cache_key, content, metadata={"file_path": str(file_path), "mtime": mtime})
 
+    def invalidate_file(self, file_path: pathlib.Path):
+        """Invalidate all cache entries for a specific file (all mtimes)."""
+        prefix = f"{file_path}:"
+        with self._lock:
+            keys_to_remove = [k for k in self._cache.keys() if k.startswith(prefix)]
+            for key in keys_to_remove:
+                self.invalidate(key)
+
 
 class LLMResponseCache(IntelligentCache):
     """Cache for LLM responses based on message hash.
