@@ -4,6 +4,7 @@
 
 from rev.terminal.input import get_input_with_escape
 from rev.terminal.commands import execute_command, COMMAND_HANDLERS
+from rev.terminal.repl import repl_mode
 from rev.terminal.formatting import (
     colorize, create_header, create_section, create_item,
     create_bullet_item, create_tree_item, Colors, Symbols,
@@ -14,6 +15,7 @@ __all__ = [
     "get_input_with_escape",
     "execute_command",
     "COMMAND_HANDLERS",
+    "repl_mode",
     "colorize",
     "create_header",
     "create_section",

@@ -90,13 +90,16 @@ class DebuggingAgent(BaseAgent):
             tool_name = tool_call['function']['name']
             arguments_str = tool_call['function']['arguments']
 
-            try:
-                arguments = json.loads(arguments_str)
-            except json.JSONDecodeError:
-                error_msg = f"DebuggingAgent: LLM returned invalid JSON for arguments: {arguments_str}"
-                context.add_error(error_msg)
-                self.request_replan(context, "Invalid JSON arguments from LLM", detailed_reason=error_msg)
-                return error_msg
+            if isinstance(arguments_str, dict):
+                arguments = arguments_str
+            else:
+                try:
+                    arguments = json.loads(arguments_str)
+                except json.JSONDecodeError:
+                    error_msg = f"DebuggingAgent: LLM returned invalid JSON for arguments: {arguments_str}"
+                    context.add_error(error_msg)
+                    self.request_replan(context, "Invalid JSON arguments from LLM", detailed_reason=error_msg)
+                    return error_msg
 
             print(f"  → DebuggingAgent will call tool '{tool_name}' with arguments: {arguments}")
 

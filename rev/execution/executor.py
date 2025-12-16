@@ -1196,11 +1196,12 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                         plan.mark_task_stopped(current_task)
                         cleanup_streaming_input()
                         return False
-
+            """
             task_iterations += 1
             if task_iterations >= warn_task_iterations and not iter_warned:
                 print(f"⚠️ Task {plan.current_index + 1} nearing iteration limit ({task_iterations}/{max_task_iterations})")
                 iter_warned = True
+            """
 
             call_tools = tools if tools_enabled and model_supports_tools else None
             llm_messages = _prepare_llm_messages(messages, exec_context, session_tracker)
@@ -1336,7 +1337,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                         continue
                     """
 
-
+                    """
                     # Check if too much exploration without editing (threshold lowered for faster intervention)
                     if current_task.action_type in {"add", "edit"} and exec_context.is_exploration_heavy(threshold=5):
                         warning_count = exec_context.increment_force_edit_warning(current_task.action_type)
@@ -1355,6 +1356,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                             })
                             # Don't reset - blocking will take over on next exploration attempt
 
+                    """
                     # Record this tool call for deduplication tracking
                     exec_context.record_tool_call(tool_name, tool_args)
 
@@ -1754,6 +1756,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             _log_usage(False)
             return False
 
+        """
         task_iterations += 1
         if task_iterations >= warn_task_iterations and not iter_warned:
             print(f"⚠️ Task {task.task_id + 1} nearing iteration limit ({task_iterations}/{max_task_iterations})")
@@ -1765,6 +1768,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                 if not budget_warned:
                     print(f"⚠️ Resource budget exceeded for task {task.task_id + 1}: {budget.get_usage_summary()} (continuing)")
                     budget_warned = True
+        """
 
         call_tools = tools if tools_enabled and model_supports_tools else None
         llm_messages = _prepare_llm_messages(messages, exec_context)

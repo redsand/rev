@@ -519,9 +519,12 @@ Provide a thorough review."""
     ]
 
     print("→ Analyzing plan with review agent...")
+    import os
+    if os.getenv("OLLAMA_DEBUG"):
+        print(f"[DEBUG] Review Agent - Using model: {config.REVIEW_MODEL} (LLM_PROVIDER={config.LLM_PROVIDER})")
     parse_attempt = 0
     while parse_attempt <= max_parse_retries:
-        response = ollama_chat(messages, tools=tools, model_name=config.REVIEW_MODEL) or {}
+        response = ollama_chat(messages, tools=tools, model=config.REVIEW_MODEL) or {}
 
         if not isinstance(response, dict):
             print("⚠️  Review agent returned no response; approving with suggestions by default")

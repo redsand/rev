@@ -262,7 +262,6 @@ class Orchestrator:
             try:
                 followup_plan = planning_mode(
                     prompt,
-                    current_plan=original_plan,
                     coding_mode=coding_mode,
                     max_plan_tasks=self.config.max_plan_tasks,
                     max_planning_iterations=self.config.max_planning_iterations,
@@ -304,6 +303,90 @@ class Orchestrator:
                     print("Invalid input. Type 'resume' or 'abort':")
             except (EOFError, KeyboardInterrupt):
                 print("\n✗ User interrupted - aborting execution")
+                return False
+
+    def _prompt_user_on_stuck_execution(self, failed_tasks: list, user_request: str) -> bool:
+        """
+        Prompt user when system detects it's stuck in a loop (same tasks failing repeatedly).
+
+        Args:
+            failed_tasks: List of Task objects that are failing
+            user_request: Original user request
+
+        Returns:
+            True if user wants to continue, False to abort
+        """
+        print("\n" + "=" * 60)
+        print("SYSTEM APPEARS STUCK")
+        print("=" * 60)
+        print(f"The same {len(failed_tasks)} task(s) have failed multiple times:")
+        for task in failed_tasks:
+            print(f"  • {task.description[:70]}")
+            if task.error:
+                print(f"    Error: {task.error[:80]}")
+        print("\nOptions:")
+        print("  'continue' - Try different approach (replan)")
+        print("  'skip' - Skip these tasks and move forward")
+        print("  'abort' - Stop execution and accept partial results")
+        print("=" * 60)
+
+        while True:
+            try:
+                user_input = input("> ").strip().lower()
+
+                if user_input == "continue":
+                    print("✓ Continuing with new strategy...")
+                    return True
+                elif user_input == "skip":
+                    print("✓ Skipping failed tasks...")
+                    # Mark failed tasks as STOPPED so they won't be retried
+                    for task in failed_tasks:
+                        task.status = TaskStatus.STOPPED
+                    return True
+                elif user_input == "abort":
+                    print("✗ Aborting execution...")
+                    return False
+                else:
+                    print("Invalid input. Type 'continue', 'skip', or 'abort':")
+            except (EOFError, KeyboardInterrupt):
+                print("\n✗ User interrupted - stopping execution")
+                return False
+
+    def _prompt_user_on_max_iterations(self, failed_count: int) -> bool:
+        """
+        Prompt user when max iterations reached with some failed tasks.
+
+        Args:
+            failed_count: Number of failed tasks
+
+        Returns:
+            True to continue trying, False to stop
+        """
+        print("\n" + "=" * 60)
+        print("MAXIMUM ITERATIONS REACHED")
+        print("=" * 60)
+        print(f"Execution hit max iterations with {failed_count} task(s) still failing.")
+        print("The system has tried its best to recover but some tasks remain incomplete.")
+        print("\nOptions:")
+        print("  'accept' - Accept partial completion and move to validation")
+        print("  'skip' - Skip failed tasks and move forward")
+        print("=" * 60)
+
+        while True:
+            try:
+                user_input = input("> ").strip().lower()
+
+                if user_input in ["accept", "skip"]:
+                    if user_input == "skip":
+                        print("✓ Marking remaining failed tasks as stopped...")
+                        # Will be marked as STOPPED by calling code
+                    else:
+                        print("✓ Accepting partial completion...")
+                    return True
+                else:
+                    print("Invalid input. Type 'accept' or 'skip':")
+            except (EOFError, KeyboardInterrupt):
+                print("\n✗ User interrupted - stopping execution")
                 return False
 
     def _hold_and_retry_validation(
@@ -409,8 +492,13 @@ class Orchestrator:
         overall_success = True
 
         for task in agent_tasks:
-            # Skip completed or failed tasks
-            if task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED]:
+            # Skip completed tasks
+            if task.status == TaskStatus.COMPLETED:
+                continue
+
+            # For failed tasks, skip unless in recovery mode (will be replanned)
+            if task.status == TaskStatus.FAILED:
+                print(f"  ⏭️  Skipping task {task.task_id}: already failed, awaiting replan")
                 continue
 
             # Check dependencies
@@ -421,7 +509,10 @@ class Orchestrator:
                     if dep_idx < len(context.plan.tasks)
                 )
                 if not deps_met:
-                    print(f"  ⏭️  Skipping task {task.task_id}: dependencies not met")
+                    failed_deps = [str(context.plan.tasks[dep_idx].task_id)
+                                 for dep_idx in task.dependencies
+                                 if dep_idx < len(context.plan.tasks) and context.plan.tasks[dep_idx].status != TaskStatus.COMPLETED]
+                    print(f"  ⏭️  Skipping task {task.task_id}: dependencies not met (blocked by: {', '.join(failed_deps)})")
                     task.status = TaskStatus.STOPPED
                     continue
 
@@ -436,13 +527,37 @@ class Orchestrator:
                 # Execute the task
                 result = agent.execute(task, context)
 
-                # Update task with result
+                # Update task with result and check for agent signals
                 task.result = result
-                task.status = TaskStatus.COMPLETED
-                print(f"  ✓ Task {task.task_id} completed successfully")
+
+                # Check if agent signaled recovery or failure
+                if isinstance(result, str):
+                    if result.startswith("[RECOVERY_REQUESTED]"):
+                        # Agent needs replanning - don't mark complete
+                        task.status = TaskStatus.FAILED
+                        task.error = result[len("[RECOVERY_REQUESTED]"):].strip()
+                        print(f"  ⚠️ Task {task.task_id} requested recovery: {task.error[:100]}")
+                        overall_success = False
+                    elif result.startswith("[FINAL_FAILURE]"):
+                        # Agent exhausted recovery attempts
+                        task.status = TaskStatus.FAILED
+                        task.error = result[len("[FINAL_FAILURE]"):].strip()
+                        print(f"  ✗ Task {task.task_id} failed after recovery attempts: {task.error[:100]}")
+                        context.add_error(f"Task {task.task_id}: {task.error}")
+                        overall_success = False
+                    else:
+                        # Normal success
+                        task.status = TaskStatus.COMPLETED
+                        print(f"  ✓ Task {task.task_id} completed successfully")
+                else:
+                    # Non-string result = execution error
+                    task.status = TaskStatus.FAILED
+                    task.error = f"Invalid result type: {type(result)}"
+                    print(f"  ✗ Task {task.task_id} returned invalid result: {task.error}")
+                    overall_success = False
 
             except Exception as e:
-                error_msg = f"Sub-agent execution failed for task {task.task_id}: {e}"
+                error_msg = f"Sub-agent execution exception for task {task.task_id}: {e}"
                 print(f"  ✗ {error_msg}")
                 task.status = TaskStatus.FAILED
                 task.error = str(e)
@@ -462,13 +577,13 @@ class Orchestrator:
 
     def _should_adaptively_replan(self, plan: ExecutionPlan, execution_success: bool, budget: ResourceBudget, adaptive_attempt: int) -> bool:
         """Determines if adaptive replanning should be triggered.
-   
+
             Args:
                 plan: The current execution plan.
                 execution_success: Whether the execution phase was successful.
                 budget: The current resource budget.
                 adaptive_attempt: The current adaptive replanning attempt number.
-   
+
             Returns:
             True if adaptive replanning should be triggered, False otherwise.
         """
@@ -489,12 +604,177 @@ class Orchestrator:
 
         return False # Default to no replan
 
+    def _continuous_sub_agent_execution(self, user_request: str, coding_mode: bool) -> bool:
+        """
+        Execute tasks using sub-agents in a continuous loop with intelligent recovery.
+        After each batch of tasks completes, evaluates progress and generates new tasks dynamically.
+
+        This implements iterative problem-solving where the system:
+        1. Executes current plan's tasks
+        2. Evaluates whether the goal is achieved
+        3. If not, generates follow-up tasks with failure feedback
+        4. Repeats until goal is achieved or max iterations reached
+        5. Prompts user if stuck
+
+        Args:
+            user_request: The original user request
+            coding_mode: Whether coding mode is enabled
+
+        Returns:
+            True if goal achieved or recovery options exhausted, False only on critical error
+        """
+        max_iterations = 5
+        iteration = 0
+        previous_failed_tasks = set()  # Track which tasks have failed before
+        consecutive_stuck_iterations = 0  # Count how many iterations without progress
+        previous_followup_descriptions = set()  # Detect if planner suggests same tasks again
+        same_plan_iterations = 0  # Count iterations with same follow-up tasks
+
+        while iteration < max_iterations:
+            iteration += 1
+            print(f"\n{'='*60}")
+            print(f"Sub-Agent Execution Iteration {iteration}/{max_iterations}")
+            print(f"{'='*60}")
+
+            # Execute current plan's tasks
+            self.context.update_repo_context()
+            execution_success = self._dispatch_to_sub_agents(self.context)
+
+            # Collect failed tasks and their error reasons for feedback
+            failed_tasks = [t for t in self.context.plan.tasks if t.status == TaskStatus.FAILED]
+            failed_task_summary = ""
+            if failed_tasks:
+                failed_task_summary = "\n\nFailed tasks from previous execution:\n"
+                for t in failed_tasks:
+                    failed_task_summary += f"  - {t.task_id}: {t.description[:60]}...\n"
+                    if t.error:
+                        failed_task_summary += f"    Error: {t.error[:100]}\n"
+
+            # Check if agents requested recovery (normal in continuous mode)
+            if self.context.agent_requests:
+                print(f"  → {len(self.context.agent_requests)} agent recovery request(s)")
+                for req in self.context.agent_requests:
+                    reason = req.get('details', {}).get('reason', 'unknown')
+                    print(f"    - {reason[:80]}")
+
+            # Clear agent requests - continuous loop handles recovery internally
+            self.context.agent_requests = []
+
+            # Track progress
+            currently_failed = set(t.task_id for t in failed_tasks)
+            if currently_failed == previous_failed_tasks and len(failed_tasks) > 0:
+                consecutive_stuck_iterations += 1
+                print(f"  ⚠️ Same tasks failing (stuck iteration {consecutive_stuck_iterations}/{2})")
+            else:
+                consecutive_stuck_iterations = 0
+
+            print(f"  → Tasks: {len([t for t in self.context.plan.tasks if t.status == TaskStatus.COMPLETED])} completed, {len(failed_tasks)} failed")
+
+            # Check resource budget
+            if self.context.resource_budget.is_exceeded():
+                print(f"\n⚠️ Resource budget exceeded at iteration {iteration}")
+                return True  # Did what we could with available resources
+
+            # Check if stuck in recovery loop (same tasks failing repeatedly)
+            if consecutive_stuck_iterations >= 2 and len(failed_tasks) > 0:
+                print(f"\n⚠️ System appears stuck: same {len(failed_tasks)} task(s) failing repeatedly")
+                print(f"   Failed tasks: {', '.join(t.description[:40] for t in failed_tasks)}")
+                # Prompt user for help
+                should_continue = self._prompt_user_on_stuck_execution(failed_tasks, user_request)
+                if not should_continue:
+                    print(f"  User requested to stop execution")
+                    return True
+                # If user wants to continue, reset stuck counter and proceed
+                consecutive_stuck_iterations = 0
+
+            previous_failed_tasks = currently_failed
+
+            # After executing tasks, evaluate if goal is achieved
+            print(f"\n  → Evaluating progress toward goal...")
+            evaluation_prompt = f"""
+Original user request: {user_request}
+
+After executing the planned tasks, have we successfully completed the user's request?
+If not, what additional tasks need to be done?
+
+{failed_task_summary}
+
+Please generate the next set of tasks if the goal has not been achieved.
+If the goal IS achieved, respond with: "GOAL_ACHIEVED"
+"""
+
+            # Generate follow-up plan
+            followup_plan = self._regenerate_followup_plan(
+                evaluation_prompt,
+                self.context.plan,
+                coding_mode,
+            )
+
+            if not followup_plan or not followup_plan.tasks:
+                print(f"  → No follow-up tasks generated. Goal achieved.")
+                return True
+
+            # Detect if planner is stuck generating same follow-up tasks
+            current_followup_descriptions = set(t.description.lower() for t in followup_plan.tasks)
+            if current_followup_descriptions == previous_followup_descriptions:
+                same_plan_iterations += 1
+                print(f"  ⚠️ Planner suggesting same tasks again (repetition {same_plan_iterations})")
+            else:
+                same_plan_iterations = 0
+
+            if same_plan_iterations >= 2:
+                print(f"  ⚠️ Planner stuck: same follow-up tasks suggested {same_plan_iterations} times")
+                print(f"   Tasks: {', '.join(t.description[:40] for t in followup_plan.tasks)}")
+                should_continue = self._prompt_user_on_stuck_execution(followup_plan.tasks, user_request)
+                if not should_continue:
+                    return True
+                same_plan_iterations = 0
+
+            previous_followup_descriptions = current_followup_descriptions
+
+            # Check if planner indicated goal achievement
+            if len(followup_plan.tasks) <= 1:
+                task_descriptions = [t.description.lower() for t in followup_plan.tasks]
+                # Only treat as verification if PURELY verification (not mixed)
+                verify_keywords = ['verify', 'test', 'check', 'confirm', 'validate']
+                is_pure_verification = (
+                    len(followup_plan.tasks) == 1 and
+                    any(keyword in task_descriptions[0] for keyword in verify_keywords)
+                )
+                if is_pure_verification:
+                    print(f"  → Executing verification task before concluding...")
+                    self.context.update_plan(followup_plan)
+                    self._dispatch_to_sub_agents(self.context)
+                    self.context.agent_requests = []
+                    return True
+
+            # Update plan with follow-up tasks
+            print(f"  → Generated {len(followup_plan.tasks)} follow-up task(s)")
+            self.context.update_plan(followup_plan)
+            # Continue loop to execute new tasks
+
+        # Reached max iterations
+        print(f"\n⚠️ Reached maximum iterations ({max_iterations})")
+        print(f"   Total completed: {len([t for t in self.context.plan.tasks if t.status == TaskStatus.COMPLETED])}")
+        print(f"   Total failed: {len([t for t in self.context.plan.tasks if t.status == TaskStatus.FAILED])}")
+
+        # Prompt user about partial completion
+        failed_count = len([t for t in self.context.plan.tasks if t.status == TaskStatus.FAILED])
+        if failed_count > 0:
+            should_continue = self._prompt_user_on_max_iterations(failed_count)
+            if not should_continue:
+                return True
+            # If user continues, still return True (we've done our best)
+
+        return True
+
     def _run_single_attempt(self, user_request: str) -> OrchestratorResult:
         """Run a single orchestration attempt."""
         print("\n" + "=" * 60)
         print("ORCHESTRATOR - MULTI-AGENT COORDINATION")
         print("=" * 60)
         print(f"Task: {user_request[:100]}...")
+        print(f"Execution Mode: {config.EXECUTION_MODE.upper()}")
 
         # Update context with current request and resource budget
         self.context.user_request = user_request # Ensure context has latest request
@@ -788,17 +1068,19 @@ class Orchestrator:
                     raise Exception("Resource budget exceeded.")
                 
                 tools = get_available_tools()
-                
+
                 if config.EXECUTION_MODE == 'sub-agent':
-                    print("  → Executing with Sub-Agent architecture...")
-                    self.context.update_repo_context() # Refresh context
-                    execution_success = self._dispatch_to_sub_agents(self.context)
+                    print("  → Executing with Sub-Agent architecture (continuous mode)...")
+                    execution_success = self._continuous_sub_agent_execution(user_request, coding_mode)
                     print(f"  ✓ Sub-Agent execution phase complete. Success: {execution_success}")
-                    # After sub-agent dispatch, ensure tasks are marked as completed if no errors occurred
+                    # After continuous sub-agent execution, ensure tasks are marked as completed if no errors occurred
                     if execution_success and not self.context.agent_requests:
                         for task in self.context.plan.tasks:
                             if task.status != TaskStatus.FAILED and task.action_type in AgentRegistry.get_registered_action_types():
                                 task.status = TaskStatus.COMPLETED
+                    # In continuous mode, we handle replanning internally, so skip adaptive replan
+                    # Just validate the results and move on
+                    break
                 elif self.config.parallel_workers > 1:
                     execution_success = concurrent_execution_mode(
                         self.context.plan,

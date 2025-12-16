@@ -102,6 +102,7 @@ class RevContext:
         self.agent_insights: Dict[str, Any] = {} # Shared dictionary for agents to log insights
         self.errors: List[str] = [] # Shared list for agents to log errors
         self.agent_requests: List[Dict[str, Any]] = [] # New: list to store agent requests
+        self.agent_state: Dict[str, Any] = {} # Track agent-specific state (e.g., recovery attempts)
         self.logger = get_logger()
         self.session_id: str = "" # Will be set by StateManager
 
@@ -140,6 +141,14 @@ class RevContext:
         request = {"type": request_type, "details": details}
         self.agent_requests.append(request)
         self.logger.log("context", "AGENT_REQUEST_ADDED", request, "INFO")
+
+    def get_agent_state(self, key: str, default: Any = None) -> Any:
+        """Get agent state value by key."""
+        return self.agent_state.get(key, default)
+
+    def set_agent_state(self, key: str, value: Any):
+        """Set agent state value by key."""
+        self.agent_state[key] = value
 
     def __str__(self):
         return (

@@ -61,11 +61,16 @@ Now, generate the tool call to complete the analysis request.
 class AnalysisAgent(BaseAgent):
     """
     A sub-agent that specializes in code analysis and review.
+    Implements intelligent error recovery with retry limits.
     """
+
+    # Max retries for this agent (prevents infinite loops)
+    MAX_RECOVERY_ATTEMPTS = 2
 
     def execute(self, task: Task, context: RevContext) -> str:
         """
         Executes an analysis task by calling an LLM to generate a tool call.
+        Implements error recovery with intelligent retry logic.
         """
         print(f"AnalysisAgent executing task: {task.description}")
 
@@ -83,48 +88,95 @@ class AnalysisAgent(BaseAgent):
             {"role": "user", "content": f"Task: {task.description}\n\nRepository Context:\n{context.repo_context}"}
         ]
 
+        # Track recovery attempts for this specific task
+        # Use task_id to track per-task recovery (important for continuous multi-task execution)
+        recovery_key = f"analysis_recovery_{task.task_id}"
+        recovery_attempts = context.get_agent_state(recovery_key, 0)
+        context.set_agent_state(recovery_key, recovery_attempts + 1)
+
         try:
             response = ollama_chat(messages, tools=available_tools)
+            error_type = None
+            error_detail = None
 
-            if not response or "message" not in response or "tool_calls" not in response["message"]:
-                error_reason = "LLM did not produce a valid tool call structure."
-                context.add_error(f"AnalysisAgent: {error_reason}")
-                self.request_replan(context, "Invalid LLM response for tool call", detailed_reason=error_reason)
-                raise ValueError(error_reason)
+            # Debug: Print what we got back
+            if not response:
+                error_type = "empty_response"
+                error_detail = "LLM returned None/empty response"
+            elif "message" not in response:
+                error_type = "missing_message_key"
+                error_detail = f"Response missing 'message' key: {list(response.keys())}"
+            elif "tool_calls" not in response["message"]:
+                # Check if there's regular content instead
+                if "content" in response["message"]:
+                    error_type = "text_instead_of_tool_call"
+                    error_detail = f"LLM returned text instead of tool call: {response['message']['content'][:200]}"
+                else:
+                    error_type = "missing_tool_calls"
+                    error_detail = f"Response missing 'tool_calls': {list(response['message'].keys())}"
+            else:
+                tool_calls = response["message"]["tool_calls"]
+                if not tool_calls:
+                    error_type = "empty_tool_calls"
+                    error_detail = "tool_calls array is empty"
+                else:
+                    # Success - process tool call
+                    tool_call = tool_calls[0]
+                    tool_name = tool_call['function']['name']
+                    arguments_str = tool_call['function']['arguments']
 
-            tool_calls = response["message"]["tool_calls"]
-            if not tool_calls:
-                error_reason = "LLM response did not contain any tool calls."
-                context.add_error(f"AnalysisAgent: {error_reason}")
-                self.request_replan(context, "LLM produced no tool calls", detailed_reason=error_reason)
-                raise ValueError(error_reason)
+                    if isinstance(arguments_str, dict):
+                        arguments = arguments_str
+                    else:
+                        try:
+                            arguments = json.loads(arguments_str)
+                        except json.JSONDecodeError:
+                            error_type = "invalid_json"
+                            error_detail = f"Invalid JSON in tool arguments: {arguments_str[:200]}"
 
-            tool_call = tool_calls[0]
-            tool_name = tool_call['function']['name']
-            arguments_str = tool_call['function']['arguments']
+                    if not error_type:
+                        print(f"  → AnalysisAgent will call tool '{tool_name}' with arguments: {arguments}")
+                        result = execute_tool(tool_name, arguments)
 
-            try:
-                arguments = json.loads(arguments_str)
-            except json.JSONDecodeError:
-                error_msg = f"AnalysisAgent: LLM returned invalid JSON for arguments: {arguments_str}"
-                context.add_error(error_msg)
-                self.request_replan(context, "Invalid JSON arguments from LLM", detailed_reason=error_msg)
-                return error_msg
+                        # Store analysis findings in context
+                        context.add_insight("analysis_agent", f"task_{task.task_id}_analysis", {
+                            "tool": tool_name,
+                            "summary": result[:500] if isinstance(result, str) else str(result)[:500]
+                        })
+                        return result
 
-            print(f"  → AnalysisAgent will call tool '{tool_name}' with arguments: {arguments}")
+            # If we reach here, there was an error
+            if error_type:
+                print(f"  ⚠️ AnalysisAgent: {error_detail}")
 
-            result = execute_tool(tool_name, arguments)
-
-            # Store analysis findings in context
-            context.add_insight("analysis_agent", f"task_{task.task_id}_analysis", {
-                "tool": tool_name,
-                "summary": result[:500] if isinstance(result, str) else str(result)[:500]
-            })
-
-            return result
+                # Check if we should attempt recovery
+                if recovery_attempts < self.MAX_RECOVERY_ATTEMPTS:
+                    print(f"  → Requesting replan (attempt {recovery_attempts + 1}/{self.MAX_RECOVERY_ATTEMPTS})...")
+                    self.request_replan(
+                        context,
+                        reason="Tool call generation failed",
+                        detailed_reason=f"Error type: {error_type}. Details: {error_detail}. Please provide clearer task instructions."
+                    )
+                    return f"[RECOVERY_REQUESTED] {error_type}: {error_detail}"
+                else:
+                    print(f"  → Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
+                    context.add_error(f"AnalysisAgent: {error_detail} (after {recovery_attempts} recovery attempts)")
+                    return f"[FINAL_FAILURE] {error_type}: {error_detail}"
 
         except Exception as e:
-            error_msg = f"Error executing task in AnalysisAgent: {e}"
-            context.add_error(error_msg)
-            self.request_replan(context, "Exception during tool execution", detailed_reason=error_msg)
-            return error_msg
+            error_msg = f"Exception in AnalysisAgent: {e}"
+            print(f"  ⚠️ {error_msg}")
+
+            # Request recovery for exceptions
+            if recovery_attempts < self.MAX_RECOVERY_ATTEMPTS:
+                print(f"  → Requesting replan due to exception (attempt {recovery_attempts + 1}/{self.MAX_RECOVERY_ATTEMPTS})...")
+                self.request_replan(
+                    context,
+                    reason="Exception during analysis",
+                    detailed_reason=str(e)
+                )
+                return f"[RECOVERY_REQUESTED] Exception: {e}"
+            else:
+                print(f"  → Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
+                context.add_error(error_msg)
+                return f"[FINAL_FAILURE] {error_msg}"
