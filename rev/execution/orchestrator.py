@@ -677,21 +677,30 @@ class Orchestrator:
             completed_summary = ""
             if completed_tasks:
                 completed_summary = "✓ Completed:\n"
-                for desc in completed_tasks[-5:]:  # Show last 5 completed tasks
+                for desc in completed_tasks[-3:]:  # Show last 3 completed tasks
                     completed_summary += f"  - {desc[:70]}\n"
             else:
-                completed_summary = "(Starting - no tasks completed yet)"
+                completed_summary = "(Starting - first task to execute)"
 
             # Build list of pending/remaining tasks from original plan
             pending_tasks_summary = ""
             if original_plan and original_plan.tasks:
                 remaining_tasks = [t for t in original_plan.tasks if t.status not in [TaskStatus.COMPLETED, TaskStatus.FAILED]]
+                total_tasks = len(original_plan.tasks)
+
                 if remaining_tasks:
-                    pending_tasks_summary = "\n📝 Remaining tasks from plan:\n"
-                    for i, task in enumerate(remaining_tasks[:8], 1):  # Show first 8 remaining
-                        pending_tasks_summary += f"  {i}. [{task.action_type}] {task.description[:60]}\n"
-                    if len(remaining_tasks) > 8:
-                        pending_tasks_summary += f"  ... and {len(remaining_tasks) - 8} more tasks\n"
+                    completed_count = total_tasks - len(remaining_tasks)
+                    pending_tasks_summary = f"\n📋 PLAN STATUS: {completed_count}/{total_tasks} tasks complete\n"
+                    pending_tasks_summary += "📝 REMAINING TASKS (must complete all):\n"
+
+                    for i, task in enumerate(remaining_tasks[:10], 1):  # Show first 10 remaining
+                        status_indicator = "⏳" if i <= 3 else " "
+                        pending_tasks_summary += f"  {status_indicator} {i}. [{task.action_type.upper()}] {task.description[:65]}\n"
+
+                    if len(remaining_tasks) > 10:
+                        pending_tasks_summary += f"\n  ⏸️  ... and {len(remaining_tasks) - 10} more tasks below the fold\n"
+                    else:
+                        pending_tasks_summary += f"\n  ✓ These are ALL remaining tasks - complete them in order\n"
 
             # Get current file state
             self.context.update_repo_context()
