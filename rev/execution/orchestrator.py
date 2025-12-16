@@ -174,7 +174,7 @@ class Orchestrator:
                 self.context.plan = None
                 self.context.state_manager = None
                 self.context.errors = []
-                self.context.agent_insights = {}
+                # Note: We preserve agent_insights across retries to track all attempts
 
             result = self._run_single_attempt(user_request)
             aggregate_errors.extend([f"Attempt {attempt + 1}: {err}" for err in self.context.errors])
@@ -203,6 +203,58 @@ class Orchestrator:
             agent_insights=self.context.agent_insights
         )
         
+    def _format_review_feedback_for_planning(self, review: ReviewDecision, user_request: str) -> str:
+        """
+        Format review feedback for the planning agent.
+
+        Args:
+            review: The PlanReview object containing feedback.
+            user_request: The original user request.
+
+        Returns:
+            A formatted string containing actionable feedback for the planner.
+        """
+        feedback_parts = []
+
+        # Add issues
+        if review.issues:
+            feedback_parts.append("ISSUES TO ADDRESS:")
+            for i, issue in enumerate(review.issues, 1):
+                if isinstance(issue, dict):
+                    severity = issue.get('severity', 'unknown')
+                    description = issue.get('description', str(issue))
+                    feedback_parts.append(f"  {i}. [{severity.upper()}] {description}")
+                else:
+                    feedback_parts.append(f"  {i}. {issue}")
+
+        # Add security concerns
+        if review.security_concerns:
+            feedback_parts.append("\nSECURITY CONCERNS:")
+            for i, concern in enumerate(review.security_concerns, 1):
+                feedback_parts.append(f"  {i}. {concern}")
+
+        # Add missing tasks
+        if review.missing_tasks:
+            feedback_parts.append("\nMISSING TASKS:")
+            for i, task in enumerate(review.missing_tasks, 1):
+                feedback_parts.append(f"  {i}. {task}")
+
+        # Add suggestions
+        if review.suggestions:
+            feedback_parts.append("\nSUGGESTIONS:")
+            for i, suggestion in enumerate(review.suggestions, 1):
+                feedback_parts.append(f"  {i}. {suggestion}")
+
+        # Add overall assessment
+        if review.overall_assessment:
+            feedback_parts.append(f"\nOVERALL ASSESSMENT:")
+            feedback_parts.append(f"  {review.overall_assessment}")
+
+        # Add confidence score
+        feedback_parts.append(f"\nReview confidence: {review.confidence_score:.0%}")
+
+        return "\n".join(feedback_parts) if feedback_parts else "No specific feedback provided."
+
     def _regenerate_followup_plan(self, prompt: str, original_plan: ExecutionPlan, coding_mode: bool) -> Optional[ExecutionPlan]:
             """Regenerates a follow-up plan based on execution feedback or agent requests.
             """
@@ -225,6 +277,90 @@ class Orchestrator:
                 traceback.print_exc()
                 return None
    
+    def _wait_for_user_resume(self) -> bool:
+        """
+        Wait for user to signal they're ready to resume execution.
+
+        Returns:
+            True if user wants to resume, False if they want to abort.
+        """
+        print("\n" + "=" * 60)
+        print("EXECUTION PAUSED - AWAITING USER ACTION")
+        print("=" * 60)
+        print("Type 'resume' to continue, or 'abort' to stop execution:")
+        print("=" * 60)
+
+        while True:
+            try:
+                user_input = input("> ").strip().lower()
+
+                if user_input == "resume":
+                    print("✓ Resuming execution...")
+                    return True
+                elif user_input == "abort":
+                    print("✗ Aborting execution...")
+                    return False
+                else:
+                    print("Invalid input. Type 'resume' or 'abort':")
+            except (EOFError, KeyboardInterrupt):
+                print("\n✗ User interrupted - aborting execution")
+                return False
+
+    def _hold_and_retry_validation(
+        self,
+        plan: ExecutionPlan,
+        user_request: str,
+        validation: ValidationReport
+    ) -> ValidationReport:
+        """
+        Enter an interactive hold for validation failures, allowing user to manually fix issues.
+
+        Args:
+            plan: The execution plan.
+            user_request: The original user request.
+            validation: The current validation report.
+
+        Returns:
+            Updated ValidationReport after user intervention and re-validation.
+        """
+        print("\n" + "=" * 60)
+        print("VALIDATION HOLD - MANUAL INTERVENTION REQUIRED")
+        print("=" * 60)
+        print("Validation has failed after all automatic retry attempts.")
+        print("\nFailed checks:")
+        for i, result in enumerate(validation.results, 1):
+            if result.status == ValidationStatus.FAILED:
+                print(f"  {i}. {result.name}: {result.message}")
+        print("\nPlease manually fix the issues and type 'resume' to retry validation.")
+        print("=" * 60)
+
+        # Wait for user to signal they're ready
+        should_resume = self._wait_for_user_resume()
+
+        if not should_resume:
+            print("  → User aborted. Returning failed validation.")
+            return validation
+
+        # Re-run validation
+        print("\n  → Re-running validation after user intervention...")
+        updated_validation = validate_execution(
+            plan,
+            user_request,
+            run_tests=True,
+            run_linter=True,
+            check_syntax=True,
+            enable_auto_fix=False,
+            validation_mode=self.config.validation_mode,
+        )
+
+        if updated_validation.overall_status == ValidationStatus.FAILED:
+            print("  ⚠️ Validation still failing. Entering another hold...")
+            # Recursive call for another round
+            return self._hold_and_retry_validation(plan, user_request, updated_validation)
+        else:
+            print("  ✓ Validation passed after user intervention!")
+            return updated_validation
+
     def _emit_run_metrics(self, plan: Optional[ExecutionPlan], result: OrchestratorResult, budget: ResourceBudget):
         """Emits run metrics for logging and analysis."""
         print(f"\n🔥 Emitting run metrics...")
@@ -243,6 +379,87 @@ class Orchestrator:
         }
         print(f"   Metrics: {metrics}")
    
+    def _dispatch_to_sub_agents(self, context: RevContext) -> bool:
+        """
+        Dispatch tasks to appropriate sub-agents based on action_type.
+
+        Args:
+            context: The RevContext containing the plan and shared state.
+
+        Returns:
+            True if all sub-agent tasks were executed successfully, False otherwise.
+        """
+        if not context.plan or not context.plan.tasks:
+            print("  ⚠️ No tasks in plan to dispatch")
+            return False
+
+        # Get registered action types
+        registered_action_types = AgentRegistry.get_registered_action_types()
+        print(f"  → Registered action types: {', '.join(registered_action_types)}")
+
+        # Filter tasks that can be handled by sub-agents
+        agent_tasks = [task for task in context.plan.tasks if task.action_type in registered_action_types]
+
+        if not agent_tasks:
+            print(f"  ⚠️ No tasks found matching registered action types")
+            return False
+
+        print(f"  → Found {len(agent_tasks)} task(s) for sub-agent execution")
+
+        overall_success = True
+
+        for task in agent_tasks:
+            # Skip completed or failed tasks
+            if task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED]:
+                continue
+
+            # Check dependencies
+            if task.dependencies:
+                deps_met = all(
+                    context.plan.tasks[dep_idx].status == TaskStatus.COMPLETED
+                    for dep_idx in task.dependencies
+                    if dep_idx < len(context.plan.tasks)
+                )
+                if not deps_met:
+                    print(f"  ⏭️  Skipping task {task.task_id}: dependencies not met")
+                    task.status = TaskStatus.STOPPED
+                    continue
+
+            # Update task status
+            task.status = TaskStatus.IN_PROGRESS
+            print(f"\n  🤖 Dispatching task {task.task_id} ({task.action_type}): {task.description}")
+
+            try:
+                # Get the appropriate agent for this action type
+                agent = AgentRegistry.get_agent_instance(task.action_type)
+
+                # Execute the task
+                result = agent.execute(task, context)
+
+                # Update task with result
+                task.result = result
+                task.status = TaskStatus.COMPLETED
+                print(f"  ✓ Task {task.task_id} completed successfully")
+
+            except Exception as e:
+                error_msg = f"Sub-agent execution failed for task {task.task_id}: {e}"
+                print(f"  ✗ {error_msg}")
+                task.status = TaskStatus.FAILED
+                task.error = str(e)
+                context.add_error(error_msg)
+                overall_success = False
+
+                # Continue to next task unless this was a critical failure
+                continue
+
+        # Determine overall success
+        completed_tasks = [t for t in agent_tasks if t.status == TaskStatus.COMPLETED]
+        failed_tasks = [t for t in agent_tasks if t.status == TaskStatus.FAILED]
+
+        print(f"\n  📊 Sub-agent execution summary: {len(completed_tasks)}/{len(agent_tasks)} completed, {len(failed_tasks)} failed")
+
+        return overall_success and len(failed_tasks) == 0
+
     def _should_adaptively_replan(self, plan: ExecutionPlan, execution_success: bool, budget: ResourceBudget, adaptive_attempt: int) -> bool:
         """Determines if adaptive replanning should be triggered.
    
@@ -454,7 +671,7 @@ class Orchestrator:
                 raise Exception("Planning agent produced no tasks.")
 
             # Phase 4: Review Agent - Validate plan with retry loop
-            review = None
+            review = None  # Will store the review decision
             if self.config.enable_review:
                 self._update_phase(AgentPhase.REVIEW)
                 self.context.resource_budget.update_step()
@@ -777,6 +994,8 @@ class Orchestrator:
             result.agent_insights = self.context.agent_insights
             result.errors = self.context.errors
             result.run_mode = run_mode # run_mode is defined earlier
+            result.validation_status = validation.overall_status if validation else None
+            result.review_decision = review.decision if review else None
 
             if all_tasks_handled and validation_ok:
                 self._update_phase(AgentPhase.COMPLETE)

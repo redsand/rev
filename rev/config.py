@@ -90,6 +90,42 @@ PLANNING_PROVIDER = os.getenv("REV_PLANNING_PROVIDER", LLM_PROVIDER)
 RESEARCH_PROVIDER = os.getenv("REV_RESEARCH_PROVIDER", LLM_PROVIDER)
 EXECUTION_MODE = os.getenv("REV_EXECUTION_MODE", "linear").lower()
 
+def set_execution_mode(mode: str) -> bool:
+    """Set the execution mode for the current session.
+
+    Args:
+        mode: Either "linear" or "sub-agent"
+
+    Returns:
+        True if mode was set successfully, False otherwise
+    """
+    global EXECUTION_MODE
+    mode = mode.lower().strip()
+
+    valid_modes = ["linear", "sub-agent", "inline"]  # "inline" is alias for "linear"
+
+    if mode == "inline":
+        mode = "linear"
+
+    if mode not in valid_modes:
+        print(f"❌ Invalid execution mode: '{mode}'. Valid modes: {', '.join(valid_modes)}")
+        return False
+
+    EXECUTION_MODE = mode
+    # Also set the environment variable for child processes
+    os.environ["REV_EXECUTION_MODE"] = mode
+
+    print(f"✓ Execution mode set to: {mode}")
+    return True
+
+def get_execution_mode() -> str:
+    """Get the current execution mode.
+
+    Returns:
+        The current execution mode ("linear" or "sub-agent")
+    """
+    return EXECUTION_MODE
+
 # OpenAI Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview")

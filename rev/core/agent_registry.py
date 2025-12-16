@@ -1,7 +1,13 @@
-from typing import Dict, Type, List # Added List
+from typing import Dict, Type, List
 from rev.agents.base import BaseAgent
 from rev.agents.code_writer import CodeWriterAgent
 from rev.agents.test_executor import TestExecutorAgent
+from rev.agents.refactoring import RefactoringAgent
+from rev.agents.debugging import DebuggingAgent
+from rev.agents.documentation import DocumentationAgent
+from rev.agents.research import ResearchAgent
+from rev.agents.analysis import AnalysisAgent
+from rev.agents.tool_creation import ToolCreationAgent
 
 class AgentRegistry:
     """
@@ -31,6 +37,26 @@ class AgentRegistry:
         return list(cls._agents.keys())
 
 # Register default agents
+# Code modification agents
 AgentRegistry.register_agent("add", CodeWriterAgent)
 AgentRegistry.register_agent("edit", CodeWriterAgent)
+AgentRegistry.register_agent("refactor", RefactoringAgent)
+
+# Testing and debugging agents
 AgentRegistry.register_agent("test", TestExecutorAgent)
+AgentRegistry.register_agent("debug", DebuggingAgent)
+AgentRegistry.register_agent("fix", DebuggingAgent)
+
+# Documentation agents
+AgentRegistry.register_agent("document", DocumentationAgent)
+AgentRegistry.register_agent("docs", DocumentationAgent)
+
+# Research and analysis agents
+AgentRegistry.register_agent("research", ResearchAgent)
+AgentRegistry.register_agent("investigate", ResearchAgent)
+AgentRegistry.register_agent("analyze", AnalysisAgent)
+AgentRegistry.register_agent("review", AnalysisAgent)
+
+# Advanced agents
+AgentRegistry.register_agent("create_tool", ToolCreationAgent)
+AgentRegistry.register_agent("tool", ToolCreationAgent)
