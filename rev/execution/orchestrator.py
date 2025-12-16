@@ -724,13 +724,21 @@ class Orchestrator:
 
             print(f"  → Next action: [{next_task.action_type.upper()}] {next_task.description[:70]}")
 
-            # Execute the single task
-            task_index = len(self.context.plan.tasks)
-            next_task.task_id = task_index
-            self.context.plan.tasks.append(next_task)
+            # Execute the single task (isolated from reference plan)
+            # Create a temporary plan with just this one task
+            temp_plan = ExecutionPlan()
+            next_task.task_id = 0
+            temp_plan.tasks = [next_task]
+
+            # Swap plans, execute, then restore reference plan
+            saved_plan = self.context.plan
+            self.context.plan = temp_plan
 
             print(f"  → Executing task...")
             success = self._dispatch_to_sub_agents(self.context)
+
+            # Restore the reference plan
+            self.context.plan = saved_plan
 
             # Update state
             self.context.update_repo_context()
