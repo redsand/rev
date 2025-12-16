@@ -780,42 +780,8 @@ class Orchestrator:
             if next_task.status == TaskStatus.COMPLETED:
                 print(f"  ✓ Task completed successfully")
                 completed_tasks.append(next_task.description)
-
-                # Mark similar tasks from original plan as complete
-                if original_plan and original_plan.tasks:
-                    matched = False
-                    next_desc_lower = next_task.description.lower()
-
-                    for plan_task in original_plan.tasks:
-                        if plan_task.status == TaskStatus.COMPLETED:
-                            continue
-                        if plan_task.action_type != next_task.action_type:
-                            continue
-
-                        plan_desc_lower = plan_task.description.lower()
-
-                        # For "add" tasks: check if same specific identifier is mentioned (class, file name, etc)
-                        if plan_task.action_type == "add":
-                            # Extract meaningful words from both descriptions (5+ chars, likely class/file names)
-                            next_words = set(w.lower() for w in next_desc_lower.split() if len(w) > 4 and w.isidentifier())
-                            plan_words = set(w.lower() for w in plan_desc_lower.split() if len(w) > 4 and w.isidentifier())
-
-                            # Check for meaningful overlap
-                            if next_words & plan_words:  # Set intersection
-                                plan_task.status = TaskStatus.COMPLETED
-                                print(f"    → Marked plan task complete: [add] {plan_task.description[:50]}")
-                                matched = True
-                                break
-
-                        # For "edit" tasks: check for specific file path matches
-                        else:
-                            # Look for matching file paths or significant terms
-                            file_paths = [w for w in next_desc_lower.split() if "/" in w or w.endswith(".py")]
-                            if any(path in plan_desc_lower for path in file_paths):
-                                plan_task.status = TaskStatus.COMPLETED
-                                print(f"    → Marked plan task complete: [{plan_task.action_type}] {plan_task.description[:50]}")
-                                matched = True
-                                break
+                # Note: Not marking original plan tasks as complete - they have their own state
+                # The LLM will track progress based on the complete remaining task list shown in prompts
 
             elif next_task.status == TaskStatus.FAILED:
                 print(f"  ✗ Task failed: {next_task.error}")
