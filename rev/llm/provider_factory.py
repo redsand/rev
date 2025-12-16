@@ -71,14 +71,21 @@ def detect_provider_from_model(model_str: str) -> str:
 
     # Check for specific model name patterns
     if model_str.startswith("gpt-") or model_str.startswith("o1-"):
-        return "openai"
+        detected = "openai"
     elif model_str.startswith("claude-"):
-        return "anthropic"
+        detected = "anthropic"
     elif model_str.startswith("gemini-"):
-        return "gemini"
+        detected = "gemini"
     else:
         # Default to Ollama for all other models
-        return "ollama"
+        detected = "ollama"
+
+    # Debug logging
+    import sys
+    if os.getenv("OLLAMA_DEBUG"):
+        print(f"[DEBUG] detect_provider_from_model: '{model_str}' -> '{detected}'", file=sys.stderr)
+
+    return detected
 
 
 def get_provider_for_model(model: str, override_provider: Optional[str] = None) -> LLMProvider:

@@ -338,6 +338,9 @@ def ollama_chat(
     # Get the appropriate provider for the model
     try:
         provider = get_provider_for_model(model_name)
+        # DEBUG: Log provider selection
+        if OLLAMA_DEBUG:
+            print(f"[DEBUG] ollama_chat: model={model_name}, provider={provider.__class__.__name__}")
     except ValueError as e:
         return {"error": f"Provider error: {e}"}
 

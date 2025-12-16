@@ -117,6 +117,12 @@ def main():
         help="Disable orchestrator mode for simple execution"
     )
     parser.add_argument(
+        "--execution-mode",
+        choices=["linear", "sub-agent", "inline"],
+        default=None,
+        help="Execution mode: 'linear' (traditional sequential), 'sub-agent' (dispatch to specialized agents). 'inline' is alias for 'linear'. Default: from REV_EXECUTION_MODE env var or 'linear'"
+    )
+    parser.add_argument(
         "--research",
         action="store_true",
         default=True,
@@ -174,6 +180,10 @@ def main():
     config.set_model(args.model)
     config.OLLAMA_BASE_URL = args.base_url
 
+    # Set execution mode if provided
+    if args.execution_mode:
+        config.set_execution_mode(args.execution_mode)
+
     if args.version:
         from rev.versioning import build_version_output
 
@@ -186,6 +196,7 @@ def main():
         "model": args.model,
         "base_url": args.base_url,
         "mode": "repl" if args.repl else ("orchestrate" if args.orchestrate else "standard"),
+        "execution_mode": config.get_execution_mode(),
         "parallel": args.parallel,
         "review_enabled": args.review and not args.no_review,
         "validate_enabled": args.validate and not args.no_validate,

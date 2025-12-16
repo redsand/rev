@@ -7,6 +7,7 @@ Tests for the orchestrator functionality.
 import unittest
 from unittest.mock import Mock, patch, MagicMock
 from pathlib import Path
+import json
 
 from rev.execution.orchestrator import (
     Orchestrator,
@@ -303,6 +304,7 @@ class TestOrchestratorReviewHandling(unittest.TestCase):
         def mark_completed(plan_obj, **_kwargs):
             for task in plan_obj.tasks:
                 task.status = TaskStatus.COMPLETED
+            return True
 
         mock_execution_mode.side_effect = mark_completed
         mock_concurrent.side_effect = AssertionError("Concurrent execution should not be used when parallelism is disabled")
@@ -326,6 +328,58 @@ class TestOrchestratorReviewHandling(unittest.TestCase):
         # Verify sequential execution was used
         mock_execution_mode.assert_called_once()
         mock_concurrent.assert_not_called()
+
+    @patch('rev.execution.orchestrator.concurrent_execution_mode')
+    @patch('rev.execution.orchestrator.execution_mode')
+    @patch('rev.execution.reviewer.ollama_chat')
+    @patch('rev.execution.router.TaskRouter')
+    @patch('rev.execution.orchestrator.planning_mode')
+    @patch('rev.execution.orchestrator.research_codebase')
+    def test_review_phase_uses_review_model(
+        self, mock_research, mock_planning, mock_router, mock_ollama_chat, mock_execution, mock_concurrent
+    ):
+        """Test that the review phase uses the REVIEW_MODEL from config."""
+        # Setup mock plan
+        plan = ExecutionPlan()
+        plan.add_task("Safe operation", "general")
+        plan.tasks[0].risk_level = RiskLevel.MEDIUM
+        mock_planning.return_value = plan
+
+        # Setup mock research
+        mock_research.return_value = MagicMock(
+            relevant_files=[],
+            estimated_complexity="LOW",
+            warnings=[]
+        )
+
+        mock_router.return_value = type("R", (), {"route": lambda *_a, **_k: _route_stub()})()
+
+        # Mock ollama_chat to return a valid JSON response for the review
+        mock_ollama_chat.return_value = {
+            "message": {
+                "content": json.dumps({
+                    "decision": "approved",
+                    "overall_assessment": "Test review",
+                    "confidence_score": 0.9
+                })
+            }
+        }
+
+        # Create orchestrator with a specific review model
+        with patch('rev.config.REVIEW_MODEL', "review-model-test"):
+            config_obj = OrchestratorConfig(
+                enable_learning=False,
+                enable_research=True,
+                enable_review=True,
+                enable_validation=False,
+            )
+            orchestrator = Orchestrator(Path("/test"), config_obj)
+            orchestrator.execute("read a file")
+
+        # Verify ollama_chat was called with the correct model
+        mock_ollama_chat.assert_called_once()
+        call_kwargs = mock_ollama_chat.call_args.kwargs
+        self.assertEqual(call_kwargs.get("model_name"), "review-model-test")
 
 
 class TestValidationHoldBehavior(unittest.TestCase):

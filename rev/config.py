@@ -48,11 +48,64 @@ TEST_MARKER_FILE = REV_DIR / "test"
 DEFAULT_OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3-coder:480b-cloud")  # default model
 
+# Determine default provider based on configured credentials
+# Priority: explicit REV_LLM_PROVIDER > Gemini > Anthropic > OpenAI > Ollama
+def _get_primary_provider_and_model():
+    """Get primary provider and its default model based on configured credentials.
+
+    Returns the provider name and its default model.
+    The model will be the one configured for that provider.
+
+    Priority order:
+    1. REV_LLM_PROVIDER (explicit override)
+    2. Gemini (if GEMINI_API_KEY is set)
+    3. Anthropic (if ANTHROPIC_API_KEY is set)
+    4. OpenAI (if OPENAI_API_KEY is set)
+    5. Ollama (default)
+    """
+    # Check for explicit provider override first
+    explicit_provider = os.getenv("REV_LLM_PROVIDER")
+    if explicit_provider:
+        explicit_provider = explicit_provider.lower()
+        # Map provider to its default model
+        provider_models = {
+            "gemini": os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp"),
+            "anthropic": os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"),
+            "openai": os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview"),
+            "ollama": DEFAULT_OLLAMA_MODEL,
+        }
+        return explicit_provider, provider_models.get(explicit_provider, DEFAULT_OLLAMA_MODEL)
+
+    # Check Gemini credentials (highest priority when present)
+    gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if gemini_key:
+        return "gemini", os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
+
+    # Check Anthropic credentials
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    if anthropic_key:
+        return "anthropic", os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
+
+    # Check OpenAI credentials
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if openai_key:
+        return "openai", os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview")
+
+    # Default to Ollama
+    return "ollama", DEFAULT_OLLAMA_MODEL
+
+_PRIMARY_PROVIDER, _DEFAULT_MODEL = _get_primary_provider_and_model()
+
+# Debug: Log provider and model selection
+if os.getenv("OLLAMA_DEBUG"):
+    print(f"[DEBUG] Config initialized: PRIMARY_PROVIDER={_PRIMARY_PROVIDER}, DEFAULT_MODEL={_DEFAULT_MODEL}")
+
 OLLAMA_BASE_URL = DEFAULT_OLLAMA_BASE_URL
 OLLAMA_MODEL = DEFAULT_OLLAMA_MODEL
-EXECUTION_MODEL = os.getenv("REV_EXECUTION_MODEL", OLLAMA_MODEL)
-PLANNING_MODEL = os.getenv("REV_PLANNING_MODEL", OLLAMA_MODEL)
-RESEARCH_MODEL = os.getenv("REV_RESEARCH_MODEL", OLLAMA_MODEL)
+EXECUTION_MODEL = os.getenv("REV_EXECUTION_MODEL", _DEFAULT_MODEL)
+PLANNING_MODEL = os.getenv("REV_PLANNING_MODEL", _DEFAULT_MODEL)
+REVIEW_MODEL = os.getenv("REV_REVIEW_MODEL", _DEFAULT_MODEL)
+RESEARCH_MODEL = os.getenv("REV_RESEARCH_MODEL", _DEFAULT_MODEL)
 DEFAULT_SUPPORTS_TOOLS = os.getenv("REV_MODEL_SUPPORTS_TOOLS", "true").lower() == "true"
 EXECUTION_SUPPORTS_TOOLS = os.getenv("REV_EXECUTION_SUPPORTS_TOOLS", str(DEFAULT_SUPPORTS_TOOLS)).lower() == "true"
 PLANNING_SUPPORTS_TOOLS = os.getenv("REV_PLANNING_SUPPORTS_TOOLS", str(DEFAULT_SUPPORTS_TOOLS)).lower() == "true"
@@ -78,15 +131,53 @@ OLLAMA_TOP_K = int(os.getenv("OLLAMA_TOP_K", "40"))
 # Multi-Provider LLM Configuration
 # ============================================================================
 # Provider selection: ollama, openai, anthropic, gemini
-# Set REV_LLM_PROVIDER to choose which provider to use
-# Or let the system auto-detect based on model name
-LLM_PROVIDER = os.getenv("REV_LLM_PROVIDER", "ollama")
+# Uses the primary provider determined above based on configured credentials
+# Priority: explicit REV_LLM_PROVIDER > Gemini > Anthropic > OpenAI > Ollama
+LLM_PROVIDER = _PRIMARY_PROVIDER
 
 # Per-phase provider overrides (optional)
 # These allow different providers for different agent phases
+# If not explicitly set, use the primary provider
 EXECUTION_PROVIDER = os.getenv("REV_EXECUTION_PROVIDER", LLM_PROVIDER)
 PLANNING_PROVIDER = os.getenv("REV_PLANNING_PROVIDER", LLM_PROVIDER)
 RESEARCH_PROVIDER = os.getenv("REV_RESEARCH_PROVIDER", LLM_PROVIDER)
+EXECUTION_MODE = os.getenv("REV_EXECUTION_MODE", "linear").lower()
+
+def set_execution_mode(mode: str) -> bool:
+    """Set the execution mode for the current session.
+
+    Args:
+        mode: Either "linear" or "sub-agent"
+
+    Returns:
+        True if mode was set successfully, False otherwise
+    """
+    global EXECUTION_MODE
+    mode = mode.lower().strip()
+
+    valid_modes = ["linear", "sub-agent", "inline"]  # "inline" is alias for "linear"
+
+    if mode == "inline":
+        mode = "linear"
+
+    if mode not in valid_modes:
+        print(f"[X] Invalid execution mode: '{mode}'. Valid modes: {', '.join(valid_modes)}")
+        return False
+
+    EXECUTION_MODE = mode
+    # Also set the environment variable for child processes
+    os.environ["REV_EXECUTION_MODE"] = mode
+
+    print(f"[OK] Execution mode set to: {mode}")
+    return True
+
+def get_execution_mode() -> str:
+    """Get the current execution mode.
+
+    Returns:
+        The current execution mode ("linear" or "sub-agent")
+    """
+    return EXECUTION_MODE
 
 # OpenAI Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -169,7 +260,7 @@ MAX_STEPS_PER_RUN = int(os.getenv("REV_MAX_STEPS", "500"))
 # token estimates differ from true usage.
 MAX_LLM_TOKENS_PER_RUN = int(os.getenv("REV_MAX_TOKENS", str(1_000_000)))
 MAX_WALLCLOCK_SECONDS = int(os.getenv("REV_MAX_SECONDS", "3600"))  # 60 minutes default
-MAX_PLAN_TASKS = int(os.getenv("REV_MAX_PLAN_TASKS", "8"))
+MAX_PLAN_TASKS = int(os.getenv("REV_MAX_PLAN_TASKS", "999"))
 RESEARCH_DEPTH_DEFAULT = os.getenv("REV_RESEARCH_DEPTH", "shallow").lower()
 MAX_ORCHESTRATOR_RETRIES = int(os.getenv("REV_MAX_ORCH_RETRIES", "2"))
 MAX_PLAN_REGEN_RETRIES = int(os.getenv("REV_MAX_PLAN_REGEN_RETRIES", "2"))

@@ -60,6 +60,14 @@ GOOD (specific and actionable):
 - "Implement 'MovingAverageCrossover' analyst based on existing 'BollingerBand' pattern."
 - "Add 'calculate_macd' function to indicators.py following existing indicator pattern."
 
+HANDLING UNKNOWNS:
+If the user asks to port/implement code, but the specific source files are NOT in the context (Research Findings):
+DO NOT guess or hallucinate class names.
+DO NOT create [ADD] or [EDIT] tasks yet.
+Create a "Discovery Plan" using [EXEC] tasks to find the files.
+Task 1: [EXEC] cmd="dir /b /s ..\external-repo" (Windows) or "find ../external-repo" (Linux)
+Task 2: [EXEC] cmd="grep -r 'class' ../external-repo"
+
 IF YOU DO NOT KNOW THE SPECIFIC NAMES of the classes, functions, or features to implement:
 1. Do NOT generate an implementation plan with placeholders.
 2. Generate a RESEARCH/DISCOVERY plan first to identify the specific items.
@@ -85,14 +93,11 @@ Tool usage:
 - Do NOT exhaustively explore - if you need more info, create review tasks in the plan.
 - If tool calling is unavailable, produce a best-effort plan with initial review tasks.
 
-CRITICAL - Output Format (PURE JSON ONLY):
-You MUST output PURE JSON and NOTHING ELSE.
-- Do NOT wrap the output in markdown code blocks (```json or ```).
-- Do NOT include ANY conversational text before or after the JSON.
-- Do NOT add explanations like "Here's the plan:" or "This plan will...".
-- Do NOT include comments or reasoning outside the JSON structure.
-- If you need to include thoughts or reasoning, put them in a JSON field like "_reasoning": "...".
-- Your ENTIRE response must be ONLY the JSON array, starting with [ and ending with ].
+CRITICAL OUTPUT RULES:
+Output PURE JSON ONLY.
+NO conversational text before or after the JSON (e.g., "Here is the plan").
+NO markdown code blocks (```json).
+If you are fixing a plan based on feedback, do not explain the fix—JUST OUTPUT THE JSON.
 
 Output format (strict):
 - Return ONLY a JSON array. No prose, no markdown, no code fences.
@@ -213,7 +218,7 @@ You MUST output PURE JSON and NOTHING ELSE.
 - Do NOT add explanations or reasoning outside the JSON.
 - Your ENTIRE response must be ONLY the JSON array, starting with [ and ending with ].
 
-Output format (strict): return ONLY a JSON array of objects with keys "description", "action_type", "complexity"."""
+Output format (strict): return ONLY a JSON array of objects with keys "description", "action_type", "complexity".."""
 
 
 TOOL_RESULT_CHAR_LIMIT = 6000
@@ -633,8 +638,7 @@ IMPORTANT: This task was detected as overly broad and MUST be broken down into M
 
 Task: {task_description}
 Action Type: {action_type}
-{force_instruction}
-Context:
+{force_instruction}Context:
 {context}
 
 Provide detailed subtasks."""}
@@ -665,11 +669,11 @@ Task: {task_description}
 
 REQUIREMENTS:
 - You MUST return at least 5 subtasks
-- Each subtask must be a SINGLE action (e.g., "Add SMA indicator" not "Add indicators")
+- Each subtask must be a SINGLE action (e.g., \"Add SMA indicator\" not \"Add indicators\")
 - If the task mentions multiple items (analysts, features, etc.), create ONE subtask per item
 - Start with review/analysis tasks, then implementation tasks, then test tasks
 
-Example for "add multiple modules/features":
+Example for \"add multiple modules/features\":
 [
   {{"description": "Review existing implementations to understand patterns", "action_type": "review", "complexity": "low"}},
   {{"description": "Add first new module/feature", "action_type": "add", "complexity": "low"}},
@@ -718,6 +722,38 @@ Return ONLY a JSON array with at least 5 subtasks."""}
     except Exception as e:
         print(f"  Warning: Could not break down task: {e}")
         return [{"description": task_description, "action_type": action_type, "complexity": "medium"}]
+
+
+def _parse_plan_from_text(content: str) -> Optional[List[Dict[str, Any]]]:
+    """Extracts and parses a JSON array (the plan) from a string.
+    Handles markdown code blocks and other surrounding text."""
+    if not content:
+        return None
+
+    # First, try to find a JSON array within a markdown block
+    json_match = re.search(r'```json\s*(\[.*?\])\s*```', content, re.DOTALL)
+    if json_match:
+        try:
+            return json.loads(json_match.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # If no markdown block, search for the first occurrence of a balanced JSON array
+    json_match = re.search(r'\[.*\]', content, re.DOTALL)
+    if json_match:
+        try:
+            return json.loads(json_match.group(0))
+        except json.JSONDecodeError:
+            pass
+    
+    try:
+        data = json.loads(content)
+        if isinstance(data, list):
+            return data
+    except json.JSONDecodeError:
+        pass
+
+    return None
 
 
 def _ensure_test_and_doc_coverage(plan: ExecutionPlan, user_request: str) -> None:
@@ -950,6 +986,8 @@ Generate a comprehensive execution plan as a JSON array NOW with AT LEAST 2 task
     print("→ Generating execution plan...")
     print(f"  Plan task cap: {task_limit} | Planning tool-iterations cap: {planning_iterations_limit}")
     ensure_escape_is_cleared("Planning interrupted before LLM call")
+    
+    # Initial call to LLM, which may include tool use
     response = _call_llm_with_tools(
         messages,
         tools,
@@ -957,146 +995,171 @@ Generate a comprehensive execution plan as a JSON array NOW with AT LEAST 2 task
         model_name=model_name,
         model_supports_tools=model_supports_tools,
     )
+    
     ensure_escape_is_cleared("Planning interrupted")
 
-    if not isinstance(response, dict):
-        error_msg = "Planning failed: LLM returned no response"
-        print(f"Error: {error_msg}")
-        raise RuntimeError(error_msg)
+    # Robust parsing with retries
+    max_parse_retries = 2
+    parse_attempt = 0
+    tasks_data = None
+    content = ""
 
-    if "error" in response:
-        error_msg = f"Planning failed: {response['error']}"
-        print(f"Error: {error_msg}")
-        raise RuntimeError(error_msg)
+    while parse_attempt <= max_parse_retries:
+        if parse_attempt > 0: # This is a retry
+            response = ollama_chat(messages, model=model_name, supports_tools=False) or {}
 
-    # Parse the plan
-    plan = ExecutionPlan()
-    try:
+        if not isinstance(response, dict):
+            raise RuntimeError("Planning failed: LLM returned no response")
+        if "error" in response:
+            raise RuntimeError(f"Planning failed during retry: {response['error']}")
+
         content = response.get("message", {}).get("content", "")
-        # Extract JSON from response
-        json_match = re.search(r'\[.*\]', content, re.DOTALL)
-        if json_match:
-            tasks_data = json.loads(json_match.group(0))
+        
+        try:
+            tasks_data = _parse_plan_from_text(content)
+            if tasks_data is None:
+                raise ValueError("No valid JSON array found in the LLM response.")
+            
+            # Successfully parsed, break the loop
+            print("  ✓ Plan parsed successfully.")
+            break
+        except Exception as e:
+            parse_attempt += 1
+            print(f"⚠️  Error parsing plan on attempt {parse_attempt}: {e}")
+            
+            if parse_attempt > max_parse_retries:
+                print("❌ Maximum parsing retries exceeded. Aborting.")
+                raise RuntimeError(f"Could not parse a valid plan from the LLM after {max_parse_retries} retries. Last content: {content}")
 
-            # Check if recursive breakdown is needed
-            if enable_recursive_breakdown:
-                print("→ Checking for complex tasks...")
-                expanded_tasks = []
+            # Construct retry message
+            retry_instruction = (
+                "Your previous response could not be parsed as a valid JSON array. "
+                f"Error: {e}.\n"
+                "The raw response was:\n"
+                "============================================================\n"
+                f"{content}\n"
+                "============================================================\n"
+                "CRITICAL: You MUST fix the JSON and output ONLY a valid JSON array representing the plan. Do not add any commentary."
+            )
+            messages.append({"role": "assistant", "content": content})
+            messages.append({"role": "user", "content": retry_instruction})
+            print("Retrying plan generation with corrective feedback...")
 
-                # Detect single/few broad tasks that need forced breakdown
-                is_single_broad_plan = (
-                    len(tasks_data) <= 2 and
-                    any(_is_overly_broad_task(t.get("description", ""), user_request) for t in tasks_data)
-                )
+    plan = ExecutionPlan()
 
-                if is_single_broad_plan:
-                    print("  ⚠️  Detected overly broad plan with 1-2 tasks - forcing breakdown...")
+    if tasks_data:
+        # Check if recursive breakdown is needed
+        if enable_recursive_breakdown:
+            print("→ Checking for complex tasks...")
+            expanded_tasks = []
 
-                for task_data in tasks_data:
-                    complexity = task_data.get("complexity", "low")
-                    description = task_data.get("description", "")
+            # Detect single/few broad tasks that need forced breakdown
+            is_single_broad_plan = (
+                len(tasks_data) <= 2 and
+                any(_is_overly_broad_task(t.get("description", ""), user_request) for t in tasks_data)
+            )
 
-                    # Force breakdown for broad tasks when plan is too small
-                    should_breakdown = (
-                        complexity == "high" or
-                        (is_single_broad_plan and _is_overly_broad_task(description, user_request))
-                    )
+            if is_single_broad_plan:
+                print("  ⚠️  Detected overly broad plan with 1-2 tasks - forcing breakdown...")
 
-                    if should_breakdown:
-                        print(f"  ├─ Breaking down {'broad' if is_single_broad_plan else 'complex'} task: {description[:60]}...")
-                        subtasks = _recursive_breakdown(
-                            description,
-                            task_data.get("action_type", "general"),
-                            context,
-                            max_depth=2,
-                            current_depth=0,
-                            tools=tools,
-                            force_breakdown=is_single_broad_plan
-                        )
-                        print(f"     └─ Expanded into {len(subtasks)} subtasks")
-                        expanded_tasks.extend(subtasks)
-                    else:
-                        expanded_tasks.append(task_data)
-                tasks_data = expanded_tasks
-
-            # VAGUE PLACEHOLDER DETECTION: Check for tasks with abstract placeholders
-            print("→ Validating task specificity...")
-            vague_task_count = 0
             for task_data in tasks_data:
+                complexity = task_data.get("complexity", "low")
                 description = task_data.get("description", "")
-                if _has_vague_placeholder(description):
-                    vague_task_count += 1
-                    print(f"  ⚠️  Vague task detected: '{description[:60]}...'")
 
-            if vague_task_count > 0:
-                print(f"  ⚠️  {vague_task_count} task(s) contain vague placeholders - adding discovery task")
-                # Prepend a discovery task if we have vague tasks
-                discovery_task = {
-                    "description": f"Scan and identify specific classes/functions to implement for: {user_request[:100]}",
-                    "action_type": "review",
-                    "complexity": "low"
-                }
-                # Only add if not already present
-                has_discovery = any(
-                    "scan" in t.get("description", "").lower() and "identify" in t.get("description", "").lower()
-                    for t in tasks_data
+                # Force breakdown for broad tasks when plan is too small
+                should_breakdown = (
+                    complexity == "high" or
+                    (is_single_broad_plan and _is_overly_broad_task(description, user_request))
                 )
-                if not has_discovery:
-                    tasks_data.insert(0, discovery_task)
 
-            # REQUIREMENTS CHECKLIST: Extract and validate requirements
-            requirements = _extract_requirements_from_request(user_request)
-            if requirements:
-                print(f"→ Extracted {len(requirements)} requirement(s) from user request:")
-                for req in requirements:
-                    print(f"   - {req}")
+                if should_breakdown:
+                    print(f"  ├─ Breaking down {'broad' if is_single_broad_plan else 'complex'} task: {description[:60]}...")
+                    subtasks = _recursive_breakdown(
+                        description,
+                        task_data.get("action_type", "general"),
+                        context,
+                        max_depth=2,
+                        current_depth=0,
+                        tools=tools,
+                        force_breakdown=is_single_broad_plan
+                    )
+                    print(f"     └─ Expanded into {len(subtasks)} subtasks")
+                    expanded_tasks.extend(subtasks)
+                else:
+                    expanded_tasks.append(task_data)
+            tasks_data = expanded_tasks
 
-                # Check if requirements are covered in the plan
-                missing_requirements = []
-                for req in requirements:
-                    req_lower = req.lower()
-                    covered = False
-                    for task_data in tasks_data:
-                        desc_lower = task_data.get("description", "").lower()
-                        # Check for keyword overlap
-                        req_keywords = set(req_lower.split())
-                        desc_keywords = set(desc_lower.split())
-                        if len(req_keywords & desc_keywords) >= 2:
-                            covered = True
-                            break
-                    if not covered:
-                        missing_requirements.append(req)
+        # VAGUE PLACEHOLDER DETECTION: Check for tasks with abstract placeholders
+        print("→ Validating task specificity...")
+        vague_task_count = 0
+        for task_data in tasks_data:
+            description = task_data.get("description", "")
+            if _has_vague_placeholder(description):
+                vague_task_count += 1
+                print(f"  ⚠️  Vague task detected: '{description[:60]}...'")
 
-                if missing_requirements:
-                    print(f"  ⚠️  {len(missing_requirements)} requirement(s) may not be covered in plan:")
-                    for missing in missing_requirements:
-                        print(f"     - {missing}")
-                        # Add a task for the missing requirement
-                        tasks_data.append({
-                            "description": f"Ensure: {missing}",
-                            "action_type": "review" if "avoid" in missing.lower() else "edit",
-                            "complexity": "low"
-                        })
+        if vague_task_count > 0:
+            print(f"  ⚠️  {vague_task_count} task(s) contain vague placeholders - adding discovery task")
+            # Prepend a discovery task if we have vague tasks
+            discovery_task = {
+                "description": f"Scan and identify specific classes/functions to implement for: {user_request[:100]}",
+                "action_type": "review",
+                "complexity": "low"
+            }
+            # Only add if not already present
+            has_discovery = any(
+                "scan" in t.get("description", "").lower() and "identify" in t.get("description", "").lower()
+                for t in tasks_data
+            )
+            if not has_discovery:
+                tasks_data.insert(0, discovery_task)
 
-            # Add all tasks to plan
-            for task_data in tasks_data:
-                plan.add_task(
-                    task_data.get("description", "Unknown task"),
-                    task_data.get("action_type", "general")
-                )
-                # Set complexity on the task
-                if len(plan.tasks) > 0:
-                    plan.tasks[-1].complexity = task_data.get("complexity", "low")
-        else:
-            print("Warning: Could not parse JSON plan, using fallback")
-            # Fallback: split into review + implementation
-            plan.add_task(f"Review existing code and patterns for: {user_request}", "review")
-            plan.add_task(user_request, "general")
-    except Exception as e:
-        print(f"Warning: Error parsing plan: {e}")
-        # Fallback: split into review + implementation
+        # REQUIREMENTS CHECKLIST: Extract and validate requirements
+        requirements = _extract_requirements_from_request(user_request)
+        if requirements:
+            print(f"→ Extracted {len(requirements)} requirement(s) from user request:")
+            for req in requirements:
+                print(f"   - {req}")
+
+            # Check if requirements are covered in the plan
+            missing_requirements = []
+            for req in requirements:
+                req_lower = req.lower()
+                covered = False
+                for task_data in tasks_data:
+                    desc_lower = task_data.get("description", "").lower()
+                    # Check for keyword overlap
+                    req_keywords = set(req_lower.split())
+                    desc_keywords = set(desc_lower.split())
+                    if len(req_keywords & desc_keywords) >= 2:
+                        covered = True
+                        break
+                if not covered:
+                    missing_requirements.append(req)
+
+            if missing_requirements:
+                print(f"  ⚠️  {len(missing_requirements)} requirement(s) may not be covered in plan:")
+                for missing in missing_requirements:
+                    print(f"     - {missing}")
+                    # Add a task for the missing requirement
+                    tasks_data.append({
+                        "description": f"Ensure: {missing}",
+                        "action_type": "review" if "avoid" in missing.lower() else "edit",
+                        "complexity": "low"
+                    })
+
+        # Add all tasks to plan
+        for task_data in tasks_data:
+            plan.add_task(
+                task_data.get("description", "Unknown task"),
+                task_data.get("action_type", "general")
+            )
+            # Set complexity on the task
+            if len(plan.tasks) > 0:
+                plan.tasks[-1].complexity = task_data.get("complexity", "low")
+    else:
+        print("Warning: Could not generate a valid plan after retries. Creating a default review task.")
         plan.add_task(f"Review existing code and patterns for: {user_request}", "review")
-        plan.add_task(user_request, "general")
 
     # CRITICAL VALIDATION: Ensure we have at least 2 tasks
     if len(plan.tasks) == 1:
