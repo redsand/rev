@@ -39,24 +39,33 @@ class RefactoringAgent(BaseAgent):
         print(f"RefactoringAgent executing task: {task.description}")
         logger.info(f"[REFACTORING] Starting task: {task.description}")
 
-        result = self._execute_simple_refactoring_task(task, context)
+        # Check if an improved system prompt was provided (for adaptive retry)
+        system_prompt = getattr(task, '_override_system_prompt', None) or REFACTORING_SYSTEM_PROMPT
+        if system_prompt != REFACTORING_SYSTEM_PROMPT:
+            logger.info(f"[REFACTORING] Using improved system prompt for retry")
+
+        result = self._execute_simple_refactoring_task(task, context, system_prompt)
 
         logger.info(f"[REFACTORING] Task result: {result[:100] if isinstance(result, str) else result}")
         return result
 
 
-    def _execute_simple_refactoring_task(self, task: Task, context: RevContext) -> str:
+    def _execute_simple_refactoring_task(self, task: Task, context: RevContext, system_prompt: str = None) -> str:
         """
         Handles simple, single-tool-call refactoring tasks.
         """
         recovery_attempts = self.increment_recovery_attempts(task, context)
         logger.debug(f"[REFACTORING] Recovery attempts: {recovery_attempts}")
 
+        # Use provided system_prompt or fall back to default
+        if system_prompt is None:
+            system_prompt = REFACTORING_SYSTEM_PROMPT
+
         available_tools = [tool for tool in get_available_tools() if tool['function']['name'] in ['write_file', 'replace_in_file', 'read_file']]
         logger.debug(f"[REFACTORING] Available tools: {[t['function']['name'] for t in available_tools]}")
 
         messages = [
-            {"role": "system", "content": REFACTORING_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"Task: {task.description}\n\nRepository Context:\n{context.repo_context}"}
         ]
 
