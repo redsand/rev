@@ -161,11 +161,11 @@ def _detect_external_paths(user_request: str) -> List[str]:
     external_paths = []
 
     # Pattern for relative paths starting with ../ or ..\
-    relative_pattern = r'(?:\.\\[\\/])+[^\s\\'"<>|]*'
+    relative_pattern = r'(?:\.\.[\\/])+[^\s\'"<>|]*'
 
     # Pattern for absolute paths (Unix or Windows)
-    unix_abs_pattern = r'(?<!\w)/(?:home|usr|opt|var|tmp|etc|mnt|media|srv)[^\s\\'"<>|]*'
-    windows_abs_pattern = r'[A-Za-z]:\\[^\s\\'"<>|]*'
+    unix_abs_pattern = r'(?<!\w)/(?:home|usr|opt|var|tmp|etc|mnt|media|srv)[^\s\'"<>|]*'
+    windows_abs_pattern = r'[A-Za-z]:\\[^\s\'"<>|]*'
 
     # Find all relative external paths
     for match in re.finditer(relative_pattern, user_request):

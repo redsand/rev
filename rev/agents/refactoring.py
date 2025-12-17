@@ -21,55 +21,7 @@ class RefactoringAgent(BaseAgent):
         code understanding capabilities for a language-agnostic approach.
         """
         print(f"RefactoringAgent executing task: {task.description}")
-        return self._execute_simple_refactoring_task(task, context)$', '', source_file_path)
-        target_dir = re.sub(r'(/|\\)[^/\\]+', '', target_dir, 1) # remove the first component to place it in the same parent dir
-
-        if not file_content or isinstance(file_content, dict) and "error" in file_content:
-            error_msg = f"Failed to read source file {source_file_path}"
-            print(f"  ⚠️ {error_msg}")
-            return self.make_failure_signal("file_read_error", error_msg)
-
-        print("  → Parsing file content to identify classes...")
-        try:
-            # Use the simple parser to get class names and content
-            classes_to_write = self._parse_python_classes(file_content)
-            if not classes_to_write:
-                raise ValueError("No classes found in the file.")
-            print(f"  → Found {len(classes_to_write)} classes to extract.")
-        except Exception as e:
-            error_msg = f"Failed to parse classes from {source_file_path}: {e}"
-            print(f"  ⚠️ {error_msg}")
-            return self.make_failure_signal("parsing_error", error_msg)
-        
-        # Loop through the classes and write each to a new file
-        for file_name, class_content in classes_to_write.items():
-            target_file_path = f"{target_dir}/{file_name}"
-            print(f"  → Writing class to {target_file_path}...")
-            try:
-                # Add necessary imports to the top of the new file
-                # This is a heuristic; a more robust solution would analyze specific imports needed.
-                content_with_imports = (
-                    f"from ..base import BaseAnalyst\n"
-                    f"from rev.tools.registry import get_available_tools\n\n"
-                    f"{class_content}"
-                )
-                
-                write_result = execute_tool("write_file", {"file_path": target_file_path, "content": content_with_imports})
-                
-                if isinstance(write_result, dict) and "error" in write_result:
-                    raise Exception(write_result["error"])
-                
-                print(f"  ✓ Successfully wrote {target_file_path}")
-            except Exception as e:
-                error_msg = f"Failed to write file {target_file_path}: {e}"
-                print(f"  ⚠️ {error_msg}")
-                # In a real scenario, we might want to decide if we should stop or continue.
-                # For now, we'll continue and report the first failure.
-                return self.make_failure_signal("file_write_error", error_msg)
-        
-        # After successfully writing all files, we can optionally remove the old content.
-        # For safety, we'll leave this to a subsequent, separate step by the planner.
-        return "Successfully split analyst classes into individual files."
+        return self._execute_simple_refactoring_task(task, context)
 
 
     def _execute_simple_refactoring_task(self, task: Task, context: RevContext) -> str:
