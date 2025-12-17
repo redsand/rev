@@ -127,6 +127,9 @@ def rag_search(query: str, k: int = 10, filters: dict = None) -> str:
 
 logger = get_logger()
 
+# Track last executed tool call for verification helpers
+_LAST_TOOL_CALL: dict[str, Any] | None = None
+
 # Cache for static descriptions (tools with no dynamic args)
 _DESCRIPTION_CACHE = {}
 
@@ -361,6 +364,16 @@ def _build_tool_dispatch() -> Dict[str, callable]:
 _TOOL_DISPATCH = _build_tool_dispatch()
 
 
+def get_last_tool_call() -> dict[str, Any] | None:
+    """Return the most recent tool call metadata."""
+    if _LAST_TOOL_CALL is None:
+        return None
+    name = _LAST_TOOL_CALL.get("name")
+    args = _LAST_TOOL_CALL.get("args")
+    args_copy = dict(args) if isinstance(args, dict) else args
+    return {"name": name, "args": args_copy}
+
+
 def _handle_mcp_tool(name: str, args: Dict[str, Any]) -> str:
     """Handle MCP tools with lazy import."""
     try:
@@ -524,6 +537,12 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
 
     # Get debug logger
     debug_logger = get_logger()
+
+    global _LAST_TOOL_CALL
+    if isinstance(args, dict):
+        _LAST_TOOL_CALL = {"name": name, "args": dict(args)}
+    else:
+        _LAST_TOOL_CALL = {"name": name, "args": args}
 
     try:
         # Check if it's an MCP tool (special handling for lazy imports)

@@ -153,6 +153,39 @@ class Orchestrator:
         for line in optimized_lines:
             print(f"    {line}")
 
+    def _maybe_optimize_user_request(self) -> bool:
+        """Optimize the current user request and log visibility when enabled."""
+        if not self.config.enable_prompt_optimization or not self.context:
+            return False
+
+        original_request = self.context.user_request
+        optimized_request, was_optimized = optimize_prompt_if_needed(
+            original_request,
+            auto_optimize=self.config.auto_optimize_prompt
+        )
+        if not was_optimized:
+            return False
+
+        print(f"\n[OK] Request optimized for clarity")
+        self._display_prompt_optimization(original_request, optimized_request)
+        self.context.user_request = optimized_request
+        self.context.add_insight("optimization", "prompt_optimized", True)
+        self.context.agent_insights["prompt_optimization"] = {
+            "optimized": True,
+            "original": original_request[:100],
+            "improved": optimized_request[:100],
+        }
+        self.debug_logger.log(
+            "orchestrator",
+            "PROMPT_OPTIMIZED",
+            {
+                "auto_optimize": self.config.auto_optimize_prompt,
+                "original_request": original_request,
+                "optimized_request": optimized_request,
+            },
+        )
+        return True
+
     def _collect_repo_stats(self) -> Dict[str, Any]:
         repo_context_raw = get_repo_context()
         repo_context = {} if isinstance(repo_context_raw, str) else repo_context_raw
@@ -215,6 +248,8 @@ class Orchestrator:
         self.context.user_request = user_request
         self.context.auto_approve = self.config.auto_approve
         self.context.resource_budget = ResourceBudget()
+        self._maybe_optimize_user_request()
+        user_request = self.context.user_request
         start_time = time.time()
 
         from rev.execution.router import TaskRouter
@@ -284,32 +319,6 @@ class Orchestrator:
                 self.context.add_insight("research", "findings_obtained", True)
 
         # Phase 2b: Prompt Optimization (optional)
-        if self.config.enable_prompt_optimization:
-            original_request = self.context.user_request
-            optimized_request, was_optimized = optimize_prompt_if_needed(
-                self.context.user_request,
-                auto_optimize=self.config.auto_optimize_prompt
-            )
-            if was_optimized:
-                print(f"\n[OK] Request optimized for clarity")
-                self._display_prompt_optimization(original_request, optimized_request)
-                self.context.user_request = optimized_request
-                self.context.add_insight("optimization", "prompt_optimized", True)
-                self.context.agent_insights["prompt_optimization"] = {
-                    "optimized": True,
-                    "original": original_request[:100],
-                    "improved": optimized_request[:100]
-                }
-                self.debug_logger.log(
-                    "orchestrator",
-                    "PROMPT_OPTIMIZED",
-                    {
-                        "auto_optimize": self.config.auto_optimize_prompt,
-                        "original_request": original_request,
-                        "optimized_request": optimized_request,
-                    },
-                )
-
         # Phase 2c: ContextGuard (optional)
         if self.config.enable_context_guard and research_findings:
             self._update_phase(AgentPhase.CONTEXT_GUARD)

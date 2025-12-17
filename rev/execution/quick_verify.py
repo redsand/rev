@@ -13,7 +13,7 @@ from typing import Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 
 from rev.models.task import Task, TaskStatus
-from rev.tools.registry import execute_tool
+from rev.tools.registry import execute_tool, get_last_tool_call
 from rev.core.context import RevContext
 
 
@@ -121,6 +121,20 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
     details = {}
     issues = []
     debug_info = {}
+    result_payload = _parse_task_result_payload(task.result)
+    call_sites_updated = []
+    if result_payload:
+        raw_call_sites = result_payload.get("call_sites_updated") or result_payload.get("call_sites") or []
+        if isinstance(raw_call_sites, list):
+            call_sites_updated = raw_call_sites
+            details["call_sites_updated"] = call_sites_updated
+            debug_info["call_sites_updated"] = call_sites_updated
+        backup = result_payload.get("original_backup")
+        if backup:
+            details["original_backup"] = backup
+        package_init = result_payload.get("package_init")
+        if package_init:
+            details["package_init"] = package_init
 
     # Don't try to guess the refactoring type - just verify the repo state changed
     # If there are issues below, they'll be caught. Otherwise, assume it succeeded.
@@ -246,6 +260,18 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
                 debug_info["main_file_status"] = "MISSING"
 
     if issues:
+        if call_sites_updated:
+            non_benign = [issue for issue in issues if "Original file" not in issue]
+            if not non_benign:
+                warning_msg = "Source module still exists but class files and call sites were updated"
+                details["warnings"] = issues
+                debug_info["warnings"] = issues
+                return VerificationResult(
+                    passed=True,
+                    message=f"[OK] Extraction succeeded with call site updates ({len(call_sites_updated)} files); "
+                            f"{warning_msg}",
+                    details={**details, "debug": debug_info}
+                )
         return VerificationResult(
             passed=False,
             message=f"Extraction verification failed: {len(issues)} issue(s) found\n\nDetails:\n" + "\n".join(issues),
@@ -328,6 +354,44 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
         )
 
 
+def _extract_path_from_task_result(result: Any) -> Optional[str]:
+    """Extract a file path from the tool result payload, if available."""
+    if not result:
+        return None
+
+    data: Optional[Dict[str, Any]] = None
+    if isinstance(result, str):
+        try:
+            data = json.loads(result)
+        except json.JSONDecodeError:
+            return None
+    elif isinstance(result, dict):
+        data = result
+    else:
+        return None
+
+    for key in ("file", "path", "updated_file"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _parse_task_result_payload(result: Any) -> Optional[Dict[str, Any]]:
+    """Best-effort JSON parsing of a task's result payload."""
+    if not result:
+        return None
+    if isinstance(result, dict):
+        return result
+    if isinstance(result, str):
+        try:
+            parsed = json.loads(result)
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
 def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
     """Verify that a file was actually edited."""
 
@@ -357,6 +421,25 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
         normalized = re.sub(r'^[./\\]+', '', normalized)
         if normalized:
             extracted_path = Path(normalized)
+
+    if not extracted_path:
+        result_path = _extract_path_from_task_result(task.result)
+        if result_path:
+            extracted_path = Path(result_path.strip().strip("\"'"))
+
+    if not extracted_path:
+        last_call = get_last_tool_call()
+        if last_call:
+            tool_name = (last_call.get("name") or "").lower()
+            if tool_name in {"replace_in_file", "write_file", "apply_patch", "append_to_file"}:
+                args = last_call.get("args") or {}
+                candidate = (
+                    args.get("path")
+                    or args.get("file_path")
+                    or args.get("target_path")
+                )
+                if isinstance(candidate, str) and candidate.strip():
+                    extracted_path = Path(candidate.strip().strip("\"'"))
 
     if not extracted_path:
         return VerificationResult(

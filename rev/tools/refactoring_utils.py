@@ -6,8 +6,9 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
 
 from rev.config import ROOT
 from rev.tools.file_ops import _safe_path
@@ -34,6 +35,29 @@ def _get_class_segments(source: str, tree: ast.Module) -> List[Dict[str, any]]:
                 }
             )
     return segments
+
+
+def _collect_trailing_imports(source: str, tree: ast.Module, first_class_start: int) -> List[str]:
+    """Collect import statements that appear after the first class definition."""
+    trailing: List[str] = []
+    seen: Set[str] = set()
+    lines = source.splitlines()
+
+    for node in tree.body:
+        if not isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        lineno = getattr(node, "lineno", None)
+        if lineno is None or (lineno - 1) < first_class_start:
+            continue
+        segment = ast.get_source_segment(source, node)
+        if not segment and 0 < lineno <= len(lines):
+            segment = lines[lineno - 1].strip()
+        snippet = (segment or "").strip()
+        if not snippet or snippet in seen:
+            continue
+        seen.add(snippet)
+        trailing.append(snippet)
+    return trailing
 
 
 def split_python_module_classes(
@@ -74,8 +98,10 @@ def split_python_module_classes(
         skipped: List[str] = []
 
         # Determine shared prefix (docstring/imports) by chopping everything before first class
+        lines = content.splitlines(keepends=True)
         first_class_start = min(seg["start"] for seg in class_segments)
-        shared_prefix = "".join(content.splitlines(keepends=True)[:first_class_start]).strip("\n")
+        shared_prefix = "".join(lines[:first_class_start]).strip("\n")
+        trailing_imports = _collect_trailing_imports(content, tree, first_class_start)
 
         # Write individual class files
         for seg in class_segments:
@@ -88,6 +114,8 @@ def split_python_module_classes(
             parts: List[str] = []
             if shared_prefix:
                 parts.append(shared_prefix.rstrip() + "\n\n")
+            if trailing_imports:
+                parts.append("\n".join(trailing_imports).rstrip() + "\n\n")
             parts.append(seg["source"].lstrip("\n"))
             class_file.write_text("".join(parts).rstrip() + "\n", encoding="utf-8")
             created_files.append(str(class_file.relative_to(ROOT)))
@@ -114,6 +142,12 @@ def split_python_module_classes(
 
         package_init.write_text("".join(aggregator_parts), encoding="utf-8")
 
+        try:
+            package_module = str(source_file.relative_to(ROOT).with_suffix("")).replace("\\", "/").replace("/", ".")
+        except ValueError:
+            package_module = source_file.with_suffix("").name
+        call_site_updates = _rewrite_package_imports(package_module, target_dir)
+
         # Backup original file so imports resolve to the new package
         backup_path = source_file.with_suffix(f"{source_file.suffix}.bak")
         source_file.rename(backup_path)
@@ -125,9 +159,84 @@ def split_python_module_classes(
                 "skipped": skipped,
                 "package_dir": str(target_dir.relative_to(ROOT)),
                 "package_init": str(package_init.relative_to(ROOT)),
+                "call_sites_updated": call_site_updates,
                 "original_backup": str(backup_path.relative_to(ROOT)),
             },
             indent=2,
         )
     except Exception as exc:
         return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
+
+
+def _rewrite_package_imports(package_module: str, target_dir: Path) -> List[str]:
+    """Rewrite import statements to use consolidated package exports."""
+    updated_files: List[str] = []
+    pattern = re.compile(rf"^\s*from\s+{re.escape(package_module)}\.[A-Za-z0-9_]+\s+import\s+(.+)$")
+
+    for file_path in ROOT.rglob("*.py"):
+        try:
+            if target_dir in file_path.parents:
+                continue
+
+            lines = file_path.read_text(encoding="utf-8").splitlines(keepends=True)
+            collected: List[str] = []
+            new_lines: List[str] = []
+            replaced = False
+            existing_idx = None
+            for line in lines:
+                match = pattern.match(line)
+                if match:
+                    replaced = True
+                    classes = [cls.strip() for cls in match.group(1).split(",") if cls.strip()]
+                    collected.extend(classes)
+                    continue
+                if line.strip().startswith(f"from {package_module} import"):
+                    existing_idx = len(new_lines)
+                new_lines.append(line)
+
+            if replaced and collected:
+                block = _format_import_block(package_module, sorted(set(collected)))
+                if existing_idx is not None:
+                    new_lines[existing_idx] = block
+                else:
+                    insert_idx = _find_import_insertion_index(new_lines)
+                    new_lines.insert(insert_idx, block)
+                file_path.write_text("".join(new_lines), encoding="utf-8")
+                updated_files.append(str(file_path.relative_to(ROOT)))
+        except Exception:
+            continue
+
+    return updated_files
+
+
+def _format_import_block(package_module: str, classes: List[str]) -> str:
+    if not classes:
+        return ""
+    if len(classes) <= 4:
+        return f"from {package_module} import {', '.join(classes)}\n"
+    block = [f"from {package_module} import (\n"]
+    for cls in classes:
+        block.append(f"    {cls},\n")
+    block.append(")\n")
+    return "".join(block)
+
+
+def _find_import_insertion_index(lines: List[str]) -> int:
+    idx = 0
+    while idx < len(lines):
+        stripped = lines[idx].strip()
+        if not stripped or stripped.startswith("#!"):
+            idx += 1
+            continue
+        if stripped.startswith(("'''", '"""')):
+            quote = stripped[:3]
+            idx += 1
+            while idx < len(lines) and quote not in lines[idx]:
+                idx += 1
+            idx += 1
+            continue
+        if stripped.startswith(("import ", "from ")):
+            idx += 1
+            continue
+        break
+    return idx
