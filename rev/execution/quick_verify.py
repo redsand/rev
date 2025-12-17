@@ -232,6 +232,18 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
             except Exception as e:
                 issues.append(f"[FAIL] Could not read {old_file}: {e}")
                 debug_info["main_file_status"] = f"ERROR: {str(e)}"
+        else:
+            package_candidate = old_file.with_suffix("")
+            package_init = package_candidate / "__init__.py"
+            if package_candidate.exists() and package_init.exists():
+                details["main_file_converted_to_package"] = True
+                debug_info["main_file_status"] = "CONVERTED_TO_PACKAGE"
+                debug_info["package_path"] = str(package_candidate)
+            else:
+                issues.append(
+                    f"[FAIL] Original file {old_file} no longer exists and package '{package_candidate}' was not found"
+                )
+                debug_info["main_file_status"] = "MISSING"
 
     if issues:
         return VerificationResult(
@@ -323,18 +335,30 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
     # For now, just check that the file exists and isn't empty
 
     patterns = [
+        # ./path/to/file.py or /path/to/file.py
         r'(?:in\s+)?(?:file\s+)?["\']?(\.?\/[a-zA-Z0-9_/\-]+\.py)["\']?',
+        # phrases like "edit foo.py" or "modify foo.py"
         r'(?:edit|update|modify)\s+["\']?([a-zA-Z0-9_/\-]+\.py)["\']?',
+        # fallback: any python file path-looking token
+        r'([a-zA-Z0-9_\-./\\]+\.py)',
     ]
 
-    file_path = None
+    extracted_path: Path | None = None
+    raw_candidate: str | None = None
     for pattern in patterns:
         matches = re.findall(pattern, task.description, re.IGNORECASE)
         if matches:
-            file_path = Path(matches[0])
+            raw_candidate = matches[0]
             break
 
-    if not file_path:
+    if raw_candidate:
+        normalized = raw_candidate.strip().strip('"\''" ")
+        # Remove leading ./ or .\ or excess slashes (so "/foo.py" -> "foo.py")
+        normalized = re.sub(r'^[./\\]+', '', normalized)
+        if normalized:
+            extracted_path = Path(normalized)
+
+    if not extracted_path:
         return VerificationResult(
             passed=False,
             message="Could not determine file path to verify",
@@ -342,8 +366,10 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
             should_replan=True
         )
 
-    if not file_path.is_absolute():
-        file_path = Path.cwd() / file_path
+    if extracted_path.is_absolute():
+        file_path = extracted_path
+    else:
+        file_path = Path.cwd() / extracted_path
 
     if not file_path.exists():
         return VerificationResult(

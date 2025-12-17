@@ -32,6 +32,7 @@ from rev.execution.state_manager import StateManager
 from rev.execution.prompt_optimizer import optimize_prompt_if_needed
 from rev.execution.quick_verify import verify_task_execution, VerificationResult
 from rev.tools.registry import get_available_tools, get_repo_context
+from rev.debug_logger import DebugLogger
 from rev.config import (
     MAX_PLAN_TASKS,
     MAX_STEPS_PER_RUN,
@@ -131,12 +132,26 @@ class Orchestrator:
         self.config = config or OrchestratorConfig()
         self.context: Optional[RevContext] = None
         self.learning_agent = LearningAgent(project_root) if self.config.enable_learning else None
+        self.debug_logger = DebugLogger.get_instance()
 
     def _update_phase(self, new_phase: AgentPhase):
         if self.context:
             self.context.set_current_phase(new_phase)
             if config.EXECUTION_MODE != 'sub-agent':
                 print(f"\nðŸ”¸ Entering phase: {new_phase.value}")
+
+    def _display_prompt_optimization(self, original: str, optimized: str) -> None:
+        """Display original vs improved prompts for transparency."""
+        original_lines = original.strip().splitlines() or [original]
+        optimized_lines = optimized.strip().splitlines() or [optimized]
+
+        print("  Original request:")
+        for line in original_lines:
+            print(f"    {line}")
+
+        print("  Optimized request:")
+        for line in optimized_lines:
+            print(f"    {line}")
 
     def _collect_repo_stats(self) -> Dict[str, Any]:
         repo_context_raw = get_repo_context()
@@ -276,7 +291,8 @@ class Orchestrator:
                 auto_optimize=self.config.auto_optimize_prompt
             )
             if was_optimized:
-                print(f"\n✓ Request optimized for clarity")
+                print(f"\n[OK] Request optimized for clarity")
+                self._display_prompt_optimization(original_request, optimized_request)
                 self.context.user_request = optimized_request
                 self.context.add_insight("optimization", "prompt_optimized", True)
                 self.context.agent_insights["prompt_optimization"] = {
@@ -284,6 +300,15 @@ class Orchestrator:
                     "original": original_request[:100],
                     "improved": optimized_request[:100]
                 }
+                self.debug_logger.log(
+                    "orchestrator",
+                    "PROMPT_OPTIMIZED",
+                    {
+                        "auto_optimize": self.config.auto_optimize_prompt,
+                        "original_request": original_request,
+                        "optimized_request": optimized_request,
+                    },
+                )
 
         # Phase 2c: ContextGuard (optional)
         if self.config.enable_context_guard and research_findings:
@@ -543,6 +568,8 @@ class Orchestrator:
         action_aliases = {
             "create": "add",
             "write": "add",
+            "refator": "refactor",
+            "investigate": "research",
         }
         
         normalized_action_type = task.action_type.lower()
@@ -637,3 +664,4 @@ def run_orchestrated(
 
     orchestrator = Orchestrator(project_root, config_obj)
     return orchestrator.execute(user_request)
+

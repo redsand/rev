@@ -12,12 +12,15 @@ You will be given an analysis task and context about the repository. Your goal i
 CRITICAL RULES:
 1. You MUST respond with a single tool call in JSON format. Do NOT provide any other text, explanations, or markdown.
 2. Use the most appropriate analysis tool for the task:
-   - `scan_security_issues` to find security vulnerabilities
+   - `scan_security_issues` or `detect_secrets` for security findings
+   - `check_license_compliance` / `check_dependency_vulnerabilities` / `check_dependency_updates` for supply-chain risk
    - `analyze_test_coverage` to check test coverage
    - `analyze_semantic_diff` to detect breaking changes
    - `analyze_code_context` to understand code history
-   - `run_static_analysis` to run comprehensive code analysis
-   - `read_file` to examine specific files for analysis
+   - `run_all_analysis` for a comprehensive static analysis sweep
+   - `analyze_code_structures` / `check_structural_consistency` for schema consistency
+   - `analyze_runtime_logs`, `analyze_performance_regression`, or `analyze_error_traces` for runtime issues
+   - `read_file` when direct inspection is required
 3. Focus on actionable insights and concrete recommendations.
 4. Your response MUST be a single, valid JSON object representing the tool call.
 
@@ -49,7 +52,7 @@ Example for test coverage:
 
 Example for static analysis:
 {
-  "tool_name": "run_static_analysis",
+  "tool_name": "run_all_analysis",
   "arguments": {
     "path": "."
   }
@@ -77,9 +80,12 @@ class AnalysisAgent(BaseAgent):
         # Get all available tools, focusing on analysis tools
         all_tools = get_available_tools()
         analysis_tool_names = [
-            'scan_security_issues', 'analyze_test_coverage', 'analyze_semantic_diff',
-            'analyze_code_context', 'run_static_analysis', 'check_structural_consistency',
-            'read_file', 'analyze_code_structures'
+            'scan_security_issues', 'detect_secrets', 'check_license_compliance',
+            'check_dependency_vulnerabilities', 'check_dependency_updates',
+            'analyze_test_coverage', 'analyze_semantic_diff', 'analyze_code_context',
+            'run_all_analysis', 'analyze_code_structures', 'check_structural_consistency',
+            'analyze_runtime_logs', 'analyze_performance_regression', 'analyze_error_traces',
+            'read_file'
         ]
         available_tools = [tool for tool in all_tools if tool['function']['name'] in analysis_tool_names]
 

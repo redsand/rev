@@ -13,11 +13,14 @@ CRITICAL RULES:
 1. You MUST respond with a single tool call in JSON format. Do NOT provide any other text, explanations, or markdown.
 2. Use the most appropriate research tool for the task:
    - `read_file` to examine specific files
-   - `search_files` to find files matching patterns
-   - `grep_files` to search for code patterns
+   - `search_code` for regex-based source searches
+   - `rag_search` for semantic/natural-language lookup
+   - `list_dir` / `tree_view` to inspect directory layout
    - `analyze_code_structures` to understand code organization
    - `find_symbol_usages` to track symbol usage
    - `analyze_dependencies` to understand module relationships
+   - `analyze_code_context` to learn change history and intent
+   - `check_structural_consistency` to validate schemas/models
 3. Your research should be focused and actionable.
 4. Your response MUST be a single, valid JSON object representing the tool call.
 
@@ -32,16 +35,24 @@ Example for reading a file:
 {
   "tool_name": "read_file",
   "arguments": {
-    "file_path": "path/to/file.py"
+    "path": "path/to/file.py"
   }
 }
 
-Example for searching files:
+Example for searching code:
 {
-  "tool_name": "search_files",
+  "tool_name": "search_code",
   "arguments": {
-    "pattern": "*.py",
-    "path": "src/"
+    "pattern": "def\\s+authenticate",
+    "include": "src/**/*.py"
+  }
+}
+
+Example for listing a directory:
+{
+  "tool_name": "list_dir",
+  "arguments": {
+    "pattern": "src/**"
   }
 }
 
@@ -75,9 +86,9 @@ class ResearchAgent(BaseAgent):
         # Get all available tools, focusing on read-only research tools
         all_tools = get_available_tools()
         research_tool_names = [
-            'read_file', 'search_files', 'grep_files', 'list_directory',
+            'read_file', 'search_code', 'rag_search', 'list_dir', 'tree_view',
             'analyze_code_structures', 'find_symbol_usages', 'analyze_dependencies',
-            'analyze_code_context', 'check_structural_consistency'
+            'analyze_code_context', 'check_structural_consistency', 'get_file_info'
         ]
         available_tools = [tool for tool in all_tools if tool['function']['name'] in research_tool_names]
 
