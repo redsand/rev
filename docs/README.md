@@ -6,12 +6,15 @@ A **robust, pattern-based autonomous development system** powered by [Ollama](ht
 
 Rev isn't just another AI coding assistant — it's a **complete agentic development system** implementing industry-proven design patterns:
 
+- **💬 Interactive REPL** — Session-persistent development with real-time guidance and context retention (essential for complex tasks)
+- **🔍 RAG (Semantic Search)** — Retrieval-Augmented Generation finds context by meaning, not just keywords (prevents hallucinations)
+- **🛡️ ContextGuard/ClarityEngine** — Validates context sufficiency before planning (prevents AI from making decisions with gaps)
 - **🧠 Agentic Design Patterns** — Built on 21 patterns from research (Goal Setting, Routing, RAG, Recovery, Resource Budgets, etc.)
-- **🔍 Hybrid Search** — Combines symbolic (regex) + semantic (RAG/TF-IDF) code search for superior context gathering
+- **🤖 Specialized Sub-Agents** — Dedicated agents for each task type (code, test, refactor, debug, document, research)
 - **📊 Resource-Aware** — Tracks steps, tokens, and time budgets to prevent runaway execution
 - **🎯 Goal-Oriented** — Derives measurable goals from requests and validates they're met
+- **✅ Workflow Verification** — Plan → Execute → Verify → Report (ensures tasks actually complete, no silent failures)
 - **🛡️ Production-Ready** — Multi-layer validation, security scanning, auto-recovery, and rollback planning
-- **⚡ Intelligent** — Self-routing, priority scheduling, and adaptive agent configuration
 
 ## Key Features
 
@@ -366,7 +369,7 @@ rev "Extract BreakoutAnalyst class to lib/analysts/"
 -> Next action: [REFACTOR] Retry extraction with different approach...
 ```
 
-**📖 See [../WORKFLOW_VERIFICATION_FIX.md](../WORKFLOW_VERIFICATION_FIX.md) for implementation details.**
+**📖 See [WORKFLOW_VERIFICATION_FIX.md](WORKFLOW_VERIFICATION_FIX.md) for implementation details.**
 
 ---
 

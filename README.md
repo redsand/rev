@@ -8,11 +8,84 @@ Rev isn't just another AI coding assistant — it's a **complete agentic develop
 
 - **🤖 Specialized Sub-Agent Architecture** — Dedicated agents for code writing, refactoring, testing, debugging, documentation, research, and analysis
 - **✅ Workflow Verification Loop** — Plan → Execute → **Verify** → Report → Re-plan (ensures tasks actually complete)
+- **💬 Interactive REPL Mode** — Session-persistent development with real-time guidance and context retention across multiple prompts
+- **🔍 RAG (Retrieval-Augmented Generation)** — Semantic code search using TF-IDF + hybrid symbolic search for intelligent context gathering
+- **🛡️ ContextGuard/ClarityEngine** — Validates context sufficiency before planning, preventing "hallucinations" from insufficient context
 - **🧠 21 Agentic Design Patterns** — Built on proven research patterns (Goal Setting, Routing, RAG, Recovery, Resource Budgets, etc.)
-- **🔍 Hybrid Search** — Combines symbolic (regex) + semantic (RAG/TF-IDF) code search for superior context gathering
 - **📊 Resource-Aware** — Tracks steps, tokens, and time budgets to prevent runaway execution
 - **🎯 Goal-Oriented** — Derives measurable goals from requests and validates they're met
 - **🛡️ Production-Ready** — Multi-layer validation, security scanning, auto-recovery, and rollback planning
+
+## Critical Features for Production Development
+
+### 💬 Interactive REPL Mode
+The **REPL (Read-Eval-Print Loop)** is essential for iterative development and real-time guidance:
+
+```bash
+# Start interactive session with persistent context
+rev --repl
+```
+
+**Why REPL Matters:**
+- **Session Memory** — Context persists across multiple prompts (no re-explaining)
+- **Real-Time Guidance** — Type commands while tasks run (steer agent mid-execution)
+- **Iterative Refinement** — Build complex features through conversation
+- **State Tracking** — `/status` shows all completed work
+- **Breakpoint-Like Control** — Use `/stop` to pause and adjust course
+
+**REPL vs One-Shot:**
+```bash
+# One-shot (simple tasks)
+rev "Add logging to util.js"
+
+# REPL (complex development)
+rev --repl
+> Review the auth module
+> Now extract the JWT logic to a separate service
+> Add unit tests for the service
+> /status  # See what was done
+```
+
+### 🔍 RAG (Retrieval-Augmented Generation)
+**Hybrid semantic + symbolic search** finds the right context even without exact keywords:
+
+```bash
+# RAG automatically finds related code:
+rev "Add OAuth2 authentication"
+
+# Internally:
+# 1. Symbolic search: Finds "authenticate", "login", "auth"
+# 2. Semantic search: Finds conceptually related code about security, tokens, sessions
+# 3. Hybrid result: Most relevant context assembled
+```
+
+**Why RAG is Critical:**
+- **Semantic Understanding** — Finds concepts by meaning, not keywords
+- **Better Context** — Reduces hallucinations from missing context
+- **Adaptive Search** — Combines keyword and semantic approaches
+- **Scope Safety** — Understands impact before making changes
+
+### 🛡️ ContextGuard/ClarityEngine
+**Validates context sufficiency before planning** to prevent hallucinations:
+
+```bash
+# ContextGuard automatically checks:
+rev "Implement authentication system"
+
+# Internally:
+# ✓ Checks: Do we have the auth module?
+# ✓ Checks: Do we have user models?
+# ✓ Checks: Do we have database schema?
+# ✓ If missing: Requests additional context or stops planning
+```
+
+**Why ContextGuard Prevents Failures:**
+- **Safety First** — Refuses to plan with insufficient context
+- **Clarity Check** — Validates request is clear enough
+- **Gap Detection** — Identifies missing information before wasting tokens
+- **Hallucination Prevention** — Won't generate fake code for "missing" patterns
+
+---
 
 ## Key Features
 
@@ -221,21 +294,58 @@ pip install -r requirements.txt
 
 ## Usage
 
-### One-Shot Mode
+### 💬 Interactive REPL Mode (Recommended for Complex Development)
+
+The **REPL is the recommended mode for any non-trivial development**. It provides session persistence, real-time guidance, and context retention:
+
+```bash
+# Start REPL session
+rev --repl
+
+# Example workflow
+agent> Review the authentication module
+  [Task completed] Understanding current auth implementation
+
+agent> Extract JWT logic to a separate service
+  [Extraction verified] jwt_service.py created with imports validated
+
+agent> Add comprehensive tests for the service
+  [Tests created and verified] 15 tests covering all paths
+
+agent> /status
+  Session Summary:
+  - Tasks completed: 3
+  - Files created: 1
+  - Files modified: 2
+  - Tests passing: 15/15
+```
+
+**REPL Commands:**
+- `/status` — Show all completed work this session
+- `/stop` — Stop current task and re-plan
+- `/clear` — Clear session memory
+- `/help` — Show all commands
+
+**Why Use REPL:**
+- ✅ No context re-entry needed between commands
+- ✅ Real-time guidance (type while tasks run)
+- ✅ Better understanding of complex workflows
+- ✅ Iterative refinement through conversation
+
+### One-Shot Mode (Quick Tasks)
 
 Execute a single task with **fully autonomous** operation:
 
 ```bash
+# Quick, specific tasks
 rev "Add error handling to all API endpoints"
+rev "Fix the race condition in session handler"
 ```
 
-### Interactive REPL
-
-For iterative development with **session memory** and **real-time interaction**:
-
-```bash
-rev --repl
-```
+**Best for:**
+- Small, focused changes
+- Known starting point
+- Simple requirements
 
 ### Sub-Agent Specific Examples
 
@@ -350,10 +460,10 @@ python -m pytest tests --cov=rev --cov-report=term-missing
 
 ## Key Documents
 
-- **[WORKFLOW_VERIFICATION_FIX.md](WORKFLOW_VERIFICATION_FIX.md)** — New verification loop implementation
+- **[docs/WORKFLOW_VERIFICATION_FIX.md](docs/WORKFLOW_VERIFICATION_FIX.md)** — New verification loop implementation
 - **[docs/README.md](docs/README.md)** — Complete feature documentation
-- **[IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md)** — Agentic patterns reference
-- **[RECOMMENDATIONS.md](RECOMMENDATIONS.md)** — Future improvements
+- **[docs/IMPLEMENTATION_SUMMARY.md](docs/IMPLEMENTATION_SUMMARY.md)** — Agentic patterns reference
+- **[docs/RECOMMENDATIONS.md](docs/RECOMMENDATIONS.md)** — Future improvements
 
 ## Architecture Highlights
 
@@ -395,25 +505,33 @@ User Request → Router → Specialized Agent → Optimized Tool Calls → Verif
 
 ```
 .
-├── rev/                      # Package (CLI entry: `rev`)
+├── README.md                  # Main documentation (you are here)
+├── docs/                      # All detailed documentation
+│   ├── WORKFLOW_VERIFICATION_FIX.md    # NEW: Verification implementation
+│   ├── IMPLEMENTATION_SUMMARY.md       # Agentic patterns reference
+│   ├── RECOMMENDATIONS.md              # Future improvements
+│   ├── QUICK_START_DEV.md              # Developer quick start
+│   ├── ARCHITECTURE.md                 # System architecture
+│   ├── EXECUTION_MODES.md              # Execution modes guide
+│   └── ... (40+ documentation files)
+├── rev/                       # Main package (CLI entry: `rev`)
 │   ├── execution/
-│   │   ├── orchestrator.py   # Sub-agent coordinator (with verification)
-│   │   ├── quick_verify.py   # NEW: Task verification module
+│   │   ├── orchestrator.py    # Sub-agent coordinator (with verification)
+│   │   ├── quick_verify.py    # NEW: Task verification module
 │   │   └── ...
 │   ├── agents/
-│   │   ├── base.py           # Agent base class
-│   │   ├── code_writer.py    # CodeWriterAgent
-│   │   ├── refactoring.py    # RefactoringAgent
-│   │   ├── test_executor.py  # TestExecutorAgent
+│   │   ├── base.py            # Agent base class
+│   │   ├── code_writer.py     # CodeWriterAgent
+│   │   ├── refactoring.py     # RefactoringAgent
+│   │   ├── test_executor.py   # TestExecutorAgent
 │   │   └── ...
 │   └── ...
 ├── tests/
 │   ├── test_quick_verify.py                      # Verification tests (14 tests)
 │   ├── test_refactoring_extraction_workflow.py   # Extraction tests (6 tests)
 │   ├── test_orchestrator_verification_workflow.py # Integration tests
-│   └── ...
-├── WORKFLOW_VERIFICATION_FIX.md  # NEW: Verification implementation details
-└── README.md                      # This file
+│   └── ... (comprehensive test suite)
+└── requirements.txt           # Project dependencies
 ```
 
 ## License
