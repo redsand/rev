@@ -328,6 +328,29 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
         )
 
 
+def _extract_path_from_task_result(result: Any) -> Optional[str]:
+    """Extract a file path from the tool result payload, if available."""
+    if not result:
+        return None
+
+    data: Optional[Dict[str, Any]] = None
+    if isinstance(result, str):
+        try:
+            data = json.loads(result)
+        except json.JSONDecodeError:
+            return None
+    elif isinstance(result, dict):
+        data = result
+    else:
+        return None
+
+    for key in ("file", "path", "updated_file"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
 def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
     """Verify that a file was actually edited."""
 
@@ -357,6 +380,11 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
         normalized = re.sub(r'^[./\\]+', '', normalized)
         if normalized:
             extracted_path = Path(normalized)
+
+    if not extracted_path:
+        result_path = _extract_path_from_task_result(task.result)
+        if result_path:
+            extracted_path = Path(result_path.strip().strip("\"'"))
 
     if not extracted_path:
         return VerificationResult(
