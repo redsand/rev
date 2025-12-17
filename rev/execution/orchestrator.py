@@ -428,6 +428,9 @@ class Orchestrator:
                     execution_success = False
                     print(f"  [!] Verification failed, marking for re-planning")
 
+                    # Display detailed debug information
+                    self._handle_verification_failure(verification_result)
+
             # STEP 4: REPORT
             log_entry = f"[{next_task.status.name}] {next_task.description}"
             if next_task.status == TaskStatus.FAILED:
@@ -443,6 +446,37 @@ class Orchestrator:
 
         print(f"\n⚠️  Reached maximum iterations ({max_iterations}). Halting execution.")
         return False
+
+    def _handle_verification_failure(self, verification_result: VerificationResult):
+        """Handle and display detailed information about verification failures."""
+        print("\n" + "=" * 70)
+        print("VERIFICATION FAILURE - DEBUG INFORMATION")
+        print("=" * 70)
+
+        # Display main message (which includes issue descriptions)
+        if verification_result.message:
+            print(f"\n{verification_result.message}")
+
+        # Display debug information if available
+        if verification_result.details and "debug" in verification_result.details:
+            debug_info = verification_result.details["debug"]
+            print("\nDebug Information:")
+            print("-" * 70)
+            for key, value in debug_info.items():
+                if isinstance(value, list):
+                    print(f"  {key}:")
+                    for item in value:
+                        print(f"    - {item}")
+                elif isinstance(value, dict):
+                    print(f"  {key}:")
+                    for k, v in value.items():
+                        print(f"    {k}: {v}")
+                else:
+                    print(f"  {key}: {value}")
+
+        print("\n" + "=" * 70)
+        print("NEXT ACTION: Re-planning with different approach...")
+        print("=" * 70 + "\n")
 
     def _dispatch_to_sub_agents(self, context: RevContext) -> bool:
         """Dispatches tasks to appropriate sub-agents."""

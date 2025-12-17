@@ -90,6 +90,7 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
 
     details = {}
     issues = []
+    debug_info = {}
 
     # Check if this is an extraction task
     desc_lower = task.description.lower()
@@ -116,20 +117,34 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
         )
 
     target_dir = Path(dir_matches[0].strip("/"))
+    debug_info["target_directory"] = str(target_dir)
+    debug_info["directory_exists"] = target_dir.exists()
 
     # Check 1: Directory exists
     if not target_dir.exists():
-        issues.append(f"Target directory '{target_dir}' does not exist")
+        issues.append(f"❌ Target directory '{target_dir}' does not exist - extraction was never started")
+        debug_info["status"] = "DIRECTORY_NOT_CREATED"
     else:
         details["directory_exists"] = True
 
         # Check 2: Files were created in the directory
         py_files = list(target_dir.glob("*.py"))
+        debug_info["files_in_directory"] = [f.name for f in py_files]
+        debug_info["file_count"] = len(py_files)
+
         if not py_files:
-            issues.append(f"No Python files found in '{target_dir}' - extraction may have failed")
+            issues.append(
+                f"❌ No Python files in '{target_dir}' - extraction created directory but extracted NO FILES\n"
+                f"   This means the RefactoringAgent either:\n"
+                f"   1. Did not actually extract any classes\n"
+                f"   2. Failed to create individual files\n"
+                f"   3. Returned success without performing extraction"
+            )
+            debug_info["status"] = "DIRECTORY_EMPTY"
         else:
             details["files_created"] = len(py_files)
             details["files"] = [f.name for f in py_files]
+            debug_info["status"] = f"EXTRACTION_PARTIAL ({len(py_files)} files)"
 
             # Check 3: Verify imports in created files
             import_errors = []
@@ -146,14 +161,16 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
                             module_name = rel_import_match.group(1)
                             module_file = target_dir / f"{module_name}.py"
                             if not module_file.exists():
-                                import_errors.append(f"{py_file.name}: imports missing {module_name}.py")
+                                import_errors.append(f"❌ {py_file.name}: imports from missing {module_name}.py")
                 except Exception as e:
-                    import_errors.append(f"Error reading {py_file.name}: {e}")
+                    import_errors.append(f"❌ Error reading {py_file.name}: {e}")
 
             if import_errors:
                 issues.extend(import_errors)
+                debug_info["import_issues"] = import_errors
             else:
                 details["imports_valid"] = True
+                debug_info["import_validation"] = "PASSED"
 
     # Check 4: Verify old file was updated with imports (if applicable)
     # Look for the original file mentioned in task description
@@ -161,30 +178,42 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
     old_file_matches = re.findall(old_file_pattern, task.description)
     if old_file_matches:
         old_file = Path(old_file_matches[0])
+        debug_info["source_file"] = str(old_file)
+        debug_info["source_file_exists"] = old_file.exists()
+
         if old_file.exists():
             try:
                 content = old_file.read_text()
+                original_size = len(content)
+                debug_info["source_file_size"] = original_size
+
                 # Check if it has import statements from the new directory
                 has_imports_from_new = re.search(rf'from\s+\.{target_dir.name}', content)
                 if has_imports_from_new:
                     details["main_file_updated"] = True
+                    debug_info["main_file_status"] = "UPDATED_WITH_IMPORTS"
                 else:
-                    issues.append(f"Original file {old_file} not updated with imports from {target_dir}")
+                    issues.append(
+                        f"❌ Original file {old_file} was NOT updated with imports from {target_dir}\n"
+                        f"   File still contains {original_size} bytes (should be much smaller if extracted)"
+                    )
+                    debug_info["main_file_status"] = "NOT_UPDATED"
             except Exception as e:
-                issues.append(f"Could not read {old_file}: {e}")
+                issues.append(f"❌ Could not read {old_file}: {e}")
+                debug_info["main_file_status"] = f"ERROR: {str(e)}"
 
     if issues:
         return VerificationResult(
             passed=False,
-            message=f"Extraction verification failed: {len(issues)} issue(s) found",
-            details={**details, "issues": issues},
+            message=f"Extraction verification failed: {len(issues)} issue(s) found\n\nDetails:\n" + "\n".join(issues),
+            details={**details, "issues": issues, "debug": debug_info},
             should_replan=True
         )
 
     return VerificationResult(
         passed=True,
-        message=f"Extraction successful: {details.get('files_created', 0)} files created with valid imports",
-        details=details
+        message=f"✓ Extraction successful: {details.get('files_created', 0)} files created with valid imports",
+        details={**details, "debug": debug_info}
     )
 
 
