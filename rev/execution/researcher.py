@@ -161,11 +161,11 @@ def _detect_external_paths(user_request: str) -> List[str]:
     external_paths = []
 
     # Pattern for relative paths starting with ../ or ..\
-    relative_pattern = r'(?:\.\.[\\/])+[^\s\'"<>|]*'
+    relative_pattern = r'(?:\.\\[\\/])+[^\s\\'"<>|]*'
 
     # Pattern for absolute paths (Unix or Windows)
-    unix_abs_pattern = r'(?<!\w)/(?:home|usr|opt|var|tmp|etc|mnt|media|srv)[^\s\'"<>|]*'
-    windows_abs_pattern = r'[A-Za-z]:\\[^\s\'"<>|]*'
+    unix_abs_pattern = r'(?<!\w)/(?:home|usr|opt|var|tmp|etc|mnt|media|srv)[^\s\\'"<>|]*'
+    windows_abs_pattern = r'[A-Za-z]:\\[^\s\\'"<>|]*'
 
     # Find all relative external paths
     for match in re.finditer(relative_pattern, user_request):
@@ -229,8 +229,18 @@ def _scan_external_directory(path: str, max_depth: int = 3) -> Dict[str, Any]:
                 result["functions"] = functions
             return result
 
-        # Directory - walk and collect files
-        code_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.cs', '.go', '.rs', '.c', '.cpp', '.h'}
+        # Language configuration
+        lang_config = {
+            "python": {".py"},
+            "javascript": {".js", ".ts", ".jsx", ".tsx"},
+            "java": {".java"},
+            "csharp": {".cs"},
+            "go": {".go"},
+            "rust": {".rs"},
+            "c": {".c", ".h"},
+            "cpp": {".cpp", ".h"},
+        }
+        all_extensions = {ext for lang_exts in lang_config.values() for ext in lang_exts}
 
         for root, dirs, files in os.walk(resolved_path):
             # Limit depth
@@ -244,27 +254,26 @@ def _scan_external_directory(path: str, max_depth: int = 3) -> Dict[str, Any]:
 
             for fname in files:
                 fpath = Path(root) / fname
-                if fpath.suffix.lower() in code_extensions:
+                if fpath.suffix.lower() in all_extensions:
                     rel_path = str(fpath.relative_to(resolved_path))
                     result["files"].append(rel_path)
 
-                    # Analyze Python files for classes and functions
-                    if fpath.suffix.lower() == '.py':
-                        content = _read_external_file(str(fpath))
-                        if content:
-                            classes, functions = _extract_definitions(content, rel_path)
-                            result["classes"].extend(classes)
-                            result["functions"].extend(functions)
+                    # Analyze files for classes and functions
+                    content = _read_external_file(str(fpath))
+                    if content:
+                        classes, functions = _extract_definitions(content, str(fpath))
+                        result["classes"].extend(classes)
+                        result["functions"].extend(functions)
 
-                            # Extract module name
-                            module_name = fpath.stem
-                            if module_name not in ['__init__', '__main__']:
-                                result["modules"].append({
-                                    "name": module_name,
-                                    "path": rel_path,
-                                    "classes": [c["name"] for c in classes if c.get("file") == rel_path],
-                                    "functions": [f["name"] for f in functions if f.get("file") == rel_path]
-                                })
+                        # Extract module name
+                        module_name = fpath.stem
+                        if module_name not in ['__init__', '__main__']:
+                            result["modules"].append({
+                                "name": module_name,
+                                "path": rel_path,
+                                "classes": [c["name"] for c in classes if c.get("file") == rel_path],
+                                "functions": [f["name"] for f in functions if f.get("file") == rel_path]
+                            })
 
     except Exception as e:
         result["error"] = str(e)
@@ -307,46 +316,44 @@ def _extract_definitions(content: str, filepath: str) -> Tuple[List[Dict], List[
     classes = []
     functions = []
 
-    # Extract Python classes
-    class_pattern = r'^class\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^)]*\))?\s*:'
-    for match in re.finditer(class_pattern, content, re.MULTILINE):
-        classes.append({
-            "name": match.group(1),
-            "file": filepath,
-            "line": content[:match.start()].count('\n') + 1
-        })
+    lang_config = {
+        "python": {
+            "extensions": {".py"},
+            "class_pattern": r'^class\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^)]*\))?\s*:',
+            "func_pattern": r'^(?:    )?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*\)\s*(?:->.*?)?:',
+        },
+        "javascript": {
+            "extensions": {".js", ".ts", ".jsx", ".tsx"},
+            "class_pattern": r'(?:export\s+)?class\s+([A-Za-z_][A-Za-z0-9_]*)',
+            "func_pattern": r'(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)',
+        },
+    }
 
-    # Extract Python functions (top-level and methods)
-    func_pattern = r'^(?:    )?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*\)\s*(?:->.*?)?:'
-    for match in re.finditer(func_pattern, content, re.MULTILINE):
-        func_name = match.group(1)
-        if not func_name.startswith('_') or func_name.startswith('__'):  # Include dunder methods
-            functions.append({
-                "name": func_name,
-                "file": filepath,
-                "line": content[:match.start()].count('\n') + 1
-            })
+    file_ext = Path(filepath).suffix.lower()
+    for lang, config in lang_config.items():
+        if file_ext in config["extensions"]:
+            # Extract classes
+            class_pattern = config.get("class_pattern")
+            if class_pattern:
+                for match in re.finditer(class_pattern, content, re.MULTILINE):
+                    classes.append({
+                        "name": match.group(1),
+                        "file": filepath,
+                        "line": content[:match.start()].count('\n') + 1
+                    })
 
-    # Extract JavaScript/TypeScript classes and functions
-    if filepath.endswith(('.js', '.ts', '.jsx', '.tsx')):
-        # JS classes
-        js_class_pattern = r'(?:export\s+)?class\s+([A-Za-z_][A-Za-z0-9_]*)'
-        for match in re.finditer(js_class_pattern, content):
-            classes.append({
-                "name": match.group(1),
-                "file": filepath,
-                "line": content[:match.start()].count('\n') + 1
-            })
-
-        # JS functions
-        js_func_pattern = r'(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)'
-        for match in re.finditer(js_func_pattern, content):
-            functions.append({
-                "name": match.group(1),
-                "file": filepath,
-                "line": content[:match.start()].count('\n') + 1
-            })
-
+            # Extract functions
+            func_pattern = config.get("func_pattern")
+            if func_pattern:
+                for match in re.finditer(func_pattern, content, re.MULTILINE):
+                    func_name = match.group(1)
+                    if not func_name.startswith('_') or func_name.startswith('__'):
+                        functions.append({
+                            "name": func_name,
+                            "file": filepath,
+                            "line": content[:match.start()].count('\n') + 1
+                        })
+            break
     return classes, functions
 
 
@@ -608,7 +615,43 @@ def research_codebase(
 
 def _extract_search_keywords(user_request: str) -> List[str]:
     """Extract keywords for code search."""
-    # Common words to ignore
+    lang_config = {
+        "c_cpp": {
+            "keywords": {"memory", "buffer", "overflow", "strcpy", "strcat", "sprintf", "gets", "scanf", "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "sizeof", "strlen"},
+            "patterns": [r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)*\b'],
+        },
+        "driver": {
+            "keywords": {"driver", "kernel", "ioctl", "IOCTL", "DeviceIoControl", "IRP", "ProbeFor"},
+        },
+        "database": {
+            "keywords": {"prisma", "schema", "database", "enum", "model", "migration", "sequelize", "typeorm", "mongoose", "sql", "table", "entity", "CREATE TABLE", "ALTER TABLE", "@db", "@relation"},
+            "patterns": [r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)*\b'],
+        },
+        "docs": {
+            "keywords": {"readme", "documentation", "docs", "api documentation", "guide", "tutorial", "# ", "## "},
+        },
+        "code_structure": {
+            "keywords": {"class", "interface", "type", "typedef", "struct", "enum", "def class", "@dataclass"},
+            "patterns": [r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)*\b'],
+        },
+        "config": {
+            "keywords": {"config", "configuration", "settings", "environment", ".env", "CONFIG", "SETTINGS", "dotenv"},
+        }
+    }
+
+    request_lower = user_request.lower()
+    extracted_keywords = set()
+
+    for lang, config in lang_config.items():
+        if any(keyword in request_lower for keyword in config["keywords"]):
+            extracted_keywords.update(config["keywords"])
+            for pattern in config.get("patterns", []):
+                extracted_keywords.update(re.findall(pattern, user_request))
+
+    if extracted_keywords:
+        return list(extracted_keywords)[:20]
+
+    # Fallback to original logic
     stop_words = {
         'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
         'with', 'all', 'my', 'this', 'that', 'add', 'create', 'make', 'implement',
@@ -616,102 +659,11 @@ def _extract_search_keywords(user_request: str) -> List[str]:
         'find', 'other', 'related', 'after', 'before', 'should', 'would', 'could',
         'any', 'without', 'risk', 'bugs'
     }
-
-    request_lower = user_request.lower()
-
-    # Security audit detection - use security-specific keywords
-    if any(keyword in request_lower for keyword in ['security', 'vulnerability', 'buffer overflow',
-                                                      'memory corruption', 'use after free', 'exploit']):
-        # Return security-focused search terms
-        security_keywords = []
-
-        # C/C++ memory safety patterns
-        if 'memory' in request_lower or 'buffer' in request_lower or 'overflow' in request_lower:
-            security_keywords.extend([
-                'strcpy', 'strcat', 'sprintf', 'gets', 'scanf',  # Unsafe functions
-                'malloc', 'calloc', 'realloc', 'free',  # Memory management
-                'memcpy', 'memmove', 'memset',  # Memory operations
-                'sizeof', 'strlen',  # Size operations
-            ])
-
-        # Use-after-free patterns
-        if 'use after free' in request_lower or 'uaf' in request_lower:
-            security_keywords.extend(['free', 'delete', 'kfree', 'ExFreePool'])
-
-        # Driver-specific security
-        if any(word in request_lower for word in ['driver', 'kernel', 'ioctl']):
-            security_keywords.extend(['IOCTL', 'DeviceIoControl', 'IRP', 'ProbeFor'])
-
-        # Add any specific technical terms from the request
-        words = re.findall(r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)*\b', user_request)  # CamelCase
-        security_keywords.extend([w for w in words if w not in ['This', 'Should']])
-
-        return security_keywords[:15] if security_keywords else ['security', 'vulnerability']
-
-    # Structure investigation detection - covers schemas, docs, code structures, config
-    structure_keywords = [
-        # Database/Schema
-        'prisma', 'schema', 'database', 'enum', 'model', 'migration',
-        'sequelize', 'typeorm', 'mongoose', 'sql', 'table', 'entity',
-        # Documentation
-        'readme', 'documentation', 'docs', 'api documentation', 'guide',
-        # Code structures
-        'class', 'interface', 'type', 'typedef', 'struct',
-        # Configuration
-        'config', 'configuration', 'settings', 'environment'
-    ]
-
-    if any(keyword in request_lower for keyword in structure_keywords):
-        # Return structure-focused search terms
-        investigation_keywords = []
-
-        # Database/Schema patterns
-        if any(word in request_lower for word in ['prisma', 'schema', 'database', 'sql', 'migration']):
-            investigation_keywords.extend([
-                'enum', 'model', 'table', 'schema', 'migration',
-                'CREATE TABLE', 'ALTER TABLE', '@db', '@relation',
-                'interface', 'type', 'class'
-            ])
-
-        # Documentation patterns
-        if any(word in request_lower for word in ['readme', 'documentation', 'docs', 'guide']):
-            investigation_keywords.extend([
-                'README', 'DOCUMENTATION', 'docs/', 'documentation/',
-                '# ', '## ', 'API', 'guide', 'tutorial'
-            ])
-
-        # Code structure patterns (enum, class, interface, type)
-        if any(word in request_lower for word in ['enum', 'class', 'interface', 'type', 'struct']):
-            investigation_keywords.extend([
-                'enum ', 'enum{', 'class ', 'interface ', 'type ',
-                'struct ', 'typedef ', 'def class', '@dataclass'
-            ])
-
-        # Configuration patterns
-        if any(word in request_lower for word in ['config', 'configuration', 'settings', 'environment']):
-            investigation_keywords.extend([
-                'config.', 'settings.', '.env', 'environment',
-                'CONFIG', 'SETTINGS', 'dotenv'
-            ])
-
-        # Add any CamelCase/PascalCase identifiers (likely type/class/enum names)
-        words = re.findall(r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)*\b', user_request)
-        investigation_keywords.extend([w for w in words if w not in ['This', 'Should', 'Add', 'Create', 'Update', 'Modify']])
-
-        return investigation_keywords[:20] if investigation_keywords else ['structure', 'definition', 'existing']
-
-    # Extract words (original logic for non-security requests)
     words = re.findall(r'\b\w+\b', request_lower)
-    keywords = [w for w in words if len(w) > 2 and w not in stop_words]
-
-    # Also extract potential class/function names (CamelCase, snake_case)
-    camel_case = re.findall(r'[A-Z][a-z]+(?:[A-Z][a-z]+)*', user_request)
-    snake_case = re.findall(r'[a-z]+_[a-z_]+', request_lower)
-
-    keywords.extend([w.lower() for w in camel_case])
-    keywords.extend(snake_case)
-
-    return list(set(keywords))[:10]
+    keywords = {w for w in words if len(w) > 2 and w not in stop_words}
+    keywords.update({w.lower() for w in re.findall(r'[A-Z][a-z]+(?:[A-Z][a-z]+)*', user_request)})
+    keywords.update(re.findall(r'[a-z]+_[a-z_]+', request_lower))
+    return list(keywords)[:10]
 
 
 def _search_relevant_code(keywords: List[str]) -> Dict[str, Any]:
@@ -872,7 +824,7 @@ def _synthesize_findings(user_request: str, findings: ResearchFindings) -> Dict[
 
     messages = [
         {"role": "system", "content": RESEARCH_SYSTEM},
-        {"role": "user", "content": f"""Analyze this research for the task: "{user_request}"
+        {"role": "user", "content": f"""Analyze this research for the task: "{user_request}""
 
 Research findings:
 {chr(10).join(context_parts)}

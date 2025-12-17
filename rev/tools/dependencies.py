@@ -43,17 +43,23 @@ def analyze_dependencies(language: str = "auto") -> str:
     Returns:
         JSON string with dependency analysis
     """
+    # Configuration for different languages
+    lang_config = {
+        "python": {"file": "requirements.txt", "alt_file": "pyproject.toml"},
+        "javascript": {"file": "package.json"},
+        "rust": {"file": "Cargo.toml"},
+        "go": {"file": "go.mod"},
+    }
+
     try:
         if language == "auto":
-            # Auto-detect from project files
-            if (ROOT / "requirements.txt").exists() or (ROOT / "pyproject.toml").exists():
-                language = "python"
-            elif (ROOT / "package.json").exists():
-                language = "javascript"
-            elif (ROOT / "Cargo.toml").exists():
-                language = "rust"
-            elif (ROOT / "go.mod").exists():
-                language = "go"
+            for lang, config in lang_config.items():
+                if (ROOT / config["file"]).exists() or (config.get("alt_file") and (ROOT / config["alt_file"]).exists()):
+                    language = lang
+                    break
+        
+        if language not in lang_config:
+            return json.dumps({"error": f"Language '{language}' not supported"})
 
         # Try to get from cache first
         cache = _get_dep_cache()
@@ -70,13 +76,13 @@ def analyze_dependencies(language: str = "auto") -> str:
 
         if language == "python":
             # Check requirements.txt
-            req_file = ROOT / "requirements.txt"
+            req_file = ROOT / lang_config["python"]["file"]
             if req_file.exists():
                 content = req_file.read_text(encoding='utf-8')
                 deps = [line.strip() for line in content.split('\n') if line.strip() and not line.startswith('#')]
                 result["dependencies"] = deps
                 result["count"] = len(deps)
-                result["file"] = "requirements.txt"
+                result["file"] = lang_config["python"]["file"]
 
                 # Check for unpinned versions
                 unpinned = [d for d in deps if '==' not in d and '>=' not in d]
@@ -95,7 +101,7 @@ def analyze_dependencies(language: str = "auto") -> str:
                 })
 
         elif language == "javascript":
-            pkg_file = ROOT / "package.json"
+            pkg_file = ROOT / lang_config["javascript"]["file"]
             if pkg_file.exists():
                 pkg_data = json.loads(pkg_file.read_text(encoding='utf-8'))
                 deps = pkg_data.get("dependencies", {})
@@ -104,7 +110,7 @@ def analyze_dependencies(language: str = "auto") -> str:
                 result["dependencies"] = list(deps.keys())
                 result["dev_dependencies"] = list(dev_deps.keys())
                 result["count"] = len(deps) + len(dev_deps)
-                result["file"] = "package.json"
+                result["file"] = lang_config["javascript"]["file"]
 
                 # Check for caret/tilde versions
                 risky_versions = []
@@ -120,6 +126,7 @@ def analyze_dependencies(language: str = "auto") -> str:
                         "packages": risky_versions[:10]
                     })
 
+
         # Cache the result
         result_json = json.dumps(result)
         cache = _get_dep_cache()
@@ -134,18 +141,26 @@ def analyze_dependencies(language: str = "auto") -> str:
 
 def check_dependency_updates(language: str = "auto") -> str:
     """Identify outdated dependencies grouped by potential impact."""
+    lang_config = {
+        "python": {"file": "requirements.txt", "alt_file": "pyproject.toml", "command": "pip list --outdated --format=json"},
+        "javascript": {"file": "package.json", "command": "npm outdated --json"},
+    }
+
     try:
         if language == "auto":
-            if (ROOT / "requirements.txt").exists() or (ROOT / "pyproject.toml").exists():
-                language = "python"
-            elif (ROOT / "package.json").exists():
-                language = "javascript"
+            for lang, config in lang_config.items():
+                if (ROOT / config["file"]).exists() or (config.get("alt_file") and (ROOT / config["alt_file"]).exists()):
+                    language = lang
+                    break
+
+        if language not in lang_config:
+            return json.dumps({"error": f"Language '{language}' not supported"})
+
+        proc = _run_shell(lang_config[language]["command"], timeout=120)
+        if proc.returncode == 127:
+            return json.dumps({"error": f"{lang_config[language]['command'].split()[0]} not available"})
 
         if language == "python":
-            proc = _run_shell("pip list --outdated --format=json", timeout=120)
-            if proc.returncode == 127:
-                return json.dumps({"error": "pip not available"})
-
             outdated = json.loads(proc.stdout) if proc.stdout else []
             grouped = _group_versions(outdated, "name", "version", "latest_version")
             return json.dumps({
@@ -155,10 +170,6 @@ def check_dependency_updates(language: str = "auto") -> str:
             }, indent=2)
 
         if language == "javascript":
-            proc = _run_shell("npm outdated --json", timeout=120)
-            if proc.returncode == 127:
-                return json.dumps({"error": "npm not available"})
-
             data = json.loads(proc.stdout) if proc.stdout else {}
             items = []
             for pkg, info in data.items():
@@ -182,22 +193,31 @@ def check_dependency_updates(language: str = "auto") -> str:
 
 def check_dependency_vulnerabilities(language: str = "auto") -> str:
     """Scan dependencies for known vulnerabilities using pip-audit or npm audit."""
+    lang_config = {
+        "python": {"file": "requirements.txt", "alt_file": "pyproject.toml", "command": "pip-audit -f json"},
+        "javascript": {"file": "package.json", "command": "npm audit --json"},
+    }
+
     try:
         if language == "auto":
-            if (ROOT / "requirements.txt").exists() or (ROOT / "pyproject.toml").exists():
-                language = "python"
-            elif (ROOT / "package.json").exists():
-                language = "javascript"
+            for lang, config in lang_config.items():
+                if (ROOT / config["file"]).exists() or (config.get("alt_file") and (ROOT / config["alt_file"]).exists()):
+                    language = lang
+                    break
+
+        if language not in lang_config:
+            return json.dumps({"error": f"Language '{language}' not supported"})
+
+        cmd = lang_config[language]["command"]
+        if language == "python" and (ROOT / "requirements.txt").exists():
+            cmd = "pip-audit -r requirements.txt -f json"
+
+        proc = _run_shell(cmd, timeout=180)
+        if proc.returncode == 127:
+            tool_name = "pip-audit" if language == "python" else "npm"
+            return json.dumps({"error": f"{tool_name} not available", "install": f"pip install {tool_name}" if language == "python" else ""})
 
         if language == "python":
-            cmd = "pip-audit -f json"
-            if (ROOT / "requirements.txt").exists():
-                cmd = "pip-audit -r requirements.txt -f json"
-
-            proc = _run_shell(cmd, timeout=180)
-            if proc.returncode == 127:
-                return json.dumps({"error": "pip-audit not installed", "install": "pip install pip-audit"})
-
             findings = json.loads(proc.stdout) if proc.stdout else []
             issues = []
             for f in findings:
@@ -211,7 +231,6 @@ def check_dependency_vulnerabilities(language: str = "auto") -> str:
                         "fixed_version": (vuln.get("fix_versions") or [None])[0],
                         "description": vuln.get("description", "")[:500]
                     })
-
             return json.dumps({
                 "language": "python",
                 "issues": issues,
@@ -220,10 +239,6 @@ def check_dependency_vulnerabilities(language: str = "auto") -> str:
             }, indent=2)
 
         if language == "javascript":
-            proc = _run_shell("npm audit --json", timeout=180)
-            if proc.returncode == 127:
-                return json.dumps({"error": "npm audit not available"})
-
             audit = json.loads(proc.stdout) if proc.stdout else {}
             issues = []
             for advisory in audit.get("advisories", {}).values():

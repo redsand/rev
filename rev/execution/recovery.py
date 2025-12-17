@@ -190,45 +190,27 @@ class RecoveryPlanner:
 
         error_lower = error_message.lower() if error_message else ""
 
-        # Test failures -> retry with --verbose
-        if "test" in error_lower or "pytest" in error_lower:
-            actions.append(RecoveryAction(
-                description="Retry tests with verbose output for better diagnosis",
-                strategy=RecoveryStrategy.RETRY,
-                commands=["pytest -vv"],
-                requires_approval=False,
-                risk_level="low",
-                estimated_success_rate=0.3,
-                metadata={"retry_type": "verbose_tests"}
-            ))
+        # Configuration for error patterns and recovery commands
+        error_config = {
+            "test": {"commands": ["pytest -vv"], "metadata": {"retry_type": "verbose_tests"}},
+            "pytest": {"commands": ["pytest -vv"], "metadata": {"retry_type": "verbose_tests"}},
+            "import": {"commands": ["pip install -r requirements.txt", "npm install"], "metadata": {"retry_type": "dependency_fix"}},
+            "module": {"commands": ["pip install -r requirements.txt", "npm install"], "metadata": {"retry_type": "dependency_fix"}},
+            "syntax": {"commands": ["ruff check --fix ."], "metadata": {"retry_type": "auto_format"}},
+            "invalid syntax": {"commands": ["ruff check --fix ."], "metadata": {"retry_type": "auto_format"}},
+        }
 
-        # Import errors -> retry with dependency check
-        if "import" in error_lower or "module" in error_lower:
-            actions.append(RecoveryAction(
-                description="Check and install missing dependencies",
-                strategy=RecoveryStrategy.ALTERNATIVE,
-                commands=[
-                    "pip list",
-                    "pip install -r requirements.txt"
-                ],
-                requires_approval=False,
-                risk_level="low",
-                estimated_success_rate=0.6,
-                metadata={"retry_type": "dependency_fix"}
-            ))
-
-        # Syntax errors -> retry with linter auto-fix
-        if "syntax" in error_lower or "invalid syntax" in error_lower:
-            actions.append(RecoveryAction(
-                description="Attempt auto-fix with code formatter",
-                strategy=RecoveryStrategy.ALTERNATIVE,
-                commands=["ruff check --fix ."],
-                requires_approval=False,
-                risk_level="low",
-                estimated_success_rate=0.4,
-                metadata={"retry_type": "auto_format"}
-            ))
-
+        for error, config in error_config.items():
+            if error in error_lower:
+                actions.append(RecoveryAction(
+                    description=f"Attempt to fix '{error}' error",
+                    strategy=RecoveryStrategy.ALTERNATIVE,
+                    commands=config["commands"],
+                    requires_approval=False,
+                    risk_level="low",
+                    estimated_success_rate=0.4,
+                    metadata=config["metadata"]
+                ))
         return actions
 
 

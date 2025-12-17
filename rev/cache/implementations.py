@@ -251,53 +251,33 @@ class DependencyTreeCache(IntelligentCache):
         super().__init__(name="dependency_tree", ttl=600, **kwargs)  # 10 minutes TTL
         self.root = root
 
+    lang_config = {
+        "python": ["requirements.txt", "pyproject.toml"],
+        "javascript": ["package.json"],
+        "rust": ["Cargo.toml"],
+        "go": ["go.mod"],
+    }
+
     def get_dependencies(self, language: str) -> Optional[str]:
         """Get cached dependency analysis."""
-        # Check if dependency file has changed
-        dep_file_path = None
-
-        if language == "python":
-            if (self.root / "requirements.txt").exists():
-                dep_file_path = self.root / "requirements.txt"
-            elif (self.root / "pyproject.toml").exists():
-                dep_file_path = self.root / "pyproject.toml"
-        elif language == "javascript":
-            if (self.root / "package.json").exists():
-                dep_file_path = self.root / "package.json"
-        elif language == "rust":
-            if (self.root / "Cargo.toml").exists():
-                dep_file_path = self.root / "Cargo.toml"
-        elif language == "go":
-            if (self.root / "go.mod").exists():
-                dep_file_path = self.root / "go.mod"
-
-        if dep_file_path and dep_file_path.exists():
-            mtime = dep_file_path.stat().st_mtime
-            cache_key = f"{language}:{dep_file_path}:{mtime}"
-            return self.get(cache_key)
-
+        dep_files = self.lang_config.get(language, [])
+        for dep_file in dep_files:
+            dep_file_path = self.root / dep_file
+            if dep_file_path.exists():
+                mtime = dep_file_path.stat().st_mtime
+                cache_key = f"{language}:{dep_file_path}:{mtime}"
+                cached_result = self.get(cache_key)
+                if cached_result is not None:
+                    return cached_result
         return None
 
     def set_dependencies(self, language: str, result: str):
         """Cache dependency analysis."""
-        dep_file_path = None
-
-        if language == "python":
-            if (self.root / "requirements.txt").exists():
-                dep_file_path = self.root / "requirements.txt"
-            elif (self.root / "pyproject.toml").exists():
-                dep_file_path = self.root / "pyproject.toml"
-        elif language == "javascript":
-            if (self.root / "package.json").exists():
-                dep_file_path = self.root / "package.json"
-        elif language == "rust":
-            if (self.root / "Cargo.toml").exists():
-                dep_file_path = self.root / "Cargo.toml"
-        elif language == "go":
-            if (self.root / "go.mod").exists():
-                dep_file_path = self.root / "go.mod"
-
-        if dep_file_path and dep_file_path.exists():
-            mtime = dep_file_path.stat().st_mtime
-            cache_key = f"{language}:{dep_file_path}:{mtime}"
-            self.set(cache_key, result, metadata={"language": language, "file": str(dep_file_path)})
+        dep_files = self.lang_config.get(language, [])
+        for dep_file in dep_files:
+            dep_file_path = self.root / dep_file
+            if dep_file_path.exists():
+                mtime = dep_file_path.stat().st_mtime
+                cache_key = f"{language}:{dep_file_path}:{mtime}"
+                self.set(cache_key, result, metadata={"language": language, "file": str(dep_file_path)})
+                return

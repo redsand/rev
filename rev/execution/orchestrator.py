@@ -43,11 +43,12 @@ from rev.config import (
     MAX_ADAPTIVE_REPLANS,
     MAX_VALIDATION_RETRIES,
 )
-from rev.llm.client import get_token_usage
-from rev.core.context import RevContext, ResourceBudget # Import ResourceBudget from context
-from rev.core.shared_enums import AgentPhase # Import AgentPhase from shared_enums
-from rev.core.agent_registry import AgentRegistry # Import AgentRegistry
-from rev.cache import clear_analysis_caches # Clear analysis caches between iterations
+from rev.llm.client import get_token_usage, ollama_chat
+from rev.core.context import RevContext, ResourceBudget
+from rev.core.shared_enums import AgentPhase
+from rev.core.agent_registry import AgentRegistry
+from rev.cache import clear_analysis_caches
+import re
 
 
 @dataclass
@@ -77,11 +78,9 @@ class OrchestratorConfig:
     max_planning_iterations: int = config.MAX_PLANNING_TOOL_ITERATIONS
 
     def __post_init__(self):
-        # Enforce strictly sequential execution (single worker only)
         if self.parallel_workers != 1:
             self.parallel_workers = 1
         
-        # If legacy max_retries is provided, apply to all retry knobs for backward compatibility
         if self.max_retries is not None:
             self.orchestrator_retries = self.max_retries
             self.plan_regen_retries = self.max_retries
@@ -122,80 +121,54 @@ class Orchestrator:
     """Coordinates all agents for autonomous task execution."""
 
     def __init__(self, project_root: Path, config: Optional[OrchestratorConfig] = None):
-        """Initialize the orchestrator.
-
-        Args:
-            project_root: Root path of the project
-            config: Orchestrator configuration
-        """
         self.project_root = project_root
         self._user_config_provided = config is not None
         self.config = config or OrchestratorConfig()
-        self.context: Optional[RevContext] = None # Will be initialized in _run_single_attempt
+        self.context: Optional[RevContext] = None
         self.learning_agent = LearningAgent(project_root) if self.config.enable_learning else None
 
     def _update_phase(self, new_phase: AgentPhase):
-        """Updates the current phase and logs the transition."""
         if self.context:
             self.context.set_current_phase(new_phase)
             if config.EXECUTION_MODE != 'sub-agent':
                 print(f"\nðŸ”¸ Entering phase: {new_phase.value}")
 
     def _collect_repo_stats(self) -> Dict[str, Any]:
-        """Collects relevant repository statistics for routing decisions."""
-        # Placeholder implementation - can be expanded to use more sophisticated git/file analysis
         repo_context_raw = get_repo_context()
         repo_context = {} if isinstance(repo_context_raw, str) else repo_context_raw
-
-        stats = {
+        return {
             "file_count": len(repo_context.get("all_files", [])),
-            "estimated_complexity": 5, # Placeholder: Medium complexity
-            "last_commit_age_days": 7, # Placeholder: 7 days old
+            "estimated_complexity": 5,
+            "last_commit_age_days": 7,
             "has_tests_dir": os.path.isdir(self.project_root / "tests"),
             "has_docs_dir": os.path.isdir(self.project_root / "docs"),
             "has_examples_dir": os.path.isdir(self.project_root / "examples"),
         }
-        return stats
 
     def execute(self, user_request: str) -> OrchestratorResult:
-        """Execute a task through the full agent pipeline.
-
-        Args:
-            user_request: The user's task request
-
-        Returns:
-            OrchestratorResult with execution outcome
-        """
+        """Execute a task through the full agent pipeline."""
         aggregate_errors: List[str] = []
         last_result: Optional[OrchestratorResult] = None
-
-        # Initialize global context for this run
         self.context = RevContext(user_request=user_request)
-        self.context.repo_context = get_repo_context() # Initial repo context
+        self.context.repo_context = get_repo_context()
 
         for attempt in range(self.config.orchestrator_retries + 1):
             if attempt > 0:
                 print(f"\n\n🔄 Orchestrator retry {attempt}/{self.config.orchestrator_retries}")
-                # Reset plan-specific state for retry
                 self.context.plan = None
                 self.context.state_manager = None
                 self.context.errors = []
-                # Note: We preserve agent_insights across retries to track all attempts
 
             result = self._run_single_attempt(user_request)
             aggregate_errors.extend([f"Attempt {attempt + 1}: {err}" for err in self.context.errors])
 
-            if result.success:
-                result.errors = aggregate_errors
-                result.agent_insights = self.context.agent_insights # Collect final insights
-                return result
-            if result.no_retry: # no_retry will be set by the orchestrator (e.g. max retries exceeded)
+            if result.success or result.no_retry:
                 result.errors = aggregate_errors
                 result.agent_insights = self.context.agent_insights
                 return result
 
             last_result = result
-            last_result.errors.extend(self.context.errors) # Accumulate errors from context
+            last_result.errors.extend(self.context.errors)
 
         if last_result:
             last_result.errors = aggregate_errors
@@ -209,477 +182,15 @@ class Orchestrator:
             agent_insights=self.context.agent_insights
         )
         
-    def _format_review_feedback_for_planning(self, review: ReviewDecision, user_request: str) -> str:
-        """
-        Format review feedback for the planning agent.
-
-        Args:
-            review: The PlanReview object containing feedback.
-            user_request: The original user request.
-
-        Returns:
-            A formatted string containing actionable feedback for the planner.
-        """
-        feedback_parts = []
-
-        # Add issues
-        if review.issues:
-            feedback_parts.append("ISSUES TO ADDRESS:")
-            for i, issue in enumerate(review.issues, 1):
-                if isinstance(issue, dict):
-                    severity = issue.get('severity', 'unknown')
-                    description = issue.get('description', str(issue))
-                    feedback_parts.append(f"  {i}. [{severity.upper()}] {description}")
-                else:
-                    feedback_parts.append(f"  {i}. {issue}")
-
-        # Add security concerns
-        if review.security_concerns:
-            feedback_parts.append("\nSECURITY CONCERNS:")
-            for i, concern in enumerate(review.security_concerns, 1):
-                feedback_parts.append(f"  {i}. {concern}")
-
-        # Add missing tasks
-        if review.missing_tasks:
-            feedback_parts.append("\nMISSING TASKS:")
-            for i, task in enumerate(review.missing_tasks, 1):
-                feedback_parts.append(f"  {i}. {task}")
-
-        # Add suggestions
-        if review.suggestions:
-            feedback_parts.append("\nSUGGESTIONS:")
-            for i, suggestion in enumerate(review.suggestions, 1):
-                feedback_parts.append(f"  {i}. {suggestion}")
-
-        # Add overall assessment
-        if review.overall_assessment:
-            feedback_parts.append(f"\nOVERALL ASSESSMENT:")
-            feedback_parts.append(f"  {review.overall_assessment}")
-
-        # Add confidence score
-        feedback_parts.append(f"\nReview confidence: {review.confidence_score:.0%}")
-
-        return "\n".join(feedback_parts) if feedback_parts else "No specific feedback provided."
-
-    def _regenerate_followup_plan(self, prompt: str, original_plan: ExecutionPlan, coding_mode: bool) -> Optional[ExecutionPlan]:
-            """Regenerates a follow-up plan based on execution feedback or agent requests.
-            """
-            print(f"\n🔄 Regenerating follow-up plan: {prompt[:100]}...")
-            try:
-                followup_plan = planning_mode(
-                    prompt,
-                    coding_mode=coding_mode,
-                    max_plan_tasks=self.config.max_plan_tasks,
-                    max_planning_iterations=self.config.max_planning_iterations,
-                )
-                if not followup_plan or not followup_plan.tasks:
-                    self.context.add_error("Follow-up planning agent produced no tasks or an invalid plan.")
-                    return None
-                print(f"  ✓ Follow-up plan generated with {len(followup_plan.tasks)} tasks.")
-                return followup_plan
-            except Exception as e:
-                self.context.add_error(f"Follow-up planning failed: {e}")
-                traceback.print_exc()
-                return None
-   
-    def _wait_for_user_resume(self) -> bool:
-        """
-        Wait for user to signal they're ready to resume execution.
-
-        Returns:
-            True if user wants to resume, False if they want to abort.
-        """
-        print("\n" + "=" * 60)
-        print("EXECUTION PAUSED - AWAITING USER ACTION")
-        print("=" * 60)
-        print("Type 'resume' to continue, or 'abort' to stop execution:")
-        print("=" * 60)
-
-        while True:
-            try:
-                user_input = input("> ").strip().lower()
-
-                if user_input == "resume":
-                    print("[OK] Resuming execution...")
-                    return True
-                elif user_input == "abort":
-                    print("[ABORT] Aborting execution...")
-                    return False
-                else:
-                    print("Invalid input. Type 'resume' or 'abort':")
-            except (EOFError, KeyboardInterrupt):
-                print("\n[ABORT] User interrupted - aborting execution")
-                return False
-
-    def _prompt_user_on_stuck_execution(self, failed_tasks: list, user_request: str) -> bool:
-        """
-        Prompt user when system detects it's stuck in a loop (same tasks failing repeatedly).
-
-        Args:
-            failed_tasks: List of Task objects that are failing
-            user_request: Original user request
-
-        Returns:
-            True if user wants to continue, False to abort
-        """
-        print("\n" + "=" * 60)
-        print("SYSTEM APPEARS STUCK")
-        print("=" * 60)
-        print(f"The same {len(failed_tasks)} task(s) have failed multiple times:")
-        for task in failed_tasks:
-            print(f"  • {task.description[:70]}")
-            if task.error:
-                print(f"    Error: {task.error[:80]}")
-        print("\nOptions:")
-        print("  'continue' - Try different approach (replan)")
-        print("  'skip' - Skip these tasks and move forward")
-        print("  'abort' - Stop execution and accept partial results")
-        print("=" * 60)
-
-        while True:
-            try:
-                user_input = input("> ").strip().lower()
-
-                if user_input == "continue":
-                    print("✓ Continuing with new strategy...")
-                    return True
-                elif user_input == "skip":
-                    print("✓ Skipping failed tasks...")
-                    # Mark failed tasks as STOPPED so they won't be retried
-                    for task in failed_tasks:
-                        task.status = TaskStatus.STOPPED
-                    return True
-                elif user_input == "abort":
-                    print("✗ Aborting execution...")
-                    return False
-                else:
-                    print("Invalid input. Type 'continue', 'skip', or 'abort':")
-            except (EOFError, KeyboardInterrupt):
-                print("\n✗ User interrupted - stopping execution")
-                return False
-
-    def _prompt_user_on_max_iterations(self, failed_count: int) -> bool:
-        """
-        Prompt user when max iterations reached with some failed tasks.
-
-        Args:
-            failed_count: Number of failed tasks
-
-        Returns:
-            True to continue trying, False to stop
-        """
-        print("\n" + "=" * 60)
-        print("MAXIMUM ITERATIONS REACHED")
-        print("=" * 60)
-        print(f"Execution hit max iterations with {failed_count} task(s) still failing.")
-        print("The system has tried its best to recover but some tasks remain incomplete.")
-        print("\nOptions:")
-        print("  'accept' - Accept partial completion and move to validation")
-        print("  'skip' - Skip failed tasks and move forward")
-        print("=" * 60)
-
-        while True:
-            try:
-                user_input = input("> ").strip().lower()
-
-                if user_input in ["accept", "skip"]:
-                    if user_input == "skip":
-                        print("✓ Marking remaining failed tasks as stopped...")
-                        # Will be marked as STOPPED by calling code
-                    else:
-                        print("✓ Accepting partial completion...")
-                    return True
-                else:
-                    print("Invalid input. Type 'accept' or 'skip':")
-            except (EOFError, KeyboardInterrupt):
-                print("\n✗ User interrupted - stopping execution")
-                return False
-
-    def _hold_and_retry_validation(
-        self,
-        plan: ExecutionPlan,
-        user_request: str,
-        validation: ValidationReport
-    ) -> ValidationReport:
-        """
-        Enter an interactive hold for validation failures, allowing user to manually fix issues.
-
-        Args:
-            plan: The execution plan.
-            user_request: The original user request.
-            validation: The current validation report.
-
-        Returns:
-            Updated ValidationReport after user intervention and re-validation.
-        """
-        max_manual_retries = 3
-        manual_retry_count = 0
-        current_validation = validation
-
-        while manual_retry_count < max_manual_retries:
-            manual_retry_count += 1
-
-            print("\n" + "=" * 60)
-            print("VALIDATION HOLD - MANUAL INTERVENTION REQUIRED")
-            print("=" * 60)
-            print(f"Validation failed ({manual_retry_count}/{max_manual_retries} manual retry attempt)")
-            print("\nFailed checks:")
-            for i, result in enumerate(current_validation.results, 1):
-                if result.status == ValidationStatus.FAILED:
-                    print(f"  {i}. {result.name}: {result.message}")
-            print("\nPlease manually fix the issues and type 'resume' to retry validation.")
-            print("Type 'abort' to give up on validation and return to main prompt.")
-            print("=" * 60)
-
-            # Wait for user to signal they're ready
-            should_resume = self._wait_for_user_resume()
-
-            if not should_resume:
-                print("  → User aborted validation. Returning to main prompt.")
-                return current_validation
-
-            # Re-run validation
-            print("\n  → Re-running validation after user intervention...")
-            current_validation = validate_execution(
-                plan,
-                user_request,
-                run_tests=True,
-                run_linter=True,
-                check_syntax=True,
-                enable_auto_fix=False,
-                validation_mode=self.config.validation_mode,
-            )
-
-            if current_validation.overall_status != ValidationStatus.FAILED:
-                print("  ✓ Validation passed after user intervention!")
-                return current_validation
-            else:
-                print(f"  ⚠️ Validation still failing. ({manual_retry_count}/{max_manual_retries} attempts)")
-                if manual_retry_count >= max_manual_retries:
-                    print(f"  → Max manual retry attempts ({max_manual_retries}) reached.")
-                    break
-
-        print(f"\n  → Giving up on manual validation after {manual_retry_count} attempt(s).")
-        return current_validation
-
-    def _emit_run_metrics(self, plan: Optional[ExecutionPlan], result: OrchestratorResult, budget: ResourceBudget):
-        """Emits run metrics for logging and analysis."""
-        print(f"\n🔥 Emitting run metrics...")
-        # Placeholder for actual metrics emission (e.g., to a file, dashboard, or telemetry system)
-        metrics = {
-            "run_id": self.context.run_id,
-            "user_request": result.run_mode,
-            "success": result.success,
-            "phase_reached": result.phase_reached.value,
-            "execution_time": result.execution_time,
-            "total_steps": budget.steps_used,
-            "total_tokens": budget.tokens_used,
-            "total_cost": 0.0, # Placeholder
-            "errors": result.errors,
-            "agent_insights": result.agent_insights,
-        }
-        print(f"   Metrics: {metrics}")
-   
-    def _dispatch_to_sub_agents(self, context: RevContext) -> bool:
-        """
-        Dispatch tasks to appropriate sub-agents based on action_type.
-
-        Args:
-            context: The RevContext containing the plan and shared state.
-
-        Returns:
-            True if all sub-agent tasks were executed successfully, False otherwise.
-        """
-        if not context.plan or not context.plan.tasks:
-            print("  ⚠️ No tasks in plan to dispatch")
-            return False
-
-        # Get registered action types
-        registered_action_types = AgentRegistry.get_registered_action_types()
-        print(f"  → Registered action types: {', '.join(registered_action_types)}")
-
-        # Filter tasks that can be handled by sub-agents
-        agent_tasks = [task for task in context.plan.tasks if task.action_type in registered_action_types]
-
-        if not agent_tasks:
-            print(f"  ⚠️ No tasks found matching registered action types")
-            return False
-
-        print(f"  → Found {len(agent_tasks)} task(s) for sub-agent execution")
-
-        overall_success = True
-
-        for task in agent_tasks:
-            # Skip completed tasks
-            if task.status == TaskStatus.COMPLETED:
-                continue
-
-            # For failed tasks, skip unless in recovery mode (will be replanned)
-            if task.status == TaskStatus.FAILED:
-                print(f"  ⏭️  Skipping task {task.task_id}: already failed, awaiting replan")
-                continue
-
-            # Check dependencies
-            if task.dependencies:
-                deps_met = all(
-                    context.plan.tasks[dep_idx].status == TaskStatus.COMPLETED
-                    for dep_idx in task.dependencies
-                    if dep_idx < len(context.plan.tasks)
-                )
-                if not deps_met:
-                    failed_deps = [str(context.plan.tasks[dep_idx].task_id)
-                                 for dep_idx in task.dependencies
-                                 if dep_idx < len(context.plan.tasks) and context.plan.tasks[dep_idx].status != TaskStatus.COMPLETED]
-                    print(f"  ⏭️  Skipping task {task.task_id}: dependencies not met (blocked by: {', '.join(failed_deps)})")
-                    task.status = TaskStatus.STOPPED
-                    continue
-
-            # Update task status
-            task.status = TaskStatus.IN_PROGRESS
-            print(f"\n  🤖 Dispatching task {task.task_id} ({task.action_type}): {task.description}")
-
-            try:
-                # Get the appropriate agent for this action type
-                agent = AgentRegistry.get_agent_instance(task.action_type)
-
-                # Execute the task
-                result = agent.execute(task, context)
-
-                # Update task with result and check for agent signals
-                task.result = result
-
-                # Check if agent signaled recovery or failure
-                if isinstance(result, str):
-                    if result.startswith("[RECOVERY_REQUESTED]"):
-                        # Agent needs replanning - don't mark complete
-                        task.status = TaskStatus.FAILED
-                        task.error = result[len("[RECOVERY_REQUESTED]"):]
-                        print(f"  ⚠️ Task {task.task_id} requested recovery: {task.error[:100]}")
-                        overall_success = False
-                    elif result.startswith("[FINAL_FAILURE]"):
-                        # Agent exhausted recovery attempts
-                        task.status = TaskStatus.FAILED
-                        task.error = result[len("[FINAL_FAILURE]"):]
-                        print(f"  ✗ Task {task.task_id} failed after recovery attempts: {task.error[:100]}")
-                        context.add_error(f"Task {task.task_id}: {task.error}")
-                        overall_success = False
-                    elif result.startswith("[USER_REJECTED]"):
-                        # User rejected the change
-                        task.status = TaskStatus.STOPPED
-                        task.error = result[len("[USER_REJECTED]"):]
-                        print(f"  ⏭️  Task {task.task_id} rejected by user: {task.error[:100]}")
-                        overall_success = False
-                    else:
-                        # Normal success
-                        task.status = TaskStatus.COMPLETED
-                        print(f"  ✓ Task {task.task_id} completed successfully")
-
-                else:
-                    # Non-string result = execution error
-                    task.status = TaskStatus.FAILED
-                    task.error = f"Invalid result type: {type(result)}"
-                    print(f"  ✗ Task {task.task_id} returned invalid result: {task.error}")
-                    overall_success = False
-
-            except Exception as e:
-                error_msg = f"Sub-agent execution exception for task {task.task_id}: {e}"
-                print(f"  ✗ {error_msg}")
-                task.status = TaskStatus.FAILED
-                task.error = str(e)
-                context.add_error(error_msg)
-                overall_success = False
-
-                # Continue to next task unless this was a critical failure
-                continue
-
-        # Determine overall success
-        completed_tasks = [t for t in agent_tasks if t.status == TaskStatus.COMPLETED]
-        failed_tasks = [t for t in agent_tasks if t.status == TaskStatus.FAILED]
-
-        print(f"\n  📊 Sub-agent execution summary: {len(completed_tasks)}/{len(agent_tasks)} completed, {len(failed_tasks)} failed")
-
-        return overall_success and len(failed_tasks) == 0
-
-
-    def _should_adaptively_replan(self, plan: ExecutionPlan, execution_success: bool, budget: ResourceBudget, adaptive_attempt: int) -> bool:
-        """Determines if adaptive replanning should be triggered."""
-        if execution_success or budget.is_exceeded() or adaptive_attempt >= self.config.adaptive_replan_attempts:
-            return False
-        return not execution_success or self.context.agent_requests
-
-    def _continuous_sub_agent_execution(self, user_request: str, coding_mode: bool) -> bool:
-        """
-        Executes a task by continuously replanning and executing the next best action.
-        """
-        print("\n" + "=" * 60)
-        print("CONTINUOUS SUB-AGENT MODE (REPL-Style)")
-        print("=" * 60)
-
-        completed_tasks_log: List[str] = []
-        iteration = 0
-        max_iterations = 25  # Safety break
-
-        while iteration < max_iterations:
-            iteration += 1
-            if self.context.resource_budget.is_exceeded():
-                print(f"\n⚠️ Resource budget exceeded at step {iteration}")
-                return True
-
-            work_summary = "No actions taken yet."
-            if completed_tasks_log:
-                work_summary = "Work Completed So Far:\n" + "\n".join(f"- {log}" for log in completed_tasks_log[-5:])
-
-            print(f"\n🤔 [Step {iteration}] Determining next action...")
-            
-            replanning_prompt = (
-                f"Original Request: {user_request}\n\n{work_summary}\n\n"
-                "Based on the work completed, what is the single next most important action to take? "
-                "If the goal has been achieved, respond with only the text 'GOAL_ACHIEVED'."
-            )
-
-            next_step_plan = planning_mode(
-                replanning_prompt,
-                coding_mode=coding_mode,
-                max_plan_tasks=1,
-                max_planning_iterations=self.config.max_planning_iterations,
-            )
-
-            if not next_step_plan or not next_step_plan.tasks or next_step_plan.tasks[0].description.strip().upper() == "GOAL_ACHIEVED":
-                print("\n✅ Planner determined the goal is achieved.")
-                return True
-
-            next_task = next_step_plan.tasks[0]
-            next_task.task_id = iteration 
-            
-            print(f"  → Next action: [{next_task.action_type.upper()}] {next_task.description[:80]}")
-            
-            temp_plan = ExecutionPlan()
-            temp_plan.tasks = [next_task]
-            self.context.plan = temp_plan
-            self._dispatch_to_sub_agents(self.context)
-
-            log_entry = f"[{next_task.status.name}] {next_task.description}"
-            if next_task.status == TaskStatus.FAILED:
-                log_entry += f" | Reason: {next_task.error}"
-            
-            completed_tasks_log.append(log_entry)
-            print(f"  {'✓' if next_task.status == TaskStatus.COMPLETED else '✗'} {log_entry}")
-
-            self.context.update_repo_context()
-            clear_analysis_caches()
-
-        print(f"\n⚠️  Reached maximum iterations ({max_iterations}). Halting execution.")
-        return False
-
     def _run_single_attempt(self, user_request: str) -> OrchestratorResult:
         """Run a single orchestration attempt."""
-        print("\n" + "=" * 60)
-        print("ORCHESTRATOR - MULTI-AGENT COORDINATION")
-        print("=" * 60)
-        print(f"Task: {user_request[:100]}...")
-        
         execution_mode_val = config.EXECUTION_MODE
-        print(f"Execution Mode: {execution_mode_val.upper()}")
+        if execution_mode_val != 'sub-agent':
+            print("\n" + "=" * 60)
+            print("ORCHESTRATOR - MULTI-AGENT COORDINATION")
+            print("=" * 60)
+            print(f"Task: {user_request[:100]}...")
+            print(f"Execution Mode: {execution_mode_val.upper()}")
 
         self.context.user_request = user_request
         self.context.resource_budget = ResourceBudget()
@@ -700,7 +211,6 @@ class Orchestrator:
         coding_mode = route.mode in coding_modes
 
         try:
-            # FAST PATH for sub-agent (REPL) mode
             if execution_mode_val == 'sub-agent':
                 self._update_phase(AgentPhase.EXECUTION)
                 execution_success = self._continuous_sub_agent_execution(user_request, coding_mode)
@@ -708,44 +218,8 @@ class Orchestrator:
                 result.phase_reached = AgentPhase.COMPLETE if execution_success else AgentPhase.FAILED
                 if not execution_success:
                     result.errors.append("Sub-agent execution failed or was halted.")
-            
-            # HEAVY PATH for all other modes
             else:
-                if self.config.enable_research:
-                    self._update_phase(AgentPhase.RESEARCH)
-                    # ... research logic ...
-                
-                self._update_phase(AgentPhase.PLANNING)
-                plan = planning_mode(
-                    self.context.user_request, coding_mode=coding_mode,
-                    max_plan_tasks=self.config.max_plan_tasks, max_planning_iterations=self.config.max_planning_iterations,
-                )
-                self.context.update_plan(plan)
-                result.plan = self.context.plan
-                self.context.set_state_manager(StateManager(self.context.plan))
-
-                if not self.context.plan.tasks:
-                    raise Exception("Planning agent produced no tasks.")
-
-                if self.config.enable_review:
-                    self._update_phase(AgentPhase.REVIEW)
-                    # ... review logic ...
-
-                self._update_phase(AgentPhase.EXECUTION)
-                execution_success = execution_mode(
-                    self.context.plan, auto_approve=self.config.auto_approve, tools=get_available_tools(),
-                    enable_action_review=self.config.enable_action_review, coding_mode=coding_mode,
-                    state_manager=self.context.state_manager, budget=self.context.resource_budget,
-                )
-
-                if self.config.enable_validation:
-                    self._update_phase(AgentPhase.VALIDATION)
-                    # ... validation logic ...
-                
-                all_tasks_handled = all(t.status == TaskStatus.COMPLETED for t in self.context.plan.tasks)
-                validation_ok = True  # Placeholder
-                result.success = all_tasks_handled and validation_ok
-                result.phase_reached = AgentPhase.COMPLETE if result.success else AgentPhase.VALIDATION
+                self._execute_heavy_path(user_request, coding_mode, result)
         
         except KeyboardInterrupt:
             if self.context.plan and self.context.state_manager:
@@ -774,499 +248,194 @@ class Orchestrator:
         self._display_summary(result)
         return result
 
-        try:
-            # Phase 1: Learning Agent - Get historical insights
-            if self.config.enable_learning and self.learning_agent:
-                self._update_phase(AgentPhase.LEARNING)
-                self.context.resource_budget.update_step()  # Track phase transition
-                if self.context.resource_budget.is_exceeded():
-                    self.context.add_error(f"Resource budget exceeded during learning phase! Usage: {self.context.resource_budget.get_usage_summary()}")
-                    raise Exception("Resource budget exceeded.")
-                suggestions = self.learning_agent.get_suggestions(self.context.user_request)
-                if suggestions["similar_patterns"]:
-                    display_learning_suggestions(suggestions, self.context.user_request)
-                self.context.agent_insights["learning"] = suggestions
-
-            # Phase 2: Research Agent - Explore codebase
-            if self.config.enable_research:
-                self._update_phase(AgentPhase.RESEARCH)
-                self.context.resource_budget.update_step()
-                if self.context.resource_budget.is_exceeded():
-                    self.context.add_error(f"Resource budget exceeded during research phase! Usage: {self.context.resource_budget.get_usage_summary()}")
-                    raise Exception("Resource budget exceeded.")
-                quick_mode = self.config.research_depth == "shallow"
-                research_findings = research_codebase(
-                    self.context.user_request,
-                    quick_mode=quick_mode,
-                    search_depth=self.config.research_depth,
-                    repo_stats=repo_stats,
-                    budget=self.context.resource_budget,
-                )
-                if not research_findings:
-                    research_findings = ResearchFindings()
-                self.context.add_insight("research", "files_found", len(research_findings.relevant_files))
-                self.context.add_insight("research", "complexity", research_findings.estimated_complexity)
-                self.context.add_insight("research", "warnings", len(research_findings.warnings))
-                self.context.agent_insights["research"] = {
-                    "files_found": len(research_findings.relevant_files),
-                    "complexity": research_findings.estimated_complexity,
-                    "warnings": len(research_findings.warnings)
+    def _execute_heavy_path(self, user_request: str, coding_mode: bool, result: OrchestratorResult):
+        if self.config.enable_research:
+            self._update_phase(AgentPhase.RESEARCH)
+        
+        # Phase 2b: Prompt Optimization (optional)
+        if self.config.enable_prompt_optimization:
+            original_request = self.context.user_request
+            optimized_request, was_optimized = optimize_prompt_if_needed(
+                self.context.user_request,
+                auto_optimize=self.config.auto_optimize_prompt
+            )
+            if was_optimized:
+                print(f"\n✓ Request optimized for clarity")
+                self.context.user_request = optimized_request
+                self.context.add_insight("optimization", "prompt_optimized", True)
+                self.context.agent_insights["prompt_optimization"] = {
+                    "optimized": True,
+                    "original": original_request[:100],
+                    "improved": optimized_request[:100]
                 }
 
-            # Phase 2b: Prompt Optimization (optional)
-            if self.config.enable_prompt_optimization:
-                original_request = self.context.user_request
-                optimized_request, was_optimized = optimize_prompt_if_needed(
-                    self.context.user_request,
-                    auto_optimize=self.config.auto_optimize_prompt
-                )
-                if was_optimized:
-                    print(f"\n✓ Request optimized for clarity")
-                    self.context.user_request = optimized_request
-                    self.context.add_insight("optimization", "prompt_optimized", True)
-                    self.context.agent_insights["prompt_optimization"] = {
-                        "optimized": True,
-                        "original": original_request[:100],
-                        "improved": optimized_request[:100]
-                    }
+        self._update_phase(AgentPhase.PLANNING)
+        plan = planning_mode(
+            self.context.user_request, coding_mode=coding_mode,
+            max_plan_tasks=self.config.max_plan_tasks, max_planning_iterations=self.config.max_planning_iterations,
+        )
+        self.context.update_plan(plan)
+        result.plan = self.context.plan
+        self.context.set_state_manager(StateManager(self.context.plan))
 
-            # Phase 3: Planning Agent - Create execution plan
-            self._update_phase(AgentPhase.PLANNING)
-            self.context.resource_budget.update_step()
-            if self.context.resource_budget.is_exceeded():
-                self.context.add_error(f"Resource budget exceeded during planning phase! Usage: {self.context.resource_budget.get_usage_summary()}")
-                raise Exception("Resource budget exceeded.")
+        if not self.context.plan.tasks:
+            raise Exception("Planning agent produced no tasks.")
 
-            plan = planning_mode(
-                self.context.user_request,
-                coding_mode=coding_mode,
-                max_plan_tasks=self.config.max_plan_tasks,
-                max_planning_iterations=self.config.max_planning_iterations,
-            )
-            self.context.update_plan(plan)
-            result.plan = self.context.plan # Update result.plan here
-            self.context.set_state_manager(StateManager(self.context.plan))
+        if self.config.enable_review:
+            self._update_phase(AgentPhase.REVIEW)
 
-            if not self.context.plan.tasks:
-                self.context.add_error("Planning agent produced no tasks")
-                self.context.set_current_phase(AgentPhase.FAILED)
-                raise Exception("Planning agent produced no tasks.")
+        self._update_phase(AgentPhase.EXECUTION)
+        execution_mode(
+            self.context.plan, auto_approve=self.config.auto_approve, tools=get_available_tools(),
+            enable_action_review=self.config.enable_action_review, coding_mode=coding_mode,
+            state_manager=self.context.state_manager, budget=self.context.resource_budget,
+        )
 
-            # Phase 4: Review Agent - Validate plan with retry loop
-            review = None  # Will store the review decision
-            if self.config.enable_review:
-                self._update_phase(AgentPhase.REVIEW)
-                self.context.resource_budget.update_step()
-                if self.context.resource_budget.is_exceeded():
-                    self.context.add_error(f"Resource budget exceeded during review phase! Usage: {self.context.resource_budget.get_usage_summary()}")
-                    raise Exception("Resource budget exceeded.")
-
-                # Retry loop for plan regeneration
-                planning_retry_count = 0
-                max_plan_retries = max(1, self.config.plan_regen_retries)
-                min_plan_tasks = 1 if route.mode == "quick_edit" else 2
-                while planning_retry_count <= max_plan_retries:
-                    if len(self.context.plan.tasks) < min_plan_tasks:
-                        if planning_retry_count >= max_plan_retries:
-                            print(f"\n❌ Plan too small after {max_plan_retries} regeneration attempt(s) (tasks: {len(self.context.plan.tasks)})")
-                            self.context.add_error(f"Plan contained fewer than {min_plan_tasks} tasks after regeneration")
-                            self.context.set_current_phase(AgentPhase.REVIEW)
-                            raise Exception("Plan too small after regeneration.")
-
-                        planning_retry_count += 1
-                        print(f"\n⚠️  Plan too small (only {len(self.context.plan.tasks)} task(s)); regenerating {planning_retry_count}/{max_plan_retries}")
-                        plan = planning_mode(
-                            f"{{{self.context.user_request}}}\n\nRegenerate the plan with at least {min_plan_tasks} distinct tasks and explicit dependencies. Avoid collapsing multi-step work into one task.",
-                            coding_mode=coding_mode,
-                            max_plan_tasks=self.config.max_plan_tasks,
-                            max_planning_iterations=self.config.max_planning_iterations,
-                        )
-                        self.context.update_plan(plan)
-                        self.context.set_state_manager(StateManager(self.context.plan)) # Ensure state manager has the latest plan
-
-                        if not self.context.plan.tasks:
-                            self.context.add_error("Plan regeneration failed")
-                            self.context.set_current_phase(AgentPhase.FAILED)
-                            raise Exception("Plan regeneration failed.")
-                        continue
-
-                    review = review_execution_plan(
-                        self.context.plan,
-                        self.context.user_request,
-                        strictness=self.config.review_strictness,
-                        auto_approve_low_risk=True
-                    )
-                    
-                    review_key = "review" if planning_retry_count == 0 else f"review_retry_{planning_retry_count}"
-                    self.context.agent_insights[review_key] = {
-                        "decision": review.decision.value,
-                        "confidence": review.confidence_score,
-                        "issues": len(review.issues),
-                        "suggestions": len(review.suggestions)
-                    }
-
-
-                    # Handle review decision
-                    if review.decision == ReviewDecision.REJECTED:
-                        print("\n❌ Plan rejected by review agent")
-                        self.context.add_error("Plan rejected by review agent")
-                        self.context.set_current_phase(AgentPhase.REVIEW)
-                        raise Exception("Plan rejected by review agent.")
-
-                    if review.decision == ReviewDecision.REQUIRES_CHANGES:
-                        print(f"\n⚠️  Plan requires changes (attempt {planning_retry_count + 1}/{self.config.plan_regen_retries + 1})")
-                        print(f"   Review confidence: {review.confidence_score:.0%}")
-                        print(f"   Issues found: {len(review.issues)}")
-                        print(f"   Security concerns: {len(review.security_concerns)}")
-                        if review.suggestions:
-                            print(f"   Suggestions: {len(review.suggestions)}")
-
-                        # Check if we've exhausted retries
-                        if planning_retry_count >= max_plan_retries:
-                            print(f"\n❌ Plan still requires changes after {max_plan_retries} regeneration attempt(s)")
-                            self.context.add_error(f"Plan requires changes after {max_plan_retries} regeneration attempts")
-                            self.context.set_current_phase(AgentPhase.REVIEW)
-                            raise Exception("Plan still requires changes after max regeneration attempts.")
-
-                        # Regenerate plan with review feedback
-                        planning_retry_count += 1
-                        print(f"\n🔄 Plan Regeneration {planning_retry_count}/{max_plan_retries}")
-                        print("  → Incorporating review feedback...")
-
-                        # Format review feedback for planning agent
-                        feedback = self._format_review_feedback_for_planning(review, self.context.user_request)
-
-                        # Regenerate plan with feedback
-                        plan = planning_mode(
-                            f"{{{self.context.user_request}}}\n\nIMPORTANT - Address the following review feedback:\n{feedback}",
-                            coding_mode=coding_mode,
-                            max_plan_tasks=self.config.max_plan_tasks,
-                            max_planning_iterations=self.config.max_planning_iterations,
-                        )
-                        self.context.update_plan(plan)
-                        self.context.set_state_manager(StateManager(self.context.plan)) # Ensure state manager has the latest plan
-
-                        if not self.context.plan.tasks:
-                            self.context.add_error("Plan regeneration failed")
-                            self.context.set_current_phase(AgentPhase.FAILED)
-                            raise Exception("Plan regeneration failed.")
-
-                        print(f"  ✓ Generated new plan with {len(self.context.plan.tasks)} tasks")
-                        # Continue to next iteration for re-review
-
-                    else:
-                        # Plan approved or approved with suggestions - proceed
-                        if planning_retry_count > 0:
-                            print(f"\n✓ Plan approved after {planning_retry_count} regeneration attempt(s)!")
-                        break
-
-            adaptive_attempt = 0
-            while True:
-                # Phase 5: Execution Agent - Execute the plan
-                self._update_phase(AgentPhase.EXECUTION)
-                self.context.resource_budget.update_step()
-                if self.context.resource_budget.is_exceeded():
-                    self.context.add_error(f"Resource budget exceeded before execution phase! Usage: {self.context.resource_budget.get_usage_summary()}")
-                    raise Exception("Resource budget exceeded.")
-                
-                tools = get_available_tools()
-
-                if config.EXECUTION_MODE == 'sub-agent':
-                    print("  → Executing with Sub-Agent architecture (continuous mode)...")
-                    execution_success = self._continuous_sub_agent_execution(user_request, coding_mode)
-                    if execution_success:
-                        print(f"  ✓ Sub-Agent execution phase complete. Success: {execution_success}")
-                        # After continuous sub-agent execution, ensure tasks are marked as completed if no errors occurred
-                        if not self.context.agent_requests:
-                            for task in self.context.plan.tasks:
-                                if task.status != TaskStatus.FAILED and task.action_type in AgentRegistry.get_registered_action_types():
-                                    task.status = TaskStatus.COMPLETED
-                    else:
-                        print(f"  ⚠️ Sub-Agent execution stopped by user")
-                        self.context.add_error("Sub-agent execution stopped by user")
-                    # In continuous mode, we handle replanning internally, so skip adaptive replan
-                    # Just validate the results and move on
-                    break
-                elif self.config.parallel_workers > 1:
-                    execution_success = concurrent_execution_mode(
-                        self.context.plan,
-                        max_workers=self.config.parallel_workers,
-                        auto_approve=self.config.auto_approve,
-                        tools=tools,
-                        enable_action_review=self.config.enable_action_review,
-                        coding_mode=coding_mode,
-                        state_manager=self.context.state_manager,
-                        budget=self.context.resource_budget,
-                    )
-                else:
-                    execution_success = execution_mode(
-                        self.context.plan,
-                        auto_approve=self.config.auto_approve,
-                        tools=tools,
-                        enable_action_review=self.config.enable_action_review,
-                        coding_mode=coding_mode,
-                        state_manager=self.context.state_manager,
-                        budget=self.context.resource_budget,
-                    )
-
-                # Check for agent requests before adaptive replan
-                if self.context.agent_requests:
-                    print(f"\n⚠️ Agent requests detected: {self.context.agent_requests}")
-                    # For now, any agent request triggers replanning
-                    execution_success = False 
-                    # Use the first request found. In a real system, a more sophisticated
-                    # request handling mechanism would be needed.
-                    first_request = self.context.agent_requests[0]
-                    self.context.add_insight("orchestrator", "agent_request_triggered_replan", first_request.get("details", {}))
-                    self.context.add_insight("orchestrator", "adaptive_replan_count", adaptive_attempt + 1)
-                    # Clear requests to avoid re-triggering immediately
-                    self.context.agent_requests = []
-                    # Do not break from while loop, continue to adaptive replan
-
-                if not self._should_adaptively_replan(self.context.plan, execution_success, self.context.resource_budget, adaptive_attempt):
-                    break
-
-                adaptive_attempt += 1
-                print(f"\n🔄 Adaptive plan regeneration ({adaptive_attempt}/{self.config.adaptive_replan_attempts})")
-                followup_prompt_suffix = ""
-                # Incorporate agent request details into followup prompt if available
-                if "agent_request_triggered_replan" in self.context.agent_insights.get("orchestrator", {}):
-                    request_details = self.context.agent_insights["orchestrator"]["agent_request_triggered_replan"]
-                    followup_prompt_suffix += f"\n\nPrevious execution was interrupted by an agent request for replanning due to: {request_details.get('reason', 'unspecified reason')}"
-
-                followup_plan = self._regenerate_followup_plan(
-                    f"{{{self.context.user_request}}}{followup_prompt_suffix}", 
-                    self.context.plan,
-                    coding_mode,
-                )
-
-                if not followup_plan or not followup_plan.tasks:
-                    print("  ✗ Adaptive regeneration did not produce a usable plan")
-                    self.context.add_error("Adaptive regeneration did not produce a usable plan.")
-                    break
-
-                self.context.update_plan(followup_plan)
-                # Continue loop to execute regenerated plan
-                continue
-
-            # Phase 6: Validation Agent - Verify results
-            validation = None
-            if self.config.enable_validation:
-                self._update_phase(AgentPhase.VALIDATION)
-                self.context.resource_budget.update_step()
-                if self.context.resource_budget.is_exceeded():
-                    self.context.add_error(f"Resource budget exceeded during validation phase! Usage: {self.context.resource_budget.get_usage_summary()} (continuing)")
-                    # Do not raise an exception, allow validation to proceed but mark as potential issue
-                validation = validate_execution(
-                    self.context.plan,
-                    self.context.user_request,
-                    run_tests=True,
-                    run_linter=True,
-                    check_syntax=True,
-                    enable_auto_fix=self.config.enable_auto_fix,
-                    validation_mode=self.config.validation_mode,
-                )
-                if validation:
-                    self.context.agent_insights["validation"] = {
-                        "status": validation.overall_status.value,
-                        "checks_passed": sum(1 for r in validation.results if r.status == ValidationStatus.PASSED),
-                        "checks_failed": sum(1 for r in validation.results if r.status == ValidationStatus.FAILED),
-                        "auto_fixed": validation.auto_fixed,
-                        "commands": validation.details.get("commands_run", []),
-                    }
-                else:
-                    print("⚠️ Validation returned no result; marking as skipped")
-                    self.context.add_insight("validation", "status", ValidationStatus.SKIPPED.value)
-                    self.context.add_insight("validation", "reason", "validation_returned_none")
-                    validation = ValidationReport(overall_status=ValidationStatus.SKIPPED, results=[])
-
-                # Auto-fix loop for validation failures
-                if validation.overall_status == ValidationStatus.FAILED:
-                    self.context.add_error("Initial validation failed")
-
-                    retry_count = 0
-                    while retry_count < self.config.validation_retries and validation.overall_status == ValidationStatus.FAILED:
-                        retry_count += 1
-                        print(f"\n🔄 Validation Retry {retry_count}/{self.config.validation_retries}")
-
-                        # Format validation feedback for LLM
-                        feedback = format_validation_feedback_for_llm(validation, self.context.user_request)
-                        if not feedback:
-                            print("  → No specific feedback to provide")
-                            break
-
-                        # Attempt to fix validation failures
-                        print("  → Attempting auto-fix...")
-                        tools = get_available_tools()
-                        fix_success = fix_validation_failures(
-                            validation_feedback=feedback,
-                            user_request=self.context.user_request,
-                            tools=tools,
-                            enable_action_review=self.config.enable_action_review,
-                            max_fix_attempts=3,
-                            coding_mode=coding_mode
-                        )
-
-                        if not fix_success:
-                            print("  ✗ Auto-fix failed")
-                            break
-
-                        # Re-run validation to check if fixes worked
-                        print("  → Re-running validation...")
-                        validation = validate_execution(
-                            self.context.plan,
-                            self.context.user_request,
-                            run_tests=True,
-                            run_linter=True,
-                            check_syntax=True,
-                            enable_auto_fix=False,  # Don't auto-fix during retry validation
-                            validation_mode=self.config.validation_mode,
-                        )
-
-                        self.context.add_insight("validation", f"retry_{retry_count}_status", validation.overall_status.value)
-                        self.context.add_insight("validation", f"retry_{retry_count}_checks_passed", sum(1 for r in validation.results if r.status == ValidationStatus.PASSED))
-                        self.context.add_insight("validation", f"retry_{retry_count}_checks_failed", sum(1 for r in validation.results if r.status == ValidationStatus.FAILED))
-
-
-                        if validation.overall_status == ValidationStatus.FAILED:
-                            print(f"  ⚠️  Validation still failing after retry {retry_count}")
-                        else:
-                            print(f"  ✓ Validation passed after {retry_count} fix attempt(s)!")
-                            self.context.errors = [e for e in self.context.errors if e != "Initial validation failed"]
-                            break
-
-                    if validation.overall_status == ValidationStatus.FAILED:
-                        print(f"\n❌ Validation failed after {retry_count} retry attempt(s)")
-                        self.context.add_error(f"Validation failed after {retry_count} retry attempts")
-
-                        # Persist checkpoint before blocking for manual intervention
-                        if self.context.state_manager:
-                            checkpoint_path = self.context.state_manager.save_checkpoint(reason="validation_failed", force=True)
-                            if checkpoint_path:
-                                print(f"  ✓ Checkpoint saved to: {checkpoint_path}")
-                                print("  The run will pause until you confirm a retry.")
-
-                        # Enter an interactive hold so we do not fail forward. Users can
-                        # manually address issues and type a resume keyword to continue
-                        # validation from the same phase.
-                        validation = self._hold_and_retry_validation(
-                            self.context.plan,
-                            self.context.user_request,
-                            validation,
-                        )
-                        if validation.overall_status != ValidationStatus.FAILED:
-                            self.context.add_insight("validation", "interactive_retries", self.context.agent_insights.get("validation", {}).get("interactive_retries", 0) + 1)
-                            self.context.errors = [e for e in self.context.errors if "Validation failed" in e and "retry attempts" in e]
-
-            # Determine if all tasks are completed or successfully handled in sub-agent mode
-            all_tasks_handled = False
-            if config.EXECUTION_MODE == 'sub-agent':
-                handled_action_types = AgentRegistry.get_registered_action_types()
-                handled_tasks = [t for t in self.context.plan.tasks if t.action_type in handled_action_types]
-                all_tasks_handled = all(t.status == TaskStatus.COMPLETED for t in handled_tasks) and len(handled_tasks) > 0
-            else:
-                all_tasks_handled = all(t.status == TaskStatus.COMPLETED for t in self.context.plan.tasks) and len(self.context.plan.tasks) > 0
-
-
-            validation_ok = (
-                not self.config.enable_validation or
-                (validation and validation.overall_status in [ValidationStatus.PASSED, ValidationStatus.PASSED_WITH_WARNINGS, ValidationStatus.SKIPPED, None])
-            )
-            
-            # The result object must be initialized with values that are always available
-            # especially since it's returned on early exceptions.
-            result.success = False
-            result.phase_reached = self.context.current_phase
-            result.plan = self.context.plan
-            result.resource_budget = self.context.resource_budget
-            result.agent_insights = self.context.agent_insights
-            result.errors = self.context.errors
-            result.run_mode = run_mode # run_mode is defined earlier
-            result.validation_status = validation.overall_status if validation else None
-            result.review_decision = review.decision if review else None
-
-            if all_tasks_handled and validation_ok:
-                self._update_phase(AgentPhase.COMPLETE)
-                result.phase_reached = AgentPhase.COMPLETE
-                result.success = True
-            else:
-                result.phase_reached = self.context.current_phase
-                result.success = False
-
-            # Learn from execution only when we reached a valid stopping point
-            if self.config.enable_learning and self.learning_agent and self.context.plan:
-                execution_time = time.time() - start_time
-                validation_passed = (validation and validation.overall_status in [ValidationStatus.PASSED, ValidationStatus.PASSED_WITH_WARNINGS]) if validation else True
-                self.learning_agent.learn_from_execution(
-                    self.context.plan,
-                    self.context.user_request,
-                    execution_time,
-                    validation_passed
-                )
-
-        except KeyboardInterrupt:
-            if self.context.plan is not None and self.context.state_manager is not None:
-                try:
-                    self.context.resource_budget.tokens_used = get_token_usage().get("total", self.context.resource_budget.tokens_used)
-                    token_usage = {
-                        "total": self.context.resource_budget.tokens_used,
-                        "prompt": 0,
-                        "completion": 0,
-                    }
-                    self.context.state_manager.on_interrupt(token_usage=token_usage)
-                except Exception as exc: # pragma: no cover - best-effort resume handling
-                    print(f"⚠️  Warning: could not save checkpoint on interrupt ({{exc}})")
-            raise
-        except Exception as e:
-            failure_phase = self.context.current_phase if self.context.current_phase else AgentPhase.FAILED
-            tb = traceback.format_exc()
-            print(f"\n?? Exception during {failure_phase.value} phase: {e}")
-            print(tb)
-            self.context.add_error(f"{failure_phase.value} phase error: {e}")
-            self.context.add_insight("exception", "phase", failure_phase.value)
-            self.context.add_insight("exception", "error", str(e))
-            self.context.add_insight("exception", "traceback", tb)
-            
-            # Ensure result is always an OrchestratorResult
-            result.phase_reached = failure_phase
-            result.success = False
-            result.errors.append(f"{failure_phase.value} phase error: {e}") # Add to existing errors
-
-        result.execution_time = time.time() - start_time
-
-        # Refresh token usage from the LLM tracker before displaying summary
-        self.context.resource_budget.tokens_used = get_token_usage().get("total", self.context.resource_budget.tokens_used)
-
-        # Display final resource budget summary
-        self.context.resource_budget.update_time()
-        print(f"\n📊 Resource Usage Summary:")
-        print(f"   {self.context.resource_budget.get_usage_summary()}")
-        remaining = self.context.resource_budget.get_remaining()
-        print(f"   Remaining: Steps {remaining['steps']:.0f}% | Tokens {remaining['tokens']:.0f}% | Time {remaining['time']:.0f}s%")
-        if self.context.resource_budget.is_exceeded():
-            print(f"   ⚠️  Budget exceeded!")
-
-        self._emit_run_metrics(result.plan, result, self.context.resource_budget)
-        self._display_summary(result)
-        return result
+        if self.config.enable_validation:
+            self._update_phase(AgentPhase.VALIDATION)
         
-    def _display_summary(self, result: OrchestratorResult):
-        """Displays a summary of the orchestration result."""
+        all_tasks_handled = all(t.status == TaskStatus.COMPLETED for t in self.context.plan.tasks)
+        validation_ok = True
+        result.success = all_tasks_handled and validation_ok
+        result.phase_reached = AgentPhase.COMPLETE if result.success else AgentPhase.VALIDATION
+
+    def _determine_next_action(self, user_request: str, work_summary: str, coding_mode: bool) -> Optional[Task]:
+        """A truly lightweight planner that makes a direct LLM call."""
+        available_actions = AgentRegistry.get_registered_action_types()
+        
+        prompt = (
+            f"Original Request: {user_request}\n\n"
+            f"{work_summary}\n\n"
+            "Based on the work completed, what is the single next most important action to take? "
+            "If a previous action failed, propose a different action to achieve the goal.\n"
+            f"You MUST choose one of the following action types: {available_actions}\n"
+            "Your response should be a single line in the format: [ACTION_TYPE] description of the action.\n"
+            "Example: [EDIT] refactor the authentication middleware to use the new session manager.\n"
+            "If the goal has been achieved, respond with only the text 'GOAL_ACHIEVED'."
+        )
+        
+        response_data = ollama_chat([{"role": "user", "content": prompt}])
+
+        if "error" in response_data:
+            print(f"  ❌ LLM Error in lightweight planner: {response_data['error']}")
+            return None
+
+        response_content = response_data.get("message", {}).get("content", "")
+        if not response_content or response_content.strip().upper() == "GOAL_ACHIEVED":
+            return None
+        
+        match = re.match(r"[\s]*\[(.*?)\]\s*(.*)", response_content.strip())
+        if not match:
+            return Task(description=response_content.strip(), action_type="general")
+        
+        action_type = match.group(1).lower()
+        description = match.group(2).strip()
+        return Task(description=description, action_type=action_type)
+
+    def _continuous_sub_agent_execution(self, user_request: str, coding_mode: bool) -> bool:
+        """Executes a task by continuously calling a lightweight planner for the next action."""
         print("\n" + "=" * 60)
-        print("ORCHESTRATOR - EXECUTION SUMMARY")
+        print("CONTINUOUS SUB-AGENT MODE (REPL-Style)")
         print("=" * 60)
-        status = "SUCCESS" if result.success else "FAILED"
-        print(f"Overall Status: {status} (Phase: {result.phase_reached.value})")
-        print(f"Execution Time: {result.execution_time:.2f} seconds")
-        if result.errors:
-            print("Errors:")
-            for error in result.errors:
-                print(f"  - {error}")
-        if result.plan and result.plan.tasks:
-            completed_tasks = [t for t in result.plan.tasks if t.status == TaskStatus.COMPLETED]
-            failed_tasks = [t for t in result.plan.tasks if t.status == TaskStatus.FAILED]
-            stopped_tasks = [t for t in result.plan.tasks if t.status == TaskStatus.STOPPED]
-            print(f"Tasks: {len(completed_tasks)} completed, {len(failed_tasks)} failed, {len(stopped_tasks)} skipped/stopped of {len(result.plan.tasks)} total")
+
+        completed_tasks_log: List[str] = []
+        iteration = 0
+        max_iterations = 25
+
+        while iteration < max_iterations:
+            iteration += 1
+            if self.context.resource_budget.is_exceeded():
+                print(f"\n⚠️ Resource budget exceeded at step {iteration}")
+                return True
+
+            work_summary = "No actions taken yet."
+            if completed_tasks_log:
+                work_summary = "Work Completed So Far:\n" + "\n".join(f"- {log}" for log in completed_tasks_log[-5:])
+
+            next_task = self._determine_next_action(user_request, work_summary, coding_mode)
+
+            if not next_task:
+                print("\n✅ Planner determined the goal is achieved.")
+                return True
+
+            next_task.task_id = iteration
+            print(f"  â†’ Next action: [{next_task.action_type.upper()}] {next_task.description[:80]}")
+            
+            self.context.plan = ExecutionPlan(tasks=[next_task])
+            self._dispatch_to_sub_agents(self.context)
+
+            log_entry = f"[{next_task.status.name}] {next_task.description}"
+            if next_task.status == TaskStatus.FAILED:
+                log_entry += f" | Reason: {next_task.error}"
+            
+            completed_tasks_log.append(log_entry)
+            print(f"  {'âœ ভারী' if next_task.status == TaskStatus.COMPLETED else '✗'} {log_entry}")
+
+            self.context.update_repo_context()
+            clear_analysis_caches()
+
+        print(f"\n⚠️  Reached maximum iterations ({max_iterations}). Halting execution.")
+        return False
+
+    def _dispatch_to_sub_agents(self, context: RevContext) -> bool:
+        """Dispatches tasks to appropriate sub-agents."""
+        if not context.plan or not context.plan.tasks:
+            return False
+            
+        task = context.plan.tasks[0]
+        if task.status == TaskStatus.COMPLETED:
+            return True
+
+        # Alias common actions to the canonical ones the agents expect
+        action_aliases = {
+            "create": "add",
+            "write": "add",
+        }
+        
+        normalized_action_type = task.action_type.lower()
+        if normalized_action_type in action_aliases:
+            task.action_type = action_aliases[normalized_action_type]
+
+        if task.action_type not in AgentRegistry.get_registered_action_types():
+            task.status = TaskStatus.FAILED
+            task.error = f"No agent available to handle action type: '{task.action_type}'"
+            return False
+
+        task.status = TaskStatus.IN_PROGRESS
+        try:
+            agent = AgentRegistry.get_agent_instance(task.action_type)
+            result = agent.execute(task, context)
+            task.result = result
+            if isinstance(result, str) and (result.startswith("[RECOVERY_REQUESTED]") or result.startswith("[FINAL_FAILURE]") or result.startswith("[USER_REJECTED]")):
+                if result.startswith("[RECOVERY_REQUESTED]"):
+                    task.status = TaskStatus.FAILED
+                    task.error = result[len("[RECOVERY_REQUESTED]"):]
+                elif result.startswith("[FINAL_FAILURE]"):
+                    task.status = TaskStatus.FAILED
+                    task.error = result[len("[FINAL_FAILURE]"):]
+                    context.add_error(f"Task {task.task_id}: {task.error}")
+                else:
+                    task.status = TaskStatus.STOPPED
+                    task.error = result[len("[USER_REJECTED]"):]
+                return False
+            else:
+                task.status = TaskStatus.COMPLETED
+                return True
+        except Exception as e:
+            task.status = TaskStatus.FAILED
+            task.error = str(e)
+            context.add_error(f"Sub-agent execution exception for task {task.task_id}: {e}")
+            return False
+    
+    def _emit_run_metrics(self, plan: Optional[ExecutionPlan], result: OrchestratorResult, budget: ResourceBudget):
+        if config.EXECUTION_MODE != 'sub-agent':
+            print(f"\n🔥 Emitting run metrics...")
+    
+    def _display_summary(self, result: OrchestratorResult):
+        if config.EXECUTION_MODE != 'sub-agent':
+            print("\n" + "=" * 60)
+            print("ORCHESTRATOR - EXECUTION SUMMARY")
+            print("=" * 60)
 
 def run_orchestrated(
     user_request: str,
@@ -1288,27 +457,7 @@ def run_orchestrated(
     enable_prompt_optimization: bool = True,
     auto_optimize_prompt: bool = False,
 ) -> OrchestratorResult:
-    """Run a task through the orchestrated multi-agent pipeline.
-
-    This is the main entry point for orchestrated execution.
-
-    Args:
-        user_request: The user's task request
-        project_root: Root path of the project
-        enable_learning: Enable Learning Agent
-        enable_research: Enable Research Agent
-        enable_review: Enable Review Agent
-        enable_validation: Enable Validation Agent
-        review_strictness: Review strictness level
-        enable_action_review: Enable action-level review
-        parallel_workers: Number of parallel execution workers
-        auto_approve: Auto-approve plans with warnings
-        research_depth: Research depth (off/shallow/medium/deep)
-
-    Returns:
-        OrchestratorResult with execution outcome
-    """
-    config_obj = OrchestratorConfig( # Renamed to config_obj to avoid name collision with module config
+    config_obj = OrchestratorConfig(
         enable_learning=enable_learning,
         enable_research=enable_research,
         enable_review=enable_review,

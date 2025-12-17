@@ -213,73 +213,68 @@ def check_license_compliance(path: str = ".") -> str:
     Returns:
         JSON string with license information
     """
+    lang_config = {
+        "python": {"file": "requirements.txt", "command": "pip-licenses --format=json"},
+        "javascript": {"file": "package.json", "command": "npx license-checker --json"},
+    }
+
     try:
-        # Python: Use pip-licenses
-        if (ROOT / "requirements.txt").exists():
-            cmd = "pip-licenses --format=json"
-            proc = _run_shell(cmd, timeout=60)
+        for lang, config in lang_config.items():
+            if (ROOT / config["file"]).exists():
+                proc = _run_shell(config["command"], timeout=60)
+                if proc.returncode != 127:
+                    continue
 
-            if proc.returncode != 127:
                 try:
-                    licenses = json.loads(proc.stdout) if proc.stdout else []
+                    if lang == "python":
+                        licenses = json.loads(proc.stdout) if proc.stdout else []
+                        restricted = ["GPL-3.0", "AGPL-3.0", "GPL-2.0"]
+                        issues: List[Dict[str, Any]] = []
 
-                    # Flag potentially problematic licenses
-                    restricted = ["GPL-3.0", "AGPL-3.0", "GPL-2.0"]
-                    issues: List[Dict[str, Any]] = []
+                        for pkg in licenses:
+                            license_name = pkg.get("License", "")
+                            if any(r in license_name for r in restricted):
+                                issues.append({
+                                    "package": pkg.get("Name"),
+                                    "license": license_name,
+                                    "issue": "Restrictive license"
+                                })
 
-                    for pkg in licenses:
-                        license_name = pkg.get("License", "")
-                        if any(r in license_name for r in restricted):
-                            issues.append({
-                                "package": pkg.get("Name"),
-                                "license": license_name,
-                                "issue": "Restrictive license"
-                            })
+                        return json.dumps({
+                            "language": "python",
+                            "tool": "pip-licenses",
+                            "total_packages": len(licenses),
+                            "licenses": licenses,
+                            "compliance_issues": issues,
+                            "issue_count": len(issues)
+                        })
+                    elif lang == "javascript":
+                        licenses = json.loads(proc.stdout) if proc.stdout else {}
+                        restricted = ["GPL-3.0", "AGPL-3.0", "GPL-2.0"]
+                        issues: List[Dict[str, Any]] = []
 
-                    return json.dumps({
-                        "language": "python",
-                        "tool": "pip-licenses",
-                        "total_packages": len(licenses),
-                        "licenses": licenses,
-                        "compliance_issues": issues,
-                        "issue_count": len(issues)
-                    })
+                        for pkg_name, pkg_info in licenses.items():
+                            license_name = pkg_info.get("licenses", "")
+                            if any(r in str(license_name) for r in restricted):
+                                issues.append({
+                                    "package": pkg_name,
+                                    "license": license_name,
+                                    "issue": "Restrictive license"
+                                })
+
+                        return json.dumps({
+                            "language": "javascript",
+                            "tool": "license-checker",
+                            "total_packages": len(licenses),
+                            "compliance_issues": issues,
+                            "issue_count": len(issues)
+                        })
                 except Exception:
                     pass
 
-        # JavaScript: Use license-checker
-        if (ROOT / "package.json").exists():
-            cmd = "npx license-checker --json"
-            proc = _run_shell(cmd, timeout=60)
-
-            try:
-                licenses = json.loads(proc.stdout) if proc.stdout else {}
-
-                restricted = ["GPL-3.0", "AGPL-3.0", "GPL-2.0"]
-                issues: List[Dict[str, Any]] = []
-
-                for pkg_name, pkg_info in licenses.items():
-                    license_name = pkg_info.get("licenses", "")
-                    if any(r in str(license_name) for r in restricted):
-                        issues.append({
-                            "package": pkg_name,
-                            "license": license_name,
-                            "issue": "Restrictive license"
-                        })
-
-                return json.dumps({
-                    "language": "javascript",
-                    "tool": "license-checker",
-                    "total_packages": len(licenses),
-                    "compliance_issues": issues,
-                    "issue_count": len(issues)
-                })
-            except Exception:
-                pass
-
         return json.dumps({
-            "message": "No license checking tool available",
-            "install": "pip install pip-licenses (Python) or npm install license-checker (JavaScript)"
+            "message": "No license checking tool available for this project type.",
+            "install_hint": "Consider installing 'pip-licenses' for Python or 'license-checker' for JavaScript."
         })
 
     except Exception as e:
