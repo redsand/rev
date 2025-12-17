@@ -13,7 +13,7 @@ from typing import Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 
 from rev.models.task import Task, TaskStatus
-from rev.tools.registry import execute_tool
+from rev.tools.registry import execute_tool, get_last_tool_call
 from rev.core.context import RevContext
 
 
@@ -385,6 +385,20 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
         result_path = _extract_path_from_task_result(task.result)
         if result_path:
             extracted_path = Path(result_path.strip().strip("\"'"))
+
+    if not extracted_path:
+        last_call = get_last_tool_call()
+        if last_call:
+            tool_name = (last_call.get("name") or "").lower()
+            if tool_name in {"replace_in_file", "write_file", "apply_patch", "append_to_file"}:
+                args = last_call.get("args") or {}
+                candidate = (
+                    args.get("path")
+                    or args.get("file_path")
+                    or args.get("target_path")
+                )
+                if isinstance(candidate, str) and candidate.strip():
+                    extracted_path = Path(candidate.strip().strip("\"'"))
 
     if not extracted_path:
         return VerificationResult(

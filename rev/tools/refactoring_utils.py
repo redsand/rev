@@ -8,7 +8,7 @@ import ast
 import json
 import re
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
 
 from rev.config import ROOT
 from rev.tools.file_ops import _safe_path
@@ -35,6 +35,29 @@ def _get_class_segments(source: str, tree: ast.Module) -> List[Dict[str, any]]:
                 }
             )
     return segments
+
+
+def _collect_trailing_imports(source: str, tree: ast.Module, first_class_start: int) -> List[str]:
+    """Collect import statements that appear after the first class definition."""
+    trailing: List[str] = []
+    seen: Set[str] = set()
+    lines = source.splitlines()
+
+    for node in tree.body:
+        if not isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        lineno = getattr(node, "lineno", None)
+        if lineno is None or (lineno - 1) < first_class_start:
+            continue
+        segment = ast.get_source_segment(source, node)
+        if not segment and 0 < lineno <= len(lines):
+            segment = lines[lineno - 1].strip()
+        snippet = (segment or "").strip()
+        if not snippet or snippet in seen:
+            continue
+        seen.add(snippet)
+        trailing.append(snippet)
+    return trailing
 
 
 def split_python_module_classes(
@@ -75,8 +98,10 @@ def split_python_module_classes(
         skipped: List[str] = []
 
         # Determine shared prefix (docstring/imports) by chopping everything before first class
+        lines = content.splitlines(keepends=True)
         first_class_start = min(seg["start"] for seg in class_segments)
-        shared_prefix = "".join(content.splitlines(keepends=True)[:first_class_start]).strip("\n")
+        shared_prefix = "".join(lines[:first_class_start]).strip("\n")
+        trailing_imports = _collect_trailing_imports(content, tree, first_class_start)
 
         # Write individual class files
         for seg in class_segments:
@@ -89,6 +114,8 @@ def split_python_module_classes(
             parts: List[str] = []
             if shared_prefix:
                 parts.append(shared_prefix.rstrip() + "\n\n")
+            if trailing_imports:
+                parts.append("\n".join(trailing_imports).rstrip() + "\n\n")
             parts.append(seg["source"].lstrip("\n"))
             class_file.write_text("".join(parts).rstrip() + "\n", encoding="utf-8")
             created_files.append(str(class_file.relative_to(ROOT)))

@@ -121,6 +121,7 @@ from rev.tools.utils import (
 from rev.tools.registry import (
     execute_tool,
     get_available_tools,
+    get_last_tool_call,
 )
 
 __all__ = [
@@ -207,4 +208,5 @@ __all__ = [
     # Registry
     "execute_tool",
     "get_available_tools",
+    "get_last_tool_call",
 ]
