@@ -45,26 +45,17 @@ def _rel_to_root(path: pathlib.Path) -> str:
 
 
 def _safe_path(rel: str) -> pathlib.Path:
-    """Resolve path safely within allowed roots (project root or /add-dir)."""
+    """Resolve path safely within the project root."""
+    # Normalize and resolve the path
+    # os.path.normpath is used to handle path separators correctly
+    # and resolve '..' components.
+    safe_path = ROOT.joinpath(os.path.normpath(rel)).resolve()
 
-    candidate = pathlib.Path(rel)
-    potential_paths = []
-
-    if candidate.is_absolute():
-        potential_paths.append(candidate.resolve())
-    else:
-        for root in _allowed_roots():
-            potential_paths.append((root / rel).resolve())
-
-    for path in potential_paths:
-        for root in _allowed_roots():
-            try:
-                path.relative_to(root)
-                return path
-            except ValueError:
-                continue
-
-    raise ValueError(f"Path escapes allowed roots: {rel}")
+    # Check if the resolved path is within the project root
+    if ROOT.resolve() not in safe_path.parents and safe_path != ROOT.resolve():
+        raise ValueError(f"Path escapes repo root: {rel}")
+        
+    return safe_path
 
 
 def _is_text_file(path: pathlib.Path) -> bool:

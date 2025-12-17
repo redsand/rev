@@ -1,7 +1,7 @@
 import json
 from rev.agents.base import BaseAgent
 from rev.models.task import Task
-from rev.tools.registry import execute_tool
+from rev.tools.registry import execute_tool, get_available_tools
 from rev.llm.client import ollama_chat
 from rev.core.context import RevContext
 import re
