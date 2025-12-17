@@ -20,7 +20,8 @@
       "Bash(do if [ \"$f\" != \"README.md\" ])",
       "Bash(then mv \"$f\" \"docs/$f\")",
       "Bash(fi)",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(python test_improvements.py:*)"
     ]
   }
 }

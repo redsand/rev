@@ -339,6 +339,50 @@ class Orchestrator:
         result.success = all_tasks_handled and validation_ok
         result.phase_reached = AgentPhase.COMPLETE if result.success else AgentPhase.VALIDATION
 
+    def _decompose_extraction_task(self, failed_task: Task) -> Optional[Task]:
+        """
+        When a task fails, ask the LLM if it can be decomposed into more granular steps.
+
+        Rather than using brittle keyword detection, we let the LLM evaluate the failed
+        task and suggest a decomposition strategy if one exists.
+        """
+        decomposition_prompt = (
+            f"A task has failed: {failed_task.description}\n\n"
+            f"Error: {failed_task.error if failed_task.error else 'Unknown'}\n\n"
+            f"Can this task be decomposed into smaller, more specific subtasks that might succeed?\n"
+            f"If yes, describe the first subtask that should be attempted next in detail.\n"
+            f"If no, just respond with 'CANNOT_DECOMPOSE'.\n\n"
+            f"Important: Be specific about what concrete action the next task should take. "
+            f"Use [ACTION_TYPE] format like [CREATE] or [EDIT] or [REFACTOR]."
+        )
+
+        response_data = ollama_chat([{"role": "user", "content": decomposition_prompt}])
+
+        if "error" in response_data or not response_data.get("message", {}).get("content"):
+            return None
+
+        response_content = response_data.get("message", {}).get("content", "").strip()
+
+        if "CANNOT_DECOMPOSE" in response_content.upper():
+            return None
+
+        # Try to parse the decomposed task format [ACTION_TYPE] description
+        match = re.match(r"[\s]*\[(.*?)\]\s*(.*)", response_content)
+        if match:
+            action_type = match.group(1).lower()
+            description = match.group(2).strip()
+            print(f"\n  [DECOMPOSITION] LLM suggested decomposition:")
+            print(f"    Action: {action_type}")
+            print(f"    Task: {description}")
+            return Task(description=description, action_type=action_type)
+        else:
+            # If LLM didn't follow format, create a generic refactor task with its suggestion
+            print(f"\n  [DECOMPOSITION] LLM suggestion: {response_content[:100]}")
+            return Task(
+                description=response_content,
+                action_type="refactor"
+            )
+
     def _determine_next_action(self, user_request: str, work_summary: str, coding_mode: bool) -> Optional[Task]:
         """A truly lightweight planner that makes a direct LLM call."""
         available_actions = AgentRegistry.get_registered_action_types()
@@ -430,6 +474,14 @@ class Orchestrator:
 
                     # Display detailed debug information
                     self._handle_verification_failure(verification_result)
+
+                    # Try to decompose the failed task into more granular steps
+                    if verification_result.should_replan:
+                        decomposed_task = self._decompose_extraction_task(next_task)
+                        if decomposed_task:
+                            print(f"  [RETRY] Using decomposed task for next iteration")
+                            next_task = decomposed_task
+                            iteration -= 1  # Don't count failed task as an iteration
 
             # STEP 4: REPORT
             log_entry = f"[{next_task.status.name}] {next_task.description}"

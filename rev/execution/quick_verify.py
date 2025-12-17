@@ -27,7 +27,9 @@ class VerificationResult:
 
     def __str__(self) -> str:
         status = '[OK]' if self.passed else '[FAIL]'
-        return f"{status} {self.message}"
+        # Remove any Unicode characters that might cause encoding issues on Windows
+        safe_message = self.message.replace('[OK]', '[OK]').replace('[FAIL]', '[FAIL]').replace('[FAIL]', '[FAIL]')
+        return f"{status} {safe_message}"
 
 
 def verify_task_execution(task: Task, context: RevContext) -> VerificationResult:
@@ -92,16 +94,8 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
     issues = []
     debug_info = {}
 
-    # Check if this is an extraction task
-    desc_lower = task.description.lower()
-    is_extraction = any(word in desc_lower for word in ["extract", "break out", "split", "separate", "move out"])
-
-    if not is_extraction:
-        return VerificationResult(
-            passed=True,
-            message="Refactoring task does not appear to be an extraction",
-            details={"is_extraction": False}
-        )
+    # Don't try to guess the refactoring type - just verify the repo state changed
+    # If there are issues below, they'll be caught. Otherwise, assume it succeeded.
 
     # Try to identify the target directory from the task description
     # Look for patterns like "./lib/analysts/" or "lib/analysts"
@@ -122,7 +116,7 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
 
     # Check 1: Directory exists
     if not target_dir.exists():
-        issues.append(f"❌ Target directory '{target_dir}' does not exist - extraction was never started")
+        issues.append(f"[FAIL] Target directory '{target_dir}' does not exist - extraction was never started")
         debug_info["status"] = "DIRECTORY_NOT_CREATED"
     else:
         details["directory_exists"] = True
@@ -134,7 +128,7 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
 
         if not py_files:
             issues.append(
-                f"❌ No Python files in '{target_dir}' - extraction created directory but extracted NO FILES\n"
+                f"[FAIL] No Python files in '{target_dir}' - extraction created directory but extracted NO FILES\n"
                 f"   This means the RefactoringAgent either:\n"
                 f"   1. Did not actually extract any classes\n"
                 f"   2. Failed to create individual files\n"
@@ -161,9 +155,9 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
                             module_name = rel_import_match.group(1)
                             module_file = target_dir / f"{module_name}.py"
                             if not module_file.exists():
-                                import_errors.append(f"❌ {py_file.name}: imports from missing {module_name}.py")
+                                import_errors.append(f"[FAIL] {py_file.name}: imports from missing {module_name}.py")
                 except Exception as e:
-                    import_errors.append(f"❌ Error reading {py_file.name}: {e}")
+                    import_errors.append(f"[FAIL] Error reading {py_file.name}: {e}")
 
             if import_errors:
                 issues.extend(import_errors)
@@ -194,12 +188,12 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
                     debug_info["main_file_status"] = "UPDATED_WITH_IMPORTS"
                 else:
                     issues.append(
-                        f"❌ Original file {old_file} was NOT updated with imports from {target_dir}\n"
+                        f"[FAIL] Original file {old_file} was NOT updated with imports from {target_dir}\n"
                         f"   File still contains {original_size} bytes (should be much smaller if extracted)"
                     )
                     debug_info["main_file_status"] = "NOT_UPDATED"
             except Exception as e:
-                issues.append(f"❌ Could not read {old_file}: {e}")
+                issues.append(f"[FAIL] Could not read {old_file}: {e}")
                 debug_info["main_file_status"] = f"ERROR: {str(e)}"
 
     if issues:
@@ -212,7 +206,7 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
 
     return VerificationResult(
         passed=True,
-        message=f"✓ Extraction successful: {details.get('files_created', 0)} files created with valid imports",
+        message=f"[OK] Extraction successful: {details.get('files_created', 0)} files created with valid imports",
         details={**details, "debug": debug_info}
     )
 
