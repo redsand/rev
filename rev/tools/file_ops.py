@@ -45,26 +45,17 @@ def _rel_to_root(path: pathlib.Path) -> str:
 
 
 def _safe_path(rel: str) -> pathlib.Path:
-    """Resolve path safely within allowed roots (project root or /add-dir)."""
+    """Resolve path safely within the project root."""
+    # Normalize and resolve the path
+    # os.path.normpath is used to handle path separators correctly
+    # and resolve '..' components.
+    safe_path = ROOT.joinpath(os.path.normpath(rel)).resolve()
 
-    candidate = pathlib.Path(rel)
-    potential_paths = []
-
-    if candidate.is_absolute():
-        potential_paths.append(candidate.resolve())
-    else:
-        for root in _allowed_roots():
-            potential_paths.append((root / rel).resolve())
-
-    for path in potential_paths:
-        for root in _allowed_roots():
-            try:
-                path.relative_to(root)
-                return path
-            except ValueError:
-                continue
-
-    raise ValueError(f"Path escapes allowed roots: {rel}")
+    # Check if the resolved path is within the project root
+    if ROOT.resolve() not in safe_path.parents and safe_path != ROOT.resolve():
+        raise ValueError(f"Path escapes repo root: {rel}")
+        
+    return safe_path
 
 
 def _is_text_file(path: pathlib.Path) -> bool:
@@ -257,6 +248,11 @@ def write_file(path: str, content: str) -> str:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
 
+        # Invalidate cache for this file
+        file_cache = get_file_cache()
+        if file_cache is not None:
+            file_cache.invalidate_file(p)
+
         # Track metrics (Phase 3)
         try:
             from rev.tools.reuse_metrics import track_file_operation
@@ -326,6 +322,12 @@ def delete_file(path: str) -> str:
         if p.is_dir():
             return json.dumps({"error": f"Cannot delete directory (use delete_directory): {path}"})
         p.unlink()
+
+        # Invalidate cache for this file
+        file_cache = get_file_cache()
+        if file_cache is not None:
+            file_cache.invalidate_file(p)
+
         return json.dumps({"deleted": _rel_to_root(p)})
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
@@ -340,6 +342,13 @@ def move_file(src: str, dest: str) -> str:
             return json.dumps({"error": f"Source not found: {src}"})
         dest_p.parent.mkdir(parents=True, exist_ok=True)
         src_p.rename(dest_p)
+
+        # Invalidate cache for both source and destination
+        file_cache = get_file_cache()
+        if file_cache is not None:
+            file_cache.invalidate_file(src_p)
+            file_cache.invalidate_file(dest_p)
+
         return json.dumps({
             "moved": _rel_to_root(src_p),
             "to": _rel_to_root(dest_p)
@@ -355,6 +364,12 @@ def append_to_file(path: str, content: str) -> str:
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("a", encoding="utf-8") as f:
             f.write(content)
+
+        # Invalidate cache for this file
+        file_cache = get_file_cache()
+        if file_cache is not None:
+            file_cache.invalidate_file(p)
+
         return json.dumps({"appended_to": _rel_to_root(p), "bytes": len(content)})
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
@@ -381,6 +396,12 @@ def replace_in_file(path: str, find: str, replace: str, regex: bool = False) -> 
             return json.dumps({"replaced": 0, "file": _rel_to_root(p)})
 
         p.write_text(new_content, encoding="utf-8")
+
+        # Invalidate cache for this file
+        file_cache = get_file_cache()
+        if file_cache is not None:
+            file_cache.invalidate_file(p)
+
         count = len(content.split(find)) - 1 if not regex else len(re.findall(find, content))
         return json.dumps({
             "replaced": count,

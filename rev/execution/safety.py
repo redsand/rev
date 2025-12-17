@@ -135,17 +135,22 @@ def clear_prompt_decisions() -> None:
     _PROMPT_DECISIONS.clear()
 
 
-def prompt_scary_operation(operation: str, reason: str) -> bool:
+def prompt_scary_operation(operation: str, reason: str, auto_approve: bool = False) -> bool:
     """
     Prompt user to confirm a scary operation.
 
     Args:
         operation: Description of the operation to confirm
         reason: Reason why this operation is considered dangerous
+        auto_approve: If True, auto-approve without prompting
 
     Returns:
         True if user approves, False otherwise
     """
+    # If auto_approve is set, skip user prompts
+    if auto_approve:
+        return True
+
     key = (operation, reason)
     if key in _PROMPT_DECISIONS:
         return _PROMPT_DECISIONS[key]

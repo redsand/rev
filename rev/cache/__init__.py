@@ -23,6 +23,7 @@ __all__ = [
     "ASTAnalysisCache",
     "get_all_cache_stats",
     "clear_all_caches",
+    "clear_analysis_caches",
     "save_all_caches",
     "initialize_caches",
     "get_file_cache",
@@ -94,6 +95,26 @@ def clear_all_caches():
     _REPO_CACHE.clear()
     _DEP_CACHE.clear()
     _AST_CACHE.clear()
+
+
+def clear_analysis_caches():
+    """Clear caches that become stale when files change.
+
+    Clears:
+    - LLM response cache (same prompt may yield different answer with new files)
+    - AST analysis cache (files changed so AST is stale)
+    - Dependency tree cache (files changed so dependencies are stale)
+
+    Keeps:
+    - File content cache (invalidated per-file on write)
+    - Repo context cache (updated explicitly after tasks)
+    """
+    if _LLM_CACHE:
+        _LLM_CACHE.clear()
+    if _AST_CACHE:
+        _AST_CACHE.clear()
+    if _DEP_CACHE:
+        _DEP_CACHE.clear()
 
 
 def save_all_caches():

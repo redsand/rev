@@ -116,7 +116,7 @@ function Create-Venv {
     # Activate virtual environment
     $ACTIVATE_SCRIPT = "$VENV_DIR\Scripts\Activate.ps1"
     if (Test-Path $ACTIVATE_SCRIPT) {
-        & $ACTIVATE_SCRIPT
+        . $ACTIVATE_SCRIPT
         Write-Status "Virtual environment activated"
     }
     else {
@@ -124,44 +124,57 @@ function Create-Venv {
     }
 }
 
+# Function to detect project type
+function Detect-ProjectType {
+    if (Test-Path "requirements.txt" -or (Test-Path "pyproject.toml")) {
+        return "python"
+    }
+    elseif (Test-Path "package.json") {
+        return "javascript"
+    }
+    elseif (Test-Path "Cargo.toml") {
+        return "rust"
+    }
+    elseif (Test-Path "go.mod") {
+        return "go"
+    }
+    else {
+        return "unknown"
+    }
+}
+
 # Function to install dependencies
 function Install-Dependencies {
-    Write-Status "Installing dependencies..."
-    
-    # Install minimal requirements
-    if (Test-Path "requirements.txt") {
-        & pip install -r requirements.txt
-        if ($LASTEXITCODE -eq 0) {
-            Write-Status "Minimal requirements installed"
-        }
-        else {
-            Write-WarningMsg "Failed to install minimal requirements"
-        }
-    }
-    
-    # Install development requirements if requested
-    if ($Dev) {
-        if (Test-Path "requirements-dev.txt") {
-            & pip install -r requirements-dev.txt
-            if ($LASTEXITCODE -eq 0) {
+    param([string]$ProjectType)
+    Write-Status "Installing dependencies for $ProjectType project..."
+
+    switch ($ProjectType) {
+        "python" {
+            & python -m pip install --upgrade pip
+            if (Test-Path "requirements.txt") {
+                & python -m pip install -r requirements.txt
+                Write-Status "Minimal requirements installed"
+            }
+            if ($Dev -and (Test-Path "requirements-dev.txt")) {
+                & python -m pip install -r requirements-dev.txt
                 Write-Status "Development requirements installed"
             }
-            else {
-                Write-WarningMsg "Failed to install development requirements"
-            }
-        }
-    }
-    
-    # Install full requirements if requested
-    if ($Full) {
-        if (Test-Path "requirements-full.txt") {
-            & pip install -r requirements-full.txt
-            if ($LASTEXITCODE -eq 0) {
+            if ($Full -and (Test-Path "requirements-full.txt")) {
+                & python -m pip install -r requirements-full.txt
                 Write-Status "Full requirements installed"
             }
-            else {
-                Write-WarningMsg "Failed to install full requirements"
+        }
+        "javascript" {
+            if (Test-CommandExists "npm") {
+                & npm install
+                Write-Status "Dependencies installed"
             }
+            else {
+                Write-ErrorExit "npm is not installed"
+            }
+        }
+        default {
+            Write-WarningMsg "Unsupported project type: $ProjectType. Skipping dependency installation."
         }
     }
 }
@@ -340,10 +353,7 @@ function Show-Help {
 
 # Main function
 function Main {
-    Write-Host "================================" -ForegroundColor $BLUE
-    Write-Host "  $SCRIPT_NAME v$SCRIPT_VERSION" -ForegroundColor $BLUE
-    Write-Host "================================" -ForegroundColor $BLUE
-    Write-Host ""
+    Write-Header
     
     # Handle help
     if ($Help) {
@@ -363,15 +373,17 @@ function Main {
     # Check Python version
     Check-PythonVersion
     
-    # Create and activate virtual environment
-    Create-Venv
-    
-    # Upgrade pip
-    Write-Status "Upgrading pip..."
-    & pip install --upgrade pip
-    
+    # Detect project type
+    $PROJECT_TYPE = Detect-ProjectType
+    Write-Status "Detected project type: $PROJECT_TYPE"
+
+    # Create and activate virtual environment for Python projects
+    if ($PROJECT_TYPE -eq "python") {
+        Create-Venv
+    }
+
     # Install dependencies
-    Install-Dependencies
+    Install-Dependencies -ProjectType $PROJECT_TYPE
     
     # Run tests if requested
     Run-Tests

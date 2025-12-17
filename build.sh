@@ -96,31 +96,55 @@ create_venv() {
     fi
 }
 
+# Function to detect project type
+detect_project_type() {
+    if [[ -f "requirements.txt" ]] || [[ -f "pyproject.toml" ]]; then
+        PROJECT_TYPE="python"
+    elif [[ -f "package.json" ]]; then
+        PROJECT_TYPE="javascript"
+    elif [[ -f "Cargo.toml" ]]; then
+        PROJECT_TYPE="rust"
+    elif [[ -f "go.mod" ]]; then
+        PROJECT_TYPE="go"
+    else
+        PROJECT_TYPE="unknown"
+    fi
+    print_status "Detected project type: $PROJECT_TYPE"
+}
+
 # Function to install dependencies
 install_dependencies() {
-    print_status "Installing dependencies..."
+    print_status "Installing dependencies for $PROJECT_TYPE project..."
     
-    # Install minimal requirements
-    if [[ -f "requirements.txt" ]]; then
-        pip install -r requirements.txt
-        print_status "Minimal requirements installed"
-    fi
-    
-    # Install development requirements if requested
-    if [[ "$INSTALL_DEV" == "true" ]]; then
-        if [[ -f "requirements-dev.txt" ]]; then
-            pip install -r requirements-dev.txt
-            print_status "Development requirements installed"
-        fi
-    fi
-    
-    # Install full requirements if requested
-    if [[ "$INSTALL_FULL" == "true" ]]; then
-        if [[ -f "requirements-full.txt" ]]; then
-            pip install -r requirements-full.txt
-            print_status "Full requirements installed"
-        fi
-    fi
+    case $PROJECT_TYPE in
+        python)
+            pip install --upgrade pip
+            if [[ -f "requirements.txt" ]]; then
+                pip install -r requirements.txt
+                print_status "Minimal requirements installed"
+            fi
+            if [[ "$INSTALL_DEV" == "true" && -f "requirements-dev.txt" ]]; then
+                pip install -r requirements-dev.txt
+                print_status "Development requirements installed"
+            fi
+            if [[ "$INSTALL_FULL" == "true" && -f "requirements-full.txt" ]]; then
+                pip install -r requirements-full.txt
+                print_status "Full requirements installed"
+            fi
+            ;;
+        javascript)
+            if command_exists npm; then
+                npm install
+                print_status "Dependencies installed"
+            else
+                print_error "npm is not installed"
+                exit 1
+            fi
+            ;;
+        *)
+            print_warning "Unsupported project type: $PROJECT_TYPE"
+            ;;
+    esac
 }
 
 # Function to run tests
@@ -258,13 +282,14 @@ main() {
     # Check Python version
     check_python_version
     
-    # Create and activate virtual environment
-    create_venv
-    
-    # Upgrade pip
-    print_status "Upgrading pip..."
-    pip install --upgrade pip
-    
+    # Detect project type
+    detect_project_type
+
+    # Create and activate virtual environment for Python projects
+    if [[ "$PROJECT_TYPE" == "python" ]]; then
+        create_venv
+    fi
+
     # Install dependencies
     install_dependencies
     

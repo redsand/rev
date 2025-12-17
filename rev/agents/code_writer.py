@@ -10,13 +10,17 @@ from typing import Tuple
 import re
 from pathlib import Path
 
-CODE_WRITER_SYSTEM_PROMPT = """You are a specialized Code Writer agent. Your sole purpose is to execute a single coding task by calling the appropriate tool (`write_file` or `replace_in_file`).
+CODE_WRITER_SYSTEM_PROMPT = """You are a specialized Code Writer agent. Your sole purpose is to execute a single coding task by calling the ONLY available tool for this specific task.
 
-You will be given a task description and context about the repository. Analyze them carefully.
+You will be given a task description, action_type, and repository context. Analyze them carefully.
 
 CRITICAL RULES FOR IMPLEMENTATION QUALITY:
 1.  You MUST respond with a single tool call in JSON format. Do NOT provide any other text, explanations, or markdown.
-2.  Based on the task, decide whether to create a new file (`write_file`) or modify an existing one (`replace_in_file`).
+2.  Use ONLY the tool(s) provided for this task's action_type. Other tools are NOT available:
+    - For action_type="create_directory": ONLY use `create_directory`
+    - For action_type="add": ONLY use `write_file`
+    - For action_type="edit": ONLY use `replace_in_file`
+    - For action_type="refactor": use `write_file` or `replace_in_file` as needed
 3.  If using `replace_in_file`, you MUST provide the *exact* `old_string` content to be replaced, including all original indentation and surrounding lines for context. Use the provided file content to construct this.
 4.  Ensure the `new_string` is complete and correctly indented to match the surrounding code.
 5.  If creating a new file, ensure the COMPLETE, FULL file content is provided to the `write_file` tool - not stubs or placeholders.
@@ -59,6 +63,14 @@ Example for `write_file`:
   "arguments": {
     "file_path": "path/to/new_file.py",
     "content": "full content of the new file"
+  }
+}
+
+Example for `create_directory`:
+{
+  "tool_name": "create_directory",
+  "arguments": {
+    "path": "path/to/new/directory"
   }
 }
 
@@ -166,9 +178,9 @@ class CodeWriterAgent(BaseAgent):
         print(f"{'='*70}")
 
         if tool_name == "replace_in_file":
-            file_path = arguments.get("file_path", "unknown")
-            old_string = arguments.get("old_string", "")
-            new_string = arguments.get("new_string", "")
+            file_path = arguments.get("path", "unknown")
+            old_string = arguments.get("find", "")
+            new_string = arguments.get("replace", "")
 
             print(f"\nFile: {file_path}")
             print(f"\n{self._COLOR_CYAN}--- Original Content{self._COLOR_RESET}")
@@ -184,7 +196,7 @@ class CodeWriterAgent(BaseAgent):
             print(f"\n{self._COLOR_CYAN}Changes:{self._COLOR_RESET} {old_lines} → {new_lines} lines")
 
         elif tool_name == "write_file":
-            file_path = arguments.get("file_path", "unknown")
+            file_path = arguments.get("path", "unknown")
             content = arguments.get("content", "")
             lines = len(content.splitlines())
 
@@ -200,10 +212,19 @@ class CodeWriterAgent(BaseAgent):
             if len(content.splitlines()) > 20:
                 print(f"  ... ({len(content.splitlines()) - 20} more lines)")
 
+        elif tool_name == "create_directory":
+            dir_path = arguments.get("path", "unknown")
+            print(f"\nDirectory: {dir_path}")
+            print(f"Action: {self._COLOR_GREEN}CREATE DIRECTORY{self._COLOR_RESET}")
+
         print(f"\n{'='*70}")
 
-    def _prompt_for_approval(self, tool_name: str, file_path: str) -> bool:
+    def _prompt_for_approval(self, tool_name: str, file_path: str, context: 'RevContext' = None) -> bool:
         """Prompt user to approve the change (matching linear mode behavior)."""
+        # If auto_approve is set in context, skip user prompts
+        if context and context.auto_approve:
+            return True
+
         # Check if this is a scary operation
         is_scary, scary_reason = is_scary_operation(tool_name, {"file_path": file_path})
 
@@ -211,7 +232,9 @@ class CodeWriterAgent(BaseAgent):
         operation_desc = f"{tool_name}: {file_path}"
 
         if is_scary:
-            return prompt_scary_operation(operation_desc, scary_reason)
+            # If context is provided and auto_approve is set, pass it to the scary operation prompt
+            auto_approve_scary = context.auto_approve if context else False
+            return prompt_scary_operation(operation_desc, scary_reason, auto_approve=auto_approve_scary)
         else:
             # For non-scary operations, still ask for confirmation
             print(f"\n{'='*70}")
@@ -246,10 +269,30 @@ class CodeWriterAgent(BaseAgent):
         # Track recovery attempts
         recovery_attempts = self.increment_recovery_attempts(task, context)
 
-        available_tools = [tool for tool in get_available_tools() if tool['function']['name'] in ['write_file', 'replace_in_file']]
+        # Constrain available tools based on task action_type
+        all_tools = get_available_tools()
+
+        # Determine which tools are appropriate for this action_type
+        if task.action_type == "create_directory":
+            # Directory creation tasks only get create_directory tool
+            tool_names = ['create_directory']
+        elif task.action_type == "add":
+            # File creation tasks only get write_file tool
+            tool_names = ['write_file']
+        elif task.action_type == "edit":
+            # File modification tasks only get replace_in_file tool
+            tool_names = ['replace_in_file']
+        elif task.action_type == "refactor":
+            # Refactoring may need to create or modify files
+            tool_names = ['write_file', 'replace_in_file']
+        else:
+            # Unknown action types get all tools (fallback)
+            tool_names = ['write_file', 'replace_in_file', 'create_directory']
+
+        available_tools = [tool for tool in all_tools if tool['function']['name'] in tool_names]
 
         # Build enhanced user message with extraction guidance
-        task_guidance = f"Task: {task.description}"
+        task_guidance = f"Task (action_type: {task.action_type}): {task.description}"
 
         # Add extraction guidance based on task type
         if any(word in task.description.lower() for word in ["extract", "port", "move", "refactor", "create"]):
@@ -309,12 +352,12 @@ class CodeWriterAgent(BaseAgent):
                     if not error_type:
                         print(f"  → CodeWriterAgent will call tool '{tool_name}'")
 
-                        # Display change preview for write and replace operations
-                        if tool_name in ["write_file", "replace_in_file"]:
+                        # Display change preview for write, replace, and create_directory operations
+                        if tool_name in ["write_file", "replace_in_file", "create_directory"]:
                             self._display_change_preview(tool_name, arguments)
 
                             # Validate import targets before proceeding
-                            file_path = arguments.get("file_path", "unknown")
+                            file_path = arguments.get("path", "unknown")
                             if tool_name == "write_file":
                                 content = arguments.get("content", "")
                                 is_valid, warning_msg = self._validate_import_targets(file_path, content)
@@ -324,12 +367,12 @@ class CodeWriterAgent(BaseAgent):
                                     print(f"  Note: This file has imports that may not exist. Proceed with caution.")
 
                             # Ask for user approval
-                            if not self._prompt_for_approval(tool_name, file_path):
+                            if not self._prompt_for_approval(tool_name, file_path, context):
                                 print(f"  ✗ Change rejected by user")
                                 return "[USER_REJECTED] Change was not approved by user"
 
                         # Execute the tool
-                        print(f"  ⏳ Applying {tool_name} to {arguments.get('file_path', 'file')}...")
+                        print(f"  ⏳ Applying {tool_name} to {arguments.get('path', 'file')}...")
                         result = execute_tool(tool_name, arguments)
                         print(f"  ✓ Successfully applied {tool_name}")
                         return result

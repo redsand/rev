@@ -40,6 +40,7 @@ class AgentRegistry:
 # Code modification agents
 AgentRegistry.register_agent("add", CodeWriterAgent)
 AgentRegistry.register_agent("edit", CodeWriterAgent)
+AgentRegistry.register_agent("create_directory", CodeWriterAgent)  # File/directory creation
 AgentRegistry.register_agent("refactor", RefactoringAgent)
 
 # Testing and debugging agents

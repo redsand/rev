@@ -3,7 +3,9 @@
 """Main entry point for rev CLI."""
 
 import sys
+import os
 import argparse
+import shutil
 from typing import Optional
 
 from . import config
@@ -54,6 +56,11 @@ def main():
         "--base-url",
         default=config.OLLAMA_BASE_URL,
         help=f"Ollama base URL (default: {config.OLLAMA_BASE_URL})"
+    )
+    parser.add_argument(
+        "-y", "--yes",
+        action="store_true",
+        help="Automatically approve all changes"
     )
     parser.add_argument(
         "--prompt",
@@ -152,9 +159,51 @@ def main():
         help="List all available checkpoints"
     )
     parser.add_argument(
+        "--optimize-prompt",
+        action="store_true",
+        help="Enable prompt optimization - analyzes and suggests improvements to vague requests"
+    )
+    parser.add_argument(
+        "--no-optimize-prompt",
+        action="store_true",
+        help="Disable prompt optimization"
+    )
+    parser.add_argument(
+        "--auto-optimize",
+        action="store_true",
+        help="Auto-optimize prompts without asking user (implies --optimize-prompt)"
+    )
+    parser.add_argument(
+        "--context-guard",
+        action="store_true",
+        default=True,
+        help="Enable ContextGuard for context validation and filtering (default: enabled)"
+    )
+    parser.add_argument(
+        "--no-context-guard",
+        action="store_true",
+        help="Disable ContextGuard phase"
+    )
+    parser.add_argument(
+        "--context-guard-auto",
+        action="store_true",
+        help="ContextGuard auto-discovery mode instead of interactive clarification"
+    )
+    parser.add_argument(
+        "--context-guard-threshold",
+        type=float,
+        default=0.3,
+        help="Relevance threshold for context filtering (0.0-1.0, default: 0.3)"
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable detailed debug logging to file for LLM review"
+    )
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Clean all temporary files, caches, and logs"
     )
     parser.add_argument(
         "-v",
@@ -184,12 +233,61 @@ def main():
     if args.execution_mode:
         config.set_execution_mode(args.execution_mode)
 
+    # Determine prompt optimization settings
+    # Priority: CLI flags > Environment variables > defaults
+    enable_prompt_optimization = True  # Default
+    auto_optimize_prompt = False  # Default
+
+    # Check environment variables
+    if os.getenv("REV_OPTIMIZE_PROMPT", "").lower() == "false":
+        enable_prompt_optimization = False
+    if os.getenv("REV_AUTO_OPTIMIZE", "").lower() == "true":
+        auto_optimize_prompt = True
+
+    # Override with CLI flags (highest priority)
+    if args.no_optimize_prompt:
+        enable_prompt_optimization = False
+    if args.optimize_prompt:
+        enable_prompt_optimization = True
+    if args.auto_optimize:
+        enable_prompt_optimization = True
+        auto_optimize_prompt = True
+
+    # Determine ContextGuard settings
+    # Priority: CLI flags > Environment variables > defaults
+    enable_context_guard = True  # Default
+    context_guard_interactive = True  # Default
+
+    # Check environment variables
+    if os.getenv("REV_ENABLE_CONTEXT_GUARD", "").lower() == "false":
+        enable_context_guard = False
+    if os.getenv("REV_CONTEXT_GUARD_INTERACTIVE", "").lower() == "false":
+        context_guard_interactive = False
+
+    # Override with CLI flags (highest priority)
+    if args.no_context_guard:
+        enable_context_guard = False
+    if args.context_guard:
+        enable_context_guard = True
+    if args.context_guard_auto:
+        context_guard_interactive = False
+
+    context_guard_threshold = args.context_guard_threshold
+
     if args.version:
         from rev.versioning import build_version_output
 
         print(build_version_output(config.OLLAMA_MODEL, config.get_system_info_cached()))
         sys.exit(0)
 
+
+    if args.clean:
+        print("Cleaning temporary files, caches, and logs...")
+        if config.REV_DIR.exists():
+            shutil.rmtree(config.REV_DIR)
+            print(f"Removed {config.REV_DIR}")
+        print("Clean complete.")
+        sys.exit(0)
 
     # Log configuration
     debug_logger.log("main", "CONFIGURATION", {
@@ -200,11 +298,16 @@ def main():
         "parallel": args.parallel,
         "review_enabled": args.review and not args.no_review,
         "validate_enabled": args.validate and not args.no_validate,
-        "auto_approve": not args.prompt,
+        "auto_approve": args.yes or not args.prompt,
         "research_enabled": args.research,
         "learn_enabled": args.learn,
         "action_review_enabled": args.action_review,
         "auto_fix_enabled": args.auto_fix,
+        "prompt_optimization_enabled": enable_prompt_optimization,
+        "auto_optimize_prompt": auto_optimize_prompt,
+        "context_guard_enabled": enable_context_guard,
+        "context_guard_interactive": context_guard_interactive,
+        "context_guard_threshold": context_guard_threshold,
     })
 
     # Handle list-checkpoints command
@@ -279,7 +382,7 @@ def main():
                     concurrent_execution_mode(
                         plan,
                         max_workers=args.parallel,
-                        auto_approve=not args.prompt,
+                        auto_approve=args.yes or not args.prompt,
                         tools=tools,
                         enable_action_review=args.action_review,
                         state_manager=state_manager,
@@ -287,7 +390,7 @@ def main():
                 else:
                     execution_mode(
                         plan,
-                        auto_approve=not args.prompt,
+                        auto_approve=args.yes or not args.prompt,
                         tools=tools,
                         enable_action_review=args.action_review,
                         state_manager=state_manager,
@@ -359,8 +462,13 @@ def main():
                     enable_action_review=args.action_review,
                     enable_auto_fix=args.auto_fix,
                     parallel_workers=args.parallel,
-                    auto_approve=not args.prompt,
-                    research_depth=args.research_depth
+                    auto_approve=args.yes or not args.prompt,
+                    research_depth=args.research_depth,
+                    enable_prompt_optimization=enable_prompt_optimization,
+                    auto_optimize_prompt=auto_optimize_prompt,
+                    enable_context_guard=enable_context_guard,
+                    context_guard_interactive=context_guard_interactive,
+                    context_guard_threshold=context_guard_threshold
                 )
                 if not result.success:
                     sys.exit(1)
@@ -435,7 +543,7 @@ def main():
                 concurrent_execution_mode(
                     plan,
                     max_workers=args.parallel,
-                    auto_approve=not args.prompt,
+                    auto_approve=args.yes or not args.prompt,
                     tools=tools,
                     enable_action_review=args.action_review,
                     state_manager=state_manager,
@@ -443,7 +551,7 @@ def main():
             else:
                 execution_mode(
                     plan,
-                    auto_approve=not args.prompt,
+                    auto_approve=args.yes or not args.prompt,
                     tools=tools,
                     enable_action_review=args.action_review,
                     state_manager=state_manager,

@@ -208,48 +208,21 @@ def _snapshot_paths(paths: set[str]) -> dict[str, Optional[bytes]]:
 
 
 def _normalize_patch_text(patch: str) -> str:
-    """Normalize non-standard whitespace that can break patch parsing.
-
-    Agents sometimes produce diffs that contain Unicode whitespace characters
-    that look like regular spaces or tabs but are not interpreted the same way
-    by ``git apply`` or ``patch`` (for example, non-breaking spaces or
-    zero-width joiners). Converting these characters up front makes the patch
-    parser more forgiving while preserving the intended formatting.
-    """
-
-    # Standardize newline handling first so replacements do not miss Windows
-    # line endings.
+    """Normalize non-standard whitespace that can break patch parsing."""
+    # Standardize newline handling first
     normalized = patch.replace("\r\n", "\n").replace("\r", "\n")
 
-    # Common invisible/alternate whitespace characters that should be treated
-    # as normal spaces. Zero-width characters are removed entirely.
-    whitespace_map = {
-        # Non-breaking spaces and width variants
-        ord("\u00A0"): " ",  # NBSP
-        ord("\u1680"): " ",  # Ogham space mark
-        ord("\u180E"): " ",  # Mongolian vowel separator (deprecated)
-        ord("\u2000"): " ",  # En quad
-        ord("\u2001"): " ",  # Em quad
-        ord("\u2002"): " ",  # En space
-        ord("\u2003"): " ",  # Em space
-        ord("\u2004"): " ",  # Three-per-em space
-        ord("\u2005"): " ",  # Four-per-em space
-        ord("\u2006"): " ",  # Six-per-em space
-        ord("\u2007"): " ",  # Figure space
-        ord("\u2008"): " ",  # Punctuation space
-        ord("\u2009"): " ",  # Thin space
-        ord("\u200A"): " ",  # Hair space
-        ord("\u202F"): " ",  # Narrow no-break space
-        ord("\u205F"): " ",  # Medium mathematical space
-        ord("\u3000"): " ",  # Ideographic space
-        # Zero-width characters that should be stripped
-        ord("\u200B"): None,  # Zero width space
-        ord("\u200C"): None,  # Zero width non-joiner
-        ord("\u200D"): None,  # Zero width joiner
-        ord("\uFEFF"): None,  # Zero width no-break space / BOM
-    }
+    # Replace various Unicode whitespace characters with a standard space
+    whitespace_pattern = re.compile(
+        r'[\u00A0\u1680\u180E\u2000-\u200A\u202F\u205F\u3000]'
+    )
+    normalized = whitespace_pattern.sub(' ', normalized)
 
-    return normalized.translate(whitespace_map)
+    # Remove zero-width characters
+    zero_width_pattern = re.compile(r'[\u200B-\u200D\uFEFF]')
+    normalized = zero_width_pattern.sub('', normalized)
+
+    return normalized
 
 
 # ========== Core Git Operations ==========
@@ -362,7 +335,7 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
         retry_plan: Optional[str] = None,
     ) -> str:
         result = {
-            "success": success,
+            "success": success or already_applied,
             "rc": proc.returncode,
             "stdout": proc.stdout,
             "stderr": proc.stderr,
@@ -383,50 +356,22 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
 
     def _apply_patch_in_chunks(chunks: Iterable[str], dry_run: bool = False) -> Optional[str]:
         """Attempt to apply each file chunk independently."""
-
         if not chunks:
             return None
 
-        applied = 0
-        last_stdout = ""
-        last_stderr = ""
-
         for idx, chunk in enumerate(chunks, start=1):
             chunk_result = json.loads(apply_patch(chunk, dry_run=dry_run, _allow_chunking=False))
-
-            last_stdout = chunk_result.get("stdout", "")
-            last_stderr = chunk_result.get("stderr", "")
-
             if not chunk_result.get("success"):
-                return json.dumps(
-                    {
-                        "success": False,
-                        "rc": chunk_result.get("rc", 1),
-                        "stdout": last_stdout,
-                        "stderr": last_stderr,
-                        "dry_run": dry_run,
-                        "phase": "chunked",
-                        "failed_chunk_index": idx,
-                        "failed_chunk": chunk_result,
-                        "chunks_attempted": len(chunked_parts),
-                        "error": chunk_result.get("error", "Patch chunk failed to apply"),
-                        "hint": chunk_result.get("hint"),
-                        "retry_plan": _retry_plan_message(len(chunked_parts)),
-                    }
-                )
-
-            applied += 1
-
-        return json.dumps(
-            {
-                "success": True,
-                "dry_run": dry_run,
-                "phase": "chunked",
-                "chunks_applied": applied,
-                "stdout": last_stdout,
-                "stderr": last_stderr,
-            }
-        )
+                return json.dumps({
+                    "success": False,
+                    "rc": chunk_result.get("rc", 1),
+                    "dry_run": dry_run,
+                    "phase": "chunked",
+                    "failed_chunk_index": idx,
+                    "error": chunk_result.get("error", "Patch chunk failed to apply"),
+                    "retry_plan": _retry_plan_message(len(chunked_parts)),
+                })
+        return json.dumps({"success": True, "phase": "chunked", "chunks_applied": len(chunked_parts)})
 
     try:
         strategies = [

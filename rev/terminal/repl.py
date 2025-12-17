@@ -52,6 +52,7 @@ def repl_mode():
         "files_modified": set(),
         "files_reviewed": set(),
         "last_summary": "",
+        "last_result": None,
         "token_usage": {"total": 0, "prompt": 0, "completion": 0},
         "execution_mode": default_mode_name,
         "mode_config": default_mode_config,
@@ -102,7 +103,7 @@ def repl_mode():
         try:
             with escape_monitor_context(check_interval=0.05):
                 if mode_cfg.get("orchestrate", False):
-                    result = run_orchestrated(
+                    session_context["last_result"] = run_orchestrated(
                         user_input,
                         config.ROOT,
                         enable_learning=mode_cfg.get("learn", False),
@@ -116,22 +117,31 @@ def repl_mode():
                         auto_approve=True,
                         research_depth=mode_cfg.get("research_depth", "medium"),
                     )
-                    plan = result.plan if hasattr(result, "plan") and result.plan else None
+                    plan = (
+                        session_context["last_result"].plan
+                        if hasattr(session_context["last_result"], "plan")
+                        and session_context["last_result"].plan
+                        else None
+                    )
                 else:
-                    # Always use streaming execution in interactive mode
-                    # This allows users to type messages while tasks run
                     plan = planning_mode(
                         user_input,
                         max_plan_tasks=config.MAX_PLAN_TASKS,
                         max_planning_iterations=config.MAX_PLANNING_TOOL_ITERATIONS,
                     )
                     tools = get_available_tools()
-                    streaming_execution_mode(plan, auto_approve=True, tools=tools)
+                    session_context["last_result"] = streaming_execution_mode(
+                        plan, auto_approve=True, tools=tools
+                    )
         except EscapeInterrupt:
             print(f"\n  {colorize('[ESC pressed - execution cancelled]', Colors.BRIGHT_YELLOW)}")
             plan = None
         finally:
             set_escape_interrupt(False)
+
+        if session_context.get("last_result") is not None:
+            print(session_context["last_result"])
+
         if plan:
             for task in plan.tasks:
                 if task.status == TaskStatus.COMPLETED:

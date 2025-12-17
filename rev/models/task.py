@@ -103,11 +103,14 @@ class Task:
 
 class ExecutionPlan:
     """Manages the task checklist for iterative execution with dependency tracking."""
-    def __init__(self):
-        self.tasks: List[Task] = []
+    def __init__(self, tasks: Optional[List[Task]] = None):
+        self.tasks: List[Task] = tasks or []
         self.current_index = 0
         self.lock = threading.Lock()  # Thread-safe operations
         self.goals: List = []  # List of Goal objects for goal-oriented execution
+        # Ensure task IDs are correctly numbered if tasks are provided upon instantiation
+        for i, task in enumerate(self.tasks):
+            task.task_id = i
 
     def add_task(self, description: str, action_type: str = "general", dependencies: List[int] = None):
         task = Task(description, action_type, dependencies)
