@@ -30,6 +30,7 @@ from rev.execution.learner import LearningAgent, display_learning_suggestions
 from rev.execution.executor import execution_mode, concurrent_execution_mode, fix_validation_failures
 from rev.execution.state_manager import StateManager
 from rev.execution.prompt_optimizer import optimize_prompt_if_needed
+from rev.execution.quick_verify import verify_task_execution, VerificationResult
 from rev.tools.registry import get_available_tools, get_repo_context
 from rev.config import (
     MAX_PLAN_TASKS,
@@ -372,9 +373,17 @@ class Orchestrator:
         return Task(description=description, action_type=action_type)
 
     def _continuous_sub_agent_execution(self, user_request: str, coding_mode: bool) -> bool:
-        """Executes a task by continuously calling a lightweight planner for the next action."""
+        """Executes a task by continuously calling a lightweight planner for the next action.
+
+        Implements the proper workflow:
+        1. Plan next action
+        2. Execute action
+        3. VERIFY execution actually succeeded
+        4. Report results
+        5. Re-plan if needed
+        """
         print("\n" + "=" * 60)
-        print("CONTINUOUS SUB-AGENT MODE (REPL-Style)")
+        print("CONTINUOUS SUB-AGENT MODE (REPL-Style with Verification)")
         print("=" * 60)
 
         completed_tasks_log: List[str] = []
@@ -398,17 +407,36 @@ class Orchestrator:
                 return True
 
             next_task.task_id = iteration
-            print(f"  â†’ Next action: [{next_task.action_type.upper()}] {next_task.description[:80]}")
-            
-            self.context.plan = ExecutionPlan(tasks=[next_task])
-            self._dispatch_to_sub_agents(self.context)
+            print(f"  â†' Next action: [{next_task.action_type.upper()}] {next_task.description[:80]}")
 
+            self.context.plan = ExecutionPlan(tasks=[next_task])
+
+            # STEP 2: EXECUTE
+            execution_success = self._dispatch_to_sub_agents(self.context)
+
+            # STEP 3: VERIFY - This is the critical addition
+            verification_result = None
+            if execution_success:
+                print(f"  -> Verifying execution...")
+                verification_result = verify_task_execution(next_task, self.context)
+                print(f"    {verification_result}")
+
+                if not verification_result.passed:
+                    # Verification failed - mark task as failed and mark for re-planning
+                    next_task.status = TaskStatus.FAILED
+                    next_task.error = verification_result.message
+                    execution_success = False
+                    print(f"  [!] Verification failed, marking for re-planning")
+
+            # STEP 4: REPORT
             log_entry = f"[{next_task.status.name}] {next_task.description}"
             if next_task.status == TaskStatus.FAILED:
                 log_entry += f" | Reason: {next_task.error}"
-            
+            if verification_result and not verification_result.passed:
+                log_entry += f" | Verification: {verification_result.message}"
+
             completed_tasks_log.append(log_entry)
-            print(f"  {'âœ ভারী' if next_task.status == TaskStatus.COMPLETED else '✗'} {log_entry}")
+            print(f"  {'âœ ভारী' if next_task.status == TaskStatus.COMPLETED else '✗'} {log_entry}")
 
             self.context.update_repo_context()
             clear_analysis_caches()
