@@ -30,7 +30,9 @@ from rev.execution.learner import LearningAgent, display_learning_suggestions
 from rev.execution.executor import execution_mode, concurrent_execution_mode, fix_validation_failures
 from rev.execution.state_manager import StateManager
 from rev.execution.prompt_optimizer import optimize_prompt_if_needed
+from rev.execution.quick_verify import verify_task_execution, VerificationResult
 from rev.tools.registry import get_available_tools, get_repo_context
+from rev.debug_logger import DebugLogger
 from rev.config import (
     MAX_PLAN_TASKS,
     MAX_STEPS_PER_RUN,
@@ -130,12 +132,26 @@ class Orchestrator:
         self.config = config or OrchestratorConfig()
         self.context: Optional[RevContext] = None
         self.learning_agent = LearningAgent(project_root) if self.config.enable_learning else None
+        self.debug_logger = DebugLogger.get_instance()
 
     def _update_phase(self, new_phase: AgentPhase):
         if self.context:
             self.context.set_current_phase(new_phase)
             if config.EXECUTION_MODE != 'sub-agent':
                 print(f"\nðŸ”¸ Entering phase: {new_phase.value}")
+
+    def _display_prompt_optimization(self, original: str, optimized: str) -> None:
+        """Display original vs improved prompts for transparency."""
+        original_lines = original.strip().splitlines() or [original]
+        optimized_lines = optimized.strip().splitlines() or [optimized]
+
+        print("  Original request:")
+        for line in original_lines:
+            print(f"    {line}")
+
+        print("  Optimized request:")
+        for line in optimized_lines:
+            print(f"    {line}")
 
     def _collect_repo_stats(self) -> Dict[str, Any]:
         repo_context_raw = get_repo_context()
@@ -275,7 +291,8 @@ class Orchestrator:
                 auto_optimize=self.config.auto_optimize_prompt
             )
             if was_optimized:
-                print(f"\n✓ Request optimized for clarity")
+                print(f"\n[OK] Request optimized for clarity")
+                self._display_prompt_optimization(original_request, optimized_request)
                 self.context.user_request = optimized_request
                 self.context.add_insight("optimization", "prompt_optimized", True)
                 self.context.agent_insights["prompt_optimization"] = {
@@ -283,6 +300,15 @@ class Orchestrator:
                     "original": original_request[:100],
                     "improved": optimized_request[:100]
                 }
+                self.debug_logger.log(
+                    "orchestrator",
+                    "PROMPT_OPTIMIZED",
+                    {
+                        "auto_optimize": self.config.auto_optimize_prompt,
+                        "original_request": original_request,
+                        "optimized_request": optimized_request,
+                    },
+                )
 
         # Phase 2c: ContextGuard (optional)
         if self.config.enable_context_guard and research_findings:
@@ -338,6 +364,50 @@ class Orchestrator:
         result.success = all_tasks_handled and validation_ok
         result.phase_reached = AgentPhase.COMPLETE if result.success else AgentPhase.VALIDATION
 
+    def _decompose_extraction_task(self, failed_task: Task) -> Optional[Task]:
+        """
+        When a task fails, ask the LLM if it can be decomposed into more granular steps.
+
+        Rather than using brittle keyword detection, we let the LLM evaluate the failed
+        task and suggest a decomposition strategy if one exists.
+        """
+        decomposition_prompt = (
+            f"A task has failed: {failed_task.description}\n\n"
+            f"Error: {failed_task.error if failed_task.error else 'Unknown'}\n\n"
+            f"Can this task be decomposed into smaller, more specific subtasks that might succeed?\n"
+            f"If yes, describe the first subtask that should be attempted next in detail.\n"
+            f"If no, just respond with 'CANNOT_DECOMPOSE'.\n\n"
+            f"Important: Be specific about what concrete action the next task should take. "
+            f"Use [ACTION_TYPE] format like [CREATE] or [EDIT] or [REFACTOR]."
+        )
+
+        response_data = ollama_chat([{"role": "user", "content": decomposition_prompt}])
+
+        if "error" in response_data or not response_data.get("message", {}).get("content"):
+            return None
+
+        response_content = response_data.get("message", {}).get("content", "").strip()
+
+        if "CANNOT_DECOMPOSE" in response_content.upper():
+            return None
+
+        # Try to parse the decomposed task format [ACTION_TYPE] description
+        match = re.match(r"[\s]*\[(.*?)\]\s*(.*)", response_content)
+        if match:
+            action_type = match.group(1).lower()
+            description = match.group(2).strip()
+            print(f"\n  [DECOMPOSITION] LLM suggested decomposition:")
+            print(f"    Action: {action_type}")
+            print(f"    Task: {description}")
+            return Task(description=description, action_type=action_type)
+        else:
+            # If LLM didn't follow format, create a generic refactor task with its suggestion
+            print(f"\n  [DECOMPOSITION] LLM suggestion: {response_content[:100]}")
+            return Task(
+                description=response_content,
+                action_type="refactor"
+            )
+
     def _determine_next_action(self, user_request: str, work_summary: str, coding_mode: bool) -> Optional[Task]:
         """A truly lightweight planner that makes a direct LLM call."""
         available_actions = AgentRegistry.get_registered_action_types()
@@ -372,9 +442,17 @@ class Orchestrator:
         return Task(description=description, action_type=action_type)
 
     def _continuous_sub_agent_execution(self, user_request: str, coding_mode: bool) -> bool:
-        """Executes a task by continuously calling a lightweight planner for the next action."""
+        """Executes a task by continuously calling a lightweight planner for the next action.
+
+        Implements the proper workflow:
+        1. Plan next action
+        2. Execute action
+        3. VERIFY execution actually succeeded
+        4. Report results
+        5. Re-plan if needed
+        """
         print("\n" + "=" * 60)
-        print("CONTINUOUS SUB-AGENT MODE (REPL-Style)")
+        print("CONTINUOUS SUB-AGENT MODE (REPL-Style with Verification)")
         print("=" * 60)
 
         completed_tasks_log: List[str] = []
@@ -398,23 +476,84 @@ class Orchestrator:
                 return True
 
             next_task.task_id = iteration
-            print(f"  â†’ Next action: [{next_task.action_type.upper()}] {next_task.description[:80]}")
-            
-            self.context.plan = ExecutionPlan(tasks=[next_task])
-            self._dispatch_to_sub_agents(self.context)
+            print(f"  â†' Next action: [{next_task.action_type.upper()}] {next_task.description[:80]}")
 
+            self.context.plan = ExecutionPlan(tasks=[next_task])
+
+            # STEP 2: EXECUTE
+            execution_success = self._dispatch_to_sub_agents(self.context)
+
+            # STEP 3: VERIFY - This is the critical addition
+            verification_result = None
+            if execution_success:
+                print(f"  -> Verifying execution...")
+                verification_result = verify_task_execution(next_task, self.context)
+                print(f"    {verification_result}")
+
+                if not verification_result.passed:
+                    # Verification failed - mark task as failed and mark for re-planning
+                    next_task.status = TaskStatus.FAILED
+                    next_task.error = verification_result.message
+                    execution_success = False
+                    print(f"  [!] Verification failed, marking for re-planning")
+
+                    # Display detailed debug information
+                    self._handle_verification_failure(verification_result)
+
+                    # Try to decompose the failed task into more granular steps
+                    if verification_result.should_replan:
+                        decomposed_task = self._decompose_extraction_task(next_task)
+                        if decomposed_task:
+                            print(f"  [RETRY] Using decomposed task for next iteration")
+                            next_task = decomposed_task
+                            iteration -= 1  # Don't count failed task as an iteration
+
+            # STEP 4: REPORT
             log_entry = f"[{next_task.status.name}] {next_task.description}"
             if next_task.status == TaskStatus.FAILED:
                 log_entry += f" | Reason: {next_task.error}"
-            
+            if verification_result and not verification_result.passed:
+                log_entry += f" | Verification: {verification_result.message}"
+
             completed_tasks_log.append(log_entry)
-            print(f"  {'âœ ভারী' if next_task.status == TaskStatus.COMPLETED else '✗'} {log_entry}")
+            print(f"  {'âœ ভारী' if next_task.status == TaskStatus.COMPLETED else '✗'} {log_entry}")
 
             self.context.update_repo_context()
             clear_analysis_caches()
 
         print(f"\n⚠️  Reached maximum iterations ({max_iterations}). Halting execution.")
         return False
+
+    def _handle_verification_failure(self, verification_result: VerificationResult):
+        """Handle and display detailed information about verification failures."""
+        print("\n" + "=" * 70)
+        print("VERIFICATION FAILURE - DEBUG INFORMATION")
+        print("=" * 70)
+
+        # Display main message (which includes issue descriptions)
+        if verification_result.message:
+            print(f"\n{verification_result.message}")
+
+        # Display debug information if available
+        if verification_result.details and "debug" in verification_result.details:
+            debug_info = verification_result.details["debug"]
+            print("\nDebug Information:")
+            print("-" * 70)
+            for key, value in debug_info.items():
+                if isinstance(value, list):
+                    print(f"  {key}:")
+                    for item in value:
+                        print(f"    - {item}")
+                elif isinstance(value, dict):
+                    print(f"  {key}:")
+                    for k, v in value.items():
+                        print(f"    {k}: {v}")
+                else:
+                    print(f"  {key}: {value}")
+
+        print("\n" + "=" * 70)
+        print("NEXT ACTION: Re-planning with different approach...")
+        print("=" * 70 + "\n")
 
     def _dispatch_to_sub_agents(self, context: RevContext) -> bool:
         """Dispatches tasks to appropriate sub-agents."""
@@ -429,6 +568,8 @@ class Orchestrator:
         action_aliases = {
             "create": "add",
             "write": "add",
+            "refator": "refactor",
+            "investigate": "research",
         }
         
         normalized_action_type = task.action_type.lower()
@@ -523,3 +664,4 @@ def run_orchestrated(
 
     orchestrator = Orchestrator(project_root, config_obj)
     return orchestrator.execute(user_request)
+

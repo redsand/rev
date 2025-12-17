@@ -68,7 +68,8 @@ class DebuggingAgent(BaseAgent):
         # Track recovery attempts
         recovery_attempts = self.increment_recovery_attempts(task, context)
 
-        available_tools = [tool for tool in get_available_tools() if tool['function']['name'] in ['write_file', 'replace_in_file', 'read_file', 'search_files']]
+        allowed_tool_names = ['write_file', 'replace_in_file', 'read_file', 'search_code', 'rag_search']
+        available_tools = [tool for tool in get_available_tools() if tool['function']['name'] in allowed_tool_names]
 
         messages = [
             {"role": "system", "content": DEBUGGING_SYSTEM_PROMPT},

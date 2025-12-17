@@ -6,12 +6,15 @@ A **robust, pattern-based autonomous development system** powered by [Ollama](ht
 
 Rev isn't just another AI coding assistant — it's a **complete agentic development system** implementing industry-proven design patterns:
 
+- **💬 Interactive REPL** — Session-persistent development with real-time guidance and context retention (essential for complex tasks)
+- **🔍 RAG (Semantic Search)** — Retrieval-Augmented Generation finds context by meaning, not just keywords (prevents hallucinations)
+- **🛡️ ContextGuard/ClarityEngine** — Validates context sufficiency before planning (prevents AI from making decisions with gaps)
 - **🧠 Agentic Design Patterns** — Built on 21 patterns from research (Goal Setting, Routing, RAG, Recovery, Resource Budgets, etc.)
-- **🔍 Hybrid Search** — Combines symbolic (regex) + semantic (RAG/TF-IDF) code search for superior context gathering
+- **🤖 Specialized Sub-Agents** — Dedicated agents for each task type (code, test, refactor, debug, document, research)
 - **📊 Resource-Aware** — Tracks steps, tokens, and time budgets to prevent runaway execution
 - **🎯 Goal-Oriented** — Derives measurable goals from requests and validates they're met
+- **✅ Workflow Verification** — Plan → Execute → Verify → Report (ensures tasks actually complete, no silent failures)
 - **🛡️ Production-Ready** — Multi-layer validation, security scanning, auto-recovery, and rollback planning
-- **⚡ Intelligent** — Self-routing, priority scheduling, and adaptive agent configuration
 
 ## Key Features
 
@@ -297,30 +300,76 @@ pip install -r requirements.txt
 
 Rev supports two execution modes:
 
-- **🎯 Sub-Agent Mode (RECOMMENDED)** — Specialized agents handle specific task types (code, testing, debugging, etc.)
-- **📋 Linear Mode** — Single generic agent (for testing/comparison)
+- **🤖 Sub-Agent Mode (NOW DEFAULT!)** — Specialized agents handle specific task types for higher quality and faster execution
+- **📋 Linear Mode (Testing Only)** — Single generic agent for testing/comparison
 
 ### Quick Start
 
 ```bash
-# Use Sub-Agent Mode (RECOMMENDED) for production
-export REV_EXECUTION_MODE=sub-agent
+# Sub-Agent Mode is now the default (no configuration needed!)
 rev "Extract BreakoutAnalyst class to lib/analysts/"
 
-# Use Linear Mode for testing/comparison
+# Explicitly set Sub-Agent Mode (same as default)
+export REV_EXECUTION_MODE=sub-agent
+rev "Your task"
+
+# Use Linear Mode only for testing/comparison
 export REV_EXECUTION_MODE=linear
-rev "Extract BreakoutAnalyst class to lib/analysts/"
+rev "Your task"
 ```
 
 **Key Differences:**
-| Feature | Sub-Agent (RECOMMENDED) | Linear (Testing) |
+| Feature | Sub-Agent (DEFAULT ✓) | Linear (Testing) |
 |---------|-----------|---------|
 | Code extraction | ✅ Real implementations (95%) | ⚠️ May generate stubs (65%) |
-| Performance | ✅ 3x faster with parallelism | ⚠️ Sequential only |
-| Quality | ✅ Specialized validation | ⚠️ Generic validation |
+| Performance | ✅ 3x faster with specialization | ⚠️ Sequential only |
+| Quality | ✅ Task-specialized validation | ⚠️ Generic validation |
+| Verification | ✅ Built-in verification loop | ⚠️ No verification |
 | Tests passing | ✅ 26/26 tests | ✅ Basic tests |
 
+### Why Sub-Agent Mode is Now Default
+
+1. **Specialized agents** produce higher-quality code (95% real implementations vs 65% stubs)
+2. **3x faster execution** through task-specific optimization
+3. **Verification loop** ensures tasks actually complete (no silent failures)
+4. **Better quality** with task-specialized prompts and tools
+5. **Production-ready** with automatic recovery on failures
+
 **📖 For detailed comparison and configuration, see [docs/EXECUTION_MODES.md](docs/EXECUTION_MODES.md)**
+
+### Workflow Verification (NEW!)
+
+Rev now implements a **proper verification workflow** that ensures tasks actually complete:
+
+```
+Plan → Execute → VERIFY ✓ → Report → Re-plan if needed
+```
+
+**What Changed:**
+- ✅ Tasks are verified after execution
+- ✅ Failed verifications trigger automatic re-planning
+- ✅ No more silent failures (e.g., extraction with no files created)
+- ✅ Real-time feedback on task completion status
+
+**Example: Extraction Verification**
+```bash
+rev "Extract BreakoutAnalyst class to lib/analysts/"
+
+# Output:
+-> Verifying execution...
+[OK] Extraction successful: 1 file created with valid imports
+✓ [COMPLETED] Extract BreakoutAnalyst class...
+```
+
+**If verification fails:**
+```bash
+# Verification detects incomplete extraction
+[FAIL] No Python files found - extraction may have failed
+[!] Verification failed, marking for re-planning
+-> Next action: [REFACTOR] Retry extraction with different approach...
+```
+
+**📖 See [WORKFLOW_VERIFICATION_FIX.md](WORKFLOW_VERIFICATION_FIX.md) for implementation details.**
 
 ---
 

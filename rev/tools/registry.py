@@ -21,6 +21,13 @@ from rev.tools.file_ops import (
     append_to_file, replace_in_file, create_directory, get_file_info,
     copy_file, file_exists, read_file_lines, tree_view, search_code
 )
+from rev.tools.code_ops import (
+    remove_unused_imports, extract_constants, simplify_conditionals
+)
+from rev.tools.conversion import (
+    convert_json_to_yaml, convert_yaml_to_json, convert_csv_to_json,
+    convert_json_to_csv, convert_env_to_json
+)
 from rev.tools.git_ops import (
     git_diff, apply_patch, git_add, git_commit, git_status, git_log, git_branch,
     run_cmd, run_tests, get_repo_context
@@ -40,8 +47,13 @@ from rev.tools.advanced_analysis import (
     analyze_test_coverage, analyze_code_context, find_symbol_usages,
     analyze_dependencies, analyze_semantic_diff
 )
-from rev.tools.security import scan_security_issues
-from rev.tools.dependencies import check_dependency_vulnerabilities, check_dependency_updates
+from rev.tools.security import (
+    scan_security_issues, detect_secrets, check_license_compliance
+)
+from rev.tools.dependencies import (
+    check_dependency_vulnerabilities, check_dependency_updates,
+    update_dependencies, scan_dependencies_vulnerabilities
+)
 from rev.tools.linting import run_linters, run_type_checks
 from rev.tools.test_quality import (
     run_property_tests,
@@ -60,6 +72,10 @@ from rev.tools.runtime_analysis import (
 from rev.tools.config_checks import (
     validate_ci_config,
     verify_migrations
+)
+from rev.tools.refactoring_utils import split_python_module_classes
+from rev.tools.cache_ops import (
+    get_cache_stats, clear_caches, persist_caches
 )
 
 
@@ -150,7 +166,13 @@ _TIMEOUT_PROTECTED_TOOLS = {
     "verify_migrations",
     "run_radon_complexity",
     "find_dead_code",
-    "run_all_analysis"
+    "run_all_analysis",
+    "remove_unused_imports",
+    "update_dependencies",
+    "scan_dependencies_vulnerabilities",
+    "detect_secrets",
+    "check_license_compliance",
+    "split_python_module_classes",
 }
 
 def _get_timeout_manager() -> TimeoutManager | None:
@@ -238,6 +260,18 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         "read_file_lines": lambda args: read_file_lines(args["path"], args.get("start", 1), args.get("end")),
         "tree_view": lambda args: tree_view(args.get("path", "."), args.get("max_depth", 3), args.get("max_files", 100)),
 
+        # Code operations
+        "remove_unused_imports": lambda args: remove_unused_imports(args["file_path"], args.get("language", "python")),
+        "extract_constants": lambda args: extract_constants(args["file_path"], args.get("threshold", 3)),
+        "simplify_conditionals": lambda args: simplify_conditionals(args["file_path"]),
+
+        # Data conversion
+        "convert_json_to_yaml": lambda args: convert_json_to_yaml(args["json_path"], args.get("yaml_path")),
+        "convert_yaml_to_json": lambda args: convert_yaml_to_json(args["yaml_path"], args.get("json_path")),
+        "convert_csv_to_json": lambda args: convert_csv_to_json(args["csv_path"], args.get("json_path")),
+        "convert_json_to_csv": lambda args: convert_json_to_csv(args["json_path"], args.get("csv_path")),
+        "convert_env_to_json": lambda args: convert_env_to_json(args["env_path"], args.get("json_path")),
+
         # Git operations
         "git_diff": lambda args: git_diff(args.get("pathspec", ".")),
         "apply_patch": lambda args: apply_patch(args["patch"], args.get("dry_run", False)),
@@ -281,6 +315,13 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         "analyze_code_structures": lambda args: analyze_code_structures(args.get("path", ".")),
         "check_structural_consistency": lambda args: check_structural_consistency(args.get("path", "."), args.get("entity")),
         "scan_security_issues": lambda args: scan_security_issues(args.get("paths"), args.get("severity_threshold", "MEDIUM")),
+        "detect_secrets": lambda args: detect_secrets(args.get("path", ".")),
+        "check_license_compliance": lambda args: check_license_compliance(args.get("path", ".")),
+        "split_python_module_classes": lambda args: split_python_module_classes(
+            args["source_path"],
+            args.get("target_directory"),
+            args.get("overwrite", False),
+        ),
         "run_property_tests": lambda args: run_property_tests(args.get("test_paths"), args.get("max_examples", 200)),
         "generate_property_tests": lambda args: generate_property_tests(args.get("targets", []), args.get("max_examples", 200)),
         "check_contracts": lambda args: check_contracts(args.get("paths"), args.get("timeout_seconds", 60)),
@@ -295,6 +336,8 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         "analyze_error_traces": lambda args: analyze_error_traces(args.get("log_paths", []), args.get("max_traces", 200)),
         "check_dependency_vulnerabilities": lambda args: check_dependency_vulnerabilities(args.get("language", "auto")),
         "check_dependency_updates": lambda args: check_dependency_updates(args.get("language", "auto")),
+        "update_dependencies": lambda args: update_dependencies(args.get("language", "auto"), args.get("major", False)),
+        "scan_dependencies_vulnerabilities": lambda args: scan_dependencies_vulnerabilities(args.get("language", "auto")),
         "bisect_test_failure": lambda args: bisect_test_failure(args["test_command"], args.get("good_ref"), args.get("bad_ref", "HEAD")),
         "generate_repro_case": lambda args: generate_repro_case(args["context"], args.get("target_path", "tests/regressions/test_repro_case.py")),
         "validate_ci_config": lambda args: validate_ci_config(args.get("paths")),
@@ -306,6 +349,11 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         "find_symbol_usages": lambda args: find_symbol_usages(args["symbol"], args.get("scope", "project")),
         "analyze_dependencies": lambda args: analyze_dependencies(args["target"], args.get("depth", 3)),
         "analyze_semantic_diff": lambda args: analyze_semantic_diff(args["file_path"], args.get("compare_to", "HEAD")),
+
+        # Cache operations
+        "get_cache_stats": lambda args: get_cache_stats(),
+        "clear_caches": lambda args: clear_caches(args.get("cache_name", "all")),
+        "persist_caches": lambda args: persist_caches(),
     }
 
 
@@ -372,6 +420,18 @@ def _format_description(name: str, args: Dict[str, Any]) -> str:
         "read_file_lines": f"Reading lines from file: {args.get('path', '')}",
         "tree_view": f"Displaying tree view: {args.get('path', '.')}",
 
+        # Code operations
+        "remove_unused_imports": f"Removing unused imports in: {args.get('file_path', '')}",
+        "extract_constants": f"Extracting constants from: {args.get('file_path', '')}",
+        "simplify_conditionals": f"Simplifying conditionals in: {args.get('file_path', '')}",
+
+        # Data conversion
+        "convert_json_to_yaml": f"Converting JSON to YAML: {args.get('json_path', '')}",
+        "convert_yaml_to_json": f"Converting YAML to JSON: {args.get('yaml_path', '')}",
+        "convert_csv_to_json": f"Converting CSV to JSON: {args.get('csv_path', '')}",
+        "convert_json_to_csv": f"Converting JSON to CSV: {args.get('json_path', '')}",
+        "convert_env_to_json": f"Converting .env to JSON: {args.get('env_path', '')}",
+
         # Git operations
         "git_diff": f"Showing git diff: {args.get('pathspec', '.')}",
         "apply_patch": f"Applying patch{' (dry run)' if args.get('dry_run') else ''}",
@@ -420,6 +480,8 @@ def _format_description(name: str, args: Dict[str, Any]) -> str:
         "analyze_error_traces": f"Analyzing error traces from: {args.get('log_paths', [])}",
         "check_dependency_vulnerabilities": f"Scanning dependency vulnerabilities ({args.get('language', 'auto')})",
         "check_dependency_updates": f"Checking dependency updates ({args.get('language', 'auto')})",
+        "update_dependencies": f"Updating dependencies ({args.get('language', 'auto')})",
+        "scan_dependencies_vulnerabilities": f"Scanning dependency vulnerabilities ({args.get('language', 'auto')})",
         "bisect_test_failure": f"Bisecting failing test: {args.get('test_command', '')}",
         "generate_repro_case": f"Generating repro case at: {args.get('target_path', 'tests/regressions/test_repro_case.py')}",
         "validate_ci_config": f"Validating CI configs: {args.get('paths', [])}",
@@ -430,6 +492,9 @@ def _format_description(name: str, args: Dict[str, Any]) -> str:
         "analyze_code_structures": f"Analyzing code structures: {args.get('path', '.')}",
         "check_structural_consistency": f"Checking structural consistency: {args.get('path', '.')}",
         "scan_security_issues": f"Scanning security issues in: {args.get('paths', args.get('path', '.'))}",
+        "detect_secrets": f"Detecting secrets in: {args.get('path', '.')}",
+        "check_license_compliance": f"Checking license compliance in: {args.get('path', '.')}",
+        "split_python_module_classes": f"Splitting classes from {args.get('source_path', '')} into package: {args.get('target_directory', '')}",
 
         # Advanced analysis tools
         "analyze_test_coverage": f"Analyzing test coverage: {args.get('path', '.')}",
@@ -437,6 +502,11 @@ def _format_description(name: str, args: Dict[str, Any]) -> str:
         "find_symbol_usages": f"Finding usages of symbol: {args.get('symbol', '')}",
         "analyze_dependencies": f"Analyzing dependencies: {args.get('target', '')}",
         "analyze_semantic_diff": f"Analyzing semantic diff: {args.get('file_path', '')}",
+
+        # Cache operations
+        "get_cache_stats": "Inspecting cache statistics",
+        "clear_caches": f"Clearing caches: {args.get('cache_name', 'all')}",
+        "persist_caches": "Persisting caches to disk",
     }
 
     # Return the friendly description or fall back to technical format
@@ -729,6 +799,129 @@ def get_available_tools() -> list:
             }
         },
 
+        # Code operations
+        {
+            "type": "function",
+            "function": {
+                "name": "remove_unused_imports",
+                "description": "Remove unused imports from a source file using autoflake (Python only).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string", "description": "Path to code file to clean"},
+                        "language": {"type": "string", "description": "Language of the file", "default": "python"}
+                    },
+                    "required": ["file_path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "extract_constants",
+                "description": "Analyze code for repeated literals and suggest constants to extract.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string", "description": "Path to code file to analyze"},
+                        "threshold": {"type": "integer", "description": "Minimum occurrences before suggesting a constant", "default": 3}
+                    },
+                    "required": ["file_path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "simplify_conditionals",
+                "description": "Detect complex conditionals (deep boolean expressions, nested ternaries) that should be simplified.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string", "description": "Path to code file to inspect"}
+                    },
+                    "required": ["file_path"]
+                }
+            }
+        },
+
+        # Data conversion
+        {
+            "type": "function",
+            "function": {
+                "name": "convert_json_to_yaml",
+                "description": "Convert a JSON file to YAML format.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "json_path": {"type": "string", "description": "Path to JSON file to convert"},
+                        "yaml_path": {"type": "string", "description": "Optional output path for the YAML file"}
+                    },
+                    "required": ["json_path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "convert_yaml_to_json",
+                "description": "Convert a YAML file to JSON format.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "yaml_path": {"type": "string", "description": "Path to YAML file to convert"},
+                        "json_path": {"type": "string", "description": "Optional output path for the JSON file"}
+                    },
+                    "required": ["yaml_path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "convert_csv_to_json",
+                "description": "Convert a CSV file into JSON array format.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "csv_path": {"type": "string", "description": "Path to CSV file"},
+                        "json_path": {"type": "string", "description": "Optional output path for the JSON file"}
+                    },
+                    "required": ["csv_path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "convert_json_to_csv",
+                "description": "Convert a JSON array of objects to CSV format.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "json_path": {"type": "string", "description": "Path to JSON file"},
+                        "csv_path": {"type": "string", "description": "Optional output path for the CSV file"}
+                    },
+                    "required": ["json_path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "convert_env_to_json",
+                "description": "Convert a .env file to JSON representation.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "env_path": {"type": "string", "description": "Path to .env file"},
+                        "json_path": {"type": "string", "description": "Optional output path for the JSON file"}
+                    },
+                    "required": ["env_path"]
+                }
+            }
+        },
+
         # Git operations
         {
             "type": "function",
@@ -917,6 +1110,43 @@ def get_available_tools() -> list:
             "function": {
                 "name": "get_system_info",
                 "description": "Get system information (OS, platform, architecture)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
+        },
+
+        # Cache operations
+        {
+            "type": "function",
+            "function": {
+                "name": "get_cache_stats",
+                "description": "Inspect cache statistics (file content, LLM responses, repo context, dependencies).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "clear_caches",
+                "description": "Clear one cache or all caches (file content, LLM response, repo context, dependency tree).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "cache_name": {"type": "string", "description": "Cache to clear: file_content, llm_response, repo_context, dependency_tree, or all", "default": "all"}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "persist_caches",
+                "description": "Persist all caches to disk so the session can resume later.",
                 "parameters": {
                     "type": "object",
                     "properties": {}
@@ -1292,6 +1522,33 @@ def get_available_tools() -> list:
         {
             "type": "function",
             "function": {
+                "name": "update_dependencies",
+                "description": "Alias for check_dependency_updates to maintain backward compatibility with earlier toolkits.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "language": {"type": "string", "description": "Language/ecosystem (auto/python/javascript)", "default": "auto"},
+                        "major": {"type": "boolean", "description": "Ignored legacy flag for requesting major upgrades", "default": False}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "scan_dependencies_vulnerabilities",
+                "description": "Alias for check_dependency_vulnerabilities (pip-audit / npm audit).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "language": {"type": "string", "description": "Language/ecosystem (auto/python/javascript)", "default": "auto"}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "bisect_test_failure",
                 "description": "Use git bisect to locate the commit that causes a test failure.",
                 "parameters": {
@@ -1424,6 +1681,48 @@ def get_available_tools() -> list:
                         "paths": {"type": "array", "items": {"type": "string"}, "description": "Paths to scan for security issues", "default": ["."]},
                         "severity_threshold": {"type": "string", "description": "Minimum severity to report (LOW/MEDIUM/HIGH/CRITICAL)", "default": "MEDIUM"}
                     }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "detect_secrets",
+                "description": "Run detect-secrets against the repository to find accidentally committed credentials.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to scan", "default": "."}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "check_license_compliance",
+                "description": "Review dependency licenses (pip-licenses / license-checker) and flag restrictive licenses.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Project root to inspect", "default": "."}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "split_python_module_classes",
+                "description": "Split top-level classes from a module into individual files inside a package directory and regenerate __init__.py exports.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "source_path": {"type": "string", "description": "Path to the module (e.g., lib/analysts.py)"},
+                        "target_directory": {"type": "string", "description": "Directory/package for extracted classes", "default": None},
+                        "overwrite": {"type": "boolean", "description": "Overwrite files if they already exist", "default": False}
+                    },
+                    "required": ["source_path"]
                 }
             }
         },

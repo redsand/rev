@@ -88,6 +88,9 @@ from rev.tools.config_checks import (
     validate_ci_config,
     verify_migrations,
 )
+from rev.tools.refactoring_utils import (
+    split_python_module_classes,
+)
 # SSH operations
 from rev.tools.ssh_ops import (
     ssh_connect,
@@ -182,6 +185,8 @@ __all__ = [
     # Config / migrations
     "validate_ci_config",
     "verify_migrations",
+    # Refactoring utilities
+    "split_python_module_classes",
     # SSH operations
     "ssh_connect",
     "ssh_exec",
