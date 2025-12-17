@@ -5,6 +5,7 @@
 import sys
 import os
 import argparse
+import shutil
 from typing import Optional
 
 from . import config
@@ -173,6 +174,11 @@ def main():
         help="Enable detailed debug logging to file for LLM review"
     )
     parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Clean all temporary files, caches, and logs"
+    )
+    parser.add_argument(
         "-v",
         "--version",
         action="store_true",
@@ -226,6 +232,14 @@ def main():
         print(build_version_output(config.OLLAMA_MODEL, config.get_system_info_cached()))
         sys.exit(0)
 
+
+    if args.clean:
+        print("Cleaning temporary files, caches, and logs...")
+        if config.REV_DIR.exists():
+            shutil.rmtree(config.REV_DIR)
+            print(f"Removed {config.REV_DIR}")
+        print("Clean complete.")
+        sys.exit(0)
 
     # Log configuration
     debug_logger.log("main", "CONFIGURATION", {
