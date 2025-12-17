@@ -72,6 +72,10 @@ class OrchestratorConfig:
     # Prompt optimization
     enable_prompt_optimization: bool = True
     auto_optimize_prompt: bool = False
+    # ContextGuard configuration
+    enable_context_guard: bool = True
+    context_guard_interactive: bool = True
+    context_guard_threshold: float = 0.3
     # Back-compat shim (legacy)
     max_retries: Optional[int] = None
     max_plan_tasks: int = MAX_PLAN_TASKS
@@ -193,6 +197,7 @@ class Orchestrator:
             print(f"Execution Mode: {execution_mode_val.upper()}")
 
         self.context.user_request = user_request
+        self.context.auto_approve = self.config.auto_approve
         self.context.resource_budget = ResourceBudget()
         start_time = time.time()
 
@@ -249,9 +254,19 @@ class Orchestrator:
         return result
 
     def _execute_heavy_path(self, user_request: str, coding_mode: bool, result: OrchestratorResult):
+        # Phase 2: Research (optional)
+        research_findings = None
         if self.config.enable_research:
             self._update_phase(AgentPhase.RESEARCH)
-        
+            research_findings = research_codebase(
+                user_request,
+                quick_mode=False,
+                search_depth=self.config.research_depth
+            )
+            if research_findings:
+                result.research_findings = research_findings
+                self.context.add_insight("research", "findings_obtained", True)
+
         # Phase 2b: Prompt Optimization (optional)
         if self.config.enable_prompt_optimization:
             original_request = self.context.user_request
@@ -268,6 +283,30 @@ class Orchestrator:
                     "original": original_request[:100],
                     "improved": optimized_request[:100]
                 }
+
+        # Phase 2c: ContextGuard (optional)
+        if self.config.enable_context_guard and research_findings:
+            self._update_phase(AgentPhase.CONTEXT_GUARD)
+            from rev.execution.context_guard import run_context_guard
+
+            guard_result = run_context_guard(
+                user_request=self.context.user_request,
+                research_findings=research_findings,
+                interactive=self.config.context_guard_interactive,
+                threshold=self.config.context_guard_threshold,
+                budget=self.context.resource_budget
+            )
+
+            # Store results in context
+            self.context.context_sufficiency = guard_result.sufficiency
+            self.context.purified_context = guard_result.filtered_context
+            self.context.add_insight("context_guard", "action", guard_result.action_taken)
+            self.context.add_insight("context_guard", "tokens_saved", guard_result.filtered_context.tokens_saved)
+
+            # Handle insufficiency
+            if guard_result.action_taken == "insufficient":
+                self.context.add_error(f"ContextGuard: Insufficient context for safe planning")
+                raise Exception(f"Insufficient context. Gaps: {[g.description for g in guard_result.sufficiency.gaps]}")
 
         self._update_phase(AgentPhase.PLANNING)
         plan = planning_mode(
@@ -456,6 +495,9 @@ def run_orchestrated(
     validation_retries: int = MAX_VALIDATION_RETRIES,
     enable_prompt_optimization: bool = True,
     auto_optimize_prompt: bool = False,
+    enable_context_guard: bool = True,
+    context_guard_interactive: bool = True,
+    context_guard_threshold: float = 0.3,
 ) -> OrchestratorResult:
     config_obj = OrchestratorConfig(
         enable_learning=enable_learning,
@@ -474,6 +516,9 @@ def run_orchestrated(
         validation_retries=validation_retries,
         enable_prompt_optimization=enable_prompt_optimization,
         auto_optimize_prompt=auto_optimize_prompt,
+        enable_context_guard=enable_context_guard,
+        context_guard_interactive=context_guard_interactive,
+        context_guard_threshold=context_guard_threshold,
     )
 
     orchestrator = Orchestrator(project_root, config_obj)

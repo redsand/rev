@@ -58,6 +58,11 @@ def main():
         help=f"Ollama base URL (default: {config.OLLAMA_BASE_URL})"
     )
     parser.add_argument(
+        "-y", "--yes",
+        action="store_true",
+        help="Automatically approve all changes"
+    )
+    parser.add_argument(
         "--prompt",
         action="store_true",
         help="Prompt for approval before execution (default: auto-approve)"
@@ -169,6 +174,28 @@ def main():
         help="Auto-optimize prompts without asking user (implies --optimize-prompt)"
     )
     parser.add_argument(
+        "--context-guard",
+        action="store_true",
+        default=True,
+        help="Enable ContextGuard for context validation and filtering (default: enabled)"
+    )
+    parser.add_argument(
+        "--no-context-guard",
+        action="store_true",
+        help="Disable ContextGuard phase"
+    )
+    parser.add_argument(
+        "--context-guard-auto",
+        action="store_true",
+        help="ContextGuard auto-discovery mode instead of interactive clarification"
+    )
+    parser.add_argument(
+        "--context-guard-threshold",
+        type=float,
+        default=0.3,
+        help="Relevance threshold for context filtering (0.0-1.0, default: 0.3)"
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable detailed debug logging to file for LLM review"
@@ -226,6 +253,27 @@ def main():
         enable_prompt_optimization = True
         auto_optimize_prompt = True
 
+    # Determine ContextGuard settings
+    # Priority: CLI flags > Environment variables > defaults
+    enable_context_guard = True  # Default
+    context_guard_interactive = True  # Default
+
+    # Check environment variables
+    if os.getenv("REV_ENABLE_CONTEXT_GUARD", "").lower() == "false":
+        enable_context_guard = False
+    if os.getenv("REV_CONTEXT_GUARD_INTERACTIVE", "").lower() == "false":
+        context_guard_interactive = False
+
+    # Override with CLI flags (highest priority)
+    if args.no_context_guard:
+        enable_context_guard = False
+    if args.context_guard:
+        enable_context_guard = True
+    if args.context_guard_auto:
+        context_guard_interactive = False
+
+    context_guard_threshold = args.context_guard_threshold
+
     if args.version:
         from rev.versioning import build_version_output
 
@@ -250,13 +298,16 @@ def main():
         "parallel": args.parallel,
         "review_enabled": args.review and not args.no_review,
         "validate_enabled": args.validate and not args.no_validate,
-        "auto_approve": not args.prompt,
+        "auto_approve": args.yes or not args.prompt,
         "research_enabled": args.research,
         "learn_enabled": args.learn,
         "action_review_enabled": args.action_review,
         "auto_fix_enabled": args.auto_fix,
         "prompt_optimization_enabled": enable_prompt_optimization,
         "auto_optimize_prompt": auto_optimize_prompt,
+        "context_guard_enabled": enable_context_guard,
+        "context_guard_interactive": context_guard_interactive,
+        "context_guard_threshold": context_guard_threshold,
     })
 
     # Handle list-checkpoints command
@@ -331,7 +382,7 @@ def main():
                     concurrent_execution_mode(
                         plan,
                         max_workers=args.parallel,
-                        auto_approve=not args.prompt,
+                        auto_approve=args.yes or not args.prompt,
                         tools=tools,
                         enable_action_review=args.action_review,
                         state_manager=state_manager,
@@ -339,7 +390,7 @@ def main():
                 else:
                     execution_mode(
                         plan,
-                        auto_approve=not args.prompt,
+                        auto_approve=args.yes or not args.prompt,
                         tools=tools,
                         enable_action_review=args.action_review,
                         state_manager=state_manager,
@@ -411,10 +462,13 @@ def main():
                     enable_action_review=args.action_review,
                     enable_auto_fix=args.auto_fix,
                     parallel_workers=args.parallel,
-                    auto_approve=not args.prompt,
+                    auto_approve=args.yes or not args.prompt,
                     research_depth=args.research_depth,
                     enable_prompt_optimization=enable_prompt_optimization,
-                    auto_optimize_prompt=auto_optimize_prompt
+                    auto_optimize_prompt=auto_optimize_prompt,
+                    enable_context_guard=enable_context_guard,
+                    context_guard_interactive=context_guard_interactive,
+                    context_guard_threshold=context_guard_threshold
                 )
                 if not result.success:
                     sys.exit(1)
@@ -489,7 +543,7 @@ def main():
                 concurrent_execution_mode(
                     plan,
                     max_workers=args.parallel,
-                    auto_approve=not args.prompt,
+                    auto_approve=args.yes or not args.prompt,
                     tools=tools,
                     enable_action_review=args.action_review,
                     state_manager=state_manager,
@@ -497,7 +551,7 @@ def main():
             else:
                 execution_mode(
                     plan,
-                    auto_approve=not args.prompt,
+                    auto_approve=args.yes or not args.prompt,
                     tools=tools,
                     enable_action_review=args.action_review,
                     state_manager=state_manager,

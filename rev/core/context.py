@@ -91,7 +91,7 @@ class RevContext:
     and share during an execution run.
     """
 
-    def __init__(self, user_request: str, initial_plan: Optional[ExecutionPlan] = None):
+    def __init__(self, user_request: str, initial_plan: Optional[ExecutionPlan] = None, auto_approve: bool = True):
         self.run_id: str = str(uuid.uuid4())  # Unique ID for each orchestration run
         self.user_request: str = user_request
         self.plan: Optional[ExecutionPlan] = initial_plan
@@ -105,6 +105,11 @@ class RevContext:
         self.agent_state: Dict[str, Any] = {} # Track agent-specific state (e.g., recovery attempts)
         self.logger = get_logger()
         self.session_id: str = "" # Will be set by StateManager
+        self.auto_approve: bool = auto_approve # Whether to auto-approve changes without prompting
+        # ContextGuard phase support
+        self.context_sufficiency: Optional[Any] = None # ContextSufficiency from context_guard phase
+        self.clarification_history: List[Dict[str, Any]] = [] # History of user clarifications
+        self.purified_context: Optional[Any] = None # FilteredContext from context_guard phase
 
     def update_plan(self, new_plan: ExecutionPlan):
         """Update the current execution plan."""

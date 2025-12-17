@@ -219,8 +219,12 @@ class CodeWriterAgent(BaseAgent):
 
         print(f"\n{'='*70}")
 
-    def _prompt_for_approval(self, tool_name: str, file_path: str) -> bool:
+    def _prompt_for_approval(self, tool_name: str, file_path: str, context: 'RevContext' = None) -> bool:
         """Prompt user to approve the change (matching linear mode behavior)."""
+        # If auto_approve is set in context, skip user prompts
+        if context and context.auto_approve:
+            return True
+
         # Check if this is a scary operation
         is_scary, scary_reason = is_scary_operation(tool_name, {"file_path": file_path})
 
@@ -228,7 +232,9 @@ class CodeWriterAgent(BaseAgent):
         operation_desc = f"{tool_name}: {file_path}"
 
         if is_scary:
-            return prompt_scary_operation(operation_desc, scary_reason)
+            # If context is provided and auto_approve is set, pass it to the scary operation prompt
+            auto_approve_scary = context.auto_approve if context else False
+            return prompt_scary_operation(operation_desc, scary_reason, auto_approve=auto_approve_scary)
         else:
             # For non-scary operations, still ask for confirmation
             print(f"\n{'='*70}")
@@ -361,7 +367,7 @@ class CodeWriterAgent(BaseAgent):
                                     print(f"  Note: This file has imports that may not exist. Proceed with caution.")
 
                             # Ask for user approval
-                            if not self._prompt_for_approval(tool_name, file_path):
+                            if not self._prompt_for_approval(tool_name, file_path, context):
                                 print(f"  ✗ Change rejected by user")
                                 return "[USER_REJECTED] Change was not approved by user"
 
