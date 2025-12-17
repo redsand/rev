@@ -17,6 +17,34 @@ from rev.tools.registry import execute_tool
 from rev.core.context import RevContext
 
 
+def _read_file_with_fallback_encoding(file_path: Path) -> Optional[str]:
+    """
+    Read a file with multiple encoding attempts.
+
+    Tries common encodings in order: UTF-8, UTF-8 BOM, Latin-1, CP1252, ASCII.
+    Falls back to UTF-8 with error replacement if all fail.
+
+    Args:
+        file_path: Path to the file to read
+
+    Returns:
+        File content string, or None if file doesn't exist
+    """
+    if not file_path.exists():
+        return None
+
+    encodings_to_try = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252', 'ascii']
+
+    for encoding in encodings_to_try:
+        try:
+            return file_path.read_text(encoding=encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+
+    # If all encodings failed, use UTF-8 with error replacement
+    return file_path.read_text(encoding='utf-8', errors='replace')
+
+
 @dataclass
 class VerificationResult:
     """Result of verifying a task's execution."""
@@ -144,7 +172,11 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
             import_errors = []
             for py_file in py_files:
                 try:
-                    content = py_file.read_text()
+                    content = _read_file_with_fallback_encoding(py_file)
+                    if content is None:
+                        import_errors.append(f"[FAIL] Could not read {py_file.name}")
+                        continue
+
                     # Try to parse imports
                     import_lines = re.findall(r'^(?:from|import)\s+.+', content, re.MULTILINE)
                     # Check if files referenced in imports actually exist
@@ -177,21 +209,26 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
 
         if old_file.exists():
             try:
-                content = old_file.read_text()
-                original_size = len(content)
-                debug_info["source_file_size"] = original_size
+                # Use helper function for robust multi-encoding file reading
+                content = _read_file_with_fallback_encoding(old_file)
 
-                # Check if it has import statements from the new directory
-                has_imports_from_new = re.search(rf'from\s+\.{target_dir.name}', content)
-                if has_imports_from_new:
-                    details["main_file_updated"] = True
-                    debug_info["main_file_status"] = "UPDATED_WITH_IMPORTS"
+                if content is None:
+                    debug_info["main_file_status"] = "NOT_READABLE"
                 else:
-                    issues.append(
-                        f"[FAIL] Original file {old_file} was NOT updated with imports from {target_dir}\n"
-                        f"   File still contains {original_size} bytes (should be much smaller if extracted)"
-                    )
-                    debug_info["main_file_status"] = "NOT_UPDATED"
+                    original_size = len(content)
+                    debug_info["source_file_size"] = original_size
+
+                    # Check if it has import statements from the new directory
+                    has_imports_from_new = re.search(rf'from\s+\.{target_dir.name}', content)
+                    if has_imports_from_new:
+                        details["main_file_updated"] = True
+                        debug_info["main_file_status"] = "UPDATED_WITH_IMPORTS"
+                    else:
+                        issues.append(
+                            f"[FAIL] Original file {old_file} was NOT updated with imports from {target_dir}\n"
+                            f"   File still contains {original_size} bytes (should be much smaller if extracted)"
+                        )
+                        debug_info["main_file_status"] = "NOT_UPDATED"
             except Exception as e:
                 issues.append(f"[FAIL] Could not read {old_file}: {e}")
                 debug_info["main_file_status"] = f"ERROR: {str(e)}"
@@ -439,8 +476,8 @@ def quick_verify_extraction_completeness(
 
     # Check that source file still exists and wasn't truncated
     if source_file.exists():
-        content = source_file.read_text()
-        if not content.strip():
+        content = _read_file_with_fallback_encoding(source_file)
+        if content and not content.strip():
             details["warning"] = f"Source file {source_file} is now empty after extraction"
             return False, details
 
