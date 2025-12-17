@@ -164,6 +164,8 @@ class Orchestrator:
             auto_optimize=self.config.auto_optimize_prompt
         )
         if not was_optimized:
+            if self.config.enable_prompt_optimization and self.config.auto_optimize_prompt:
+                print("\n[OK] Request already optimized; using original text")
             return False
 
         print(f"\n[OK] Request optimized for clarity")
@@ -466,10 +468,11 @@ class Orchestrator:
 
         completed_tasks_log: List[str] = []
         iteration = 0
-        max_iterations = 25
 
-        while iteration < max_iterations:
+        while True:
             iteration += 1
+            self.context.set_agent_state("current_iteration", iteration)
+            self.context.resource_budget.update_step()
             if self.context.resource_budget.is_exceeded():
                 print(f"\n⚠️ Resource budget exceeded at step {iteration}")
                 return True
@@ -517,6 +520,10 @@ class Orchestrator:
                             next_task = decomposed_task
                             iteration -= 1  # Don't count failed task as an iteration
 
+            action_type = (next_task.action_type or "").lower()
+            if next_task.status == TaskStatus.COMPLETED and action_type in {"edit", "add", "refactor", "create_directory"}:
+                self.context.set_agent_state("last_code_change_iteration", iteration)
+
             # STEP 4: REPORT
             log_entry = f"[{next_task.status.name}] {next_task.description}"
             if next_task.status == TaskStatus.FAILED:
@@ -530,7 +537,6 @@ class Orchestrator:
             self.context.update_repo_context()
             clear_analysis_caches()
 
-        print(f"\n⚠️  Reached maximum iterations ({max_iterations}). Halting execution.")
         return False
 
     def _handle_verification_failure(self, verification_result: VerificationResult):

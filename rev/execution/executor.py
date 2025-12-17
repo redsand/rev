@@ -1053,6 +1053,8 @@ def execution_mode(
 
     # Initialize session tracker for comprehensive summarization
     session_tracker = SessionTracker()
+    if state_manager:
+        setattr(state_manager, "session_tracker", session_tracker)
     print(f"  📊 Session tracking enabled (ID: {session_tracker.session_id})\n")
     exec_context = ExecutionContext(plan)
     tool_limits = {
@@ -2365,6 +2367,8 @@ def streaming_execution_mode(
 
         # Initialize session tracker
         session_tracker = SessionTracker()
+        if state_manager:
+            setattr(state_manager, "session_tracker", session_tracker)
         exec_context = ExecutionContext(plan)
         tool_limits = {
             "read_file": MAX_READ_FILE_PER_TASK,
