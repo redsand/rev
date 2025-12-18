@@ -25,16 +25,26 @@ from rev.debug_logger import prune_old_logs
 
 def _run_shell(cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:
     """Execute shell command."""
-    return subprocess.run(
-        cmd,
-        shell=True,
-        cwd=str(config.ROOT),
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-        encoding="utf-8",
-        errors="replace",
-    )
+    try:
+        return subprocess.run(
+            cmd,
+            shell=True,
+            cwd=str(config.ROOT),
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError as exc:
+        # On Windows low-memory/paging-file failures (e.g., WinError 1455), return a CompletedProcess-like
+        # object so callers can surface a clear message instead of crashing.
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=1,
+            stdout="",
+            stderr=str(exc),
+        )
 
 
 def _create_log_file(prefix: str) -> pathlib.Path:
@@ -725,6 +735,16 @@ def get_repo_context(commits: int = 6) -> str:
     # Generate context
     st = _run_shell("git status -s")
     lg = _run_shell(f"git log -n {int(commits)} --oneline")
+
+    # If git commands failed (e.g., low memory / paging file error), surface a minimal context and skip crashing.
+    if st.returncode != 0 or lg.returncode != 0:
+        error_msg = st.stderr or lg.stderr or "git commands failed"
+        return json.dumps({
+            "status": st.stdout,
+            "log": lg.stdout,
+            "error": error_msg,
+            "note": "git status/log unavailable (likely low memory); continuing with partial context",
+        })
 
     from rev.config import EXCLUDE_DIRS
     top = []

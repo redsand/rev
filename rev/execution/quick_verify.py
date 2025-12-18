@@ -536,6 +536,18 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
                 )
                 if isinstance(candidate, str) and candidate.strip():
                     extracted_path = Path(candidate.strip().strip("\"'"))
+                # If args didn't provide a usable path, try the tool result payload (path_abs/path_rel/file).
+                if not extracted_path:
+                    try:
+                        last_result = json.loads(last_call.get("result") or "{}")
+                    except Exception:
+                        last_result = {}
+                    if isinstance(last_result, dict):
+                        for key in ("path_abs", "path_rel", "file", "path"):
+                            candidate2 = last_result.get(key)
+                            if isinstance(candidate2, str) and candidate2.strip():
+                                extracted_path = Path(candidate2.strip().strip("\"'"))
+                                break
 
     if not extracted_path:
         return VerificationResult(
@@ -643,6 +655,27 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
                 passed=False,
                 message="Test command timed out",
                 details=payload,
+                should_replan=True,
+            )
+
+    # If the task is about auto-registration, surface the observed count from stdout/stderr even if rc != 0.
+    def _extract_auto_registered_count(out: str) -> Optional[int]:
+        if not out:
+            return None
+        match = re.search(r"Auto-registered\s+(\d+)", out, re.IGNORECASE)
+        return int(match.group(1)) if match else None
+
+    desc_lower = (task.description or "").lower()
+    output_combined = ""
+    if payload:
+        output_combined = (payload.get("stdout", "") or "") + (payload.get("stderr", "") or "")
+    if "auto-registered" in desc_lower and output_combined:
+        count = _extract_auto_registered_count(output_combined)
+        if count is not None and count <= 0:
+            return VerificationResult(
+                passed=False,
+                message=f"Auto-registration still empty (Auto-registered {count})",
+                details={"count": count, "output": output_combined[:500]},
                 should_replan=True,
             )
     if payload and payload.get("skipped") is True and payload.get("kind") == "skipped_tests":

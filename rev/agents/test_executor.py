@@ -168,8 +168,20 @@ class TestExecutorAgent(BaseAgent):
                 payload = json.loads(result)
             except json.JSONDecodeError:
                 payload = {}
-            if isinstance(payload, dict) and isinstance(payload.get("rc"), int):
-                context.set_agent_state("last_test_rc", payload.get("rc"))
+            if isinstance(payload, dict):
+                # Normalize rc so verification always has an exit code to inspect.
+                if not isinstance(payload.get("rc"), int):
+                    rc_fallback = payload.get("returncode")
+                    if isinstance(rc_fallback, int):
+                        payload["rc"] = rc_fallback
+                    elif payload.get("timeout") or payload.get("blocked"):
+                        # leave as-is; verifier will surface the error
+                        pass
+                    else:
+                        payload["rc"] = 1
+                if isinstance(payload.get("rc"), int):
+                    context.set_agent_state("last_test_rc", payload.get("rc"))
+                result = json.dumps(payload)
             return result
         except Exception as e:
             error_msg = f"Error executing test command: {e}"

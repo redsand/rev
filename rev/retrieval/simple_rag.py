@@ -104,8 +104,6 @@ class SimpleCodeRetriever(BaseCodeRetriever):
             return
 
         cache_path = self._cache_path()
-        if self._load_cache(cache_path):
-            return
 
         self.chunks = []
         self.term_document_freq = {}
