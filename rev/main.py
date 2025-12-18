@@ -70,6 +70,11 @@ def main():
         help="Interactive REPL mode"
     )
     parser.add_argument(
+        "--tui",
+        action="store_true",
+        help="Use curses TUI (prompt at bottom with scrollback). Can also set REV_TUI=1"
+    )
+    parser.add_argument(
         "--model",
         default=config.OLLAMA_MODEL,
         help=f"Ollama model (default: {config.OLLAMA_MODEL})"
@@ -481,7 +486,7 @@ def main():
                 sys.exit(1)
         if args.repl or not args.task:
             debug_logger.log_workflow_phase("repl", {})
-            repl_mode()
+            repl_mode(force_tui=args.tui)
         else:
             task_description = " ".join(args.task)
             debug_logger.log("main", "TASK_DESCRIPTION", {"task": task_description})

@@ -15,13 +15,12 @@ from rev.terminal.input import get_input_with_escape, get_history
 from rev.terminal.commands import execute_command
 from rev.terminal.formatting import colorize, Colors, Symbols, get_color_status
 from rev.terminal.escape_monitor import escape_monitor_context
-from rev.terminal.tui import TUI
 from rev.tools.registry import get_available_tools
 from rev.settings_manager import get_default_mode, apply_saved_settings
 from rev.llm.client import get_token_usage
 
 
-def repl_mode():
+def repl_mode(force_tui: bool = False):
     """Interactive REPL for iterative development with session memory.
 
     The REPL is intended for interactive use. When standard input is not a TTY
@@ -30,7 +29,7 @@ def repl_mode():
     input, causing automated runs to hang. Detect this early and exit
     gracefully with a short message.
     """
-    use_tui = os.getenv("REV_TUI", "").lower() in {"1", "true", "yes", "on"} or "--tui" in sys.argv
+    use_tui = force_tui or os.getenv("REV_TUI", "").lower() in {"1", "true", "yes", "on"}
     # Exit early in non-interactive environments
     if not sys.stdin.isatty() and not use_tui:
         print("[rev] Non-interactive environment detected - exiting REPL.")
@@ -38,14 +37,20 @@ def repl_mode():
 
     # Print welcome message with styling
     if use_tui:
-        tui = TUI(prompt=f"{colorize('rev', Colors.BRIGHT_MAGENTA)}{colorize('>', Colors.BRIGHT_BLACK)} ")
-        def _tui_log(msg: str):
-            tui.log(msg)
-        def _tui_print(msg: str):
-            tui.log(msg)
-        printer = _tui_print
-        logger = _tui_log
-    else:
+        try:
+            from rev.terminal.tui import TUI
+            tui = TUI(prompt=f"{colorize('rev', Colors.BRIGHT_MAGENTA)}{colorize('>', Colors.BRIGHT_BLACK)} ")
+            def _tui_log(msg: str):
+                tui.log(msg)
+            def _tui_print(msg: str):
+                tui.log(msg)
+            printer = _tui_print
+            logger = _tui_log
+        except Exception as e:
+            print(f"[rev] TUI unavailable ({e}); falling back to standard REPL.")
+            use_tui = False
+
+    if not use_tui:
         print(f"{colorize('rev Interactive REPL', Colors.BRIGHT_CYAN, bold=True)}")
         print(f"{colorize('-' * 80, Colors.BRIGHT_BLACK)}")
         print(f"  {colorize('[i] Type /help for commands', Colors.BRIGHT_BLUE)}")
