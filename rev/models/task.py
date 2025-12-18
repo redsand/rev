@@ -48,6 +48,7 @@ class Task:
         self.complexity = "low"  # Task complexity: low, medium, high
         self.subtasks = []  # For complex tasks, list of subtask IDs
         self.priority = 0  # Task priority: higher values = more important (0 = normal)
+        self.tool_events: List[Dict[str, Any]] = []  # Recorded tool executions
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -67,7 +68,8 @@ class Task:
             "validation_steps": self.validation_steps,
             "complexity": self.complexity,
             "subtasks": self.subtasks,
-            "priority": self.priority
+            "priority": self.priority,
+            "tool_events": self.tool_events,
         }
 
     @classmethod
@@ -98,6 +100,7 @@ class Task:
         task.complexity = data.get("complexity", "low")
         task.subtasks = data.get("subtasks", [])
         task.priority = data.get("priority", 0)
+        task.tool_events = data.get("tool_events", [])
         return task
 
 

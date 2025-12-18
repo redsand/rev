@@ -136,12 +136,42 @@ def _build_tool_evidence(
     return evidence
 
 
+def _append_tool_event(
+    current_task: Optional[Task],
+    tool_name: str,
+    tool_args: Dict[str, Any],
+    result: str,
+    evidence: Dict[str, Any],
+) -> None:
+    """Record a tool event on the task for downstream verification."""
+    if not current_task:
+        return
+    try:
+        events = getattr(current_task, "tool_events", None)
+        if events is None:
+            current_task.tool_events = []
+            events = current_task.tool_events
+        events.append(
+            {
+                "tool": tool_name,
+                "args": tool_args,
+                "raw_result": result,
+                "artifact_ref": evidence.get("artifact_ref"),
+                "summary": evidence.get("summary"),
+                "status": evidence.get("result"),
+            }
+        )
+    except Exception:
+        pass
+
+
 def _tool_message_content(
     tool_name: str,
     tool_args: Dict[str, Any],
     result: str,
     session_tracker: Optional[SessionTracker],
     task_id: Optional[str] = None,
+    current_task: Optional[Task] = None,
 ) -> str:
     """Return the content to attach to a tool message (compressed when needed)."""
     policy = get_tool_compression_policy()
@@ -150,6 +180,9 @@ def _tool_message_content(
     # Always persist artifact for observability/replay.
     evidence = _build_tool_evidence(tool_name, tool_args, result, session_tracker, task_id=task_id)
     evidence["compression_reason"] = decision.reason
+
+    # Record tool event for verification
+    _append_tool_event(current_task, tool_name, tool_args, result, evidence)
 
     if not decision.compress:
         return result
@@ -786,6 +819,7 @@ def _apply_text_fallbacks(
     session_tracker: Optional[SessionTracker],
     exec_context: Optional[ExecutionContext],
     debug_logger,
+    current_task: Optional[Task] = None,
 ) -> bool:
     """Try to handle text-only responses by applying patches or writing files."""
     recovered = recover_tool_call_from_text(content)
@@ -815,6 +849,7 @@ def _apply_text_fallbacks(
                     recovered.arguments if isinstance(recovered.arguments, dict) else {"arguments": recovered.arguments},
                     result,
                     session_tracker,
+                    current_task=current_task,
                 ),
             })
             if debug_logger:
@@ -878,6 +913,7 @@ def _apply_text_fallbacks(
                     {"path": path, "content": body},
                     result,
                     session_tracker,
+                    current_task=current_task,
                 )
             })
             if debug_logger:
@@ -1631,6 +1667,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                             result,
                             session_tracker,
                             task_id=getattr(current_task, "task_id", None),
+                            current_task=current_task,
                         )
                     })
                     redisplay_prompt()
@@ -1705,6 +1742,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                     session_tracker,
                     exec_context,
                     debug_logger,
+                    current_task=current_task,
                 )
                 if applied_fallback:
                     continue
@@ -2177,6 +2215,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         result,
                         None,
                         task_id=getattr(task, "task_id", None),
+                        current_task=task,
                     )
                 })
 
@@ -2203,7 +2242,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             # Model is thinking/responding without tool calls
             print(f"  → {content[:200]}")
             no_tool_call_streak += 1
-            applied_fallback = _apply_text_fallbacks(content, task.action_type, messages, None, exec_context, debug_logger)
+            applied_fallback = _apply_text_fallbacks(content, task.action_type, messages, None, exec_context, debug_logger, current_task=task)
             if applied_fallback:
                 continue
 
@@ -2391,6 +2430,7 @@ Please analyze these validation failures and fix them. Complete each fix and rep
                         tool_args if isinstance(tool_args, dict) else {},
                         result,
                         None,
+                        current_task=None,
                     )
                 })
 
@@ -2765,6 +2805,7 @@ Action type: {current_task.action_type}
                                 result,
                                 session_tracker,
                                 task_id=getattr(current_task, "task_id", None),
+                                current_task=current_task,
                             )
                         })
 

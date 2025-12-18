@@ -74,6 +74,20 @@ class Workspace:
         # Ensure root is resolved
         object.__setattr__(self, "root", self.root.expanduser().resolve())
 
+        # Auto-register additional roots from environment (REV_ADDITIONAL_ROOTS)
+        # Accept a pathsep-separated list of directories.
+        extra_roots_env = os.getenv("REV_ADDITIONAL_ROOTS", "")
+        if extra_roots_env:
+            for raw_path in extra_roots_env.split(os.pathsep):
+                candidate = raw_path.strip()
+                if not candidate:
+                    continue
+                try:
+                    self.register_additional_root(Path(candidate))
+                except Exception:
+                    # Ignore invalid entries; workspace resolution will still validate paths.
+                    pass
+
         # Compute derived paths
         rev_dir = self.root / ".rev"
         object.__setattr__(self, "rev_dir", rev_dir)

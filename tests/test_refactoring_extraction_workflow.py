@@ -7,6 +7,8 @@ This tests the complete workflow that was shown as broken in the issue.
 
 import pytest
 import tempfile
+import shutil
+from uuid import uuid4
 import os
 from pathlib import Path
 from unittest.mock import Mock, MagicMock, patch
@@ -18,6 +20,7 @@ from rev.execution.quick_verify import (
     VerificationResult,
     quick_verify_extraction_completeness,
 )
+from rev.workspace import init_workspace, reset_workspace
 
 
 class TestAnalystExtractionWorkflow:
@@ -412,6 +415,57 @@ class TestRegressionPrevention:
 
             finally:
                 os.chdir(old_cwd)
+
+    def test_verification_uses_parent_directory_for_init_py(self):
+        """
+        Regression: ensure verify_task_execution does not truncate `.py` when
+        inferring the target directory from a description containing
+        `__init__.py`.
+        """
+        base = Path(f"tmp_parent_dir_test_{uuid4().hex}")
+        try:
+            base.mkdir(parents=True, exist_ok=False)
+            init_workspace(base)
+
+            lib_dir = base / "lib"
+            lib_dir.mkdir()
+
+            # Source file that should be considered the "old" file
+            analysts_file = lib_dir / "analysts.py"
+            analysts_file.write_text(
+                "from .analysts import BreakoutAnalyst\n__all__ = ['BreakoutAnalyst']\n"
+            )
+
+            # Extracted package with __init__.py and one module
+            analysts_dir = lib_dir / "analysts"
+            analysts_dir.mkdir()
+            (analysts_dir / "breakout_analyst.py").write_text(
+                "class BreakoutAnalyst:\n    pass\n"
+            )
+            analysts_init = analysts_dir / "__init__.py"
+            analysts_init.write_text(
+                "from .breakout_analyst import BreakoutAnalyst\n__all__ = ['BreakoutAnalyst']\n"
+            )
+
+            # Task description includes a .py path for the package init
+            task = Task(
+                description=(
+                    f"Extract analysts from {analysts_file} into {analysts_init}"
+                ),
+                action_type="refactor",
+            )
+            task.status = TaskStatus.COMPLETED
+
+            context = RevContext(user_request="Extract")
+            result = verify_task_execution(task, context)
+
+            assert result.passed is True, f"Verification should pass: {result.message}"
+            debug = result.details.get("debug", {})
+            target_dir = str(debug.get("target_directory", "")).replace("\\", "/")
+            assert target_dir.endswith("lib/analysts"), "Should resolve to parent directory, not __init__"
+        finally:
+            reset_workspace()
+            shutil.rmtree(base, ignore_errors=True)
 
 
 if __name__ == "__main__":
