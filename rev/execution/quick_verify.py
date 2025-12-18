@@ -631,7 +631,8 @@ def _get_verification_mode() -> Optional[str]:
         return "strict"
     if env_fast in {"1", "true", "yes", "on", "fast"}:
         return "fast"
-    return None
+    # Default to fast mode so syntax errors are caught even without env flags.
+    return "fast"
 
 
 def _latest_tool_event(tool_events: Optional[Iterable[Dict[str, Any]]], names: Iterable[str]) -> Optional[Dict[str, Any]]:
