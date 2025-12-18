@@ -630,12 +630,46 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
 
     # Prefer the tool result from the task itself (avoid re-running expensive tests).
     payload = _parse_task_result_payload(task.result)
+    if payload and payload.get("skipped") is True and payload.get("kind") == "skipped_tests":
+        last_test_iteration = payload.get("last_test_iteration")
+        last_test_rc = payload.get("last_test_rc")
+
+        if isinstance(last_test_rc, int) and last_test_rc != 0:
+            context.agent_state["tests_blocked_no_changes"] = True
+            return VerificationResult(
+                passed=True,
+                message="Skipped pytest (no code changes since last failure)",
+                details={
+                    "skipped": True,
+                    "blocked": True,
+                    "last_test_iteration": last_test_iteration,
+                    "last_test_rc": last_test_rc,
+                },
+            )
+
+        return VerificationResult(
+            passed=True,
+            message="Skipped pytest (no changes since last pass)",
+            details={
+                "skipped": True,
+                "last_test_iteration": last_test_iteration,
+                "last_test_rc": last_test_rc,
+            },
+        )
+
     if payload and isinstance(payload.get("rc"), int):
         rc = payload.get("rc", 1)
         output = (payload.get("stdout", "") or "") + (payload.get("stderr", "") or "")
         context.agent_state["last_test_iteration"] = context.agent_state.get("current_iteration")
         context.agent_state["last_test_rc"] = rc
         if rc == 0:
+            cmd = payload.get("cmd") or payload.get("command")
+            if isinstance(cmd, str) and cmd.strip() and "pytest" not in cmd.lower():
+                return VerificationResult(
+                    passed=True,
+                    message="Command succeeded",
+                    details={"rc": rc, "command": cmd, "output": output[:200]},
+                )
             return VerificationResult(
                 passed=True,
                 message="Tests passed",
@@ -662,11 +696,11 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
                 message="Skipped tests (no changes since last pass)",
                 details={"last_test_iteration": last_test_iteration}
             )
+        context.agent_state["tests_blocked_no_changes"] = True
         return VerificationResult(
-            passed=False,
-            message="Skipping test re-run (no code changes since last failure)",
-            details={"last_test_iteration": last_test_iteration, "last_test_rc": last_test_rc},
-            should_replan=True
+            passed=True,
+            message="Skipped pytest (no code changes since last failure)",
+            details={"blocked": True, "last_test_iteration": last_test_iteration, "last_test_rc": last_test_rc},
         )
 
     # Fall back to running tests if we have no usable tool result.

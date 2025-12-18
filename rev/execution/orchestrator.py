@@ -442,10 +442,21 @@ class Orchestrator:
     def _determine_next_action(self, user_request: str, work_summary: str, coding_mode: bool) -> Optional[Task]:
         """A truly lightweight planner that makes a direct LLM call."""
         available_actions = AgentRegistry.get_registered_action_types()
+
+        blocked_note = ""
+        if self.context:
+            blocked_tests = bool(self.context.agent_state.get("tests_blocked_no_changes"))
+            last_test_rc = self.context.agent_state.get("last_test_rc")
+            if blocked_tests and isinstance(last_test_rc, int) and last_test_rc != 0:
+                blocked_note = (
+                    "Important: The last [TEST] was skipped because no code changed since the last failing test run.\n"
+                    "Do NOT propose another [TEST] until a code-changing step (e.g. [EDIT]/[REFACTOR]) is completed.\n\n"
+                )
         
         prompt = (
             f"Original Request: {user_request}\n\n"
             f"{work_summary}\n\n"
+            f"{blocked_note}"
             "Based on the work completed, what is the single next most important action to take? "
             "If a previous action failed, propose a different action to achieve the goal.\n"
             "Constraints to avoid duplicating work:\n"
@@ -600,6 +611,18 @@ class Orchestrator:
                 verification_result = verify_task_execution(next_task, self.context)
                 print(f"    {verification_result}")
 
+                # If tests are being skipped because nothing has changed since a failure,
+                # don't treat this as a verification failure (it causes loops). Instead,
+                # bias planning toward a code-changing step.
+                if (
+                    (next_task.action_type or "").lower() == "test"
+                    and verification_result.passed
+                    and isinstance(getattr(verification_result, "details", None), dict)
+                    and verification_result.details.get("blocked") is True
+                ):
+                    self.context.set_agent_state("tests_blocked_no_changes", True)
+                    print("  [!] Skipped re-running tests: no code changes since the last failing run.")
+
                 if not verification_result.passed:
                     # Verification failed - mark task as failed and mark for re-planning
                     next_task.status = TaskStatus.FAILED
@@ -654,6 +677,7 @@ class Orchestrator:
             action_type = (next_task.action_type or "").lower()
             if next_task.status == TaskStatus.COMPLETED and action_type in {"edit", "add", "refactor", "create_directory"}:
                 self.context.set_agent_state("last_code_change_iteration", iteration)
+                self.context.set_agent_state("tests_blocked_no_changes", False)
 
             # STEP 4: REPORT
             log_entry = f"[{next_task.status.name}] {next_task.description}"

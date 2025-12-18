@@ -20,6 +20,7 @@ _EXACT_ALIASES: dict[str, str] = {
     # canonical shims
     "create": "add",
     "write": "add",
+    "fix": "edit",
     "investigate": "research",
     # known refactor typos
     "refator": "refactor",
@@ -88,4 +89,3 @@ def normalize_action_type(
         return best_action
 
     return raw
-
