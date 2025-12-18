@@ -189,6 +189,29 @@ class CodeWriterAgent(BaseAgent):
                 return False, "create_directory missing required key: path"
         return True, ""
 
+    def _should_retry_invalid_tool_args(self, context: RevContext, tool_name: str) -> bool:
+        """Allow a few extra replans for invalid tool args (separate from global recovery)."""
+        max_attempts = 3
+        key = f"invalid_tool_args_attempts:{(tool_name or '').lower()}"
+        attempts = context.get_agent_state(key, 0)
+        if not isinstance(attempts, int):
+            attempts = 0
+        if attempts >= max_attempts:
+            return False
+        context.set_agent_state(key, attempts + 1)
+        return True
+
+    def _invalid_args_guidance(self, tool_name: str, arg_msg: str) -> str:
+        tool = (tool_name or "").lower()
+        if tool == "replace_in_file":
+            return (
+                f"{tool_name}: {arg_msg}. "
+                "You must include either `find`/`replace` or `old_string`/`new_string`. "
+                "`find`/`old_string` must be an exact substring from the current file content "
+                "(include surrounding lines for context to ensure a unique match)."
+            )
+        return f"{tool_name}: {arg_msg}"
+
     def _color_diff_line(self, line: str) -> str:
         """Apply color coding to diff lines (matching linear mode formatting)."""
         if line.startswith("+++") or line.startswith("---"):
@@ -433,11 +456,11 @@ class CodeWriterAgent(BaseAgent):
                         ok_args, arg_msg = self._validate_tool_args(tool_name, arguments)
                         if not ok_args:
                             print(f"  ✗ Invalid tool args: {arg_msg}")
-                            if self.should_attempt_recovery(task, context):
+                            if self._should_retry_invalid_tool_args(context, tool_name):
                                 self.request_replan(
                                     context,
                                     reason="Missing required tool arguments",
-                                    detailed_reason=f"{tool_name}: {arg_msg}",
+                                    detailed_reason=self._invalid_args_guidance(tool_name, arg_msg),
                                 )
                                 return self.make_recovery_request("invalid_tool_args", arg_msg)
                             return self.make_failure_signal("invalid_tool_args", arg_msg)
@@ -496,11 +519,11 @@ class CodeWriterAgent(BaseAgent):
                         ok_args, arg_msg = self._validate_tool_args(tool_name, arguments)
                         if not ok_args:
                             print(f"  Invalid tool args: {arg_msg}")
-                            if self.should_attempt_recovery(task, context):
+                            if self._should_retry_invalid_tool_args(context, tool_name):
                                 self.request_replan(
                                     context,
                                     reason="Missing required tool arguments",
-                                    detailed_reason=f"{tool_name}: {arg_msg}",
+                                    detailed_reason=self._invalid_args_guidance(tool_name, arg_msg),
                                 )
                                 return self.make_recovery_request("invalid_tool_args", arg_msg)
                             return self.make_failure_signal("invalid_tool_args", arg_msg)
