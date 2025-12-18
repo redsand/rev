@@ -630,6 +630,21 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
 
     # Prefer the tool result from the task itself (avoid re-running expensive tests).
     payload = _parse_task_result_payload(task.result)
+    if payload:
+        if isinstance(payload.get("blocked"), (list, str)):
+            return VerificationResult(
+                passed=False,
+                message="Test command was blocked by tool allowlist",
+                details=payload,
+                should_replan=True,
+            )
+        if payload.get("timeout"):
+            return VerificationResult(
+                passed=False,
+                message="Test command timed out",
+                details=payload,
+                should_replan=True,
+            )
     if payload and payload.get("skipped") is True and payload.get("kind") == "skipped_tests":
         last_test_iteration = payload.get("last_test_iteration")
         last_test_rc = payload.get("last_test_rc")
@@ -665,6 +680,24 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
         if rc == 0:
             cmd = payload.get("cmd") or payload.get("command")
             if isinstance(cmd, str) and cmd.strip() and "pytest" not in cmd.lower():
+                if "auto-registered" in (task.description or "").lower():
+                    match = re.search(r"Auto-registered\s+(\d+)", output, re.IGNORECASE)
+                    if match:
+                        count = int(match.group(1))
+                        if count <= 0:
+                            return VerificationResult(
+                                passed=False,
+                                message=f"Auto-registration still empty (Auto-registered {count})",
+                                details={"count": count, "command": cmd, "output": output[:500]},
+                                should_replan=True,
+                            )
+                    else:
+                        return VerificationResult(
+                            passed=False,
+                            message="Could not find Auto-registered count in startup output",
+                            details={"command": cmd, "output": output[:500]},
+                            should_replan=True,
+                        )
                 return VerificationResult(
                     passed=True,
                     message="Command succeeded",
@@ -680,6 +713,14 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
             message=f"Tests failed (rc={rc})",
             details={"rc": rc, "output": output[:500]},
             should_replan=True
+        )
+
+    if payload is not None:
+        return VerificationResult(
+            passed=False,
+            message="Test command did not return an exit code (rc); cannot verify",
+            details={"payload": payload},
+            should_replan=True,
         )
 
     last_test_iteration = context.agent_state.get("last_test_iteration")

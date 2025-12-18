@@ -167,6 +167,25 @@ class CodeWriterAgent(BaseAgent):
             return True, payload["error"].strip()
         return False, ""
 
+    def _tool_result_is_noop(self, tool_name: str, raw_result: str) -> Tuple[bool, str]:
+        """Detect tool results that technically succeeded but made no changes."""
+        tool = (tool_name or "").lower()
+        if not isinstance(raw_result, str):
+            return False, ""
+        try:
+            payload = json.loads(raw_result)
+        except json.JSONDecodeError:
+            return False, ""
+        if not isinstance(payload, dict):
+            return False, ""
+
+        if tool == "replace_in_file":
+            replaced = payload.get("replaced")
+            if isinstance(replaced, int) and replaced == 0:
+                return True, "replace_in_file made no changes (replaced=0); likely `find` did not match the file"
+
+        return False, ""
+
     def _validate_tool_args(self, tool_name: str, arguments: dict) -> Tuple[bool, str]:
         """Validate minimum required tool args to avoid tool-layer KeyErrors."""
         tool = (tool_name or "").lower()
@@ -478,6 +497,18 @@ class CodeWriterAgent(BaseAgent):
                                 )
                                 return self.make_recovery_request("tool_error", error_msg)
                             return self.make_failure_signal("tool_error", error_msg)
+
+                        is_noop, noop_msg = self._tool_result_is_noop(tool_name, raw_result)
+                        if is_noop:
+                            print(f"  ? Tool made no changes: {noop_msg}")
+                            if self.should_attempt_recovery(task, context):
+                                self.request_replan(
+                                    context,
+                                    reason="Tool made no changes",
+                                    detailed_reason=noop_msg,
+                                )
+                                return self.make_recovery_request("tool_noop", noop_msg)
+                            return self.make_failure_signal("tool_noop", noop_msg)
                         print(f"  ✓ Successfully applied {tool_name}")
                         return build_subagent_output(
                             agent_name="CodeWriterAgent",
@@ -541,6 +572,18 @@ class CodeWriterAgent(BaseAgent):
                                 )
                                 return self.make_recovery_request("tool_error", error_msg)
                             return self.make_failure_signal("tool_error", error_msg)
+
+                        is_noop, noop_msg = self._tool_result_is_noop(tool_name, raw_result)
+                        if is_noop:
+                            print(f"  Tool made no changes: {noop_msg}")
+                            if self.should_attempt_recovery(task, context):
+                                self.request_replan(
+                                    context,
+                                    reason="Tool made no changes",
+                                    detailed_reason=noop_msg,
+                                )
+                                return self.make_recovery_request("tool_noop", noop_msg)
+                            return self.make_failure_signal("tool_noop", noop_msg)
                         print(f"  Successfully applied {tool_name}")
                         return build_subagent_output(
                             agent_name="CodeWriterAgent",
