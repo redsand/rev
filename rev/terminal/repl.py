@@ -20,7 +20,7 @@ from rev.settings_manager import get_default_mode, apply_saved_settings
 from rev.llm.client import get_token_usage
 
 
-def repl_mode(force_tui: bool = False):
+def repl_mode(force_tui: bool = False, init_logs: list[str] | None = None):
     """Interactive REPL for iterative development with session memory.
 
     The REPL is intended for interactive use. When standard input is not a TTY
@@ -39,7 +39,13 @@ def repl_mode(force_tui: bool = False):
     if use_tui:
         try:
             from rev.terminal.tui import TUI
+            import rev.terminal.formatting as fmt
+            # Disable ANSI colors inside curses UI to avoid escape artifacts on Windows.
+            fmt._COLORS_ENABLED = False
             tui = TUI(prompt=f"{colorize('rev', Colors.BRIGHT_MAGENTA)}{colorize('>', Colors.BRIGHT_BLACK)} ")
+            if init_logs:
+                for line in init_logs:
+                    tui.log(line)
             def _tui_log(msg: str):
                 tui.log(msg)
             def _tui_print(msg: str):
