@@ -463,6 +463,9 @@ class Orchestrator:
 
         if "error" in response_data:
             print(f"  ❌ LLM Error in lightweight planner: {response_data['error']}")
+            if self.context:
+                self.context.set_agent_state("planner_error", response_data["error"])
+                self.context.add_error(f"Lightweight planner LLM error: {response_data['error']}")
             return None
 
         response_content = response_data.get("message", {}).get("content", "")
@@ -514,6 +517,12 @@ class Orchestrator:
             next_task = self._determine_next_action(user_request, work_summary, coding_mode)
 
             if not next_task:
+                planner_error = self.context.get_agent_state("planner_error") if self.context else None
+                if isinstance(planner_error, str) and planner_error.strip():
+                    self.context.set_agent_state("no_retry", True)
+                    print("\n❌ Planner failed to produce a next action (LLM error).")
+                    print(f"  Error: {planner_error}")
+                    return False
                 print("\n✅ Planner determined the goal is achieved.")
                 return True
 
