@@ -8,14 +8,22 @@ for the workflow loop: Plan → Execute → Verify → Report → Re-plan if nee
 
 import json
 import re
+import os
+import shlex
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, Iterable
 from dataclasses import dataclass
 
 from rev.models.task import Task, TaskStatus
 from rev.tools.registry import execute_tool, get_last_tool_call
+from rev import config
 from rev.core.context import RevContext
-from rev.tools.workspace_resolver import WorkspacePathError, resolve_workspace_path
+from rev.tools.workspace_resolver import (
+    WorkspacePathError,
+    resolve_workspace_path,
+    normalize_path,
+    normalize_to_workspace_relative,
+)
 
 
 def _read_file_with_fallback_encoding(file_path: Path) -> Optional[str]:
@@ -88,6 +96,7 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
         )
 
     action_type = task.action_type.lower()
+    verification_mode = _get_verification_mode()
 
     # If the planner mislabeled the action type but the tool call clearly indicates
     # a directory creation, verify it as such. This prevents false failures like
@@ -99,15 +108,15 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
 
     # Route to appropriate verification handler
     if action_type == "refactor":
-        return _verify_refactoring(task, context)
+        result = _verify_refactoring(task, context)
     elif action_type == "add" or action_type == "create":
-        return _verify_file_creation(task, context)
+        result = _verify_file_creation(task, context)
     elif action_type == "edit":
-        return _verify_file_edit(task, context)
+        result = _verify_file_edit(task, context)
     elif action_type == "create_directory":
-        return _verify_directory_creation(task, context)
+        result = _verify_directory_creation(task, context)
     elif action_type == "test":
-        return _verify_test_execution(task, context)
+        result = _verify_test_execution(task, context)
     else:
         # For unknown action types, return a passing result but flag for caution
         return VerificationResult(
@@ -115,6 +124,27 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
             message=f"No specific verification available for action type '{action_type}'",
             details={"action_type": action_type, "note": "Verification skipped for this action type"}
         )
+
+    # Apply strict verification (compileall + targeted tests) when enabled
+    if result.passed and action_type in {"add", "create", "edit", "refactor"} and verification_mode:
+        strict_paths = _collect_paths_for_strict_checks(
+            action_type, result.details, getattr(task, "tool_events", None)
+        )
+        strict_outcome = _maybe_run_strict_verification(action_type, strict_paths, mode=verification_mode)
+        if isinstance(strict_outcome, VerificationResult):
+            return strict_outcome
+        if strict_outcome:
+            result.details["strict"] = strict_outcome
+
+    # Execute declarative validation steps when provided
+    if result.passed and task.validation_steps:
+        validation_outcome = _run_validation_steps(task.validation_steps, result.details, getattr(task, "tool_events", None))
+        if isinstance(validation_outcome, VerificationResult):
+            return validation_outcome
+        if validation_outcome:
+            result.details["validation"] = validation_outcome
+
+    return result
 
 
 def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
@@ -157,6 +187,8 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
         package_dir = result_payload.get("package_dir")
         if isinstance(package_dir, str) and package_dir.strip():
             target_dir = _resolve_for_verification(package_dir.strip(), purpose="verify refactoring target dir")
+            if target_dir:
+                details["target_dir_path"] = str(target_dir)
 
         if not target_dir:
             package_init = result_payload.get("package_init")
@@ -164,6 +196,7 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
                 init_path = _resolve_for_verification(package_init.strip(), purpose="verify refactoring package init")
                 if init_path:
                     target_dir = init_path.parent
+                    details["target_dir_path"] = str(target_dir)
 
     if not target_dir:
         last_call = get_last_tool_call() or {}
@@ -173,14 +206,37 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
                 candidate = args.get("target_directory")
                 if isinstance(candidate, str) and candidate.strip():
                     target_dir = _resolve_for_verification(candidate.strip(), purpose="verify refactoring target dir")
+                    if target_dir:
+                        details["target_dir_path"] = str(target_dir)
 
     if not target_dir:
-        # Fallback: try to parse something directory-looking from the task description.
-        dir_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\-]+\/[a-zA-Z0-9_\-]+)(?:\/)?'
+        # Fallback 1: if a .py file path is mentioned, use its parent directory.
+        file_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\\\-]+\.py)'
+        file_matches = re.findall(file_pattern, task.description)
+        if file_matches:
+            # Prefer __init__.py paths (package exports) and longer paths (more specific)
+            def _file_sort_key(path_str: str) -> tuple:
+                posix = path_str.replace("\\", "/")
+                return (not posix.endswith("__init__.py"), -len(posix))
+
+            for candidate in sorted(file_matches, key=_file_sort_key):
+                normalized = normalize_path(candidate.strip())
+                resolved_file = _resolve_for_verification(
+                    normalized, purpose="verify refactoring target dir from file"
+                )
+                if resolved_file:
+                    target_dir = resolved_file.parent
+                    break
+
+    if not target_dir:
+        # Fallback 2: try to parse something directory-looking from the task description.
+        dir_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\\\-]+\/[a-zA-Z0-9_\-]+)(?:\/)?'
         dir_matches = re.findall(dir_pattern, task.description)
         if dir_matches:
             best_dir = max(dir_matches, key=len)
             target_dir = _resolve_for_verification(best_dir.strip("/"), purpose="verify refactoring target dir")
+            if target_dir:
+                details["target_dir_path"] = str(target_dir)
 
     if not target_dir:
         return VerificationResult(
@@ -250,7 +306,7 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
 
     # Check 4: Verify old file was updated with imports (if applicable)
     # Look for the original file mentioned in task description
-    old_file_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\-]+\.py)'
+    old_file_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\\\-]+\.py)'
     old_file_matches = re.findall(old_file_pattern, task.description)
     if old_file_matches:
         old_file = _resolve_for_verification(old_file_matches[0], purpose="verify refactoring source file")
@@ -260,6 +316,8 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
             old_file = None
         debug_info["source_file"] = str(old_file)
         debug_info["source_file_exists"] = old_file.exists() if old_file else False
+        if old_file:
+            details["source_file_path"] = str(old_file)
 
         if old_file and old_file.exists():
             try:
@@ -334,42 +392,62 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
 
     # Prefer tool metadata (stable) over regex guessing (brittle).
     file_path: Path | None = None
+    ev = _latest_tool_event(getattr(task, "tool_events", None), {"write_file", "apply_patch", "replace_in_file"})
+    if ev:
+        for p in _paths_from_event(ev):
+            resolved = _resolve_for_verification(normalize_path(str(p)), purpose="verify file creation")
+            if resolved:
+                file_path = resolved
+                details["file_path"] = str(file_path)
+                break
+
     extracted_from_result = _extract_path_from_task_result(task.result)
     if extracted_from_result:
-        file_path = _resolve_for_verification(extracted_from_result, purpose="verify file creation")
+        # Normalize path to handle Windows/Unix differences
+        normalized = normalize_path(extracted_from_result)
+        file_path = _resolve_for_verification(normalized, purpose="verify file creation")
 
-    # Try to extract file path from task description
-    # Patterns: "create file at ./lib/file.py" or "add ./lib/file.py"
-    patterns = [
-        r'(?:file\s+)?(?:at\s+)?["\']?(\.?\/[a-zA-Z0-9_/\-]+\.py)["\']?',
-        r'(?:add|create)\s+(?:file\s+)?(?:at\s+)?["\']?([a-zA-Z0-9_/\-]+\.py)["\']?',
-    ]
-
-    if not file_path:
-        for pattern in patterns:
-            matches = re.findall(pattern, task.description, re.IGNORECASE)
-            if matches:
-                candidate = matches[0]
-                file_path = _resolve_for_verification(candidate, purpose="verify file creation")
-                if file_path:
-                    break
-
-    if not file_path:
-        # If we can't determine from description, check task.result
-        if task.result and isinstance(task.result, str):
-            # Result might contain the file path
-            result_match = re.search(r'(?:\.?\/)?[a-zA-Z0-9_/\-]+\.py', task.result)
-            if result_match:
-                file_path = _resolve_for_verification(result_match.group(0), purpose="verify file creation")
-
+    # Priority 2: Check last tool call arguments
     if not file_path:
         last_call = get_last_tool_call()
         if last_call:
             args = last_call.get("args") or {}
             if isinstance(args, dict):
-                candidate = args.get("path") or args.get("file") or args.get("target")
+                candidate = args.get("path") or args.get("file") or args.get("target") or args.get("file_path")
                 if isinstance(candidate, str) and candidate.strip():
-                    file_path = _resolve_for_verification(candidate.strip(), purpose="verify file creation")
+                    normalized = normalize_path(candidate.strip())
+                    file_path = _resolve_for_verification(normalized, purpose="verify file creation")
+
+    # Priority 3: Try to extract file path from task description (fallback)
+    # Patterns handle both Windows (backslash) and Unix (forward slash) paths
+    if not file_path:
+        patterns = [
+            # Windows absolute path with extension
+            r'(?:file\s+)?(?:at\s+)?["\']?([a-zA-Z]:[/\\][^"\'\s]+\.[a-zA-Z0-9]+)["\']?',
+            # Unix or relative path with extension
+            r'(?:file\s+)?(?:at\s+)?["\']?(\.?[/\\]?[a-zA-Z0-9_/\\\-\.]+\.[a-zA-Z0-9]+)["\']?',
+            # Generic add/create pattern
+            r'(?:add|create)\s+(?:file\s+)?(?:at\s+)?["\']?([a-zA-Z0-9_/\\\-\.]+\.[a-zA-Z0-9]+)["\']?',
+        ]
+
+        for pattern in patterns:
+            matches = re.findall(pattern, task.description, re.IGNORECASE)
+            if matches:
+                candidate = matches[0].strip()
+                if candidate:
+                    normalized = normalize_path(candidate)
+                    file_path = _resolve_for_verification(normalized, purpose="verify file creation")
+                    if file_path:
+                        break
+
+    # Priority 4: Check task.result for path-like strings
+    if not file_path:
+        if task.result and isinstance(task.result, str):
+            # Result might contain the file path - handle both separators
+            result_match = re.search(r'[a-zA-Z0-9_/\\\-\.]+\.[a-zA-Z0-9]+', task.result)
+            if result_match:
+                normalized = normalize_path(result_match.group(0))
+                file_path = _resolve_for_verification(normalized, purpose="verify file creation")
 
     if not file_path:
         return VerificationResult(
@@ -488,42 +566,260 @@ def _parse_task_result_payload(result: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _get_verification_mode() -> Optional[str]:
+    """Return verification mode: 'strict', 'fast', or None."""
+    env_strict = os.getenv("REV_VERIFY_STRICT", "").lower()
+    env_fast = os.getenv("REV_VERIFY_FAST", "").lower()
+    if env_strict in {"1", "true", "yes", "on", "strict"}:
+        return "strict"
+    if env_fast in {"1", "true", "yes", "on", "fast"}:
+        return "fast"
+    return None
+
+
+def _latest_tool_event(tool_events: Optional[Iterable[Dict[str, Any]]], names: Iterable[str]) -> Optional[Dict[str, Any]]:
+    """Return the most recent tool event matching one of the names."""
+    if not tool_events:
+        return None
+    target = {n.lower() for n in names}
+    for ev in reversed(list(tool_events)):
+        tool = str(ev.get("tool") or "").lower()
+        if tool in target:
+            return ev
+    return None
+
+
+def _paths_from_event(event: Dict[str, Any]) -> list[Path]:
+    """Extract path candidates from a tool event."""
+    paths: list[Path] = []
+    raw_result = event.get("raw_result")
+    parsed = None
+    if isinstance(raw_result, str):
+        try:
+            parsed = json.loads(raw_result)
+        except Exception:
+            parsed = None
+    if isinstance(parsed, dict):
+        for key in ("path_abs", "file_abs", "directory_abs", "path", "file", "created", "wrote", "updated_file", "dir_path", "path_rel"):
+            val = parsed.get(key)
+            if isinstance(val, str) and val.strip():
+                paths.append(Path(val))
+        tool_args = parsed.get("tool_args") if isinstance(parsed.get("tool_args"), dict) else None
+        if tool_args:
+            for key in ("path", "file_path", "target_path", "directory", "dir_path", "target_directory"):
+                val = tool_args.get(key)
+                if isinstance(val, str) and val.strip():
+                    paths.append(Path(val))
+    args = event.get("args")
+    if isinstance(args, dict):
+        for key in ("path", "file_path", "target_path", "directory", "dir_path", "target_directory"):
+            val = args.get(key)
+            if isinstance(val, str) and val.strip():
+                paths.append(Path(val))
+    return paths
+
+
+def _collect_paths_for_strict_checks(
+    action_type: str,
+    details: Dict[str, Any],
+    tool_events: Optional[Iterable[Dict[str, Any]]] = None,
+) -> list[Path]:
+    """Collect relevant paths for strict verification."""
+    paths: list[Path] = []
+    for key in ("file_path", "directory_path", "source_file_path", "target_dir_path"):
+        candidate = details.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            try:
+                paths.append(Path(candidate))
+            except Exception:
+                continue
+
+    # Add from tool events
+    if tool_events:
+        for ev in tool_events:
+            paths.extend(_paths_from_event(ev))
+
+    # Ensure uniqueness
+    unique_paths: list[Path] = []
+    seen = set()
+    for p in paths:
+        try:
+            resolved = p.resolve()
+        except Exception:
+            resolved = p
+        if resolved not in seen:
+            seen.add(resolved)
+            unique_paths.append(resolved)
+    return unique_paths
+
+
+def _run_validation_command(cmd: str, *, use_tests_tool: bool = False, timeout: int | None = None) -> Dict[str, Any]:
+    """Run a validation command via the tool runner and return parsed JSON."""
+    payload = {"cmd": cmd}
+    if timeout:
+        payload["timeout"] = timeout
+
+    tool = "run_tests" if use_tests_tool else "run_cmd"
+    try:
+        raw = execute_tool(tool, payload)
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+        return {"raw": raw}
+    except Exception as e:
+        return {"error": str(e), "cmd": cmd}
+
+
+def _quote_path(path: Path) -> str:
+    """Quote a path for shell commands."""
+    return shlex.quote(str(path))
+
+
+def _paths_or_default(paths: list[Path]) -> list[Path]:
+    """Return provided paths or default to workspace root."""
+    if paths:
+        return paths
+    try:
+        return [config.ROOT]
+    except Exception:
+        return [Path(".").resolve()]
+
+
+def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode: str) -> Optional[VerificationResult | Dict[str, Any]]:
+    """Run compileall/tests depending on verification mode (fast/strict)."""
+    if not paths:
+        return None
+
+    strict_details: Dict[str, Any] = {}
+    compile_targets = _paths_or_default(paths)
+    compile_cmd = "python -m compileall " + " ".join(_quote_path(p) for p in compile_targets)
+    compile_res = _run_validation_command(compile_cmd, timeout=max(config.VALIDATION_TIMEOUT_SECONDS, 180))
+    strict_details["compileall"] = compile_res
+    if compile_res.get("blocked") or compile_res.get("rc", 1) != 0:
+        return VerificationResult(
+            passed=False,
+            message="Verification failed: compileall errors",
+            details={"strict": strict_details},
+            should_replan=True,
+        )
+
+    if mode == "fast":
+        return strict_details
+
+    # Targeted pytest for touched test files/directories
+    test_targets = []
+    for p in paths:
+        parts_lower = {part.lower() for part in p.parts}
+        if "tests" in parts_lower or p.name.startswith("test_") or p.name.endswith("_test.py"):
+            test_targets.append(p)
+    if test_targets:
+        pytest_cmd = "pytest -q " + " ".join(_quote_path(p) for p in test_targets)
+    else:
+        pytest_cmd = "pytest -q"
+    pytest_res = _run_validation_command(pytest_cmd, use_tests_tool=True, timeout=config.VALIDATION_TIMEOUT_SECONDS)
+    strict_details["pytest"] = pytest_res
+    rc = pytest_res.get("rc", 1)
+    if pytest_res.get("blocked") or rc != 0:
+        return VerificationResult(
+            passed=False,
+            message="Verification failed: pytest errors",
+            details={"strict": strict_details},
+            should_replan=True,
+        )
+
+    # Optional lint/type checks if allowed
+    optional_checks = []
+    if "ruff" in config.ALLOW_CMDS:
+        optional_checks.append(("ruff", "ruff check ."))
+    if "mypy" in config.ALLOW_CMDS:
+        optional_checks.append(("mypy", "mypy ."))
+    for label, cmd in optional_checks:
+        res = _run_validation_command(cmd, timeout=config.VALIDATION_TIMEOUT_SECONDS)
+        strict_details[label] = res
+        rc = res.get("rc")
+        if rc is None:
+            rc = 0 if res.get("blocked") else 1
+        # Optional: do not fail on blocked, but fail on non-zero rc when executed
+        if not res.get("blocked") and rc not in (0, None):
+            return VerificationResult(
+                passed=False,
+                message=f"Verification failed: {label} errors",
+                details={"strict": strict_details},
+                should_replan=True,
+            )
+
+    return strict_details
+
+
+def _run_validation_steps(validation_steps: list[str], details: Dict[str, Any], tool_events: Optional[Iterable[Dict[str, Any]]]) -> Optional[VerificationResult | Dict[str, Any]]:
+    """Execute declarative validation steps (lint/tests/compile) via tool runner."""
+    commands: list[tuple[str, str, str]] = []
+    seen_cmds = set()
+    paths = _paths_or_default(_collect_paths_for_strict_checks("", details, tool_events))
+
+    def _add(label: str, cmd: str, tool: str = "run_cmd") -> None:
+        if cmd in seen_cmds:
+            return
+        seen_cmds.add(cmd)
+        commands.append((label, cmd, tool))
+
+    for step in validation_steps:
+        text = step.lower()
+        if "syntax" in text or "compile" in text:
+            cmd = "python -m compileall " + " ".join(_quote_path(p) for p in paths)
+            _add("compileall", cmd)
+        if "lint" in text or "linter" in text:
+            _add("ruff", "ruff check .")
+        if "test" in text:
+            _add("pytest", "pytest -q", "run_tests")
+        if "mypy" in text or "type" in text:
+            _add("mypy", "mypy .")
+
+    if not commands:
+        return None
+
+    results: Dict[str, Any] = {}
+    for label, cmd, tool in commands:
+        res = _run_validation_command(cmd, use_tests_tool=(tool == "run_tests"), timeout=config.VALIDATION_TIMEOUT_SECONDS)
+        results[label] = res
+        rc = res.get("rc")
+        if rc is None:
+            rc = 0 if res.get("blocked") else 1
+        if res.get("blocked") or (rc is not None and rc != 0):
+            return VerificationResult(
+                passed=False,
+                message=f"Validation step failed: {label}",
+                details={"validation": results, "failed_step": label},
+                should_replan=True,
+            )
+
+    return results
+
+
 def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
     """Verify that a file was actually edited."""
 
     # This is harder to verify without knowing the original content
     # For now, just check that the file exists and isn't empty
 
-    patterns = [
-        # ./path/to/file.py or /path/to/file.py
-        r'(?:in\s+)?(?:file\s+)?["\']?(\.?\/[a-zA-Z0-9_/\-]+\.py)["\']?',
-        # phrases like "edit foo.py" or "modify foo.py"
-        r'(?:edit|update|modify)\s+["\']?([a-zA-Z0-9_/\-]+\.py)["\']?',
-        # fallback: any python file path-looking token
-        r'([a-zA-Z0-9_\-./\\]+\.py)',
-    ]
+    file_path: Path | None = None
 
-    extracted_path: Path | None = None
-    raw_candidate: str | None = None
-    for pattern in patterns:
-        matches = re.findall(pattern, task.description, re.IGNORECASE)
-        if matches:
-            raw_candidate = matches[0]
-            break
+    # Priority 1: Extract from task result (most reliable)
+    ev = _latest_tool_event(getattr(task, "tool_events", None), {"write_file", "replace_in_file", "apply_patch", "append_to_file"})
+    if ev:
+        for p in _paths_from_event(ev):
+            resolved = _resolve_for_verification(normalize_path(str(p)), purpose="verify file edit")
+            if resolved:
+                file_path = resolved
+                break
 
-    if raw_candidate:
-        normalized = raw_candidate.strip().strip('"\''" ")
-        # Remove leading ./ or .\ or excess slashes (so "/foo.py" -> "foo.py")
-        normalized = re.sub(r'^[./\\]+', '', normalized)
-        if normalized:
-            extracted_path = Path(normalized)
+    result_path = _extract_path_from_task_result(task.result)
+    if result_path:
+        normalized = normalize_path(result_path)
+        file_path = _resolve_for_verification(normalized, purpose="verify file edit")
 
-    if not extracted_path:
-        result_path = _extract_path_from_task_result(task.result)
-        if result_path:
-            extracted_path = Path(result_path.strip().strip("\"'"))
-
-    if not extracted_path:
+    # Priority 2: Check last tool call arguments
+    if not file_path:
         last_call = get_last_tool_call()
         if last_call:
             tool_name = (last_call.get("name") or "").lower()
@@ -535,9 +831,11 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
                     or args.get("target_path")
                 )
                 if isinstance(candidate, str) and candidate.strip():
-                    extracted_path = Path(candidate.strip().strip("\"'"))
-                # If args didn't provide a usable path, try the tool result payload (path_abs/path_rel/file).
-                if not extracted_path:
+                    normalized = normalize_path(candidate.strip())
+                    file_path = _resolve_for_verification(normalized, purpose="verify file edit")
+
+                # If args didn't provide a usable path, try the tool result payload
+                if not file_path:
                     try:
                         last_result = json.loads(last_call.get("result") or "{}")
                     except Exception:
@@ -546,23 +844,38 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
                         for key in ("path_abs", "path_rel", "file", "path"):
                             candidate2 = last_result.get(key)
                             if isinstance(candidate2, str) and candidate2.strip():
-                                extracted_path = Path(candidate2.strip().strip("\"'"))
-                                break
+                                normalized = normalize_path(candidate2.strip())
+                                file_path = _resolve_for_verification(normalized, purpose="verify file edit")
+                                if file_path:
+                                    break
 
-    if not extracted_path:
-        return VerificationResult(
-            passed=False,
-            message="Could not determine file path to verify",
-            details={},
-            should_replan=True
-        )
+    # Priority 3: Parse from task description (fallback)
+    # Patterns handle both Windows and Unix paths
+    if not file_path:
+        patterns = [
+            # Windows absolute path
+            r'(?:in\s+)?(?:file\s+)?["\']?([a-zA-Z]:[/\\][^"\'\s]+\.[a-zA-Z0-9]+)["\']?',
+            # Unix or relative path
+            r'(?:in\s+)?(?:file\s+)?["\']?(\.?[/\\]?[a-zA-Z0-9_/\\\-\.]+\.[a-zA-Z0-9]+)["\']?',
+            # phrases like "edit foo.py" or "modify foo.py"
+            r'(?:edit|update|modify)\s+["\']?([a-zA-Z0-9_/\\\-\.]+\.[a-zA-Z0-9]+)["\']?',
+        ]
 
-    file_path = _resolve_for_verification(str(extracted_path), purpose="verify file edit")
+        for pattern in patterns:
+            matches = re.findall(pattern, task.description, re.IGNORECASE)
+            if matches:
+                candidate = matches[0].strip()
+                if candidate:
+                    normalized = normalize_path(candidate)
+                    file_path = _resolve_for_verification(normalized, purpose="verify file edit")
+                    if file_path:
+                        break
+
     if not file_path:
         return VerificationResult(
             passed=False,
             message="Could not determine file path to verify",
-            details={"path": str(extracted_path)},
+            details={},
             should_replan=True
         )
 
@@ -587,46 +900,74 @@ def _verify_directory_creation(task: Task, context: RevContext) -> VerificationR
     """Verify that a directory was actually created."""
 
     dir_path: Path | None = None
+
+    # Priority 1: Extract from task result (most reliable)
+    ev = _latest_tool_event(getattr(task, "tool_events", None), {"create_directory"})
+    if ev:
+        for p in _paths_from_event(ev):
+            resolved = _resolve_for_verification(normalize_path(str(p)), purpose="verify directory creation")
+            if resolved:
+                dir_path = resolved
+                break
+
     extracted_from_result = _extract_path_from_task_result(task.result)
     if extracted_from_result:
-        dir_path = _resolve_for_verification(extracted_from_result, purpose="verify directory creation")
+        # Normalize the path first to handle Windows/Unix differences
+        normalized = normalize_path(extracted_from_result)
+        dir_path = _resolve_for_verification(normalized, purpose="verify directory creation")
 
-    patterns = [
-        r'(?:directory\s+)?["\']?(\.?\/[a-zA-Z0-9_/\-]+\/)["\']?',
-        r'(?:create|add)\s+(?:directory\s+)?["\']?([a-zA-Z0-9_/\-]+\/)["\']?',
-    ]
-
-    if not dir_path:
-        for pattern in patterns:
-            matches = re.findall(pattern, task.description, re.IGNORECASE)
-            if matches:
-                candidate = matches[0].strip("/").strip("\\")
-                dir_path = _resolve_for_verification(candidate, purpose="verify directory creation")
-                if dir_path:
-                    break
-
+    # Priority 2: Check last tool call arguments (second most reliable)
     if not dir_path:
         last_call = get_last_tool_call()
         if last_call:
             args = last_call.get("args") or {}
             if isinstance(args, dict):
-                candidate = args.get("path") or args.get("target")
+                candidate = args.get("path") or args.get("target") or args.get("directory")
                 if isinstance(candidate, str) and candidate.strip():
-                    dir_path = _resolve_for_verification(candidate.strip(), purpose="verify directory creation")
+                    # Normalize before resolution
+                    normalized = normalize_path(candidate.strip())
+                    dir_path = _resolve_for_verification(normalized, purpose="verify directory creation")
+
+    # Priority 3: Parse from task description (least reliable, fallback only)
+    # These patterns now handle both Windows and Unix paths
+    if not dir_path:
+        patterns = [
+            # Match paths with forward or back slashes
+            r'(?:directory\s+)?["\']?([a-zA-Z]:[/\\][^"\'\s]+)["\']?',  # Windows absolute
+            r'(?:directory\s+)?["\']?(\.?[/\\][a-zA-Z0-9_/\\\-\.]+)["\']?',  # Unix absolute or relative
+            r'(?:create|add)\s+(?:directory\s+)?["\']?([a-zA-Z0-9_/\\\-\.]+[/\\]?)["\']?',  # General
+        ]
+
+        for pattern in patterns:
+            matches = re.findall(pattern, task.description, re.IGNORECASE)
+            if matches:
+                candidate = matches[0].strip("/").strip("\\").strip()
+                if candidate:
+                    normalized = normalize_path(candidate)
+                    dir_path = _resolve_for_verification(normalized, purpose="verify directory creation")
+                    if dir_path:
+                        break
 
     if not dir_path:
+        # Provide more helpful error details
         return VerificationResult(
             passed=False,
             message="Could not determine directory path to verify",
-            details={},
+            details={
+                "task_result": str(task.result)[:200] if task.result else None,
+                "last_tool_call": get_last_tool_call(),
+                "hint": "Tool result did not contain a recognizable path"
+            },
             should_replan=True
         )
 
     if dir_path.exists() and dir_path.is_dir():
+        # Return normalized relative path for cleaner output
+        rel_path = normalize_to_workspace_relative(dir_path)
         return VerificationResult(
             passed=True,
-            message=f"Directory created successfully: {dir_path.name}",
-            details={"directory_path": str(dir_path), "is_dir": True}
+            message=f"Directory created successfully: {rel_path}",
+            details={"directory_path": str(dir_path), "relative_path": rel_path, "is_dir": True}
         )
     else:
         return VerificationResult(

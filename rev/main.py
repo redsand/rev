@@ -27,13 +27,23 @@ def main():
     # Apply any saved configuration overrides before parsing arguments
     apply_saved_settings()
 
-    # Pre-parse --workspace early so config.ROOT and .rev paths are correct before init.
+    # Pre-parse --workspace and --allow-external-paths early so config.ROOT and
+    # .rev paths are correct before init.
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument("--workspace", type=str, default=None)
+    pre_parser.add_argument("--allow-external-paths", action="store_true", default=False)
     pre_args, _unknown = pre_parser.parse_known_args()
+
+    # Initialize workspace from CLI args and environment variable
+    from pathlib import Path
+    from rev.workspace import init_workspace
+
+    allow_external = pre_args.allow_external_paths or os.getenv("REV_ALLOW_EXTERNAL_PATHS", "").lower() == "true"
+    workspace_root = Path(pre_args.workspace) if pre_args.workspace else Path.cwd()
+    init_workspace(root=workspace_root, allow_external=allow_external)
+    config._sync_from_workspace()
+
     if pre_args.workspace:
-        from pathlib import Path
-        config.set_workspace_root(Path(pre_args.workspace))
         try:
             os.chdir(str(config.ROOT))
         except Exception:
@@ -68,6 +78,12 @@ def main():
         "--workspace",
         default=None,
         help="Workspace root directory (sets repo root and .rev/ state location)"
+    )
+    parser.add_argument(
+        "--allow-external-paths",
+        action="store_true",
+        default=False,
+        help="Allow tool access to absolute paths outside the workspace (must be in allowlist via /add-dir). Can also set REV_ALLOW_EXTERNAL_PATHS=true"
     )
     parser.add_argument(
         "--base-url",

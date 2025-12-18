@@ -25,8 +25,9 @@ except ImportError:
     paramiko = None
 
 # Import configuration from rev.config
-from rev.config import ROOT, EXCLUDE_DIRS, MAX_FILE_BYTES
+from rev.config import EXCLUDE_DIRS, MAX_FILE_BYTES
 from rev.tools.workspace_resolver import resolve_workspace_path
+from rev.workspace import get_workspace
 
 
 def _safe_path(rel: str) -> pathlib.Path:
@@ -58,7 +59,7 @@ def _run_shell(cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:
     return subprocess.run(
         cmd,
         shell=True,
-        cwd=str(ROOT),
+        cwd=str(get_workspace().root),
         text=True,
         capture_output=True,
         timeout=timeout,
