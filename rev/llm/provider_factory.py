@@ -70,7 +70,11 @@ def detect_provider_from_model(model_str: str) -> str:
     model_str = model_str.lower().strip()
 
     # Check for specific model name patterns
-    if model_str.startswith("gpt-") or model_str.startswith("o1-"):
+    # Some Ollama models are GPT-prefixed (e.g., `gpt-oss`) but are still served
+    # by Ollama. Keep an explicit allowlist to avoid mis-routing to OpenAI.
+    if model_str.startswith("gpt-oss"):
+        detected = "ollama"
+    elif model_str.startswith("gpt-") or model_str.startswith("o1-"):
         detected = "openai"
     elif model_str.startswith("claude-"):
         detected = "anthropic"

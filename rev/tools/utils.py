@@ -26,6 +26,7 @@ except ImportError:
 
 # Import configuration from rev.config
 from rev.config import ROOT, EXCLUDE_DIRS, MAX_FILE_BYTES
+from rev.tools.workspace_resolver import resolve_workspace_path
 
 
 def _safe_path(rel: str) -> pathlib.Path:
@@ -40,10 +41,8 @@ def _safe_path(rel: str) -> pathlib.Path:
     Raises:
         ValueError: If path escapes root directory
     """
-    p = (ROOT / rel).resolve()
-    if not str(p).startswith(str(ROOT)):
-        raise ValueError(f"Path escapes repo: {rel}")
-    return p
+    resolved = resolve_workspace_path(rel, purpose="tool operation")
+    return resolved.abs_path
 
 
 def _run_shell(cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:

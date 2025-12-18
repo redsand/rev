@@ -8,6 +8,7 @@ Implements Resource-Aware Optimization pattern to track and enforce budgets.
 """
 
 import os
+import json
 import time
 import traceback
 from typing import Dict, Any, List, Optional, Literal
@@ -51,6 +52,12 @@ from rev.core.shared_enums import AgentPhase
 from rev.core.agent_registry import AgentRegistry
 from rev.cache import clear_analysis_caches
 import re
+from rev.retrieval.context_builder import ContextBuilder
+from rev.memory.project_memory import ensure_project_memory_file, maybe_record_known_failure_from_error
+from rev.tools.workspace_resolver import resolve_workspace_path
+from rev.core.text_tool_shim import maybe_execute_tool_call_from_text
+from rev.agents.subagent_io import build_subagent_output
+from rev.execution.action_normalizer import normalize_action_type
 
 
 @dataclass
@@ -133,6 +140,7 @@ class Orchestrator:
         self.context: Optional[RevContext] = None
         self.learning_agent = LearningAgent(project_root) if self.config.enable_learning else None
         self.debug_logger = DebugLogger.get_instance()
+        self._context_builder: Optional[ContextBuilder] = None
 
     def _update_phase(self, new_phase: AgentPhase):
         if self.context:
@@ -164,8 +172,10 @@ class Orchestrator:
             auto_optimize=self.config.auto_optimize_prompt
         )
         if not was_optimized:
-            if self.config.enable_prompt_optimization and self.config.auto_optimize_prompt:
+            if self.config.auto_optimize_prompt:
                 print("\n[OK] Request already optimized; using original text")
+                # Still show the final prompt for transparency (it's identical).
+                self._display_prompt_optimization(original_request, original_request)
             return False
 
         print(f"\n[OK] Request optimized for clarity")
@@ -205,7 +215,9 @@ class Orchestrator:
         aggregate_errors: List[str] = []
         last_result: Optional[OrchestratorResult] = None
         self.context = RevContext(user_request=user_request)
-        self.context.repo_context = get_repo_context()
+        ensure_project_memory_file()
+        # Keep repo_context minimal; sub-agents will retrieve focused context via ContextBuilder.
+        self.context.repo_context = ""
 
         for attempt in range(self.config.orchestrator_retries + 1):
             if attempt > 0:
@@ -274,6 +286,7 @@ class Orchestrator:
                 execution_success = self._continuous_sub_agent_execution(user_request, coding_mode)
                 result.success = execution_success
                 result.phase_reached = AgentPhase.COMPLETE if execution_success else AgentPhase.FAILED
+                result.no_retry = bool(self.context.agent_state.get("no_retry")) if self.context else False
                 if not execution_success:
                     result.errors.append("Sub-agent execution failed or was halted.")
             else:
@@ -388,6 +401,10 @@ class Orchestrator:
             f"Can this task be decomposed into smaller, more specific subtasks that might succeed?\n"
             f"If yes, describe the first subtask that should be attempted next in detail.\n"
             f"If no, just respond with 'CANNOT_DECOMPOSE'.\n\n"
+            "Important import strategy note (avoid churn):\n"
+            "- If a refactor split creates a package (directory with __init__.py exports), update call sites/tests to\n"
+            "  import from the package exports (e.g., `from lib.analysts import BreakoutAnalyst`).\n"
+            "- Do NOT expand `from pkg import *` into dozens of per-module imports.\n\n"
             f"Important: Be specific about what concrete action the next task should take. "
             f"Use [ACTION_TYPE] format like [CREATE] or [EDIT] or [REFACTOR]."
         )
@@ -405,7 +422,10 @@ class Orchestrator:
         # Try to parse the decomposed task format [ACTION_TYPE] description
         match = re.match(r"[\s]*\[(.*?)\]\s*(.*)", response_content)
         if match:
-            action_type = match.group(1).lower()
+            action_type = normalize_action_type(
+                match.group(1),
+                available_actions=AgentRegistry.get_registered_action_types(),
+            )
             description = match.group(2).strip()
             print(f"\n  [DECOMPOSITION] LLM suggested decomposition:")
             print(f"    Action: {action_type}")
@@ -422,12 +442,30 @@ class Orchestrator:
     def _determine_next_action(self, user_request: str, work_summary: str, coding_mode: bool) -> Optional[Task]:
         """A truly lightweight planner that makes a direct LLM call."""
         available_actions = AgentRegistry.get_registered_action_types()
+
+        blocked_note = ""
+        if self.context:
+            blocked_tests = bool(self.context.agent_state.get("tests_blocked_no_changes"))
+            last_test_rc = self.context.agent_state.get("last_test_rc")
+            if blocked_tests and isinstance(last_test_rc, int) and last_test_rc != 0:
+                blocked_note = (
+                    "Important: The last [TEST] was skipped because no code changed since the last failing test run.\n"
+                    "Do NOT propose another [TEST] until a code-changing step (e.g. [EDIT]/[REFACTOR]) is completed.\n\n"
+                )
         
         prompt = (
             f"Original Request: {user_request}\n\n"
             f"{work_summary}\n\n"
+            f"{blocked_note}"
             "Based on the work completed, what is the single next most important action to take? "
             "If a previous action failed, propose a different action to achieve the goal.\n"
+            "Constraints to avoid duplicating work:\n"
+            "- Do not propose repeating a step that is already complete (e.g., do not re-create a directory that exists).\n"
+            "- If you are going to use `split_python_module_classes`, do not hand-author `lib/analysts/__init__.py` first; let the tool generate it.\n"
+            "- After `split_python_module_classes` runs, the source file is renamed to `*.py.bak`. Do not try to edit the old `*.py` path.\n"
+            "- If the code was split into a package with __init__.py exports, prefer package-export imports at call sites.\n"
+            "- Avoid replacing `from pkg import *` with dozens of per-module imports; only import names actually used.\n"
+            "- Prefer `from lib.analysts import SomeAnalyst` over `from lib.analysts.some_file import SomeAnalyst` when `lib/analysts/__init__.py` exports it.\n"
             f"You MUST choose one of the following action types: {available_actions}\n"
             "Your response should be a single line in the format: [ACTION_TYPE] description of the action.\n"
             "Example: [EDIT] refactor the authentication middleware to use the new session manager.\n"
@@ -438,6 +476,9 @@ class Orchestrator:
 
         if "error" in response_data:
             print(f"  ❌ LLM Error in lightweight planner: {response_data['error']}")
+            if self.context:
+                self.context.set_agent_state("planner_error", response_data["error"])
+                self.context.add_error(f"Lightweight planner LLM error: {response_data['error']}")
             return None
 
         response_content = response_data.get("message", {}).get("content", "")
@@ -448,7 +489,10 @@ class Orchestrator:
         if not match:
             return Task(description=response_content.strip(), action_type="general")
         
-        action_type = match.group(1).lower()
+        action_type = normalize_action_type(
+            match.group(1),
+            available_actions=available_actions,
+        )
         description = match.group(2).strip()
         return Task(description=description, action_type=action_type)
 
@@ -468,6 +512,8 @@ class Orchestrator:
 
         completed_tasks_log: List[str] = []
         iteration = 0
+        action_counts: Dict[str, int] = defaultdict(int)
+        failure_counts: Dict[str, int] = defaultdict(int)
 
         while True:
             iteration += 1
@@ -484,6 +530,12 @@ class Orchestrator:
             next_task = self._determine_next_action(user_request, work_summary, coding_mode)
 
             if not next_task:
+                planner_error = self.context.get_agent_state("planner_error") if self.context else None
+                if isinstance(planner_error, str) and planner_error.strip():
+                    self.context.set_agent_state("no_retry", True)
+                    print("\n❌ Planner failed to produce a next action (LLM error).")
+                    print(f"  Error: {planner_error}")
+                    return False
                 print("\n✅ Planner determined the goal is achieved.")
                 return True
 
@@ -491,6 +543,63 @@ class Orchestrator:
             print(f"  â†' Next action: [{next_task.action_type.upper()}] {next_task.description[:80]}")
 
             self.context.plan = ExecutionPlan(tasks=[next_task])
+
+            # Anti-loop: stop if the planner repeats the same action too many times.
+            action_sig = f"{(next_task.action_type or '').strip().lower()}::{next_task.description.strip().lower()}"
+            action_counts[action_sig] += 1
+            if action_counts[action_sig] >= 3:
+                self.context.set_agent_state("no_retry", True)
+                self.context.add_error(f"Circuit breaker: repeating action '{next_task.action_type}'")
+                print("\n" + "=" * 70)
+                print("CIRCUIT BREAKER - REPEATED ACTION")
+                print("=" * 70)
+                print(f"Repeated action {action_counts[action_sig]}x: [{(next_task.action_type or '').upper()}] {next_task.description}")
+                print("Blocking issue: planner is not making forward progress; refusing to repeat the same step.")
+                print("Next step: run with `--debug` and share the last verification failure + tool args.\n")
+                return False
+
+            # Fast-path: don't dispatch a no-op create_directory if it already exists.
+            if (next_task.action_type or "").lower() == "create_directory":
+                try:
+                    desc = next_task.description or ""
+                    candidate = ""
+
+                    # Prefer explicit "directory <path>" phrasing.
+                    m = re.search(r"directory\s+([^\s]+)", desc, flags=re.IGNORECASE)
+                    if m:
+                        candidate = m.group(1)
+
+                    # Windows absolute path (drive letter).
+                    if not candidate:
+                        m = re.search(r"([A-Za-z]:\\\\[^\s]+)", desc)
+                        if m:
+                            candidate = m.group(1)
+
+                    # Fallback: first path-ish token (includes ':' for Windows).
+                    if not candidate:
+                        m = re.search(r'([A-Za-z0-9_:\\-./\\\\]+)', desc)
+                        if m:
+                            candidate = m.group(1)
+
+                    candidate = candidate.strip().strip('"').strip("'")
+                    if candidate:
+                        resolved = resolve_workspace_path(candidate, purpose="check create_directory preflight")
+                        if resolved.abs_path.exists() and resolved.abs_path.is_dir():
+                            next_task.status = TaskStatus.COMPLETED
+                            next_task.result = json.dumps(
+                                {
+                                    "skipped": True,
+                                    "reason": "directory already exists",
+                                    "directory_abs": str(resolved.abs_path),
+                                    "directory_rel": resolved.rel_path.replace("\\", "/"),
+                                }
+                            )
+                            log_entry = f"[COMPLETED] (skipped) {next_task.description}"
+                            completed_tasks_log.append(log_entry)
+                            print(f"  ✓ {log_entry}")
+                            continue
+                except Exception:
+                    pass
 
             # STEP 2: EXECUTE
             execution_success = self._dispatch_to_sub_agents(self.context)
@@ -502,6 +611,18 @@ class Orchestrator:
                 verification_result = verify_task_execution(next_task, self.context)
                 print(f"    {verification_result}")
 
+                # If tests are being skipped because nothing has changed since a failure,
+                # don't treat this as a verification failure (it causes loops). Instead,
+                # bias planning toward a code-changing step.
+                if (
+                    (next_task.action_type or "").lower() == "test"
+                    and verification_result.passed
+                    and isinstance(getattr(verification_result, "details", None), dict)
+                    and verification_result.details.get("blocked") is True
+                ):
+                    self.context.set_agent_state("tests_blocked_no_changes", True)
+                    print("  [!] Skipped re-running tests: no code changes since the last failing run.")
+
                 if not verification_result.passed:
                     # Verification failed - mark task as failed and mark for re-planning
                     next_task.status = TaskStatus.FAILED
@@ -512,17 +633,51 @@ class Orchestrator:
                     # Display detailed debug information
                     self._handle_verification_failure(verification_result)
 
-                    # Try to decompose the failed task into more granular steps
-                    if verification_result.should_replan:
+                    # Anti-loop: stop if the same verification failure repeats.
+                    first_line = verification_result.message.splitlines()[0].strip() if verification_result.message else ""
+                    failure_sig = f"{(next_task.action_type or '').lower()}::{first_line}"
+                    failure_counts[failure_sig] += 1
+                    if failure_counts[failure_sig] >= 3:
+                        self.context.set_agent_state("no_retry", True)
+                        self.context.add_error("Circuit breaker: repeating verification failure")
+                        print("\n" + "=" * 70)
+                        print("CIRCUIT BREAKER - REPEATED VERIFICATION FAILURE")
+                        print("=" * 70)
+                        print(f"Repeated failure {failure_counts[failure_sig]}x: {first_line}")
+                        print("Blocking issue: verification is failing the same way repeatedly; refusing to loop.")
+                        print("Next step: fix the blocking issue shown above, then re-run.\n")
+                        return False
+
+                    # Try to decompose the failed task into more granular steps.
+                    # Decomposing test failures is usually counterproductive (it tends to produce vague edits);
+                    # let the planner pick a focused debug/fix step instead.
+                    if verification_result.should_replan and (next_task.action_type or "").lower() != "test":
                         decomposed_task = self._decompose_extraction_task(next_task)
                         if decomposed_task:
                             print(f"  [RETRY] Using decomposed task for next iteration")
                             next_task = decomposed_task
                             iteration -= 1  # Don't count failed task as an iteration
+                else:
+                    # If we've just verified a successful test and no code has changed since,
+                    # treat this as "goal achieved" to prevent endless test loops.
+                    if (next_task.action_type or "").lower() == "test":
+                        last_test_rc = self.context.agent_state.get("last_test_rc")
+                        last_test_iteration = self.context.agent_state.get("last_test_iteration", -1)
+                        last_code_change_iteration = self.context.agent_state.get("last_code_change_iteration", -1)
+                        if (
+                            last_test_rc == 0
+                            and isinstance(last_test_iteration, int)
+                            and isinstance(last_code_change_iteration, int)
+                            and last_code_change_iteration != -1
+                            and last_code_change_iteration <= last_test_iteration
+                        ):
+                            print("\n[OK] Verification passed and no code changed since; stopping to avoid repeated tests.")
+                            return True
 
             action_type = (next_task.action_type or "").lower()
             if next_task.status == TaskStatus.COMPLETED and action_type in {"edit", "add", "refactor", "create_directory"}:
                 self.context.set_agent_state("last_code_change_iteration", iteration)
+                self.context.set_agent_state("tests_blocked_no_changes", False)
 
             # STEP 4: REPORT
             log_entry = f"[{next_task.status.name}] {next_task.description}"
@@ -579,17 +734,16 @@ class Orchestrator:
         if task.status == TaskStatus.COMPLETED:
             return True
 
-        # Alias common actions to the canonical ones the agents expect
-        action_aliases = {
-            "create": "add",
-            "write": "add",
-            "refator": "refactor",
-            "investigate": "research",
-        }
-        
-        normalized_action_type = task.action_type.lower()
-        if normalized_action_type in action_aliases:
-            task.action_type = action_aliases[normalized_action_type]
+        # Guardrail: if the planner accidentally schedules a file creation as a directory creation
+        # (common in decomposed tasks like "create __init__.py"), coerce to `add` so we can use write_file.
+        if (task.action_type or "").lower() == "create_directory" and re.search(r"\.py\b", task.description, re.IGNORECASE):
+            task.action_type = "add"
+
+        # Normalize action types (aliases + fuzzy typos) before registry lookup.
+        task.action_type = normalize_action_type(
+            task.action_type,
+            available_actions=AgentRegistry.get_registered_action_types(),
+        )
 
         if task.action_type not in AgentRegistry.get_registered_action_types():
             task.status = TaskStatus.FAILED
@@ -598,8 +752,55 @@ class Orchestrator:
 
         task.status = TaskStatus.IN_PROGRESS
         try:
+            # Build a focused context snapshot (selection pipeline); agents will also
+            # use this same pipeline when selecting tools and composing prompts.
+            if self._context_builder is None:
+                self._context_builder = ContextBuilder(self.project_root)
+            try:
+                tool_names = [t.get("function", {}).get("name") for t in get_available_tools() if isinstance(t, dict)]
+                bundle = self._context_builder.build(
+                    query=f"{context.user_request}\n\n{task.action_type}: {task.description}",
+                    tool_universe=get_available_tools(),
+                    tool_candidates=[n for n in tool_names if isinstance(n, str)],
+                    top_k_tools=7,
+                )
+                context.agent_insights["context_builder"] = {
+                    "selected_tools": [t.name for t in bundle.selected_tool_schemas],
+                    "selected_code": [c.location for c in bundle.selected_code_chunks],
+                    "selected_docs": [d.location for d in bundle.selected_docs_chunks],
+                }
+            except Exception:
+                # Best-effort: never fail dispatch due to context retrieval.
+                pass
+
             agent = AgentRegistry.get_agent_instance(task.action_type)
             result = agent.execute(task, context)
+
+            # Global recovery: if an agent returns a tool-call payload as plain text, execute it here.
+            # This avoids "death spirals" where the model can describe a tool call but fails to emit
+            # structured tool_calls for the runtime adapter.
+            if isinstance(result, str):
+                try:
+                    allowed = [
+                        t.get("function", {}).get("name")
+                        for t in get_available_tools()
+                        if isinstance(t, dict)
+                    ]
+                    executed = maybe_execute_tool_call_from_text(result, allowed_tools=[n for n in allowed if isinstance(n, str)])
+                except Exception:
+                    executed = None
+
+                if executed is not None:
+                    print(f"  -> Recovered tool call from text output: {executed.tool_name}")
+                    result = build_subagent_output(
+                        agent_name=agent.__class__.__name__,
+                        tool_name=executed.tool_name,
+                        tool_args=executed.tool_args,
+                        tool_output=executed.tool_output,
+                        context=context,
+                        task_id=task.task_id,
+                    )
+
             task.result = result
             if isinstance(result, str) and (result.startswith("[RECOVERY_REQUESTED]") or result.startswith("[FINAL_FAILURE]") or result.startswith("[USER_REJECTED]")):
                 if result.startswith("[RECOVERY_REQUESTED]"):
@@ -615,6 +816,12 @@ class Orchestrator:
                 return False
             else:
                 task.status = TaskStatus.COMPLETED
+                try:
+                    # If the agent produced tool evidence, it may include artifact refs.
+                    if isinstance(task.result, str) and "outside allowed workspace roots" in task.result.lower():
+                        maybe_record_known_failure_from_error(error_text=task.result)
+                except Exception:
+                    pass
                 return True
         except Exception as e:
             task.status = TaskStatus.FAILED

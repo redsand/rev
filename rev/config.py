@@ -15,10 +15,42 @@ except ImportError:
     SSH_AVAILABLE = False
     paramiko = None
 
-# Configuration
+# Configuration (workspace root)
 ROOT = pathlib.Path(os.getcwd()).resolve()
 # Allowlist of additional roots that tools can access (populated via /add-dir)
 ADDITIONAL_ROOTS: list[pathlib.Path] = []
+
+
+def set_workspace_root(path: pathlib.Path) -> None:
+    """Set the workspace root for this Rev process.
+
+    This updates derived `.rev/*` directories and is intended to be called very
+    early in CLI startup (before caches/tools initialize).
+    """
+
+    global ROOT
+    ROOT = path.expanduser().resolve()
+    _recompute_derived_paths()
+
+
+def _recompute_derived_paths() -> None:
+    """Recompute derived paths that depend on ROOT."""
+
+    global REV_DIR, CACHE_DIR, CHECKPOINTS_DIR, LOGS_DIR, SESSIONS_DIR, MEMORY_DIR, METRICS_DIR
+    global ARTIFACTS_DIR, TOOL_OUTPUTS_DIR, PROJECT_MEMORY_FILE, SETTINGS_FILE, TEST_MARKER_FILE
+
+    REV_DIR = ROOT / ".rev"
+    CACHE_DIR = REV_DIR / "cache"
+    CHECKPOINTS_DIR = REV_DIR / "checkpoints"
+    LOGS_DIR = REV_DIR / "logs"
+    SESSIONS_DIR = REV_DIR / "sessions"
+    MEMORY_DIR = REV_DIR / "memory"
+    METRICS_DIR = REV_DIR / "metrics"
+    ARTIFACTS_DIR = REV_DIR / "artifacts"
+    TOOL_OUTPUTS_DIR = ARTIFACTS_DIR / "tool_outputs"
+    PROJECT_MEMORY_FILE = MEMORY_DIR / "project_summary.md"
+    SETTINGS_FILE = REV_DIR / "settings.json"
+    TEST_MARKER_FILE = REV_DIR / "test"
 
 
 def register_additional_root(path: pathlib.Path) -> None:
@@ -36,17 +68,12 @@ def get_allowed_roots() -> List[pathlib.Path]:
     """Return the primary project root plus any additional allowed roots."""
 
     return [ROOT, *ADDITIONAL_ROOTS]
-REV_DIR = ROOT / ".rev"
-CACHE_DIR = REV_DIR / "cache"
-CHECKPOINTS_DIR = REV_DIR / "checkpoints"
-LOGS_DIR = REV_DIR / "logs"
-SESSIONS_DIR = REV_DIR / "sessions"
-MEMORY_DIR = REV_DIR / "memory"
-METRICS_DIR = REV_DIR / "metrics"
-SETTINGS_FILE = REV_DIR / "settings.json"
-TEST_MARKER_FILE = REV_DIR / "test"
+
+
+# Initialize derived paths at import time.
+_recompute_derived_paths()
 DEFAULT_OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3-coder:480b-cloud")  # default model
+DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "devstral-2:123b-cloud")  # default model
 
 # Determine default provider based on configured credentials
 # Priority: explicit REV_LLM_PROVIDER > Gemini > Anthropic > OpenAI > Ollama

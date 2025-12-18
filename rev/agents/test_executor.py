@@ -6,14 +6,47 @@ from rev.models.task import Task
 from rev.tools.registry import execute_tool, get_last_tool_call
 from rev.core.context import RevContext
 
+
 class TestExecutorAgent(BaseAgent):
     """
-    A sub-agent that specializes in running tests.
+    A sub-agent that specializes in running tests and lightweight execution checks.
     """
+
+    def _select_command(self, description: str) -> tuple[str, Dict[str, Any]]:
+        desc_lower = (description or "").lower()
+
+        # If the task is explicitly about "startup" behavior/log output, don't default to pytest.
+        if any(
+            token in desc_lower
+            for token in (
+                "auto-registered",
+                "auto registered",
+                "[analysts]",
+                "on startup",
+                "startup",
+                "run the application",
+                "run application",
+                "run main.py",
+                "main.py",
+            )
+        ):
+            return "python main.py", {"timeout": 45}
+
+        parts = (description or "").split()
+        test_path = None
+        for part in parts:
+            if "tests/" in part or "tests\\" in part:
+                test_path = part
+                break
+
+        command = "pytest"
+        if test_path:
+            command = f"pytest {test_path}"
+        return command, {"timeout": 600}
 
     def _maybe_run_import_smoke(self, description: str) -> Optional[str]:
         """Run a quick import smoke test before full pytest when imports are the focus."""
-        desc_lower = description.lower()
+        desc_lower = (description or "").lower()
         if "import" not in desc_lower:
             return None
 
@@ -24,8 +57,11 @@ class TestExecutorAgent(BaseAgent):
         if not module:
             return None
 
+        wants_pytest = any(token in desc_lower for token in ("pytest", "run tests", "unit test", "test suite"))
+        import_only = ("import" in desc_lower) and not wants_pytest
+
         smoke_cmd = f'python -c "import {module}"'
-        print(f"  → Running smoke test: {smoke_cmd}")
+        print(f"  -> Running smoke test: {smoke_cmd}")
         result = execute_tool("run_cmd", {"command": smoke_cmd})
         try:
             payload = json.loads(result)
@@ -34,10 +70,20 @@ class TestExecutorAgent(BaseAgent):
 
         rc = payload.get("rc")
         if isinstance(rc, int) and rc != 0:
-            print("  ✗ Smoke test failed; skipping pytest until import issues are resolved.")
+            print("  [!] Smoke test failed; skipping pytest until import issues are resolved.")
             return result
 
-        print("  ✓ Smoke test passed")
+        print("  [OK] Smoke test passed")
+        if import_only:
+            return json.dumps(
+                {
+                    "rc": 0,
+                    "stdout": f"Smoke import OK: {module}",
+                    "stderr": "",
+                    "command": smoke_cmd,
+                    "kind": "import_smoke",
+                }
+            )
         return None
 
     def _last_change_context(self, context: RevContext) -> Optional[Dict[str, Any]]:
@@ -82,38 +128,48 @@ class TestExecutorAgent(BaseAgent):
         return bool(files_touched)
 
     def execute(self, task: Task, context: RevContext) -> str:
-        """
-        Executes a test-related task.
-        """
+        """Executes a test-related task."""
         print(f"TestExecutorAgent executing task: {task.description}")
-
-        parts = task.description.split()
-        test_path = None
-        for part in parts:
-            if "tests/" in part:
-                test_path = part
-                break
-        
-        command = "pytest"
-        if test_path:
-            command = f"pytest {test_path}"
 
         smoke_result = self._maybe_run_import_smoke(task.description)
         if smoke_result is not None:
             return smoke_result
 
-        if not self._should_run_pytest(context):
+        command, run_opts = self._select_command(task.description)
+        is_pytest = command.strip().lower().startswith("pytest")
+
+        if is_pytest and not self._should_run_pytest(context):
             warning = "[SKIPPED_TESTS] No code changes detected since last run; skipping pytest."
             print(f"  ⚠️  {warning}")
-            return warning
+            return json.dumps(
+                {
+                    "skipped": True,
+                    "kind": "skipped_tests",
+                    "reason": "no code changes detected since last run",
+                    "command": command,
+                    "last_test_iteration": context.get_agent_state("last_test_iteration"),
+                    "last_test_rc": context.get_agent_state("last_test_rc"),
+                    "last_code_change_iteration": context.get_agent_state("last_code_change_iteration"),
+                    "warning": warning,
+                }
+            )
 
-        print(f"  → TestExecutorAgent will run command: '{command}'")
-        
+        print(f"  -> Running: {command}")
+
         try:
-            result = execute_tool("run_cmd", {"command": command})
+            tool_args: Dict[str, Any] = {"command": command}
+            if isinstance(run_opts, dict) and run_opts.get("timeout"):
+                tool_args["timeout"] = run_opts["timeout"]
+
+            result = execute_tool("run_cmd", tool_args)
             context.set_agent_state("last_test_iteration", context.get_agent_state("current_iteration", 0))
-            # Check if the command execution itself indicates a failure (e.g., non-zero exit code)
-            # For now, we'll assume any exception from execute_tool is a failure
+
+            try:
+                payload = json.loads(result)
+            except json.JSONDecodeError:
+                payload = {}
+            if isinstance(payload, dict) and isinstance(payload.get("rc"), int):
+                context.set_agent_state("last_test_rc", payload.get("rc"))
             return result
         except Exception as e:
             error_msg = f"Error executing test command: {e}"

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from rev.models.task import Task, TaskStatus
 from rev.tools.registry import execute_tool, get_last_tool_call
 from rev.core.context import RevContext
+from rev.tools.workspace_resolver import WorkspacePathError, resolve_workspace_path
 
 
 def _read_file_with_fallback_encoding(file_path: Path) -> Optional[str]:
@@ -88,6 +89,14 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
 
     action_type = task.action_type.lower()
 
+    # If the planner mislabeled the action type but the tool call clearly indicates
+    # a directory creation, verify it as such. This prevents false failures like
+    # "File created but is empty" when a directory was created.
+    last_call = get_last_tool_call() or {}
+    last_tool = (last_call.get("name") or "").lower()
+    if last_tool == "create_directory" and action_type in {"add", "create"}:
+        return _verify_directory_creation(task, context)
+
     # Route to appropriate verification handler
     if action_type == "refactor":
         return _verify_refactoring(task, context)
@@ -139,20 +148,47 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
     # Don't try to guess the refactoring type - just verify the repo state changed
     # If there are issues below, they'll be caught. Otherwise, assume it succeeded.
 
-    # Try to identify the target directory from the task description
-    # Look for patterns like "./lib/analysts/" or "lib/analysts"
-    dir_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\-]+\/[a-zA-Z0-9_\-]+\/)'
-    dir_matches = re.findall(dir_pattern, task.description)
+    # Identify the target directory.
+    # Prefer tool metadata / tool outputs (stable) over parsing task.description (brittle).
+    target_dir: Optional[Path] = None
 
-    if not dir_matches:
+    if result_payload:
+        # split_python_module_classes returns package_dir and package_init.
+        package_dir = result_payload.get("package_dir")
+        if isinstance(package_dir, str) and package_dir.strip():
+            target_dir = _resolve_for_verification(package_dir.strip(), purpose="verify refactoring target dir")
+
+        if not target_dir:
+            package_init = result_payload.get("package_init")
+            if isinstance(package_init, str) and package_init.strip():
+                init_path = _resolve_for_verification(package_init.strip(), purpose="verify refactoring package init")
+                if init_path:
+                    target_dir = init_path.parent
+
+    if not target_dir:
+        last_call = get_last_tool_call() or {}
+        if (last_call.get("name") or "").lower() == "split_python_module_classes":
+            args = last_call.get("args") or {}
+            if isinstance(args, dict):
+                candidate = args.get("target_directory")
+                if isinstance(candidate, str) and candidate.strip():
+                    target_dir = _resolve_for_verification(candidate.strip(), purpose="verify refactoring target dir")
+
+    if not target_dir:
+        # Fallback: try to parse something directory-looking from the task description.
+        dir_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\-]+\/[a-zA-Z0-9_\-]+)(?:\/)?'
+        dir_matches = re.findall(dir_pattern, task.description)
+        if dir_matches:
+            best_dir = max(dir_matches, key=len)
+            target_dir = _resolve_for_verification(best_dir.strip("/"), purpose="verify refactoring target dir")
+
+    if not target_dir:
         return VerificationResult(
             passed=False,
-            message="Could not determine target directory from task description",
-            details={"description": task.description, "warning": "Cannot verify extraction without target dir"},
+            message="Could not determine target directory for verification",
+            details={"description": task.description, "result_payload_keys": list(result_payload.keys()) if result_payload else None},
             should_replan=True
         )
-
-    target_dir = Path(dir_matches[0].strip("/"))
     debug_info["target_directory"] = str(target_dir)
     debug_info["directory_exists"] = target_dir.exists()
 
@@ -217,11 +253,15 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
     old_file_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\-]+\.py)'
     old_file_matches = re.findall(old_file_pattern, task.description)
     if old_file_matches:
-        old_file = Path(old_file_matches[0])
+        old_file = _resolve_for_verification(old_file_matches[0], purpose="verify refactoring source file")
+        if not old_file:
+            issues.append(f"[FAIL] Could not resolve source file path for verification: {old_file_matches[0]}")
+            debug_info["main_file_status"] = "UNRESOLVABLE"
+            old_file = None
         debug_info["source_file"] = str(old_file)
-        debug_info["source_file_exists"] = old_file.exists()
+        debug_info["source_file_exists"] = old_file.exists() if old_file else False
 
-        if old_file.exists():
+        if old_file and old_file.exists():
             try:
                 # Use helper function for robust multi-encoding file reading
                 content = _read_file_with_fallback_encoding(old_file)
@@ -247,17 +287,18 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
                 issues.append(f"[FAIL] Could not read {old_file}: {e}")
                 debug_info["main_file_status"] = f"ERROR: {str(e)}"
         else:
-            package_candidate = old_file.with_suffix("")
-            package_init = package_candidate / "__init__.py"
-            if package_candidate.exists() and package_init.exists():
-                details["main_file_converted_to_package"] = True
-                debug_info["main_file_status"] = "CONVERTED_TO_PACKAGE"
-                debug_info["package_path"] = str(package_candidate)
-            else:
-                issues.append(
-                    f"[FAIL] Original file {old_file} no longer exists and package '{package_candidate}' was not found"
-                )
-                debug_info["main_file_status"] = "MISSING"
+            if old_file:
+                package_candidate = old_file.with_suffix("")
+                package_init = package_candidate / "__init__.py"
+                if package_candidate.exists() and package_init.exists():
+                    details["main_file_converted_to_package"] = True
+                    debug_info["main_file_status"] = "CONVERTED_TO_PACKAGE"
+                    debug_info["package_path"] = str(package_candidate)
+                else:
+                    issues.append(
+                        f"[FAIL] Original file {old_file} no longer exists and package '{package_candidate}' was not found"
+                    )
+                    debug_info["main_file_status"] = "MISSING"
 
     if issues:
         if call_sites_updated:
@@ -291,6 +332,12 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
 
     details = {}
 
+    # Prefer tool metadata (stable) over regex guessing (brittle).
+    file_path: Path | None = None
+    extracted_from_result = _extract_path_from_task_result(task.result)
+    if extracted_from_result:
+        file_path = _resolve_for_verification(extracted_from_result, purpose="verify file creation")
+
     # Try to extract file path from task description
     # Patterns: "create file at ./lib/file.py" or "add ./lib/file.py"
     patterns = [
@@ -298,12 +345,14 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
         r'(?:add|create)\s+(?:file\s+)?(?:at\s+)?["\']?([a-zA-Z0-9_/\-]+\.py)["\']?',
     ]
 
-    file_path = None
-    for pattern in patterns:
-        matches = re.findall(pattern, task.description, re.IGNORECASE)
-        if matches:
-            file_path = Path(matches[0])
-            break
+    if not file_path:
+        for pattern in patterns:
+            matches = re.findall(pattern, task.description, re.IGNORECASE)
+            if matches:
+                candidate = matches[0]
+                file_path = _resolve_for_verification(candidate, purpose="verify file creation")
+                if file_path:
+                    break
 
     if not file_path:
         # If we can't determine from description, check task.result
@@ -311,7 +360,16 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
             # Result might contain the file path
             result_match = re.search(r'(?:\.?\/)?[a-zA-Z0-9_/\-]+\.py', task.result)
             if result_match:
-                file_path = Path(result_match.group(0))
+                file_path = _resolve_for_verification(result_match.group(0), purpose="verify file creation")
+
+    if not file_path:
+        last_call = get_last_tool_call()
+        if last_call:
+            args = last_call.get("args") or {}
+            if isinstance(args, dict):
+                candidate = args.get("path") or args.get("file") or args.get("target")
+                if isinstance(candidate, str) and candidate.strip():
+                    file_path = _resolve_for_verification(candidate.strip(), purpose="verify file creation")
 
     if not file_path:
         return VerificationResult(
@@ -321,12 +379,16 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
             should_replan=True
         )
 
-    # Ensure relative path is absolute
-    if not file_path.is_absolute():
-        file_path = Path.cwd() / file_path
-
     # Check if file exists
     if file_path.exists():
+        # If the resolved path is actually a directory, don't apply file-size semantics.
+        if file_path.is_dir():
+            return VerificationResult(
+                passed=True,
+                message=f"Directory exists: {file_path.name}",
+                details={"directory_path": str(file_path), "is_dir": True},
+            )
+
         file_size = file_path.stat().st_size
         details["file_exists"] = True
         details["file_size"] = file_size
@@ -370,11 +432,45 @@ def _extract_path_from_task_result(result: Any) -> Optional[str]:
     else:
         return None
 
-    for key in ("file", "path", "updated_file"):
+    # Sub-agent standardized output may wrap the raw tool output.
+    if isinstance(data.get("tool_output"), str):
+        nested = _extract_path_from_task_result(data.get("tool_output"))
+        if nested:
+            return nested
+
+    # Prefer explicit tool args (stable) over brittle regex parsing of task text.
+    tool_args = data.get("tool_args")
+    if isinstance(tool_args, dict):
+        for key in ("path", "file_path", "target_path", "directory", "dir_path"):
+            value = tool_args.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+
+    for key in (
+        "path_abs",
+        "file_abs",
+        "directory_abs",
+        "file",
+        "path",
+        "updated_file",
+        "wrote",
+        "created",
+        "deleted",
+        "appended_to",
+    ):
         value = data.get(key)
         if isinstance(value, str) and value.strip():
             return value
     return None
+
+
+def _resolve_for_verification(raw_path: str, *, purpose: str) -> Optional[Path]:
+    """Resolve a candidate path using the canonical workspace resolver."""
+
+    try:
+        return resolve_workspace_path(raw_path, purpose=purpose).abs_path
+    except WorkspacePathError:
+        return None
 
 
 def _parse_task_result_payload(result: Any) -> Optional[Dict[str, Any]]:
@@ -449,10 +545,14 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
             should_replan=True
         )
 
-    if extracted_path.is_absolute():
-        file_path = extracted_path
-    else:
-        file_path = Path.cwd() / extracted_path
+    file_path = _resolve_for_verification(str(extracted_path), purpose="verify file edit")
+    if not file_path:
+        return VerificationResult(
+            passed=False,
+            message="Could not determine file path to verify",
+            details={"path": str(extracted_path)},
+            should_replan=True
+        )
 
     if not file_path.exists():
         return VerificationResult(
@@ -474,17 +574,33 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
 def _verify_directory_creation(task: Task, context: RevContext) -> VerificationResult:
     """Verify that a directory was actually created."""
 
+    dir_path: Path | None = None
+    extracted_from_result = _extract_path_from_task_result(task.result)
+    if extracted_from_result:
+        dir_path = _resolve_for_verification(extracted_from_result, purpose="verify directory creation")
+
     patterns = [
         r'(?:directory\s+)?["\']?(\.?\/[a-zA-Z0-9_/\-]+\/)["\']?',
         r'(?:create|add)\s+(?:directory\s+)?["\']?([a-zA-Z0-9_/\-]+\/)["\']?',
     ]
 
-    dir_path = None
-    for pattern in patterns:
-        matches = re.findall(pattern, task.description, re.IGNORECASE)
-        if matches:
-            dir_path = Path(matches[0].strip("/"))
-            break
+    if not dir_path:
+        for pattern in patterns:
+            matches = re.findall(pattern, task.description, re.IGNORECASE)
+            if matches:
+                candidate = matches[0].strip("/").strip("\\")
+                dir_path = _resolve_for_verification(candidate, purpose="verify directory creation")
+                if dir_path:
+                    break
+
+    if not dir_path:
+        last_call = get_last_tool_call()
+        if last_call:
+            args = last_call.get("args") or {}
+            if isinstance(args, dict):
+                candidate = args.get("path") or args.get("target")
+                if isinstance(candidate, str) and candidate.strip():
+                    dir_path = _resolve_for_verification(candidate.strip(), purpose="verify directory creation")
 
     if not dir_path:
         return VerificationResult(
@@ -493,9 +609,6 @@ def _verify_directory_creation(task: Task, context: RevContext) -> VerificationR
             details={},
             should_replan=True
         )
-
-    if not dir_path.is_absolute():
-        dir_path = Path.cwd() / dir_path
 
     if dir_path.exists() and dir_path.is_dir():
         return VerificationResult(
@@ -515,12 +628,130 @@ def _verify_directory_creation(task: Task, context: RevContext) -> VerificationR
 def _verify_test_execution(task: Task, context: RevContext) -> VerificationResult:
     """Verify that tests actually passed."""
 
-    # Try to run tests
+    # Prefer the tool result from the task itself (avoid re-running expensive tests).
+    payload = _parse_task_result_payload(task.result)
+    if payload:
+        if isinstance(payload.get("blocked"), (list, str)):
+            return VerificationResult(
+                passed=False,
+                message="Test command was blocked by tool allowlist",
+                details=payload,
+                should_replan=True,
+            )
+        if payload.get("timeout"):
+            return VerificationResult(
+                passed=False,
+                message="Test command timed out",
+                details=payload,
+                should_replan=True,
+            )
+    if payload and payload.get("skipped") is True and payload.get("kind") == "skipped_tests":
+        last_test_iteration = payload.get("last_test_iteration")
+        last_test_rc = payload.get("last_test_rc")
+
+        if isinstance(last_test_rc, int) and last_test_rc != 0:
+            context.agent_state["tests_blocked_no_changes"] = True
+            return VerificationResult(
+                passed=True,
+                message="Skipped pytest (no code changes since last failure)",
+                details={
+                    "skipped": True,
+                    "blocked": True,
+                    "last_test_iteration": last_test_iteration,
+                    "last_test_rc": last_test_rc,
+                },
+            )
+
+        return VerificationResult(
+            passed=True,
+            message="Skipped pytest (no changes since last pass)",
+            details={
+                "skipped": True,
+                "last_test_iteration": last_test_iteration,
+                "last_test_rc": last_test_rc,
+            },
+        )
+
+    if payload and isinstance(payload.get("rc"), int):
+        rc = payload.get("rc", 1)
+        output = (payload.get("stdout", "") or "") + (payload.get("stderr", "") or "")
+        context.agent_state["last_test_iteration"] = context.agent_state.get("current_iteration")
+        context.agent_state["last_test_rc"] = rc
+        if rc == 0:
+            cmd = payload.get("cmd") or payload.get("command")
+            if isinstance(cmd, str) and cmd.strip() and "pytest" not in cmd.lower():
+                if "auto-registered" in (task.description or "").lower():
+                    match = re.search(r"Auto-registered\s+(\d+)", output, re.IGNORECASE)
+                    if match:
+                        count = int(match.group(1))
+                        if count <= 0:
+                            return VerificationResult(
+                                passed=False,
+                                message=f"Auto-registration still empty (Auto-registered {count})",
+                                details={"count": count, "command": cmd, "output": output[:500]},
+                                should_replan=True,
+                            )
+                    else:
+                        return VerificationResult(
+                            passed=False,
+                            message="Could not find Auto-registered count in startup output",
+                            details={"command": cmd, "output": output[:500]},
+                            should_replan=True,
+                        )
+                return VerificationResult(
+                    passed=True,
+                    message="Command succeeded",
+                    details={"rc": rc, "command": cmd, "output": output[:200]},
+                )
+            return VerificationResult(
+                passed=True,
+                message="Tests passed",
+                details={"rc": rc, "output": output[:200]}
+            )
+        return VerificationResult(
+            passed=False,
+            message=f"Tests failed (rc={rc})",
+            details={"rc": rc, "output": output[:500]},
+            should_replan=True
+        )
+
+    if payload is not None:
+        return VerificationResult(
+            passed=False,
+            message="Test command did not return an exit code (rc); cannot verify",
+            details={"payload": payload},
+            should_replan=True,
+        )
+
+    last_test_iteration = context.agent_state.get("last_test_iteration")
+    last_test_rc = context.agent_state.get("last_test_rc")
+    last_code_change_iteration = context.agent_state.get("last_code_change_iteration", -1)
+    if (
+        isinstance(last_test_iteration, int)
+        and isinstance(last_code_change_iteration, int)
+        and last_code_change_iteration <= last_test_iteration
+    ):
+        if last_test_rc == 0:
+            return VerificationResult(
+                passed=True,
+                message="Skipped tests (no changes since last pass)",
+                details={"last_test_iteration": last_test_iteration}
+            )
+        context.agent_state["tests_blocked_no_changes"] = True
+        return VerificationResult(
+            passed=True,
+            message="Skipped pytest (no code changes since last failure)",
+            details={"blocked": True, "last_test_iteration": last_test_iteration, "last_test_rc": last_test_rc},
+        )
+
+    # Fall back to running tests if we have no usable tool result.
     try:
         result = execute_tool("run_tests", {"cmd": "pytest -q", "timeout": 30})
         result_data = json.loads(result)
         rc = result_data.get("rc", 1)
         output = result_data.get("stdout", "") + result_data.get("stderr", "")
+        context.agent_state["last_test_iteration"] = context.agent_state.get("current_iteration")
+        context.agent_state["last_test_rc"] = rc
 
         if rc == 0:
             return VerificationResult(

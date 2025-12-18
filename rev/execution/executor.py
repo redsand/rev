@@ -40,6 +40,15 @@ from rev.execution.safety import (
 from rev.execution.reviewer import review_action, display_action_review, format_review_feedback_for_llm
 from rev.execution.session import SessionTracker, create_message_summary_from_history
 from rev.debug_logger import get_logger
+from rev.core.tool_call_recovery import recover_tool_call_from_text
+from rev.execution.artifacts import write_tool_output_artifact
+from rev.execution.evidence import summarize_tool_output
+from rev.execution.compression_policy import get_tool_compression_policy
+from rev.memory.project_memory import (
+    ensure_project_memory_file,
+    maybe_record_known_failure_from_error,
+    record_recent_changes,
+)
 
 EXECUTION_SYSTEM = """You are an autonomous coding agent that executes planned tasks using tools.
 
@@ -90,6 +99,65 @@ You MUST NOT respond with TASK_COMPLETE until:
 - Relevant tests have been run, AND
 - Tests either pass OR you have a clear, explicit reason why tests cannot yet pass.
 """
+
+def _build_tool_evidence(
+    tool_name: str,
+    tool_args: Dict[str, Any],
+    result: str,
+    session_tracker: Optional[SessionTracker],
+    task_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    artifact, artifact_meta = write_tool_output_artifact(
+        tool=tool_name,
+        args=tool_args if isinstance(tool_args, dict) else {"args": tool_args},
+        output=result,
+        session_id=session_tracker.session_id if session_tracker else None,
+        task_id=task_id,
+        step_id=session_tracker.summary.total_tool_calls if session_tracker else None,
+        agent_name="executor",
+    )
+    evidence = summarize_tool_output(
+        tool=tool_name,
+        args=tool_args if isinstance(tool_args, dict) else {"args": tool_args},
+        output=result,
+        artifact_ref=artifact.as_posix(),
+    )
+    evidence["artifact_meta"] = artifact_meta
+    if evidence.get("result") == "error":
+        try:
+            maybe_record_known_failure_from_error(
+                error_text=str(result),
+                evidence_ref=evidence.get("artifact_ref"),
+            )
+        except Exception:
+            pass
+    if session_tracker:
+        session_tracker.track_evidence(evidence)
+    return evidence
+
+
+def _tool_message_content(
+    tool_name: str,
+    tool_args: Dict[str, Any],
+    result: str,
+    session_tracker: Optional[SessionTracker],
+    task_id: Optional[str] = None,
+) -> str:
+    """Return the content to attach to a tool message (compressed when needed)."""
+    policy = get_tool_compression_policy()
+    decision = policy.decide(tool_name, result)
+
+    # Always persist artifact for observability/replay.
+    evidence = _build_tool_evidence(tool_name, tool_args, result, session_tracker, task_id=task_id)
+    evidence["compression_reason"] = decision.reason
+
+    if not decision.compress:
+        return result
+
+    if decision.inline_content is not None:
+        evidence["inline_window"] = decision.inline_content[: max(200, policy.inline_max_chars // 2)]
+        evidence["note"] = "Strict compression mode: include inline window for editability"
+    return json.dumps(evidence, indent=2)
 
 
 TEST_WRITER_SYSTEM = """
@@ -720,6 +788,57 @@ def _apply_text_fallbacks(
     debug_logger,
 ) -> bool:
     """Try to handle text-only responses by applying patches or writing files."""
+    recovered = recover_tool_call_from_text(content)
+    if recovered:
+        try:
+            is_scary, reason = is_scary_operation(recovered.name, recovered.arguments, action_type)
+            if is_scary:
+                operation_desc = format_operation_description(recovered.name, recovered.arguments)
+                if not prompt_scary_operation(operation_desc, reason, auto_approve=False):
+                    if debug_logger:
+                        debug_logger.log(
+                            "executor",
+                            "TEXT_TOOL_RECOVERY_REJECTED",
+                            {"tool": recovered.name, "reason": reason},
+                            "INFO",
+                        )
+                    return False
+
+            result = execute_tool(recovered.name, recovered.arguments)
+            if session_tracker:
+                session_tracker.track_tool_call(recovered.name, recovered.arguments)
+            messages.append({
+                "role": "tool",
+                "name": recovered.name,
+                "content": _tool_message_content(
+                    recovered.name,
+                    recovered.arguments if isinstance(recovered.arguments, dict) else {"arguments": recovered.arguments},
+                    result,
+                    session_tracker,
+                ),
+            })
+            if debug_logger:
+                debug_logger.log(
+                    "executor",
+                    "TEXT_TOOL_RECOVERED",
+                    {"tool": recovered.name, "arguments": recovered.arguments},
+                    "INFO",
+                )
+
+            if exec_context:
+                path = recovered.arguments.get("path")
+                if recovered.name == "write_file" and isinstance(path, str):
+                    body = recovered.arguments.get("content", "")
+                    exec_context.invalidate_code(path)
+                    exec_context.set_code(path, body if isinstance(body, str) else "")
+                elif recovered.name in {"replace_in_file", "apply_patch", "move_file", "delete_file"}:
+                    exec_context.clear_code_cache()
+            print(f"  -> Recovered tool call from text output: {recovered.name}")
+            return not _has_error_result(result)
+        except Exception as exc:  # pragma: no cover - defensive
+            if debug_logger:
+                debug_logger.log("executor", "TEXT_TOOL_RECOVERY_FAILED", {"error": str(exc)}, "ERROR")
+
     if action_type not in {"add", "edit"}:
         return False
 
@@ -754,7 +873,12 @@ def _apply_text_fallbacks(
             messages.append({
                 "role": "tool",
                 "name": "write_file",
-                "content": result
+                "content": _tool_message_content(
+                    "write_file",
+                    {"path": path, "content": body},
+                    result,
+                    session_tracker,
+                )
             })
             if debug_logger:
                 debug_logger.log("executor", "TEXT_WRITE_APPLIED", {"path": path}, "INFO")
@@ -1053,6 +1177,7 @@ def execution_mode(
 
     # Initialize session tracker for comprehensive summarization
     session_tracker = SessionTracker()
+    ensure_project_memory_file()
     if state_manager:
         setattr(state_manager, "session_tracker", session_tracker)
     print(f"  📊 Session tracking enabled (ID: {session_tracker.session_id})\n")
@@ -1500,7 +1625,13 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                     messages.append({
                         "role": "tool",
                         "name": tool_name,
-                        "content": result
+                        "content": _tool_message_content(
+                            tool_name,
+                            tool_args if isinstance(tool_args, dict) else {},
+                            result,
+                            session_tracker,
+                            task_id=getattr(current_task, "task_id", None),
+                        )
                     })
                     redisplay_prompt()
 
@@ -1518,6 +1649,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                                     exec_context.record_unavailable_path(path)
                         except:
                             pass
+                        # Known failure modes are recorded in _build_tool_evidence (artifact-backed).
 
                     # Check for test failures and track results
                     if tool_name == "run_tests":
@@ -1542,16 +1674,24 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                         except:
                             pass
 
-            # Check if task is complete AFTER executing tool calls
-            if "TASK_COMPLETE" in content or "task complete" in content.lower():
-                print(f"  ✓ Task completed")
-                redisplay_prompt()
-                plan.mark_completed(content)
-                if state_manager:
-                    state_manager.on_task_completed(current_task)
-                session_tracker.track_task_completed(current_task.description)
-                task_complete = True
-                break
+                    # Check if task is complete AFTER executing tool calls
+                    if "TASK_COMPLETE" in content or "task complete" in content.lower():
+                        print(f"  ✓ Task completed")
+                        redisplay_prompt()
+                        plan.mark_completed(content)
+                        if state_manager:
+                            state_manager.on_task_completed(current_task)
+                        session_tracker.track_task_completed(current_task.description)
+                        try:
+                            record_recent_changes(
+                                files_created=session_tracker.summary.files_created,
+                                files_modified=session_tracker.summary.files_modified,
+                                files_deleted=session_tracker.summary.files_deleted,
+                            )
+                        except Exception:
+                            pass
+                        task_complete = True
+                        break
 
             # If model responds but doesn't use tools and doesn't complete task
             if not tool_calls and content:
@@ -1636,6 +1776,14 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
 
     # Finalize and display session summary
     session_tracker.finalize()
+    try:
+        record_recent_changes(
+            files_created=session_tracker.summary.files_created,
+            files_modified=session_tracker.summary.files_modified,
+            files_deleted=session_tracker.summary.files_deleted,
+        )
+    except Exception:
+        pass
     print("\n" + "=" * 60)
     print("SESSION SUMMARY")
     print("=" * 60)
@@ -2023,7 +2171,13 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                 messages.append({
                     "role": "tool",
                     "name": tool_name,
-                    "content": result
+                    "content": _tool_message_content(
+                        tool_name,
+                        tool_args if isinstance(tool_args, dict) else {},
+                        result,
+                        None,
+                        task_id=getattr(task, "task_id", None),
+                    )
                 })
 
                 # Check for test failures
@@ -2231,7 +2385,13 @@ Please analyze these validation failures and fix them. Complete each fix and rep
                 # Add result to conversation
                 messages.append({
                     "role": "tool",
-                    "content": result
+                    "name": tool_name,
+                    "content": _tool_message_content(
+                        tool_name,
+                        tool_args if isinstance(tool_args, dict) else {},
+                        result,
+                        None,
+                    )
                 })
 
         # Check if fixes are complete
@@ -2599,7 +2759,13 @@ Action type: {current_task.action_type}
                         messages.append({
                             "role": "tool",
                             "name": tool_name,
-                            "content": result
+                            "content": _tool_message_content(
+                                tool_name,
+                                tool_args if isinstance(tool_args, dict) else {},
+                                result,
+                                session_tracker,
+                                task_id=getattr(current_task, "task_id", None),
+                            )
                         })
 
                 # Check for task completion

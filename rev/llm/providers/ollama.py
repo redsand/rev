@@ -276,6 +276,42 @@ class OllamaProvider(LLMProvider):
                 if OLLAMA_DEBUG:
                     print(f"[DEBUG] Response status: {resp.status_code}")
 
+                # Some Ollama-compatible proxies expose an OpenAI-compatible endpoint only.
+                # If /api/chat is missing, fall back to /v1/chat/completions.
+                if resp.status_code == 404:
+                    v1_url = f"{self.base_url}/v1/chat/completions"
+                    v1_payload = {
+                        "model": model_name,
+                        "messages": messages,
+                        "stream": False,
+                        "temperature": config.OLLAMA_TEMPERATURE,
+                        "top_p": config.OLLAMA_TOP_P,
+                    }
+                    try:
+                        v1_resp = _make_request_interruptible(v1_url, v1_payload, timeout)
+                        v1_resp.raise_for_status()
+                        v1_data = v1_resp.json()
+                        # Normalize OpenAI-style response into our standard format.
+                        msg = (
+                            (v1_data.get("choices") or [{}])[0].get("message")
+                            if isinstance(v1_data, dict)
+                            else None
+                        ) or {}
+                        normalized = {"message": msg}
+                        completion_tokens = _estimate_message_tokens(normalized.get("message", {}))
+                        normalized["usage"] = {
+                            "prompt": prompt_tokens_estimate,
+                            "completion": completion_tokens,
+                            "total": prompt_tokens_estimate + completion_tokens,
+                        }
+                        debug_logger.log_llm_response(model_name, normalized, cached=False)
+                        llm_cache.set_response(messages, normalized, tools if tools_provided else None, model_name)
+                        return normalized
+                    except Exception as exc:
+                        # Preserve original error context if fallback fails.
+                        if OLLAMA_DEBUG:
+                            print(f"[DEBUG] /v1/chat/completions fallback failed: {exc}")
+
                 # Handle 401 for cloud models
                 if resp.status_code == 401:
                     try:
