@@ -236,6 +236,37 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
                     break
 
     if not target_dir:
+        # Fallback 1a: use source file parent from tool events or description
+        source_candidates: list[str] = []
+        if getattr(task, "tool_events", None):
+            for ev in reversed(list(task.tool_events)):
+                args = ev.get("args") or {}
+                if isinstance(args, dict):
+                    cand = args.get("path")
+                    if isinstance(cand, str) and cand.strip():
+                        source_candidates.append(cand)
+        desc_matches = re.findall(r'(?:\.\/)?([a-zA-Z0-9_/\\\-]+\.py)', task.description or "")
+        source_candidates.extend(desc_matches)
+        for cand in source_candidates:
+            resolved_file = _resolve_for_verification(cand.strip(), purpose="verify refactoring source file parent")
+            if resolved_file:
+                target_dir = resolved_file.parent
+                details["target_dir_path"] = str(target_dir)
+                break
+
+    if not target_dir:
+        # Fallback: use the most recent tool call (any tool) and derive parent directory from its path
+        last_call = get_last_tool_call() or {}
+        args = last_call.get("args") or {}
+        if isinstance(args, dict):
+            path_candidate = args.get("path") or args.get("file_path")
+            if isinstance(path_candidate, str) and path_candidate.strip():
+                resolved_file = _resolve_for_verification(path_candidate.strip(), purpose="verify refactoring target dir (last tool)")
+                if resolved_file:
+                    target_dir = resolved_file.parent
+                    details["target_dir_path"] = str(target_dir)
+
+    if not target_dir:
         # Fallback 1: if a .py file path is mentioned, use its parent directory.
         file_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\\\-]+\.py)'
         file_matches = re.findall(file_pattern, task.description)
