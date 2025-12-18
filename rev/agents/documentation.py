@@ -4,6 +4,9 @@ from rev.models.task import Task
 from rev.tools.registry import execute_tool, get_available_tools
 from rev.llm.client import ollama_chat
 from rev.core.context import RevContext
+from rev.core.tool_call_recovery import recover_tool_call_from_text
+from rev.agents.context_provider import build_context_and_tools
+from rev.agents.subagent_io import build_subagent_output
 
 DOCUMENTATION_SYSTEM_PROMPT = """You are a specialized Documentation agent. Your purpose is to create, update, and review documentation for code, APIs, and projects.
 
@@ -75,11 +78,20 @@ class DocumentationAgent(BaseAgent):
         # Track recovery attempts
         recovery_attempts = self.increment_recovery_attempts(task, context)
 
-        available_tools = [tool for tool in get_available_tools() if tool['function']['name'] in ['write_file', 'replace_in_file', 'read_file']]
+        all_tools = get_available_tools()
+        candidate_tool_names = ['write_file', 'replace_in_file', 'read_file']
+        rendered_context, selected_tools, _bundle = build_context_and_tools(
+            task,
+            context,
+            tool_universe=all_tools,
+            candidate_tool_names=candidate_tool_names,
+            max_tools=3,
+        )
+        available_tools = selected_tools
 
         messages = [
             {"role": "system", "content": DOCUMENTATION_SYSTEM_PROMPT},
-            {"role": "user", "content": f"Task: {task.description}\n\nRepository Context:\n{context.repo_context}"}
+            {"role": "user", "content": f"Task: {task.description}\n\nSelected Context:\n{rendered_context}"}
         ]
 
         try:
@@ -122,11 +134,35 @@ class DocumentationAgent(BaseAgent):
 
                     if not error_type:
                         print(f"  → DocumentationAgent will call tool '{tool_name}' with arguments: {arguments}")
-                        result = execute_tool(tool_name, arguments)
-                        return result
+                        raw_result = execute_tool(tool_name, arguments)
+                        return build_subagent_output(
+                            agent_name="DocumentationAgent",
+                            tool_name=tool_name,
+                            tool_args=arguments,
+                            tool_output=raw_result,
+                            context=context,
+                            task_id=task.task_id,
+                        )
 
             # Error handling
             if error_type:
+                if error_type == "text_instead_of_tool_call":
+                    recovered = recover_tool_call_from_text(
+                        response.get("message", {}).get("content", ""),
+                        allowed_tools=[t["function"]["name"] for t in available_tools],
+                    )
+                    if recovered:
+                        print(f"  -> Recovered tool call from text output: {recovered.name}")
+                        raw_result = execute_tool(recovered.name, recovered.arguments)
+                        return build_subagent_output(
+                            agent_name="DocumentationAgent",
+                            tool_name=recovered.name,
+                            tool_args=recovered.arguments,
+                            tool_output=raw_result,
+                            context=context,
+                            task_id=task.task_id,
+                        )
+
                 print(f"  ⚠️ DocumentationAgent: {error_detail}")
 
                 if self.should_attempt_recovery(task, context):

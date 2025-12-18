@@ -24,6 +24,7 @@ from rev.config import (
     get_allowed_roots,
 )
 from rev.cache import get_file_cache, get_repo_cache
+from rev.tools.workspace_resolver import resolve_workspace_path
 
 
 # ========== Helper Functions ==========
@@ -44,18 +45,16 @@ def _rel_to_root(path: pathlib.Path) -> str:
         return os.path.relpath(path, ROOT)
 
 
-def _safe_path(rel: str) -> pathlib.Path:
-    """Resolve path safely within the project root."""
-    # Normalize and resolve the path
-    # os.path.normpath is used to handle path separators correctly
-    # and resolve '..' components.
-    safe_path = ROOT.joinpath(os.path.normpath(rel)).resolve()
+def _rel_to_root_posix(path: pathlib.Path) -> str:
+    """Return a stable, forward-slash relative path for logs/results."""
 
-    # Check if the resolved path is within the project root
-    if ROOT.resolve() not in safe_path.parents and safe_path != ROOT.resolve():
-        raise ValueError(f"Path escapes repo root: {rel}")
-        
-    return safe_path
+    return _rel_to_root(path).replace("\\", "/")
+
+
+def _safe_path(rel: str) -> pathlib.Path:
+    """Resolve a path safely within configured allowed roots."""
+    resolved = resolve_workspace_path(rel, purpose="file operation")
+    return resolved.abs_path
 
 
 def _is_text_file(path: pathlib.Path) -> bool:
@@ -265,7 +264,12 @@ def write_file(path: str, content: str) -> str:
             # Don't fail if metrics tracking fails
             pass
 
-        result = {"wrote": _rel_to_root(p), "bytes": len(content)}
+        result = {
+            "wrote": _rel_to_root(p),
+            "bytes": len(content),
+            "path_abs": str(p),
+            "path_rel": _rel_to_root_posix(p),
+        }
 
         # Include warnings and similar files in result for LLM awareness
         if is_new and check_result.get('similar_files'):
@@ -328,7 +332,7 @@ def delete_file(path: str) -> str:
         if file_cache is not None:
             file_cache.invalidate_file(p)
 
-        return json.dumps({"deleted": _rel_to_root(p)})
+        return json.dumps({"deleted": _rel_to_root(p), "path_abs": str(p), "path_rel": _rel_to_root_posix(p)})
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
@@ -349,10 +353,16 @@ def move_file(src: str, dest: str) -> str:
             file_cache.invalidate_file(src_p)
             file_cache.invalidate_file(dest_p)
 
-        return json.dumps({
-            "moved": _rel_to_root(src_p),
-            "to": _rel_to_root(dest_p)
-        })
+        return json.dumps(
+            {
+                "moved": _rel_to_root(src_p),
+                "to": _rel_to_root(dest_p),
+                "src_path_abs": str(src_p),
+                "src_path_rel": _rel_to_root_posix(src_p),
+                "dest_path_abs": str(dest_p),
+                "dest_path_rel": _rel_to_root_posix(dest_p),
+            }
+        )
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
@@ -361,6 +371,8 @@ def append_to_file(path: str, content: str) -> str:
     """Append content to a file."""
     try:
         p = _safe_path(path)
+        if not p.exists():
+            return json.dumps({"error": f"Not found: {path}"})
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("a", encoding="utf-8") as f:
             f.write(content)
@@ -370,7 +382,9 @@ def append_to_file(path: str, content: str) -> str:
         if file_cache is not None:
             file_cache.invalidate_file(p)
 
-        return json.dumps({"appended_to": _rel_to_root(p), "bytes": len(content)})
+        return json.dumps(
+            {"appended_to": _rel_to_root(p), "bytes": len(content), "path_abs": str(p), "path_rel": _rel_to_root_posix(p)}
+        )
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
@@ -393,7 +407,9 @@ def replace_in_file(path: str, find: str, replace: str, regex: bool = False) -> 
             new_content = content.replace(find, replace)
 
         if content == new_content:
-            return json.dumps({"replaced": 0, "file": _rel_to_root(p)})
+            return json.dumps(
+                {"replaced": 0, "file": _rel_to_root(p), "path_abs": str(p), "path_rel": _rel_to_root_posix(p)}
+            )
 
         p.write_text(new_content, encoding="utf-8")
 
@@ -403,10 +419,14 @@ def replace_in_file(path: str, find: str, replace: str, regex: bool = False) -> 
             file_cache.invalidate_file(p)
 
         count = len(content.split(find)) - 1 if not regex else len(re.findall(find, content))
-        return json.dumps({
-            "replaced": count,
-            "file": _rel_to_root(p)
-        })
+        return json.dumps(
+            {
+                "replaced": count,
+                "file": _rel_to_root(p),
+                "path_abs": str(p),
+                "path_rel": _rel_to_root_posix(p),
+            }
+        )
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
@@ -416,7 +436,7 @@ def create_directory(path: str) -> str:
     try:
         p = _safe_path(path)
         p.mkdir(parents=True, exist_ok=True)
-        return json.dumps({"created": _rel_to_root(p)})
+        return json.dumps({"created": _rel_to_root(p), "path_abs": str(p), "path_rel": _rel_to_root_posix(p)})
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
@@ -430,6 +450,8 @@ def get_file_info(path: str) -> str:
         stat = p.stat()
         return json.dumps({
             "path": _rel_to_root(p),
+            "path_abs": str(p),
+            "path_rel": _rel_to_root_posix(p),
             "size": stat.st_size,
             "modified": stat.st_mtime,
             "is_file": p.is_file(),
@@ -450,10 +472,16 @@ def copy_file(src: str, dest: str) -> str:
             return json.dumps({"error": f"Cannot copy directory: {src}"})
         dest_p.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src_p, dest_p)
-        return json.dumps({
-            "copied": _rel_to_root(src_p),
-            "to": _rel_to_root(dest_p)
-        })
+        return json.dumps(
+            {
+                "copied": _rel_to_root(src_p),
+                "to": _rel_to_root(dest_p),
+                "src_path_abs": str(src_p),
+                "src_path_rel": _rel_to_root_posix(src_p),
+                "dest_path_abs": str(dest_p),
+                "dest_path_rel": _rel_to_root_posix(dest_p),
+            }
+        )
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
@@ -464,6 +492,8 @@ def file_exists(path: str) -> str:
         p = _safe_path(path)
         return json.dumps({
             "path": path,
+            "path_abs": str(p),
+            "path_rel": _rel_to_root_posix(p),
             "exists": p.exists(),
             "is_file": p.is_file() if p.exists() else False,
             "is_dir": p.is_dir() if p.exists() else False
@@ -488,6 +518,8 @@ def read_file_lines(path: str, start: int = 1, end: int = None) -> str:
         selected_lines = lines[start_idx:end_idx]
         return json.dumps({
             "path": _rel_to_root(p),
+            "path_abs": str(p),
+            "path_rel": _rel_to_root_posix(p),
             "start": start,
             "end": end_idx,
             "total_lines": len(lines),
@@ -536,6 +568,8 @@ def tree_view(path: str = ".", max_depth: int = 3, max_files: int = 100) -> str:
 
         return json.dumps({
             "path": _rel_to_root(p) if p != ROOT else ".",
+            "path_abs": str(p),
+            "path_rel": _rel_to_root_posix(p) if p != ROOT else ".",
             "tree": "\n".join(tree),
             "files_shown": count
         })

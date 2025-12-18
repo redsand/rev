@@ -4,6 +4,9 @@ from rev.models.task import Task
 from rev.tools.registry import execute_tool, get_available_tools
 from rev.llm.client import ollama_chat
 from rev.core.context import RevContext
+from rev.core.tool_call_recovery import recover_tool_call_from_text
+from rev.agents.context_provider import build_context_and_tools
+from rev.agents.subagent_io import build_subagent_output
 
 RESEARCH_SYSTEM_PROMPT = """You are a specialized Research agent. Your purpose is to investigate codebases, gather context, analyze code structures, and provide insights.
 
@@ -90,11 +93,18 @@ class ResearchAgent(BaseAgent):
             'analyze_code_structures', 'find_symbol_usages', 'analyze_dependencies',
             'analyze_code_context', 'check_structural_consistency', 'get_file_info'
         ]
-        available_tools = [tool for tool in all_tools if tool['function']['name'] in research_tool_names]
+        rendered_context, selected_tools, _bundle = build_context_and_tools(
+            task,
+            context,
+            tool_universe=all_tools,
+            candidate_tool_names=research_tool_names,
+            max_tools=7,
+        )
+        available_tools = selected_tools
 
         messages = [
             {"role": "system", "content": RESEARCH_SYSTEM_PROMPT},
-            {"role": "user", "content": f"Task: {task.description}\n\nRepository Context:\n{context.repo_context}"}
+            {"role": "user", "content": f"Task: {task.description}\n\nSelected Context:\n{rendered_context}"}
         ]
 
         try:
@@ -137,18 +147,46 @@ class ResearchAgent(BaseAgent):
 
                     if not error_type:
                         print(f"  → ResearchAgent will call tool '{tool_name}' with arguments: {arguments}")
-                        result = execute_tool(tool_name, arguments)
+                        raw_result = execute_tool(tool_name, arguments)
 
                         # Store research findings in context for other agents to use
                         context.add_insight("research_agent", f"task_{task.task_id}_result", {
                             "tool": tool_name,
-                            "result": result[:500] if isinstance(result, str) else str(result)[:500]
+                            "result": raw_result[:500] if isinstance(raw_result, str) else str(raw_result)[:500]
                         })
 
-                        return result
+                        return build_subagent_output(
+                            agent_name="ResearchAgent",
+                            tool_name=tool_name,
+                            tool_args=arguments,
+                            tool_output=raw_result,
+                            context=context,
+                            task_id=task.task_id,
+                        )
 
             # Error handling
             if error_type:
+                if error_type == "text_instead_of_tool_call":
+                    recovered = recover_tool_call_from_text(
+                        response.get("message", {}).get("content", ""),
+                        allowed_tools=[t["function"]["name"] for t in available_tools],
+                    )
+                    if recovered:
+                        print(f"  -> Recovered tool call from text output: {recovered.name}")
+                        raw_result = execute_tool(recovered.name, recovered.arguments)
+                        context.add_insight("research_agent", f"task_{task.task_id}_result", {
+                            "tool": recovered.name,
+                            "result": raw_result[:500] if isinstance(raw_result, str) else str(raw_result)[:500]
+                        })
+                        return build_subagent_output(
+                            agent_name="ResearchAgent",
+                            tool_name=recovered.name,
+                            tool_args=recovered.arguments,
+                            tool_output=raw_result,
+                            context=context,
+                            task_id=task.task_id,
+                        )
+
                 print(f"  ⚠️ ResearchAgent: {error_detail}")
 
                 if self.should_attempt_recovery(task, context):

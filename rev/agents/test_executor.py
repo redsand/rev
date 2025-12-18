@@ -24,6 +24,9 @@ class TestExecutorAgent(BaseAgent):
         if not module:
             return None
 
+        wants_pytest = any(token in desc_lower for token in ("pytest", "run tests", "unit test", "test suite"))
+        import_only = ("import" in desc_lower) and not wants_pytest
+
         smoke_cmd = f'python -c "import {module}"'
         print(f"  → Running smoke test: {smoke_cmd}")
         result = execute_tool("run_cmd", {"command": smoke_cmd})
@@ -38,6 +41,16 @@ class TestExecutorAgent(BaseAgent):
             return result
 
         print("  ✓ Smoke test passed")
+        if import_only:
+            return json.dumps(
+                {
+                    "rc": 0,
+                    "stdout": f"Smoke import OK: {module}",
+                    "stderr": "",
+                    "command": smoke_cmd,
+                    "kind": "import_smoke",
+                }
+            )
         return None
 
     def _last_change_context(self, context: RevContext) -> Optional[Dict[str, Any]]:

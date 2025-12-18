@@ -8,6 +8,9 @@ from rev.models.task import Task
 from rev.tools.registry import execute_tool, get_available_tools
 from rev.llm.client import ollama_chat
 from rev.core.context import RevContext
+from rev.core.tool_call_recovery import recover_tool_call_from_text
+from rev.agents.context_provider import build_context_and_tools
+from rev.agents.subagent_io import build_subagent_output
 
 # Set up logging for RefactoringAgent
 logger = logging.getLogger(__name__)
@@ -24,6 +27,13 @@ When asked to extract classes from a file into separate files:
 3. Create an __init__.py file that imports all extracted classes
 4. Update the original file to import from the new files (or replace with imports)
 5. Prefer the `split_python_module_classes` tool to automate this process when working with large modules.
+
+IMPORT STRATEGY (IMPORTANT):
+- If you create a package (e.g., lib/analysts/__init__.py exporting classes), update call sites/tests to import from the package
+  exports, not from each individual module file.
+  Prefer: `from lib.analysts import BreakoutAnalyst` (or `import lib.analysts as analysts`)
+  Avoid: `from lib.analysts.BreakoutAnalyst import BreakoutAnalyst` and avoid expanding `from ... import *` into dozens of imports.
+- Only import the symbols actually used at the call site.
 
 You MUST use the write_file tool for each extracted file. Do not just read files - you must CREATE new files."""
 
@@ -125,9 +135,20 @@ class RefactoringAgent(BaseAgent):
         ]
         logger.debug(f"[REFACTORING] Available tools: {[t['function']['name'] for t in available_tools]}")
 
+        all_tools = get_available_tools()
+        candidate_tool_names = ['write_file', 'replace_in_file', 'read_file', 'split_python_module_classes']
+        rendered_context, selected_tools, _bundle = build_context_and_tools(
+            task,
+            context,
+            tool_universe=all_tools,
+            candidate_tool_names=candidate_tool_names,
+            max_tools=4,
+        )
+        available_tools = selected_tools
+
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Task: {task.description}\n\nRepository Context:\n{context.repo_context}"}
+            {"role": "user", "content": f"Task: {task.description}\n\nSelected Context:\n{rendered_context}"}
         ]
 
         logger.debug(f"[REFACTORING] Sending to LLM with {len(messages)} messages")
@@ -170,12 +191,37 @@ class RefactoringAgent(BaseAgent):
 
                         result = execute_tool(tool_name, arguments)
                         logger.info(f"[REFACTORING] Tool execution successful: {str(result)[:100]}")
-                        return result
+                        return build_subagent_output(
+                            agent_name="RefactoringAgent",
+                            tool_name=tool_name,
+                            tool_args=arguments,
+                            tool_output=result,
+                            context=context,
+                            task_id=task.task_id,
+                        )
                     except json.JSONDecodeError as je:
                         error_type, error_detail = "invalid_json", f"Invalid JSON in tool arguments: {arguments_str[:200]}"
                         logger.error(f"[REFACTORING] {error_type}: {error_detail}")
 
             if error_type:
+                recovered = None
+                if response and isinstance(response.get("message"), dict):
+                    recovered = recover_tool_call_from_text(
+                        response["message"].get("content", ""),
+                        allowed_tools=[t["function"]["name"] for t in available_tools],
+                    )
+                if recovered:
+                    print(f"  -> Recovered tool call from text output: {recovered.name}")
+                    raw_result = execute_tool(recovered.name, recovered.arguments)
+                    return build_subagent_output(
+                        agent_name="RefactoringAgent",
+                        tool_name=recovered.name,
+                        tool_args=recovered.arguments,
+                        tool_output=raw_result,
+                        context=context,
+                        task_id=task.task_id,
+                    )
+
                 print(f"  ⚠️ RefactoringAgent: {error_detail}")
                 logger.warning(f"[REFACTORING] {error_type}: {error_detail}")
 

@@ -60,6 +60,11 @@ class SessionSummary:
     success: bool = True
     error_messages: List[str] = field(default_factory=list)
 
+    # Compression helpers
+    running_summary: str = ""
+    open_threads: List[str] = field(default_factory=list)
+    evidence_summaries: List[Dict[str, Any]] = field(default_factory=list)  # capped
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return asdict(self)
@@ -94,6 +99,8 @@ class SessionSummary:
         # Header
         duration = self.duration_seconds or (time.time() - self.start_time)
         parts.append(f"## Session Summary ({duration:.1f}s)")
+        if self.running_summary:
+            parts.append(f"\nRunning: {self.running_summary}")
 
         # Task summary
         if self.total_tasks > 0:
@@ -144,6 +151,13 @@ class SessionSummary:
             for err in self.error_messages[:3]:
                 parts.append(f"  • {err[:100]}")
 
+        if self.open_threads:
+            parts.append(f"\n### Open Threads ({len(self.open_threads)})")
+            for thread in self.open_threads[:6]:
+                parts.append(f"  • {thread[:100]}")
+            if len(self.open_threads) > 6:
+                parts.append(f"  ... and {len(self.open_threads) - 6} more")
+
         return "\n".join(parts)
 
     def get_detailed_summary(self) -> str:
@@ -187,11 +201,14 @@ class SessionTracker:
         """Track when a task completes successfully."""
         if task_description not in self.summary.tasks_completed:
             self.summary.tasks_completed.append(task_description)
+        self.summary.open_threads = [t for t in self.summary.open_threads if t != task_description]
 
     def track_task_failed(self, task_description: str, error: str):
         """Track when a task fails."""
         if task_description not in self.summary.tasks_failed:
             self.summary.tasks_failed.append(task_description)
+        if task_description not in self.summary.open_threads:
+            self.summary.open_threads.append(task_description)
         if error not in self.summary.error_messages:
             self.summary.error_messages.append(error)
         self.summary.success = False
@@ -233,9 +250,54 @@ class SessionTracker:
                 self.summary.tests_passed += 1
             else:
                 self.summary.tests_failed += 1
+                thread = "Fix failing tests"
+                if thread not in self.summary.open_threads:
+                    self.summary.open_threads.append(thread)
         except (json.JSONDecodeError, KeyError, TypeError) as e:
             # Log malformed test results but don't fail
             pass
+
+    def track_evidence(self, evidence: Dict[str, Any], cap: int = 40):
+        """Track a compact evidence summary (token-stable)."""
+        self.summary.evidence_summaries.append(evidence)
+        if len(self.summary.evidence_summaries) > cap:
+            self.summary.evidence_summaries = self.summary.evidence_summaries[-cap:]
+
+    def update_running_summary(self):
+        """Update running_summary from tracked signals (no LLM required)."""
+        # Hard sections to prevent drift into vague mush:
+        # 1) What changed
+        # 2) Evidence
+        # 3) Open threads
+        sections = []
+
+        changed = []
+        if self.summary.files_created:
+            changed.append(f"created: {', '.join(self.summary.files_created[-5:])}")
+        if self.summary.files_modified:
+            changed.append(f"modified: {', '.join(self.summary.files_modified[-5:])}")
+        if self.summary.files_deleted:
+            changed.append(f"deleted: {', '.join(self.summary.files_deleted[-5:])}")
+        if changed:
+            sections.append("What changed: " + " | ".join(changed))
+
+        evidence = []
+        if self.summary.tests_run:
+            evidence.append(f"tests: {self.summary.tests_run} (pass={self.summary.tests_passed}, fail={self.summary.tests_failed})")
+        # Keep only a couple of artifact handles for quick re-hydration.
+        for ev in self.summary.evidence_summaries[-3:]:
+            ref = ev.get("artifact_ref")
+            tool = ev.get("tool")
+            if ref and tool:
+                evidence.append(f"{tool}: {ref}")
+        if evidence:
+            sections.append("Evidence: " + " | ".join(evidence))
+
+        if self.summary.open_threads:
+            sections.append("Open threads: " + " | ".join(self.summary.open_threads[:6]))
+
+        # Cap size hard.
+        self.summary.running_summary = "\n".join(sections)[:800]
 
     def track_messages(self, message_count: int, estimated_tokens: Optional[int] = None):
         """Track message statistics."""
@@ -254,6 +316,7 @@ class SessionTracker:
 
     def get_summary(self, detailed: bool = False) -> str:
         """Get current session summary."""
+        self.update_running_summary()
         if detailed:
             return self.summary.get_detailed_summary()
         return self.summary.get_concise_summary()
@@ -378,6 +441,7 @@ def create_message_summary_from_history(messages: List[Dict], tracker: Optional[
     if tracker:
         # Use tracked information for accurate summary
         tracker.track_messages(len(messages), tracker.estimate_tokens(messages))
+        tracker.update_running_summary()
         return tracker.get_summary(detailed=False)
 
     # Fallback: basic message-based summarization

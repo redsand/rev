@@ -10,6 +10,10 @@ from typing import Tuple
 import re
 from pathlib import Path
 
+from rev.core.tool_call_recovery import recover_tool_call_from_text
+from rev.agents.context_provider import build_context_and_tools
+from rev.agents.subagent_io import build_subagent_output
+
 CODE_WRITER_SYSTEM_PROMPT = """You are a specialized Code Writer agent. Your sole purpose is to execute a single coding task by calling the ONLY available tool for this specific task.
 
 You will be given a task description, action_type, and repository context. Analyze them carefully.
@@ -46,6 +50,12 @@ CRITICAL RULES FOR CODE EXTRACTION:
     - All imports and dependencies included
     - Proper error handling and validation
     - Docstrings explaining non-obvious logic
+
+IMPORT STRATEGY (IMPORTANT):
+- When updating imports after a refactor/split into a package (a directory with `__init__.py`), prefer importing from the
+  package exports (the `__init__.py`) instead of importing from each individual module file.
+- Do NOT replace `from pkg import *` with dozens of explicit imports. Only import the names actually used in the file,
+  or import from the package namespace if it already re-exports them.
 
 Example for `replace_in_file`:
 {
@@ -290,6 +300,14 @@ class CodeWriterAgent(BaseAgent):
             tool_names = ['write_file', 'replace_in_file', 'create_directory']
 
         available_tools = [tool for tool in all_tools if tool['function']['name'] in tool_names]
+        rendered_context, selected_tools, _bundle = build_context_and_tools(
+            task,
+            context,
+            tool_universe=all_tools,
+            candidate_tool_names=tool_names,
+            max_tools=min(7, len(tool_names) if tool_names else 7),
+        )
+        available_tools = selected_tools
 
         # Build enhanced user message with extraction guidance
         task_guidance = f"Task (action_type: {task.action_type}): {task.description}"
@@ -306,7 +324,7 @@ class CodeWriterAgent(BaseAgent):
 
         messages = [
             {"role": "system", "content": CODE_WRITER_SYSTEM_PROMPT},
-            {"role": "user", "content": f"{task_guidance}\n\nRepository Context:\n{context.repo_context}"}
+            {"role": "user", "content": f"{task_guidance}\n\nSelected Context:\n{rendered_context}"}
         ]
 
         try:
@@ -373,12 +391,57 @@ class CodeWriterAgent(BaseAgent):
 
                         # Execute the tool
                         print(f"  ⏳ Applying {tool_name} to {arguments.get('path', 'file')}...")
-                        result = execute_tool(tool_name, arguments)
+                        raw_result = execute_tool(tool_name, arguments)
                         print(f"  ✓ Successfully applied {tool_name}")
-                        return result
+                        return build_subagent_output(
+                            agent_name="CodeWriterAgent",
+                            tool_name=tool_name,
+                            tool_args=arguments,
+                            tool_output=raw_result,
+                            context=context,
+                            task_id=task.task_id,
+                        )
 
             # If we reach here, there was an error
             if error_type:
+                if error_type == "text_instead_of_tool_call":
+                    recovered = recover_tool_call_from_text(
+                        response.get("message", {}).get("content", ""),
+                        allowed_tools=[t["function"]["name"] for t in available_tools],
+                    )
+                    if recovered:
+                        tool_name = recovered.name
+                        arguments = recovered.arguments
+                        print(f"  -> Recovered tool call from text output: {tool_name}")
+
+                        if tool_name in ["write_file", "replace_in_file", "create_directory"]:
+                            self._display_change_preview(tool_name, arguments)
+
+                            file_path = arguments.get("path", "unknown")
+                            if tool_name == "write_file":
+                                content = arguments.get("content", "")
+                                is_valid, warning_msg = self._validate_import_targets(file_path, content)
+                                if not is_valid:
+                                    print("\n  [WARN] Import validation warning:")
+                                    print(f"  {warning_msg}")
+                                    print("  Note: This file has imports that may not exist. Proceed with caution.")
+
+                            if not self._prompt_for_approval(tool_name, file_path, context):
+                                print("  [REJECTED] Change rejected by user")
+                                return "[USER_REJECTED] Change was not approved by user"
+
+                        print(f"  Applying {tool_name} to {arguments.get('path', 'file')}...")
+                        raw_result = execute_tool(tool_name, arguments)
+                        print(f"  Successfully applied {tool_name}")
+                        return build_subagent_output(
+                            agent_name="CodeWriterAgent",
+                            tool_name=tool_name,
+                            tool_args=arguments,
+                            tool_output=raw_result,
+                            context=context,
+                            task_id=task.task_id,
+                        )
+
                 print(f"  ⚠️ CodeWriterAgent: {error_detail}")
 
                 # Check if we should attempt recovery

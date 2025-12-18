@@ -8,6 +8,7 @@ Implements Resource-Aware Optimization pattern to track and enforce budgets.
 """
 
 import os
+import json
 import time
 import traceback
 from typing import Dict, Any, List, Optional, Literal
@@ -51,6 +52,9 @@ from rev.core.shared_enums import AgentPhase
 from rev.core.agent_registry import AgentRegistry
 from rev.cache import clear_analysis_caches
 import re
+from rev.retrieval.context_builder import ContextBuilder
+from rev.memory.project_memory import ensure_project_memory_file, maybe_record_known_failure_from_error
+from rev.tools.workspace_resolver import resolve_workspace_path
 
 
 @dataclass
@@ -133,6 +137,7 @@ class Orchestrator:
         self.context: Optional[RevContext] = None
         self.learning_agent = LearningAgent(project_root) if self.config.enable_learning else None
         self.debug_logger = DebugLogger.get_instance()
+        self._context_builder: Optional[ContextBuilder] = None
 
     def _update_phase(self, new_phase: AgentPhase):
         if self.context:
@@ -164,8 +169,10 @@ class Orchestrator:
             auto_optimize=self.config.auto_optimize_prompt
         )
         if not was_optimized:
-            if self.config.enable_prompt_optimization and self.config.auto_optimize_prompt:
+            if self.config.auto_optimize_prompt:
                 print("\n[OK] Request already optimized; using original text")
+                # Still show the final prompt for transparency (it's identical).
+                self._display_prompt_optimization(original_request, original_request)
             return False
 
         print(f"\n[OK] Request optimized for clarity")
@@ -205,7 +212,9 @@ class Orchestrator:
         aggregate_errors: List[str] = []
         last_result: Optional[OrchestratorResult] = None
         self.context = RevContext(user_request=user_request)
-        self.context.repo_context = get_repo_context()
+        ensure_project_memory_file()
+        # Keep repo_context minimal; sub-agents will retrieve focused context via ContextBuilder.
+        self.context.repo_context = ""
 
         for attempt in range(self.config.orchestrator_retries + 1):
             if attempt > 0:
@@ -274,6 +283,7 @@ class Orchestrator:
                 execution_success = self._continuous_sub_agent_execution(user_request, coding_mode)
                 result.success = execution_success
                 result.phase_reached = AgentPhase.COMPLETE if execution_success else AgentPhase.FAILED
+                result.no_retry = bool(self.context.agent_state.get("no_retry")) if self.context else False
                 if not execution_success:
                     result.errors.append("Sub-agent execution failed or was halted.")
             else:
@@ -388,6 +398,10 @@ class Orchestrator:
             f"Can this task be decomposed into smaller, more specific subtasks that might succeed?\n"
             f"If yes, describe the first subtask that should be attempted next in detail.\n"
             f"If no, just respond with 'CANNOT_DECOMPOSE'.\n\n"
+            "Important import strategy note (avoid churn):\n"
+            "- If a refactor split creates a package (directory with __init__.py exports), update call sites/tests to\n"
+            "  import from the package exports (e.g., `from lib.analysts import BreakoutAnalyst`).\n"
+            "- Do NOT expand `from pkg import *` into dozens of per-module imports.\n\n"
             f"Important: Be specific about what concrete action the next task should take. "
             f"Use [ACTION_TYPE] format like [CREATE] or [EDIT] or [REFACTOR]."
         )
@@ -428,6 +442,10 @@ class Orchestrator:
             f"{work_summary}\n\n"
             "Based on the work completed, what is the single next most important action to take? "
             "If a previous action failed, propose a different action to achieve the goal.\n"
+            "Constraints to avoid duplicating work:\n"
+            "- Do not propose repeating a step that is already complete (e.g., do not re-create a directory that exists).\n"
+            "- If the code was split into a package with __init__.py exports, prefer package-export imports at call sites.\n"
+            "- Avoid replacing `from pkg import *` with dozens of per-module imports; only import names actually used.\n"
             f"You MUST choose one of the following action types: {available_actions}\n"
             "Your response should be a single line in the format: [ACTION_TYPE] description of the action.\n"
             "Example: [EDIT] refactor the authentication middleware to use the new session manager.\n"
@@ -468,6 +486,8 @@ class Orchestrator:
 
         completed_tasks_log: List[str] = []
         iteration = 0
+        action_counts: Dict[str, int] = defaultdict(int)
+        failure_counts: Dict[str, int] = defaultdict(int)
 
         while True:
             iteration += 1
@@ -492,6 +512,44 @@ class Orchestrator:
 
             self.context.plan = ExecutionPlan(tasks=[next_task])
 
+            # Anti-loop: stop if the planner repeats the same action too many times.
+            action_sig = f"{(next_task.action_type or '').strip().lower()}::{next_task.description.strip().lower()}"
+            action_counts[action_sig] += 1
+            if action_counts[action_sig] >= 3:
+                self.context.set_agent_state("no_retry", True)
+                self.context.add_error(f"Circuit breaker: repeating action '{next_task.action_type}'")
+                print("\n" + "=" * 70)
+                print("CIRCUIT BREAKER - REPEATED ACTION")
+                print("=" * 70)
+                print(f"Repeated action {action_counts[action_sig]}x: [{(next_task.action_type or '').upper()}] {next_task.description}")
+                print("Blocking issue: planner is not making forward progress; refusing to repeat the same step.")
+                print("Next step: run with `--debug` and share the last verification failure + tool args.\n")
+                return False
+
+            # Fast-path: don't dispatch a no-op create_directory if it already exists.
+            if (next_task.action_type or "").lower() == "create_directory":
+                try:
+                    m = re.search(r'([A-Za-z0-9_\\-./\\\\]+)', next_task.description)
+                    candidate = (m.group(1) if m else "").strip().strip('"').strip("'")
+                    if candidate:
+                        resolved = resolve_workspace_path(candidate, purpose="check create_directory preflight")
+                        if resolved.abs_path.exists() and resolved.abs_path.is_dir():
+                            next_task.status = TaskStatus.COMPLETED
+                            next_task.result = json.dumps(
+                                {
+                                    "skipped": True,
+                                    "reason": "directory already exists",
+                                    "directory_abs": str(resolved.abs_path),
+                                    "directory_rel": resolved.rel_path.replace("\\", "/"),
+                                }
+                            )
+                            log_entry = f"[COMPLETED] (skipped) {next_task.description}"
+                            completed_tasks_log.append(log_entry)
+                            print(f"  ✓ {log_entry}")
+                            continue
+                except Exception:
+                    pass
+
             # STEP 2: EXECUTE
             execution_success = self._dispatch_to_sub_agents(self.context)
 
@@ -512,8 +570,25 @@ class Orchestrator:
                     # Display detailed debug information
                     self._handle_verification_failure(verification_result)
 
-                    # Try to decompose the failed task into more granular steps
-                    if verification_result.should_replan:
+                    # Anti-loop: stop if the same verification failure repeats.
+                    first_line = verification_result.message.splitlines()[0].strip() if verification_result.message else ""
+                    failure_sig = f"{(next_task.action_type or '').lower()}::{first_line}"
+                    failure_counts[failure_sig] += 1
+                    if failure_counts[failure_sig] >= 3:
+                        self.context.set_agent_state("no_retry", True)
+                        self.context.add_error("Circuit breaker: repeating verification failure")
+                        print("\n" + "=" * 70)
+                        print("CIRCUIT BREAKER - REPEATED VERIFICATION FAILURE")
+                        print("=" * 70)
+                        print(f"Repeated failure {failure_counts[failure_sig]}x: {first_line}")
+                        print("Blocking issue: verification is failing the same way repeatedly; refusing to loop.")
+                        print("Next step: fix the blocking issue shown above, then re-run.\n")
+                        return False
+
+                    # Try to decompose the failed task into more granular steps.
+                    # Decomposing test failures is usually counterproductive (it tends to produce vague edits);
+                    # let the planner pick a focused debug/fix step instead.
+                    if verification_result.should_replan and (next_task.action_type or "").lower() != "test":
                         decomposed_task = self._decompose_extraction_task(next_task)
                         if decomposed_task:
                             print(f"  [RETRY] Using decomposed task for next iteration")
@@ -598,6 +673,27 @@ class Orchestrator:
 
         task.status = TaskStatus.IN_PROGRESS
         try:
+            # Build a focused context snapshot (selection pipeline); agents will also
+            # use this same pipeline when selecting tools and composing prompts.
+            if self._context_builder is None:
+                self._context_builder = ContextBuilder(self.project_root)
+            try:
+                tool_names = [t.get("function", {}).get("name") for t in get_available_tools() if isinstance(t, dict)]
+                bundle = self._context_builder.build(
+                    query=f"{context.user_request}\n\n{task.action_type}: {task.description}",
+                    tool_universe=get_available_tools(),
+                    tool_candidates=[n for n in tool_names if isinstance(n, str)],
+                    top_k_tools=7,
+                )
+                context.agent_insights["context_builder"] = {
+                    "selected_tools": [t.name for t in bundle.selected_tool_schemas],
+                    "selected_code": [c.location for c in bundle.selected_code_chunks],
+                    "selected_docs": [d.location for d in bundle.selected_docs_chunks],
+                }
+            except Exception:
+                # Best-effort: never fail dispatch due to context retrieval.
+                pass
+
             agent = AgentRegistry.get_agent_instance(task.action_type)
             result = agent.execute(task, context)
             task.result = result
@@ -615,6 +711,12 @@ class Orchestrator:
                 return False
             else:
                 task.status = TaskStatus.COMPLETED
+                try:
+                    # If the agent produced tool evidence, it may include artifact refs.
+                    if isinstance(task.result, str) and "outside allowed workspace roots" in task.result.lower():
+                        maybe_record_known_failure_from_error(error_text=task.result)
+                except Exception:
+                    pass
                 return True
         except Exception as e:
             task.status = TaskStatus.FAILED

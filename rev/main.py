@@ -27,6 +27,18 @@ def main():
     # Apply any saved configuration overrides before parsing arguments
     apply_saved_settings()
 
+    # Pre-parse --workspace early so config.ROOT and .rev paths are correct before init.
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--workspace", type=str, default=None)
+    pre_args, _unknown = pre_parser.parse_known_args()
+    if pre_args.workspace:
+        from pathlib import Path
+        config.set_workspace_root(Path(pre_args.workspace))
+        try:
+            os.chdir(str(config.ROOT))
+        except Exception:
+            pass
+
     # Ensure rev data directory exists
     config.REV_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -51,6 +63,11 @@ def main():
         "--model",
         default=config.OLLAMA_MODEL,
         help=f"Ollama model (default: {config.OLLAMA_MODEL})"
+    )
+    parser.add_argument(
+        "--workspace",
+        default=None,
+        help="Workspace root directory (sets repo root and .rev/ state location)"
     )
     parser.add_argument(
         "--base-url",
@@ -214,6 +231,19 @@ def main():
 
 
     args = parser.parse_args()
+
+    # Apply --workspace (full parser) for log visibility and safety.
+    if args.workspace:
+        from pathlib import Path
+        config.set_workspace_root(Path(args.workspace))
+        try:
+            os.chdir(str(config.ROOT))
+        except Exception:
+            pass
+
+    # Log workspace roots for transparency (Isolate).
+    print(f"workspace_root={config.ROOT}")
+    print(f"allowed_roots={[str(p) for p in config.get_allowed_roots()]}")
 
     # Enforce single-worker execution regardless of CLI input
     if args.parallel != 1:
