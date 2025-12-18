@@ -55,6 +55,8 @@ import re
 from rev.retrieval.context_builder import ContextBuilder
 from rev.memory.project_memory import ensure_project_memory_file, maybe_record_known_failure_from_error
 from rev.tools.workspace_resolver import resolve_workspace_path
+from rev.core.text_tool_shim import maybe_execute_tool_call_from_text
+from rev.agents.subagent_io import build_subagent_output
 
 
 @dataclass
@@ -696,6 +698,32 @@ class Orchestrator:
 
             agent = AgentRegistry.get_agent_instance(task.action_type)
             result = agent.execute(task, context)
+
+            # Global recovery: if an agent returns a tool-call payload as plain text, execute it here.
+            # This avoids "death spirals" where the model can describe a tool call but fails to emit
+            # structured tool_calls for the runtime adapter.
+            if isinstance(result, str):
+                try:
+                    allowed = [
+                        t.get("function", {}).get("name")
+                        for t in get_available_tools()
+                        if isinstance(t, dict)
+                    ]
+                    executed = maybe_execute_tool_call_from_text(result, allowed_tools=[n for n in allowed if isinstance(n, str)])
+                except Exception:
+                    executed = None
+
+                if executed is not None:
+                    print(f"  -> Recovered tool call from text output: {executed.tool_name}")
+                    result = build_subagent_output(
+                        agent_name=agent.__class__.__name__,
+                        tool_name=executed.tool_name,
+                        tool_args=executed.tool_args,
+                        tool_output=executed.tool_output,
+                        context=context,
+                        task_id=task.task_id,
+                    )
+
             task.result = result
             if isinstance(result, str) and (result.startswith("[RECOVERY_REQUESTED]") or result.startswith("[FINAL_FAILURE]") or result.startswith("[USER_REJECTED]")):
                 if result.startswith("[RECOVERY_REQUESTED]"):
