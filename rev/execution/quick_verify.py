@@ -536,6 +536,18 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
                 )
                 if isinstance(candidate, str) and candidate.strip():
                     extracted_path = Path(candidate.strip().strip("\"'"))
+                # If args didn't provide a usable path, try the tool result payload (path_abs/path_rel/file).
+                if not extracted_path:
+                    try:
+                        last_result = json.loads(last_call.get("result") or "{}")
+                    except Exception:
+                        last_result = {}
+                    if isinstance(last_result, dict):
+                        for key in ("path_abs", "path_rel", "file", "path"):
+                            candidate2 = last_result.get(key)
+                            if isinstance(candidate2, str) and candidate2.strip():
+                                extracted_path = Path(candidate2.strip().strip("\"'"))
+                                break
 
     if not extracted_path:
         return VerificationResult(

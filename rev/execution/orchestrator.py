@@ -463,6 +463,7 @@ class Orchestrator:
             "- Do not propose repeating a step that is already complete (e.g., do not re-create a directory that exists).\n"
             "- If you are going to use `split_python_module_classes`, do not hand-author `lib/analysts/__init__.py` first; let the tool generate it.\n"
             "- After `split_python_module_classes` runs, the source file is renamed to `*.py.bak`. Do not try to edit the old `*.py` path.\n"
+            "- If a source file was split into a package (directory with __init__.py) and the original single-file path no longer exists, do NOT propose edits to that missing file; operate on the package files that actually exist.\n"
             "- If the code was split into a package with __init__.py exports, prefer package-export imports at call sites.\n"
             "- Avoid replacing `from pkg import *` with dozens of per-module imports; only import names actually used.\n"
             "- Prefer `from lib.analysts import SomeAnalyst` over `from lib.analysts.some_file import SomeAnalyst` when `lib/analysts/__init__.py` exports it.\n"
@@ -607,9 +608,22 @@ class Orchestrator:
             # STEP 3: VERIFY - This is the critical addition
             verification_result = None
             if execution_success:
-                print(f"  -> Verifying execution...")
-                verification_result = verify_task_execution(next_task, self.context)
-                print(f"    {verification_result}")
+                # Only verify actions we have a handler for; otherwise skip verification noise.
+                verifiable_actions = {"refactor", "add", "create", "edit", "create_directory", "test"}
+                action_type = (next_task.action_type or "").lower()
+                if action_type in verifiable_actions:
+                    print(f"  -> Verifying execution...")
+                    verification_result = verify_task_execution(next_task, self.context)
+                    print(f"    {verification_result}")
+                else:
+                    verification_result = VerificationResult(
+                        passed=True,
+                        message="Verification skipped",
+                        details={"action_type": action_type, "skipped": True},
+                    )
+                    # Only log skip details when debug logging is enabled.
+                    if self.context and getattr(self.context, "debug", False):
+                        print(f"    {verification_result}")
 
                 # If tests are being skipped because nothing has changed since a failure,
                 # don't treat this as a verification failure (it causes loops). Instead,
