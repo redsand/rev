@@ -42,6 +42,9 @@ AgentRegistry.register_agent("add", CodeWriterAgent)
 AgentRegistry.register_agent("edit", CodeWriterAgent)
 AgentRegistry.register_agent("create_directory", CodeWriterAgent)  # File/directory creation
 AgentRegistry.register_agent("refactor", RefactoringAgent)
+AgentRegistry.register_agent("refracto", RefactoringAgent)
+AgentRegistry.register_agent("refacto", RefactoringAgent)
+AgentRegistry.register_agent("refctor", RefactoringAgent)
 
 # Testing and debugging agents
 AgentRegistry.register_agent("test", TestExecutorAgent)

@@ -532,6 +532,42 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
     Optimized for O(1) lookup using dictionary dispatch instead of O(n) elif chain.
     Tools in the timeout-protected list will be executed with automatic retry on timeout.
     """
+    # Compatibility shim: normalize common alternate argument names that some models emit
+    # (e.g. "file_path" vs the canonical "path") so tools don't KeyError.
+    if isinstance(args, dict):
+        tool = (name or "").lower()
+        normalized_args = dict(args)
+
+        if tool in {"read_file", "get_file_info", "delete_file", "file_exists"}:
+            if "path" not in normalized_args and isinstance(normalized_args.get("file_path"), str):
+                normalized_args["path"] = normalized_args["file_path"]
+
+        if tool in {"write_file", "append_to_file"}:
+            if "path" not in normalized_args and isinstance(normalized_args.get("file_path"), str):
+                normalized_args["path"] = normalized_args["file_path"]
+            if tool == "write_file" and "content" not in normalized_args:
+                for alt in ("text", "contents", "new_content"):
+                    if isinstance(normalized_args.get(alt), str):
+                        normalized_args["content"] = normalized_args[alt]
+                        break
+
+        if tool == "replace_in_file":
+            if "path" not in normalized_args and isinstance(normalized_args.get("file_path"), str):
+                normalized_args["path"] = normalized_args["file_path"]
+            if "find" not in normalized_args and isinstance(normalized_args.get("old_string"), str):
+                normalized_args["find"] = normalized_args["old_string"]
+            if "replace" not in normalized_args and isinstance(normalized_args.get("new_string"), str):
+                normalized_args["replace"] = normalized_args["new_string"]
+
+        if tool == "create_directory":
+            if "path" not in normalized_args:
+                for alt in ("dir", "dir_path", "directory", "folder"):
+                    if isinstance(normalized_args.get(alt), str):
+                        normalized_args["path"] = normalized_args[alt]
+                        break
+
+        args = normalized_args
+
     friendly_desc = _get_friendly_description(name, args)
     print(f"  → {friendly_desc}")
 

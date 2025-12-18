@@ -119,7 +119,13 @@ class CodeWriterAgent(BaseAgent):
         matches = re.finditer(import_pattern, content)
 
         warnings = []
-        base_dir = Path.cwd()
+        # Resolve import targets relative to the file being written (not CWD).
+        # This avoids false warnings like checking `<repo>/analysts.py` for imports
+        # inside `lib/analysts/__init__.py`.
+        try:
+            base_dir = (Path.cwd() / Path(file_path)).resolve(strict=False).parent
+        except Exception:
+            base_dir = Path.cwd()
 
         for match in matches:
             import_path = match.group(1)
@@ -147,6 +153,40 @@ class CodeWriterAgent(BaseAgent):
         if warnings:
             return False, "; ".join(warnings)
 
+        return True, ""
+
+    def _tool_result_has_error(self, raw_result: str) -> Tuple[bool, str]:
+        """Detect JSON tool failures (file tools typically return {"error": "..."})."""
+        if not isinstance(raw_result, str):
+            return False, ""
+        try:
+            payload = json.loads(raw_result)
+        except json.JSONDecodeError:
+            return False, ""
+        if isinstance(payload, dict) and isinstance(payload.get("error"), str) and payload["error"].strip():
+            return True, payload["error"].strip()
+        return False, ""
+
+    def _validate_tool_args(self, tool_name: str, arguments: dict) -> Tuple[bool, str]:
+        """Validate minimum required tool args to avoid tool-layer KeyErrors."""
+        tool = (tool_name or "").lower()
+        if not isinstance(arguments, dict):
+            return False, "Tool arguments are not a JSON object"
+
+        def _has_str(key: str) -> bool:
+            return isinstance(arguments.get(key), str) and arguments.get(key).strip() != ""
+
+        if tool == "replace_in_file":
+            missing = [k for k in ("path", "find", "replace") if not _has_str(k)]
+            if missing:
+                return False, f"replace_in_file missing required keys: {', '.join(missing)}"
+        elif tool == "write_file":
+            missing = [k for k in ("path", "content") if not _has_str(k)]
+            if missing:
+                return False, f"write_file missing required keys: {', '.join(missing)}"
+        elif tool == "create_directory":
+            if not _has_str("path"):
+                return False, "create_directory missing required key: path"
         return True, ""
 
     def _color_diff_line(self, line: str) -> str:
@@ -390,8 +430,31 @@ class CodeWriterAgent(BaseAgent):
                                 return "[USER_REJECTED] Change was not approved by user"
 
                         # Execute the tool
+                        ok_args, arg_msg = self._validate_tool_args(tool_name, arguments)
+                        if not ok_args:
+                            print(f"  ✗ Invalid tool args: {arg_msg}")
+                            if self.should_attempt_recovery(task, context):
+                                self.request_replan(
+                                    context,
+                                    reason="Missing required tool arguments",
+                                    detailed_reason=f"{tool_name}: {arg_msg}",
+                                )
+                                return self.make_recovery_request("invalid_tool_args", arg_msg)
+                            return self.make_failure_signal("invalid_tool_args", arg_msg)
+
                         print(f"  ⏳ Applying {tool_name} to {arguments.get('path', 'file')}...")
                         raw_result = execute_tool(tool_name, arguments)
+                        has_error, error_msg = self._tool_result_has_error(raw_result)
+                        if has_error:
+                            print(f"  ✗ Tool reported error: {error_msg}")
+                            if self.should_attempt_recovery(task, context):
+                                self.request_replan(
+                                    context,
+                                    reason="Tool execution failed",
+                                    detailed_reason=f"{tool_name} returned error: {error_msg}",
+                                )
+                                return self.make_recovery_request("tool_error", error_msg)
+                            return self.make_failure_signal("tool_error", error_msg)
                         print(f"  ✓ Successfully applied {tool_name}")
                         return build_subagent_output(
                             agent_name="CodeWriterAgent",
@@ -430,8 +493,31 @@ class CodeWriterAgent(BaseAgent):
                                 print("  [REJECTED] Change rejected by user")
                                 return "[USER_REJECTED] Change was not approved by user"
 
+                        ok_args, arg_msg = self._validate_tool_args(tool_name, arguments)
+                        if not ok_args:
+                            print(f"  Invalid tool args: {arg_msg}")
+                            if self.should_attempt_recovery(task, context):
+                                self.request_replan(
+                                    context,
+                                    reason="Missing required tool arguments",
+                                    detailed_reason=f"{tool_name}: {arg_msg}",
+                                )
+                                return self.make_recovery_request("invalid_tool_args", arg_msg)
+                            return self.make_failure_signal("invalid_tool_args", arg_msg)
+
                         print(f"  Applying {tool_name} to {arguments.get('path', 'file')}...")
                         raw_result = execute_tool(tool_name, arguments)
+                        has_error, error_msg = self._tool_result_has_error(raw_result)
+                        if has_error:
+                            print(f"  Tool reported error: {error_msg}")
+                            if self.should_attempt_recovery(task, context):
+                                self.request_replan(
+                                    context,
+                                    reason="Tool execution failed",
+                                    detailed_reason=f"{tool_name} returned error: {error_msg}",
+                                )
+                                return self.make_recovery_request("tool_error", error_msg)
+                            return self.make_failure_signal("tool_error", error_msg)
                         print(f"  Successfully applied {tool_name}")
                         return build_subagent_output(
                             agent_name="CodeWriterAgent",

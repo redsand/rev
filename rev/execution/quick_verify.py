@@ -89,6 +89,14 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
 
     action_type = task.action_type.lower()
 
+    # If the planner mislabeled the action type but the tool call clearly indicates
+    # a directory creation, verify it as such. This prevents false failures like
+    # "File created but is empty" when a directory was created.
+    last_call = get_last_tool_call() or {}
+    last_tool = (last_call.get("name") or "").lower()
+    if last_tool == "create_directory" and action_type in {"add", "create"}:
+        return _verify_directory_creation(task, context)
+
     # Route to appropriate verification handler
     if action_type == "refactor":
         return _verify_refactoring(task, context)
@@ -356,6 +364,14 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
 
     # Check if file exists
     if file_path.exists():
+        # If the resolved path is actually a directory, don't apply file-size semantics.
+        if file_path.is_dir():
+            return VerificationResult(
+                passed=True,
+                message=f"Directory exists: {file_path.name}",
+                details={"directory_path": str(file_path), "is_dir": True},
+            )
+
         file_size = file_path.stat().st_size
         details["file_exists"] = True
         details["file_size"] = file_size

@@ -75,6 +75,21 @@ def resolve_workspace_path(
     """
 
     raw = _clean_path_input(path)
+    # Guard against a common LLM/pathing mistake: prefixing a workspace-relative path
+    # with the workspace folder name (e.g., running inside `C:\repo\redtrade` but
+    # emitting `redtrade/lib/...`). That creates nested paths like `<ROOT>/redtrade/lib`.
+    #
+    # If the incoming path is relative and starts with "<ROOT.name>/", strip that prefix.
+    try:
+        raw_norm = raw.replace("\\", "/")
+        if not Path(raw).is_absolute():
+            root_name = ROOT.name
+            if raw_norm.lower() == root_name.lower():
+                raw = "."
+            elif raw_norm.lower().startswith(root_name.lower() + "/"):
+                raw = raw_norm[len(root_name) + 1 :]
+    except Exception:
+        pass
     candidate = Path(raw)
     if not candidate.is_absolute():
         candidate = ROOT / candidate

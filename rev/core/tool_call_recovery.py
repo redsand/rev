@@ -49,7 +49,7 @@ def _extract_json_snippet(text: str) -> Optional[str]:
 
 def _coerce_args(value: Any) -> Optional[Dict[str, Any]]:
     if value is None:
-        return {}
+        return None
     if isinstance(value, dict):
         return value
     if isinstance(value, str):
@@ -117,4 +117,3 @@ def recover_tool_call_from_text(
         return recovered
 
     return None
-

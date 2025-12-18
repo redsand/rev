@@ -69,8 +69,20 @@ class RefactoringAgent(BaseAgent):
     def _attempt_structured_split(self, task: Task, context: RevContext) -> str | None:
         """Automatically invoke the split tool when the task clearly requests it."""
         desc_lower = task.description.lower()
-        split_keywords = ("break out", "split", "separate", "extract", "individual files")
-        if not any(keyword in desc_lower for keyword in split_keywords):
+        split_keywords = (
+            "break out",
+            "split",
+            "separate",
+            "extract",
+            "individual files",
+            "its own file",
+            "into its own file",
+            "each class",
+            "each analyst",
+        )
+        has_source = bool(re.search(r'([A-Za-z0-9_\-./]+\.py)', task.description))
+        has_target_dir = bool(re.search(r'([A-Za-z0-9_\-./]+/)', task.description))
+        if not any(keyword in desc_lower for keyword in split_keywords) and not (has_source and has_target_dir):
             return None
 
         def _clean_path(raw: str) -> str:

@@ -57,6 +57,7 @@ from rev.memory.project_memory import ensure_project_memory_file, maybe_record_k
 from rev.tools.workspace_resolver import resolve_workspace_path
 from rev.core.text_tool_shim import maybe_execute_tool_call_from_text
 from rev.agents.subagent_io import build_subagent_output
+from rev.execution.action_normalizer import normalize_action_type
 
 
 @dataclass
@@ -421,7 +422,10 @@ class Orchestrator:
         # Try to parse the decomposed task format [ACTION_TYPE] description
         match = re.match(r"[\s]*\[(.*?)\]\s*(.*)", response_content)
         if match:
-            action_type = match.group(1).lower()
+            action_type = normalize_action_type(
+                match.group(1),
+                available_actions=AgentRegistry.get_registered_action_types(),
+            )
             description = match.group(2).strip()
             print(f"\n  [DECOMPOSITION] LLM suggested decomposition:")
             print(f"    Action: {action_type}")
@@ -446,6 +450,7 @@ class Orchestrator:
             "If a previous action failed, propose a different action to achieve the goal.\n"
             "Constraints to avoid duplicating work:\n"
             "- Do not propose repeating a step that is already complete (e.g., do not re-create a directory that exists).\n"
+            "- If you are going to use `split_python_module_classes`, do not hand-author `lib/analysts/__init__.py` first; let the tool generate it.\n"
             "- If the code was split into a package with __init__.py exports, prefer package-export imports at call sites.\n"
             "- Avoid replacing `from pkg import *` with dozens of per-module imports; only import names actually used.\n"
             f"You MUST choose one of the following action types: {available_actions}\n"
@@ -468,7 +473,10 @@ class Orchestrator:
         if not match:
             return Task(description=response_content.strip(), action_type="general")
         
-        action_type = match.group(1).lower()
+        action_type = normalize_action_type(
+            match.group(1),
+            available_actions=available_actions,
+        )
         description = match.group(2).strip()
         return Task(description=description, action_type=action_type)
 
@@ -531,8 +539,27 @@ class Orchestrator:
             # Fast-path: don't dispatch a no-op create_directory if it already exists.
             if (next_task.action_type or "").lower() == "create_directory":
                 try:
-                    m = re.search(r'([A-Za-z0-9_\\-./\\\\]+)', next_task.description)
-                    candidate = (m.group(1) if m else "").strip().strip('"').strip("'")
+                    desc = next_task.description or ""
+                    candidate = ""
+
+                    # Prefer explicit "directory <path>" phrasing.
+                    m = re.search(r"directory\s+([^\s]+)", desc, flags=re.IGNORECASE)
+                    if m:
+                        candidate = m.group(1)
+
+                    # Windows absolute path (drive letter).
+                    if not candidate:
+                        m = re.search(r"([A-Za-z]:\\\\[^\s]+)", desc)
+                        if m:
+                            candidate = m.group(1)
+
+                    # Fallback: first path-ish token (includes ':' for Windows).
+                    if not candidate:
+                        m = re.search(r'([A-Za-z0-9_:\\-./\\\\]+)', desc)
+                        if m:
+                            candidate = m.group(1)
+
+                    candidate = candidate.strip().strip('"').strip("'")
                     if candidate:
                         resolved = resolve_workspace_path(candidate, purpose="check create_directory preflight")
                         if resolved.abs_path.exists() and resolved.abs_path.is_dir():
@@ -596,6 +623,22 @@ class Orchestrator:
                             print(f"  [RETRY] Using decomposed task for next iteration")
                             next_task = decomposed_task
                             iteration -= 1  # Don't count failed task as an iteration
+                else:
+                    # If we've just verified a successful test and no code has changed since,
+                    # treat this as "goal achieved" to prevent endless test loops.
+                    if (next_task.action_type or "").lower() == "test":
+                        last_test_rc = self.context.agent_state.get("last_test_rc")
+                        last_test_iteration = self.context.agent_state.get("last_test_iteration", -1)
+                        last_code_change_iteration = self.context.agent_state.get("last_code_change_iteration", -1)
+                        if (
+                            last_test_rc == 0
+                            and isinstance(last_test_iteration, int)
+                            and isinstance(last_code_change_iteration, int)
+                            and last_code_change_iteration != -1
+                            and last_code_change_iteration <= last_test_iteration
+                        ):
+                            print("\n[OK] Verification passed and no code changed since; stopping to avoid repeated tests.")
+                            return True
 
             action_type = (next_task.action_type or "").lower()
             if next_task.status == TaskStatus.COMPLETED and action_type in {"edit", "add", "refactor", "create_directory"}:
@@ -656,17 +699,16 @@ class Orchestrator:
         if task.status == TaskStatus.COMPLETED:
             return True
 
-        # Alias common actions to the canonical ones the agents expect
-        action_aliases = {
-            "create": "add",
-            "write": "add",
-            "refator": "refactor",
-            "investigate": "research",
-        }
-        
-        normalized_action_type = task.action_type.lower()
-        if normalized_action_type in action_aliases:
-            task.action_type = action_aliases[normalized_action_type]
+        # Guardrail: if the planner accidentally schedules a file creation as a directory creation
+        # (common in decomposed tasks like "create __init__.py"), coerce to `add` so we can use write_file.
+        if (task.action_type or "").lower() == "create_directory" and re.search(r"\.py\b", task.description, re.IGNORECASE):
+            task.action_type = "add"
+
+        # Normalize action types (aliases + fuzzy typos) before registry lookup.
+        task.action_type = normalize_action_type(
+            task.action_type,
+            available_actions=AgentRegistry.get_registered_action_types(),
+        )
 
         if task.action_type not in AgentRegistry.get_registered_action_types():
             task.status = TaskStatus.FAILED
