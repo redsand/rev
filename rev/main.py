@@ -70,6 +70,11 @@ def main():
         help="Interactive REPL mode"
     )
     parser.add_argument(
+        "--tui",
+        action="store_true",
+        help="Use curses TUI (prompt at bottom with scrollback). Can also set REV_TUI=1"
+    )
+    parser.add_argument(
         "--model",
         default=config.OLLAMA_MODEL,
         help=f"Ollama model (default: {config.OLLAMA_MODEL})"
@@ -247,6 +252,13 @@ def main():
 
 
     args = parser.parse_args()
+    use_tui_main = args.tui or os.getenv("REV_TUI", "").lower() in {"1", "true", "yes", "on"}
+    buffered_logs: list[str] = []
+    def _log(msg: str):
+        if use_tui_main and (args.repl or not args.task):
+            buffered_logs.append(msg)
+        else:
+            print(msg)
 
     # Apply --workspace (full parser) for log visibility and safety.
     if args.workspace:
@@ -258,18 +270,18 @@ def main():
             pass
 
     # Log workspace roots for transparency (Isolate).
-    print(f"workspace_root={config.ROOT}")
-    print(f"allowed_roots={[str(p) for p in config.get_allowed_roots()]}")
+    _log(f"workspace_root={config.ROOT}")
+    _log(f"allowed_roots={[str(p) for p in config.get_allowed_roots()]}")
 
     # Enforce single-worker execution regardless of CLI input
     if args.parallel != 1:
-        print(f"⚠️ Parallel execution is disabled. Forcing --parallel=1 (requested {args.parallel}).")
+        _log(f"⚠️ Parallel execution is disabled. Forcing --parallel=1 (requested {args.parallel}).")
         args.parallel = 1
 
     # Initialize debug logging if requested
     debug_logger = DebugLogger.initialize(enabled=args.debug)
     if args.debug:
-        print(f"Debug logging enabled: {debug_logger.log_file_path}")
+        _log(f"Debug logging enabled: {debug_logger.log_file_path}")
 
     # Update config globals for ollama_chat function
     config.set_model(args.model)
@@ -373,15 +385,15 @@ def main():
         sys.exit(0)
 
 
-    print(f"rev - CI/CD Agent")
-    print(f"Model: {config.OLLAMA_MODEL}")
-    print(f"Ollama: {config.OLLAMA_BASE_URL}")
-    print(f"Repository: {config.ROOT}")
+    _log(f"rev - CI/CD Agent")
+    _log(f"Model: {config.OLLAMA_MODEL}")
+    _log(f"Ollama: {config.OLLAMA_BASE_URL}")
+    _log(f"Repository: {config.ROOT}")
     if args.parallel > 1:
-        print(f"Parallel execution: {args.parallel} concurrent tasks")
+        _log(f"Parallel execution: {args.parallel} concurrent tasks")
     if not args.prompt:
-        print("  [i] Autonomous mode: destructive operations will prompt for confirmation")
-    print()
+        _log("  [i] Autonomous mode: destructive operations will prompt for confirmation")
+    _log("")
 
     state_manager: Optional[StateManager] = None
 
@@ -481,7 +493,7 @@ def main():
                 sys.exit(1)
         if args.repl or not args.task:
             debug_logger.log_workflow_phase("repl", {})
-            repl_mode()
+            repl_mode(force_tui=args.tui, init_logs=buffered_logs if use_tui_main else None)
         else:
             task_description = " ".join(args.task)
             debug_logger.log("main", "TASK_DESCRIPTION", {"task": task_description})

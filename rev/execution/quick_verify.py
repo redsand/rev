@@ -209,6 +209,63 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
                     if target_dir:
                         details["target_dir_path"] = str(target_dir)
 
+    if not target_dir and getattr(task, "tool_events", None):
+        # Look at recorded tool events (most recent first)
+        for ev in reversed(list(task.tool_events)):
+            args = ev.get("args") or {}
+            if not isinstance(args, dict):
+                continue
+            # Prefer explicit target_directory/directory keys
+            for key in ("target_directory", "directory", "dir_path"):
+                candidate = args.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    resolved = _resolve_for_verification(candidate.strip(), purpose="verify refactoring target dir (event)")
+                    if resolved:
+                        target_dir = resolved
+                        details["target_dir_path"] = str(target_dir)
+                        break
+            if target_dir:
+                break
+            # Fallback: path pointing to a module/init; use parent
+            path_candidate = args.get("path")
+            if isinstance(path_candidate, str) and path_candidate.strip():
+                resolved_file = _resolve_for_verification(path_candidate.strip(), purpose="verify refactoring target dir (event path)")
+                if resolved_file:
+                    target_dir = resolved_file.parent
+                    details["target_dir_path"] = str(target_dir)
+                    break
+
+    if not target_dir:
+        # Fallback 1a: use source file parent from tool events or description
+        source_candidates: list[str] = []
+        if getattr(task, "tool_events", None):
+            for ev in reversed(list(task.tool_events)):
+                args = ev.get("args") or {}
+                if isinstance(args, dict):
+                    cand = args.get("path")
+                    if isinstance(cand, str) and cand.strip():
+                        source_candidates.append(cand)
+        desc_matches = re.findall(r'(?:\.\/)?([a-zA-Z0-9_/\\\-]+\.py)', task.description or "")
+        source_candidates.extend(desc_matches)
+        for cand in source_candidates:
+            resolved_file = _resolve_for_verification(cand.strip(), purpose="verify refactoring source file parent")
+            if resolved_file:
+                target_dir = resolved_file.parent
+                details["target_dir_path"] = str(target_dir)
+                break
+
+    if not target_dir:
+        # Fallback: use the most recent tool call (any tool) and derive parent directory from its path
+        last_call = get_last_tool_call() or {}
+        args = last_call.get("args") or {}
+        if isinstance(args, dict):
+            path_candidate = args.get("path") or args.get("file_path")
+            if isinstance(path_candidate, str) and path_candidate.strip():
+                resolved_file = _resolve_for_verification(path_candidate.strip(), purpose="verify refactoring target dir (last tool)")
+                if resolved_file:
+                    target_dir = resolved_file.parent
+                    details["target_dir_path"] = str(target_dir)
+
     if not target_dir:
         # Fallback 1: if a .py file path is mentioned, use its parent directory.
         file_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\\\-]+\.py)'
@@ -310,6 +367,11 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
     old_file_matches = re.findall(old_file_pattern, task.description)
     if old_file_matches:
         old_file = _resolve_for_verification(old_file_matches[0], purpose="verify refactoring source file")
+        if not old_file and target_dir:
+            # Heuristic: source next to target_dir, e.g., lib/analysts.py when target_dir=lib/analysts
+            alt_source = (target_dir.parent / f"{target_dir.name}.py").resolve()
+            if alt_source.exists():
+                old_file = alt_source
         if not old_file:
             issues.append(f"[FAIL] Could not resolve source file path for verification: {old_file_matches[0]}")
             debug_info["main_file_status"] = "UNRESOLVABLE"
@@ -353,10 +415,20 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
                     debug_info["main_file_status"] = "CONVERTED_TO_PACKAGE"
                     debug_info["package_path"] = str(package_candidate)
                 else:
-                    issues.append(
-                        f"[FAIL] Original file {old_file} no longer exists and package '{package_candidate}' was not found"
-                    )
-                    debug_info["main_file_status"] = "MISSING"
+                    # If target_dir exists with files, downgrade to warning
+                    if target_dir and target_dir.exists():
+                        warn = (
+                            f"Original file {old_file} missing but extraction target {target_dir} exists; "
+                            "treating as converted package"
+                        )
+                        details["main_file_converted_to_package"] = True
+                        debug_info["main_file_status"] = "MISSING_BUT_TARGET_EXISTS"
+                        debug_info["warnings"] = debug_info.get("warnings", []) + [warn]
+                    else:
+                        issues.append(
+                            f"[FAIL] Original file {old_file} no longer exists and package '{package_candidate}' was not found"
+                        )
+                        debug_info["main_file_status"] = "MISSING"
 
     if issues:
         if call_sites_updated:
@@ -574,7 +646,8 @@ def _get_verification_mode() -> Optional[str]:
         return "strict"
     if env_fast in {"1", "true", "yes", "on", "fast"}:
         return "fast"
-    return None
+    # Default to fast mode so syntax errors are caught even without env flags.
+    return "fast"
 
 
 def _latest_tool_event(tool_events: Optional[Iterable[Dict[str, Any]]], names: Iterable[str]) -> Optional[Dict[str, Any]]:

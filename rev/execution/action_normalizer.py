@@ -21,6 +21,7 @@ _EXACT_ALIASES: dict[str, str] = {
     "create": "add",
     "write": "add",
     "fix": "edit",
+    "general": "refactor",
     "investigate": "research",
     # known refactor typos
     "refator": "refactor",

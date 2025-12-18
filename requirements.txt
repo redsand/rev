@@ -11,3 +11,5 @@ colorama
 setuptools
 anthropic
 google-generativeai
+windows-curses; platform_system == "Windows"
+ncurses; platform_system != "Windows"
