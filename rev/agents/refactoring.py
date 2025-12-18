@@ -118,15 +118,20 @@ class RefactoringAgent(BaseAgent):
             target_dir = default_target
 
         print(f"  → Using split_python_module_classes on {source_path} → {target_dir}")
-        result = execute_tool(
-            "split_python_module_classes",
-            {
-                "source_path": source_path,
-                "target_directory": target_dir,
-                "overwrite": False,
-            },
+        arguments = {
+            "source_path": source_path,
+            "target_directory": target_dir,
+            "overwrite": False,
+        }
+        result = execute_tool("split_python_module_classes", arguments)
+        return build_subagent_output(
+            agent_name="RefactoringAgent",
+            tool_name="split_python_module_classes",
+            tool_args=arguments,
+            tool_output=result,
+            context=context,
+            task_id=task.task_id,
         )
-        return result
 
 
     def _execute_simple_refactoring_task(self, task: Task, context: RevContext, system_prompt: str = None) -> str:

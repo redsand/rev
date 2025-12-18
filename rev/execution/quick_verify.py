@@ -148,28 +148,45 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
     # Don't try to guess the refactoring type - just verify the repo state changed
     # If there are issues below, they'll be caught. Otherwise, assume it succeeded.
 
-    # Try to identify the target directory from the task description
-    # Look for patterns like "./lib/analysts/" or "lib/analysts"
-    dir_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\-]+\/[a-zA-Z0-9_\-]+\/)'
-    dir_matches = re.findall(dir_pattern, task.description)
+    # Identify the target directory.
+    # Prefer tool metadata / tool outputs (stable) over parsing task.description (brittle).
+    target_dir: Optional[Path] = None
 
-    if not dir_matches:
-        return VerificationResult(
-            passed=False,
-            message="Could not determine target directory from task description",
-            details={"description": task.description, "warning": "Cannot verify extraction without target dir"},
-            should_replan=True
-        )
+    if result_payload:
+        # split_python_module_classes returns package_dir and package_init.
+        package_dir = result_payload.get("package_dir")
+        if isinstance(package_dir, str) and package_dir.strip():
+            target_dir = _resolve_for_verification(package_dir.strip(), purpose="verify refactoring target dir")
 
-    # Prefer the most-specific (longest) match so nested paths like
-    # "foo/bar/baz/" resolve to the intended extraction target.
-    best_dir = max(dir_matches, key=len)
-    target_dir = _resolve_for_verification(best_dir.strip("/"), purpose="verify refactoring target dir")
+        if not target_dir:
+            package_init = result_payload.get("package_init")
+            if isinstance(package_init, str) and package_init.strip():
+                init_path = _resolve_for_verification(package_init.strip(), purpose="verify refactoring package init")
+                if init_path:
+                    target_dir = init_path.parent
+
+    if not target_dir:
+        last_call = get_last_tool_call() or {}
+        if (last_call.get("name") or "").lower() == "split_python_module_classes":
+            args = last_call.get("args") or {}
+            if isinstance(args, dict):
+                candidate = args.get("target_directory")
+                if isinstance(candidate, str) and candidate.strip():
+                    target_dir = _resolve_for_verification(candidate.strip(), purpose="verify refactoring target dir")
+
+    if not target_dir:
+        # Fallback: try to parse something directory-looking from the task description.
+        dir_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\-]+\/[a-zA-Z0-9_\-]+)(?:\/)?'
+        dir_matches = re.findall(dir_pattern, task.description)
+        if dir_matches:
+            best_dir = max(dir_matches, key=len)
+            target_dir = _resolve_for_verification(best_dir.strip("/"), purpose="verify refactoring target dir")
+
     if not target_dir:
         return VerificationResult(
             passed=False,
-            message="Could not resolve target directory for verification (outside workspace)",
-            details={"description": task.description},
+            message="Could not determine target directory for verification",
+            details={"description": task.description, "result_payload_keys": list(result_payload.keys()) if result_payload else None},
             should_replan=True
         )
     debug_info["target_directory"] = str(target_dir)
