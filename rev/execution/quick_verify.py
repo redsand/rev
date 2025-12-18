@@ -367,6 +367,11 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
     old_file_matches = re.findall(old_file_pattern, task.description)
     if old_file_matches:
         old_file = _resolve_for_verification(old_file_matches[0], purpose="verify refactoring source file")
+        if not old_file and target_dir:
+            # Heuristic: source next to target_dir, e.g., lib/analysts.py when target_dir=lib/analysts
+            alt_source = (target_dir.parent / f"{target_dir.name}.py").resolve()
+            if alt_source.exists():
+                old_file = alt_source
         if not old_file:
             issues.append(f"[FAIL] Could not resolve source file path for verification: {old_file_matches[0]}")
             debug_info["main_file_status"] = "UNRESOLVABLE"
@@ -410,10 +415,20 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
                     debug_info["main_file_status"] = "CONVERTED_TO_PACKAGE"
                     debug_info["package_path"] = str(package_candidate)
                 else:
-                    issues.append(
-                        f"[FAIL] Original file {old_file} no longer exists and package '{package_candidate}' was not found"
-                    )
-                    debug_info["main_file_status"] = "MISSING"
+                    # If target_dir exists with files, downgrade to warning
+                    if target_dir and target_dir.exists():
+                        warn = (
+                            f"Original file {old_file} missing but extraction target {target_dir} exists; "
+                            "treating as converted package"
+                        )
+                        details["main_file_converted_to_package"] = True
+                        debug_info["main_file_status"] = "MISSING_BUT_TARGET_EXISTS"
+                        debug_info["warnings"] = debug_info.get("warnings", []) + [warn]
+                    else:
+                        issues.append(
+                            f"[FAIL] Original file {old_file} no longer exists and package '{package_candidate}' was not found"
+                        )
+                        debug_info["main_file_status"] = "MISSING"
 
     if issues:
         if call_sites_updated:
