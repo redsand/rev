@@ -21,7 +21,9 @@
       "Bash(then mv \"$f\" \"docs/$f\")",
       "Bash(fi)",
       "Bash(done)",
-      "Bash(python test_improvements.py:*)"
+      "Bash(python test_improvements.py:*)",
+      "Bash(grep:*)",
+      "Bash(python -m rev:*)"
     ]
   }
 }

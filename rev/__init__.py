@@ -8,6 +8,7 @@ __version__ = get_version()
 
 # Configuration
 from rev.config import ROOT
+from rev.workspace import get_workspace, Workspace
 
 # Core models
 from rev.models import (
@@ -131,6 +132,8 @@ __all__ = [
     "__version__",
     # Configuration
     "ROOT",
+    "get_workspace",
+    "Workspace",
     # Models
     "Task",
     "TaskStatus",

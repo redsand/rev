@@ -13,7 +13,6 @@ import shlex
 from typing import List, Optional
 
 from rev.config import (
-    ROOT,
     EXCLUDE_DIRS,
     MAX_FILE_BYTES,
     READ_RETURN_LIMIT,
@@ -21,33 +20,31 @@ from rev.config import (
     LIST_LIMIT,
     WARN_ON_NEW_FILES,
     SIMILARITY_THRESHOLD,
-    get_allowed_roots,
 )
 from rev.cache import get_file_cache, get_repo_cache
 from rev.tools.workspace_resolver import resolve_workspace_path
+from rev.workspace import get_workspace
 
 
 # ========== Helper Functions ==========
 
 def _allowed_roots() -> list[pathlib.Path]:
     """Return configured roots that file operations may access."""
-
-    return get_allowed_roots()
+    return get_workspace().get_allowed_roots()
 
 
 def _rel_to_root(path: pathlib.Path) -> str:
     """Return a path string relative to the main ROOT (allows .. for extras)."""
-
+    root = get_workspace().root
     try:
-        rel = path.relative_to(ROOT)
+        rel = path.relative_to(root)
         return str(rel)
     except ValueError:
-        return os.path.relpath(path, ROOT)
+        return os.path.relpath(path, root)
 
 
 def _rel_to_root_posix(path: pathlib.Path) -> str:
     """Return a stable, forward-slash relative path for logs/results."""
-
     return _rel_to_root(path).replace("\\", "/")
 
 
@@ -199,7 +196,10 @@ def _check_for_similar_files(path: str) -> dict:
 
 def read_file(path: str) -> str:
     """Read a file from the repository."""
-    p = _safe_path(path)
+    try:
+        p = _safe_path(path)
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
     if not p.exists():
         return json.dumps({"error": f"Not found: {path}"})
     if p.stat().st_size > MAX_FILE_BYTES:

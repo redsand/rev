@@ -15,7 +15,12 @@ from dataclasses import dataclass
 from rev.models.task import Task, TaskStatus
 from rev.tools.registry import execute_tool, get_last_tool_call
 from rev.core.context import RevContext
-from rev.tools.workspace_resolver import WorkspacePathError, resolve_workspace_path
+from rev.tools.workspace_resolver import (
+    WorkspacePathError,
+    resolve_workspace_path,
+    normalize_path,
+    normalize_to_workspace_relative,
+)
 
 
 def _read_file_with_fallback_encoding(file_path: Path) -> Optional[str]:
@@ -336,40 +341,51 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
     file_path: Path | None = None
     extracted_from_result = _extract_path_from_task_result(task.result)
     if extracted_from_result:
-        file_path = _resolve_for_verification(extracted_from_result, purpose="verify file creation")
+        # Normalize path to handle Windows/Unix differences
+        normalized = normalize_path(extracted_from_result)
+        file_path = _resolve_for_verification(normalized, purpose="verify file creation")
 
-    # Try to extract file path from task description
-    # Patterns: "create file at ./lib/file.py" or "add ./lib/file.py"
-    patterns = [
-        r'(?:file\s+)?(?:at\s+)?["\']?(\.?\/[a-zA-Z0-9_/\-]+\.py)["\']?',
-        r'(?:add|create)\s+(?:file\s+)?(?:at\s+)?["\']?([a-zA-Z0-9_/\-]+\.py)["\']?',
-    ]
-
-    if not file_path:
-        for pattern in patterns:
-            matches = re.findall(pattern, task.description, re.IGNORECASE)
-            if matches:
-                candidate = matches[0]
-                file_path = _resolve_for_verification(candidate, purpose="verify file creation")
-                if file_path:
-                    break
-
-    if not file_path:
-        # If we can't determine from description, check task.result
-        if task.result and isinstance(task.result, str):
-            # Result might contain the file path
-            result_match = re.search(r'(?:\.?\/)?[a-zA-Z0-9_/\-]+\.py', task.result)
-            if result_match:
-                file_path = _resolve_for_verification(result_match.group(0), purpose="verify file creation")
-
+    # Priority 2: Check last tool call arguments
     if not file_path:
         last_call = get_last_tool_call()
         if last_call:
             args = last_call.get("args") or {}
             if isinstance(args, dict):
-                candidate = args.get("path") or args.get("file") or args.get("target")
+                candidate = args.get("path") or args.get("file") or args.get("target") or args.get("file_path")
                 if isinstance(candidate, str) and candidate.strip():
-                    file_path = _resolve_for_verification(candidate.strip(), purpose="verify file creation")
+                    normalized = normalize_path(candidate.strip())
+                    file_path = _resolve_for_verification(normalized, purpose="verify file creation")
+
+    # Priority 3: Try to extract file path from task description (fallback)
+    # Patterns handle both Windows (backslash) and Unix (forward slash) paths
+    if not file_path:
+        patterns = [
+            # Windows absolute path with extension
+            r'(?:file\s+)?(?:at\s+)?["\']?([a-zA-Z]:[/\\][^"\'\s]+\.[a-zA-Z0-9]+)["\']?',
+            # Unix or relative path with extension
+            r'(?:file\s+)?(?:at\s+)?["\']?(\.?[/\\]?[a-zA-Z0-9_/\\\-\.]+\.[a-zA-Z0-9]+)["\']?',
+            # Generic add/create pattern
+            r'(?:add|create)\s+(?:file\s+)?(?:at\s+)?["\']?([a-zA-Z0-9_/\\\-\.]+\.[a-zA-Z0-9]+)["\']?',
+        ]
+
+        for pattern in patterns:
+            matches = re.findall(pattern, task.description, re.IGNORECASE)
+            if matches:
+                candidate = matches[0].strip()
+                if candidate:
+                    normalized = normalize_path(candidate)
+                    file_path = _resolve_for_verification(normalized, purpose="verify file creation")
+                    if file_path:
+                        break
+
+    # Priority 4: Check task.result for path-like strings
+    if not file_path:
+        if task.result and isinstance(task.result, str):
+            # Result might contain the file path - handle both separators
+            result_match = re.search(r'[a-zA-Z0-9_/\\\-\.]+\.[a-zA-Z0-9]+', task.result)
+            if result_match:
+                normalized = normalize_path(result_match.group(0))
+                file_path = _resolve_for_verification(normalized, purpose="verify file creation")
 
     if not file_path:
         return VerificationResult(
@@ -494,36 +510,16 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
     # This is harder to verify without knowing the original content
     # For now, just check that the file exists and isn't empty
 
-    patterns = [
-        # ./path/to/file.py or /path/to/file.py
-        r'(?:in\s+)?(?:file\s+)?["\']?(\.?\/[a-zA-Z0-9_/\-]+\.py)["\']?',
-        # phrases like "edit foo.py" or "modify foo.py"
-        r'(?:edit|update|modify)\s+["\']?([a-zA-Z0-9_/\-]+\.py)["\']?',
-        # fallback: any python file path-looking token
-        r'([a-zA-Z0-9_\-./\\]+\.py)',
-    ]
+    file_path: Path | None = None
 
-    extracted_path: Path | None = None
-    raw_candidate: str | None = None
-    for pattern in patterns:
-        matches = re.findall(pattern, task.description, re.IGNORECASE)
-        if matches:
-            raw_candidate = matches[0]
-            break
+    # Priority 1: Extract from task result (most reliable)
+    result_path = _extract_path_from_task_result(task.result)
+    if result_path:
+        normalized = normalize_path(result_path)
+        file_path = _resolve_for_verification(normalized, purpose="verify file edit")
 
-    if raw_candidate:
-        normalized = raw_candidate.strip().strip('"\''" ")
-        # Remove leading ./ or .\ or excess slashes (so "/foo.py" -> "foo.py")
-        normalized = re.sub(r'^[./\\]+', '', normalized)
-        if normalized:
-            extracted_path = Path(normalized)
-
-    if not extracted_path:
-        result_path = _extract_path_from_task_result(task.result)
-        if result_path:
-            extracted_path = Path(result_path.strip().strip("\"'"))
-
-    if not extracted_path:
+    # Priority 2: Check last tool call arguments
+    if not file_path:
         last_call = get_last_tool_call()
         if last_call:
             tool_name = (last_call.get("name") or "").lower()
@@ -535,9 +531,11 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
                     or args.get("target_path")
                 )
                 if isinstance(candidate, str) and candidate.strip():
-                    extracted_path = Path(candidate.strip().strip("\"'"))
-                # If args didn't provide a usable path, try the tool result payload (path_abs/path_rel/file).
-                if not extracted_path:
+                    normalized = normalize_path(candidate.strip())
+                    file_path = _resolve_for_verification(normalized, purpose="verify file edit")
+
+                # If args didn't provide a usable path, try the tool result payload
+                if not file_path:
                     try:
                         last_result = json.loads(last_call.get("result") or "{}")
                     except Exception:
@@ -546,23 +544,38 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
                         for key in ("path_abs", "path_rel", "file", "path"):
                             candidate2 = last_result.get(key)
                             if isinstance(candidate2, str) and candidate2.strip():
-                                extracted_path = Path(candidate2.strip().strip("\"'"))
-                                break
+                                normalized = normalize_path(candidate2.strip())
+                                file_path = _resolve_for_verification(normalized, purpose="verify file edit")
+                                if file_path:
+                                    break
 
-    if not extracted_path:
-        return VerificationResult(
-            passed=False,
-            message="Could not determine file path to verify",
-            details={},
-            should_replan=True
-        )
+    # Priority 3: Parse from task description (fallback)
+    # Patterns handle both Windows and Unix paths
+    if not file_path:
+        patterns = [
+            # Windows absolute path
+            r'(?:in\s+)?(?:file\s+)?["\']?([a-zA-Z]:[/\\][^"\'\s]+\.[a-zA-Z0-9]+)["\']?',
+            # Unix or relative path
+            r'(?:in\s+)?(?:file\s+)?["\']?(\.?[/\\]?[a-zA-Z0-9_/\\\-\.]+\.[a-zA-Z0-9]+)["\']?',
+            # phrases like "edit foo.py" or "modify foo.py"
+            r'(?:edit|update|modify)\s+["\']?([a-zA-Z0-9_/\\\-\.]+\.[a-zA-Z0-9]+)["\']?',
+        ]
 
-    file_path = _resolve_for_verification(str(extracted_path), purpose="verify file edit")
+        for pattern in patterns:
+            matches = re.findall(pattern, task.description, re.IGNORECASE)
+            if matches:
+                candidate = matches[0].strip()
+                if candidate:
+                    normalized = normalize_path(candidate)
+                    file_path = _resolve_for_verification(normalized, purpose="verify file edit")
+                    if file_path:
+                        break
+
     if not file_path:
         return VerificationResult(
             passed=False,
             message="Could not determine file path to verify",
-            details={"path": str(extracted_path)},
+            details={},
             should_replan=True
         )
 
@@ -587,46 +600,66 @@ def _verify_directory_creation(task: Task, context: RevContext) -> VerificationR
     """Verify that a directory was actually created."""
 
     dir_path: Path | None = None
+
+    # Priority 1: Extract from task result (most reliable)
     extracted_from_result = _extract_path_from_task_result(task.result)
     if extracted_from_result:
-        dir_path = _resolve_for_verification(extracted_from_result, purpose="verify directory creation")
+        # Normalize the path first to handle Windows/Unix differences
+        normalized = normalize_path(extracted_from_result)
+        dir_path = _resolve_for_verification(normalized, purpose="verify directory creation")
 
-    patterns = [
-        r'(?:directory\s+)?["\']?(\.?\/[a-zA-Z0-9_/\-]+\/)["\']?',
-        r'(?:create|add)\s+(?:directory\s+)?["\']?([a-zA-Z0-9_/\-]+\/)["\']?',
-    ]
-
-    if not dir_path:
-        for pattern in patterns:
-            matches = re.findall(pattern, task.description, re.IGNORECASE)
-            if matches:
-                candidate = matches[0].strip("/").strip("\\")
-                dir_path = _resolve_for_verification(candidate, purpose="verify directory creation")
-                if dir_path:
-                    break
-
+    # Priority 2: Check last tool call arguments (second most reliable)
     if not dir_path:
         last_call = get_last_tool_call()
         if last_call:
             args = last_call.get("args") or {}
             if isinstance(args, dict):
-                candidate = args.get("path") or args.get("target")
+                candidate = args.get("path") or args.get("target") or args.get("directory")
                 if isinstance(candidate, str) and candidate.strip():
-                    dir_path = _resolve_for_verification(candidate.strip(), purpose="verify directory creation")
+                    # Normalize before resolution
+                    normalized = normalize_path(candidate.strip())
+                    dir_path = _resolve_for_verification(normalized, purpose="verify directory creation")
+
+    # Priority 3: Parse from task description (least reliable, fallback only)
+    # These patterns now handle both Windows and Unix paths
+    if not dir_path:
+        patterns = [
+            # Match paths with forward or back slashes
+            r'(?:directory\s+)?["\']?([a-zA-Z]:[/\\][^"\'\s]+)["\']?',  # Windows absolute
+            r'(?:directory\s+)?["\']?(\.?[/\\][a-zA-Z0-9_/\\\-\.]+)["\']?',  # Unix absolute or relative
+            r'(?:create|add)\s+(?:directory\s+)?["\']?([a-zA-Z0-9_/\\\-\.]+[/\\]?)["\']?',  # General
+        ]
+
+        for pattern in patterns:
+            matches = re.findall(pattern, task.description, re.IGNORECASE)
+            if matches:
+                candidate = matches[0].strip("/").strip("\\").strip()
+                if candidate:
+                    normalized = normalize_path(candidate)
+                    dir_path = _resolve_for_verification(normalized, purpose="verify directory creation")
+                    if dir_path:
+                        break
 
     if not dir_path:
+        # Provide more helpful error details
         return VerificationResult(
             passed=False,
             message="Could not determine directory path to verify",
-            details={},
+            details={
+                "task_result": str(task.result)[:200] if task.result else None,
+                "last_tool_call": get_last_tool_call(),
+                "hint": "Tool result did not contain a recognizable path"
+            },
             should_replan=True
         )
 
     if dir_path.exists() and dir_path.is_dir():
+        # Return normalized relative path for cleaner output
+        rel_path = normalize_to_workspace_relative(dir_path)
         return VerificationResult(
             passed=True,
-            message=f"Directory created successfully: {dir_path.name}",
-            details={"directory_path": str(dir_path), "is_dir": True}
+            message=f"Directory created successfully: {rel_path}",
+            details={"directory_path": str(dir_path), "relative_path": rel_path, "is_dir": True}
         )
     else:
         return VerificationResult(

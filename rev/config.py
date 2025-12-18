@@ -15,27 +15,72 @@ except ImportError:
     SSH_AVAILABLE = False
     paramiko = None
 
-# Configuration (workspace root)
+# ---------------------------------------------------------------------------
+# Workspace integration
+# ---------------------------------------------------------------------------
+# The Workspace class (in rev.workspace) is the single source of truth for path
+# handling. These module-level variables are maintained for backward compatibility.
+# They are synced from the Workspace singleton.
+
+# Configuration (workspace root) - initially set from cwd, updated via set_workspace_root()
 ROOT = pathlib.Path(os.getcwd()).resolve()
 # Allowlist of additional roots that tools can access (populated via /add-dir)
+# NOTE: This is kept in sync with the Workspace singleton.
 ADDITIONAL_ROOTS: list[pathlib.Path] = []
 
+# Derived paths - initialized below, updated via _sync_from_workspace()
+REV_DIR: pathlib.Path
+CACHE_DIR: pathlib.Path
+CHECKPOINTS_DIR: pathlib.Path
+LOGS_DIR: pathlib.Path
+SESSIONS_DIR: pathlib.Path
+MEMORY_DIR: pathlib.Path
+METRICS_DIR: pathlib.Path
+ARTIFACTS_DIR: pathlib.Path
+TOOL_OUTPUTS_DIR: pathlib.Path
+PROJECT_MEMORY_FILE: pathlib.Path
+SETTINGS_FILE: pathlib.Path
+TEST_MARKER_FILE: pathlib.Path
 
-def set_workspace_root(path: pathlib.Path) -> None:
-    """Set the workspace root for this Rev process.
 
-    This updates derived `.rev/*` directories and is intended to be called very
-    early in CLI startup (before caches/tools initialize).
+def _sync_from_workspace() -> None:
+    """Sync module-level path variables from the Workspace singleton.
+
+    This maintains backward compatibility for code that imports these variables
+    directly from config.
     """
+    # Import here to avoid circular imports at module load time
+    from rev.workspace import get_workspace
 
-    global ROOT
-    ROOT = path.expanduser().resolve()
-    _recompute_derived_paths()
+    ws = get_workspace()
+
+    global ROOT, ADDITIONAL_ROOTS
+    global REV_DIR, CACHE_DIR, CHECKPOINTS_DIR, LOGS_DIR, SESSIONS_DIR, MEMORY_DIR, METRICS_DIR
+    global ARTIFACTS_DIR, TOOL_OUTPUTS_DIR, PROJECT_MEMORY_FILE, SETTINGS_FILE, TEST_MARKER_FILE
+
+    ROOT = ws.root
+    ADDITIONAL_ROOTS = ws.additional_roots
+
+    REV_DIR = ws.rev_dir
+    CACHE_DIR = ws.cache_dir
+    CHECKPOINTS_DIR = ws.checkpoints_dir
+    LOGS_DIR = ws.logs_dir
+    SESSIONS_DIR = ws.sessions_dir
+    MEMORY_DIR = ws.memory_dir
+    METRICS_DIR = ws.metrics_dir
+    ARTIFACTS_DIR = ws.artifacts_dir
+    TOOL_OUTPUTS_DIR = ws.tool_outputs_dir
+    PROJECT_MEMORY_FILE = ws.project_memory_file
+    SETTINGS_FILE = ws.settings_file
+    TEST_MARKER_FILE = ws.test_marker_file
 
 
 def _recompute_derived_paths() -> None:
-    """Recompute derived paths that depend on ROOT."""
+    """Recompute derived paths that depend on ROOT.
 
+    DEPRECATED: Use _sync_from_workspace() instead. This function is kept for
+    backward compatibility during the transition period.
+    """
     global REV_DIR, CACHE_DIR, CHECKPOINTS_DIR, LOGS_DIR, SESSIONS_DIR, MEMORY_DIR, METRICS_DIR
     global ARTIFACTS_DIR, TOOL_OUTPUTS_DIR, PROJECT_MEMORY_FILE, SETTINGS_FILE, TEST_MARKER_FILE
 
@@ -53,24 +98,49 @@ def _recompute_derived_paths() -> None:
     TEST_MARKER_FILE = REV_DIR / "test"
 
 
+def set_workspace_root(path: pathlib.Path, allow_external: bool = False) -> None:
+    """Set the workspace root for this Rev process.
+
+    This updates the Workspace singleton and syncs derived `.rev/*` directories.
+    Should be called very early in CLI startup (before caches/tools initialize).
+
+    Args:
+        path: New workspace root directory.
+        allow_external: Whether to allow external absolute paths.
+    """
+    # Import here to avoid circular imports
+    from rev.workspace import init_workspace
+
+    init_workspace(root=path, allow_external=allow_external)
+    _sync_from_workspace()
+
+
 def register_additional_root(path: pathlib.Path) -> None:
-    """Register an additional root directory that tools may access."""
+    """Register an additional root directory that tools may access.
 
-    resolved = path.resolve()
-    if not resolved.is_dir():
-        raise ValueError(f"Additional root must be a directory: {path}")
+    Delegates to the Workspace singleton.
+    """
+    # Import here to avoid circular imports
+    from rev.workspace import get_workspace
 
-    if resolved not in ADDITIONAL_ROOTS:
-        ADDITIONAL_ROOTS.append(resolved)
+    get_workspace().register_additional_root(path)
+    # Keep ADDITIONAL_ROOTS in sync
+    global ADDITIONAL_ROOTS
+    ADDITIONAL_ROOTS = get_workspace().additional_roots
 
 
 def get_allowed_roots() -> List[pathlib.Path]:
-    """Return the primary project root plus any additional allowed roots."""
+    """Return the primary project root plus any additional allowed roots.
 
-    return [ROOT, *ADDITIONAL_ROOTS]
+    Delegates to the Workspace singleton.
+    """
+    # Import here to avoid circular imports
+    from rev.workspace import get_workspace
+
+    return get_workspace().get_allowed_roots()
 
 
-# Initialize derived paths at import time.
+# Initialize derived paths at import time (before Workspace is available).
 _recompute_derived_paths()
 DEFAULT_OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "devstral-2:123b-cloud")  # default model
