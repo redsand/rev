@@ -35,6 +35,11 @@ IMPORT STRATEGY (IMPORTANT):
   Avoid: `from lib.analysts.BreakoutAnalyst import BreakoutAnalyst` and avoid expanding `from ... import *` into dozens of imports.
 - Only import the symbols actually used at the call site.
 
+AST-AWARE EDITS (IMPORTANT):
+- When updating Python import paths (e.g., after splitting/moving modules), prefer the `rewrite_python_imports` tool over
+  brittle string replacement.
+- If preserving multiline import formatting/comments/parentheses is important, set `"engine": "libcst"`.
+
 You MUST use the write_file tool for each extracted file. Do not just read files - you must CREATE new files."""
 
 class RefactoringAgent(BaseAgent):
@@ -148,12 +153,32 @@ class RefactoringAgent(BaseAgent):
         available_tools = [
             tool
             for tool in get_available_tools()
-            if tool['function']['name'] in ['write_file', 'replace_in_file', 'read_file', 'split_python_module_classes']
+            if tool['function']['name'] in [
+                'write_file',
+                'replace_in_file',
+                'rewrite_python_imports',
+                'rewrite_python_keyword_args',
+                'rename_imported_symbols',
+                'move_imported_symbols',
+                'rewrite_python_function_parameters',
+                'read_file',
+                'split_python_module_classes',
+            ]
         ]
         logger.debug(f"[REFACTORING] Available tools: {[t['function']['name'] for t in available_tools]}")
 
         all_tools = get_available_tools()
-        candidate_tool_names = ['write_file', 'replace_in_file', 'read_file', 'split_python_module_classes']
+        candidate_tool_names = [
+            'write_file',
+            'rewrite_python_imports',
+            'rewrite_python_keyword_args',
+            'rename_imported_symbols',
+            'move_imported_symbols',
+            'rewrite_python_function_parameters',
+            'replace_in_file',
+            'read_file',
+            'split_python_module_classes',
+        ]
         rendered_context, selected_tools, _bundle = build_context_and_tools(
             task,
             context,

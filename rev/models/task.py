@@ -578,11 +578,11 @@ class ExecutionPlan:
         # Common validation
         steps.append("Check for syntax errors")
 
-        if task.action_type in ["add", "edit"]:
+        if task.action_type in ["add", "edit", "refactor", "create"]:
             steps.append("Run linter to check code quality")
             steps.append("Verify imports and dependencies")
 
-        if task.action_type in ["add", "edit", "delete", "rename"]:
+        if task.action_type in ["add", "edit", "refactor", "create", "delete", "rename"]:
             steps.append("Run test suite: pytest / npm test")
             steps.append("Check for failing tests")
 

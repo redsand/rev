@@ -74,6 +74,13 @@ from rev.tools.config_checks import (
     verify_migrations
 )
 from rev.tools.refactoring_utils import split_python_module_classes
+from rev.tools.python_ast_ops import (
+    rewrite_python_imports,
+    rewrite_python_keyword_args,
+    rename_imported_symbols,
+    move_imported_symbols,
+    rewrite_python_function_parameters,
+)
 from rev.tools.cache_ops import (
     get_cache_stats, clear_caches, persist_caches
 )
@@ -256,6 +263,42 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         "move_file": lambda args: move_file(args["src"], args["dest"]),
         "append_to_file": lambda args: append_to_file(args["path"], args["content"]),
         "replace_in_file": lambda args: replace_in_file(args["path"], args["find"], args["replace"], args.get("regex", False)),
+        "rewrite_python_imports": lambda args: rewrite_python_imports(
+            args["path"],
+            args["rules"],
+            args.get("dry_run", False),
+            args.get("engine", "auto"),
+        ),
+        "rewrite_python_keyword_args": lambda args: rewrite_python_keyword_args(
+            args["path"],
+            args["callee"],
+            args["renames"],
+            args.get("dry_run", False),
+            args.get("engine", "libcst"),
+        ),
+        "rename_imported_symbols": lambda args: rename_imported_symbols(
+            args["path"],
+            args["renames"],
+            args.get("dry_run", False),
+            args.get("engine", "libcst"),
+        ),
+        "move_imported_symbols": lambda args: move_imported_symbols(
+            args["path"],
+            args["old_module"],
+            args["new_module"],
+            args["symbols"],
+            args.get("dry_run", False),
+            args.get("engine", "libcst"),
+        ),
+        "rewrite_python_function_parameters": lambda args: rewrite_python_function_parameters(
+            args["path"],
+            args["function"],
+            args.get("rename"),
+            args.get("add"),
+            args.get("remove"),
+            args.get("dry_run", False),
+            args.get("engine", "libcst"),
+        ),
         "create_directory": lambda args: create_directory(args["path"]),
         "get_file_info": lambda args: get_file_info(args["path"]),
         "copy_file": lambda args: copy_file(args["src"], args["dest"]),
@@ -762,6 +805,152 @@ def get_available_tools() -> list:
                         "regex": {"type": "boolean", "description": "Use regex pattern", "default": False}
                     },
                     "required": ["path", "find", "replace"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "rewrite_python_imports",
+                "description": "Rewrite Python import statements using AST parsing (safer than string replace). Prefer this for import-path migrations; falls back to replace_in_file for non-import edits.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to a .py file"},
+                        "rules": {
+                            "type": "array",
+                            "description": "Rewrite rules: [{from_module,to_module,match}] where match is 'exact'|'prefix'",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "from_module": {"type": "string"},
+                                    "to_module": {"type": "string"},
+                                    "match": {"type": "string", "enum": ["exact", "prefix"], "default": "exact"}
+                                },
+                                "required": ["from_module", "to_module"]
+                            }
+                        },
+                        "dry_run": {"type": "boolean", "description": "If true, do not write file; return diff only", "default": False}
+                        ,
+                        "engine": {
+                            "type": "string",
+                            "description": "Rewrite engine: 'auto' (prefer libcst), 'libcst' (require format-preserving), or 'ast' (stdlib fallback)",
+                            "enum": ["auto", "libcst", "ast"],
+                            "default": "auto"
+                        }
+                    },
+                    "required": ["path", "rules"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "rewrite_python_keyword_args",
+                "description": "Rename keyword arguments at call sites for a specific callee (libcst format-preserving).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to a .py file"},
+                        "callee": {"type": "string", "description": "Callee to match (e.g., 'foo' or 'obj.foo')"},
+                        "renames": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "old": {"type": "string"},
+                                    "new": {"type": "string"}
+                                },
+                                "required": ["old", "new"]
+                            }
+                        },
+                        "dry_run": {"type": "boolean", "default": False},
+                        "engine": {"type": "string", "enum": ["libcst", "auto"], "default": "libcst"}
+                    },
+                    "required": ["path", "callee", "renames"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "rename_imported_symbols",
+                "description": "Rename imported symbol(s) and update references in the same file (libcst + qualified name resolution).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to a .py file"},
+                        "renames": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "from_module": {"type": "string", "description": "Optional module filter"},
+                                    "old_name": {"type": "string"},
+                                    "new_name": {"type": "string"}
+                                },
+                                "required": ["old_name", "new_name"]
+                            }
+                        },
+                        "dry_run": {"type": "boolean", "default": False},
+                        "engine": {"type": "string", "enum": ["libcst", "auto"], "default": "libcst"}
+                    },
+                    "required": ["path", "renames"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "move_imported_symbols",
+                "description": "Move specific symbols from `from old_module import ...` to `from new_module import ...` within one file (preserves formatting).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to a .py file"},
+                        "old_module": {"type": "string"},
+                        "new_module": {"type": "string"},
+                        "symbols": {"type": "array", "items": {"type": "string"}},
+                        "dry_run": {"type": "boolean", "default": False},
+                        "engine": {"type": "string", "enum": ["libcst", "auto"], "default": "libcst"}
+                    },
+                    "required": ["path", "old_module", "new_module", "symbols"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "rewrite_python_function_parameters",
+                "description": "Add/remove/rename function parameters and update call sites (conservative, file-scoped; format-preserving).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to a .py file"},
+                        "function": {"type": "string", "description": "Target function name (e.g., 'foo' or 'Class.method')"},
+                        "rename": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {"old": {"type": "string"}, "new": {"type": "string"}},
+                                "required": ["old", "new"]
+                            },
+                            "default": []
+                        },
+                        "add": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {"name": {"type": "string"}, "default": {"type": "string"}},
+                                "required": ["name", "default"]
+                            },
+                            "default": []
+                        },
+                        "remove": {"type": "array", "items": {"type": "string"}, "default": []},
+                        "dry_run": {"type": "boolean", "default": False},
+                        "engine": {"type": "string", "enum": ["libcst", "auto"], "default": "libcst"}
+                    },
+                    "required": ["path", "function"]
                 }
             }
         },

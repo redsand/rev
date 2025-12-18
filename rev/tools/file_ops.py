@@ -401,6 +401,17 @@ def replace_in_file(path: str, find: str, replace: str, regex: bool = False) -> 
             return json.dumps({"error": f"Not found: {path}"})
         content = p.read_text(encoding="utf-8", errors="ignore")
 
+        # Determine match count up front (used for no-op detection and error messages).
+        if regex:
+            match_count = len(re.findall(find, content))
+        else:
+            match_count = content.count(find)
+
+        if match_count == 0:
+            return json.dumps(
+                {"replaced": 0, "file": _rel_to_root(p), "path_abs": str(p), "path_rel": _rel_to_root_posix(p)}
+            )
+
         if regex:
             new_content = re.sub(find, replace, content)
         else:
@@ -408,8 +419,38 @@ def replace_in_file(path: str, find: str, replace: str, regex: bool = False) -> 
 
         if content == new_content:
             return json.dumps(
-                {"replaced": 0, "file": _rel_to_root(p), "path_abs": str(p), "path_rel": _rel_to_root_posix(p)}
+                {
+                    "replaced": 0,
+                    "matches": match_count,
+                    "file": _rel_to_root(p),
+                    "path_abs": str(p),
+                    "path_rel": _rel_to_root_posix(p),
+                }
             )
+
+        # Safety: prevent breaking Python syntax on edits to .py files.
+        # Validate the resulting content before writing it.
+        if p.suffix.lower() == ".py":
+            try:
+                import ast
+
+                ast.parse(new_content, filename=str(p))
+            except SyntaxError as e:
+                return json.dumps(
+                    {
+                        "error": f"SyntaxError: {e.msg} (line {e.lineno}:{e.offset})",
+                        "replaced": match_count,
+                        "file": _rel_to_root(p),
+                        "path_abs": str(p),
+                        "path_rel": _rel_to_root_posix(p),
+                        "syntax_error": {
+                            "msg": e.msg,
+                            "lineno": e.lineno,
+                            "offset": e.offset,
+                            "text": getattr(e, "text", None),
+                        },
+                    }
+                )
 
         p.write_text(new_content, encoding="utf-8")
 
@@ -418,7 +459,7 @@ def replace_in_file(path: str, find: str, replace: str, regex: bool = False) -> 
         if file_cache is not None:
             file_cache.invalidate_file(p)
 
-        count = len(content.split(find)) - 1 if not regex else len(re.findall(find, content))
+        count = match_count
         return json.dumps(
             {
                 "replaced": count,

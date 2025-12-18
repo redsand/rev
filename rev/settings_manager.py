@@ -313,6 +313,15 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         setter=lambda value: setattr(config, "OLLAMA_TOP_K", value),
         default=40,
     ),
+    "thinking_mode": RuntimeSetting(
+        key="thinking_mode",
+        description="Thinking mode (auto tries once per model; off disables)",
+        section="LLM Generation",
+        parser=lambda value: _parse_choice(value, choices={"auto", "off"}),
+        getter=lambda: getattr(config, "LLM_THINKING_MODE", "auto"),
+        setter=lambda value: setattr(config, "LLM_THINKING_MODE", value),
+        default=getattr(config, "LLM_THINKING_MODE", "auto"),
+    ),
     "validation_mode": RuntimeSetting(
         key="validation_mode",
         description="Default validation mode (none, smoke, targeted, full)",

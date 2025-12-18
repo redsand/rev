@@ -19,6 +19,13 @@ from rev.tools.file_ops import (
     read_file_lines,
     tree_view,
 )
+from rev.tools.python_ast_ops import (
+    rewrite_python_imports,
+    rewrite_python_keyword_args,
+    rename_imported_symbols,
+    move_imported_symbols,
+    rewrite_python_function_parameters,
+)
 
 # Git operations
 from rev.tools.git_ops import (
@@ -134,6 +141,11 @@ __all__ = [
     "move_file",
     "append_to_file",
     "replace_in_file",
+    "rewrite_python_imports",
+    "rewrite_python_keyword_args",
+    "rename_imported_symbols",
+    "move_imported_symbols",
+    "rewrite_python_function_parameters",
     "create_directory",
     "get_file_info",
     "copy_file",

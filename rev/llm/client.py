@@ -8,6 +8,7 @@ import signal
 import threading
 import time
 import random
+import re
 from typing import Dict, Any, List, Optional, Tuple
 
 import requests
@@ -56,6 +57,177 @@ class _TokenUsageTracker:
 
 
 _token_usage_tracker = _TokenUsageTracker()
+
+# Cache per provider+model: None (unknown), True (supported), False (unsupported)
+_THINKING_SUPPORT: Dict[str, Optional[bool]] = {}
+
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", flags=re.IGNORECASE | re.DOTALL)
+_ANALYSIS_BLOCK_RE = re.compile(r"<analysis>.*?</analysis>", flags=re.IGNORECASE | re.DOTALL)
+
+
+def reset_thinking_capabilities() -> None:
+    """Reset in-memory thinking capability cache (primarily for tests)."""
+    _THINKING_SUPPORT.clear()
+
+
+def _strip_thinking_blocks(text: str) -> str:
+    """Remove provider-emitted reasoning blocks from text output."""
+    if not isinstance(text, str) or not text:
+        return text
+    cleaned = _THINK_BLOCK_RE.sub("", text)
+    cleaned = _ANALYSIS_BLOCK_RE.sub("", cleaned)
+    # Normalize leading whitespace after stripping.
+    return cleaned.lstrip("\n")
+
+
+def _sanitize_response_content(response: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip any chain-of-thought-like blocks from assistant content."""
+    if not isinstance(response, dict):
+        return response
+    msg = response.get("message")
+    if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+        msg = dict(msg)
+        msg["content"] = _strip_thinking_blocks(msg.get("content", ""))
+        response = dict(response)
+        response["message"] = msg
+    return response
+
+
+def _thinking_cache_key(provider: Any, model: str) -> str:
+    name = getattr(provider, "name", provider.__class__.__name__)
+    return f"{name}:{model}"
+
+
+def _provider_can_try_thinking(provider: Any) -> bool:
+    # Only OpenAI-compatible backends are expected to accept a "thinking" parameter today.
+    return getattr(provider, "name", "") == "openai"
+
+
+def _call_with_auto_thinking(
+    *,
+    provider: Any,
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]],
+    model_name: str,
+    supports_tools: bool,
+) -> Dict[str, Any]:
+    """Call provider.chat with thinking enabled on first attempt, disable on failure."""
+    if getattr(config, "LLM_THINKING_MODE", "auto") == "off":
+        return provider.chat(messages=messages, tools=tools, model=model_name, supports_tools=supports_tools)
+    if not _provider_can_try_thinking(provider):
+        return provider.chat(messages=messages, tools=tools, model=model_name, supports_tools=supports_tools)
+
+    key = _thinking_cache_key(provider, model_name)
+    state = _THINKING_SUPPORT.get(key)
+    thinking_kwargs = {"thinking": {"type": "enabled"}}
+
+    # Known supported
+    if state is True:
+        return provider.chat(messages=messages, tools=tools, model=model_name, supports_tools=supports_tools, **thinking_kwargs)
+    # Known unsupported
+    if state is False:
+        return provider.chat(messages=messages, tools=tools, model=model_name, supports_tools=supports_tools)
+
+    # Unknown: try thinking once, then retry without on failure.
+    response = provider.chat(messages=messages, tools=tools, model=model_name, supports_tools=supports_tools, **thinking_kwargs)
+    if isinstance(response, dict) and "error" not in response:
+        _THINKING_SUPPORT[key] = True
+        return response
+
+    fallback = provider.chat(messages=messages, tools=tools, model=model_name, supports_tools=supports_tools)
+    if isinstance(fallback, dict) and "error" not in fallback:
+        _THINKING_SUPPORT[key] = False
+        return fallback
+
+    # If both failed, leave state unknown so we can retry later.
+    return response
+
+
+def _call_stream_with_auto_thinking(
+    *,
+    provider: Any,
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]],
+    model_name: str,
+    supports_tools: bool,
+    on_chunk: Optional[callable],
+    check_interrupt: Optional[callable],
+    check_user_messages: Optional[callable],
+) -> Dict[str, Any]:
+    if getattr(config, "LLM_THINKING_MODE", "auto") == "off":
+        return provider.chat_stream(
+            messages=messages,
+            tools=tools,
+            model=model_name,
+            supports_tools=supports_tools,
+            on_chunk=on_chunk,
+            check_interrupt=check_interrupt,
+            check_user_messages=check_user_messages,
+        )
+    if not _provider_can_try_thinking(provider):
+        return provider.chat_stream(
+            messages=messages,
+            tools=tools,
+            model=model_name,
+            supports_tools=supports_tools,
+            on_chunk=on_chunk,
+            check_interrupt=check_interrupt,
+            check_user_messages=check_user_messages,
+        )
+
+    key = _thinking_cache_key(provider, model_name)
+    state = _THINKING_SUPPORT.get(key)
+    thinking_kwargs = {"thinking": {"type": "enabled"}}
+
+    if state is True:
+        return provider.chat_stream(
+            messages=messages,
+            tools=tools,
+            model=model_name,
+            supports_tools=supports_tools,
+            on_chunk=on_chunk,
+            check_interrupt=check_interrupt,
+            check_user_messages=check_user_messages,
+            **thinking_kwargs,
+        )
+    if state is False:
+        return provider.chat_stream(
+            messages=messages,
+            tools=tools,
+            model=model_name,
+            supports_tools=supports_tools,
+            on_chunk=on_chunk,
+            check_interrupt=check_interrupt,
+            check_user_messages=check_user_messages,
+        )
+
+    response = provider.chat_stream(
+        messages=messages,
+        tools=tools,
+        model=model_name,
+        supports_tools=supports_tools,
+        on_chunk=on_chunk,
+        check_interrupt=check_interrupt,
+        check_user_messages=check_user_messages,
+        **thinking_kwargs,
+    )
+    if isinstance(response, dict) and "error" not in response:
+        _THINKING_SUPPORT[key] = True
+        return response
+
+    fallback = provider.chat_stream(
+        messages=messages,
+        tools=tools,
+        model=model_name,
+        supports_tools=supports_tools,
+        on_chunk=on_chunk,
+        check_interrupt=check_interrupt,
+        check_user_messages=check_user_messages,
+    )
+    if isinstance(fallback, dict) and "error" not in fallback:
+        _THINKING_SUPPORT[key] = False
+        return fallback
+    return response
 
 # Retry configuration (can be overridden via environment variables)
 def _get_retry_config():
@@ -345,12 +517,14 @@ def ollama_chat(
         return {"error": f"Provider error: {e}"}
 
     # Make the request through the provider
-    response = provider.chat(
+    response = _call_with_auto_thinking(
+        provider=provider,
         messages=messages,
         tools=tools,
-        model=model_name,
+        model_name=model_name,
         supports_tools=supports_tools,
     )
+    response = _sanitize_response_content(response)
 
     # Track token usage if successful
     if "usage" in response and "error" not in response:
@@ -401,16 +575,17 @@ def ollama_chat_stream(
     except ValueError as e:
         return {"error": f"Provider error: {e}"}
 
-    # Make the streaming request through the provider
-    response = provider.chat_stream(
+    response = _call_stream_with_auto_thinking(
+        provider=provider,
         messages=messages,
         tools=tools,
-        model=model_name,
+        model_name=model_name,
         supports_tools=supports_tools,
         on_chunk=on_chunk,
         check_interrupt=check_interrupt,
         check_user_messages=check_user_messages,
     )
+    response = _sanitize_response_content(response)
 
     # Track token usage if successful
     if "usage" in response and "error" not in response:

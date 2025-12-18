@@ -40,6 +40,14 @@ def _init_colors():
     # Windows-specific handling
     if platform.system() == 'Windows':
         try:
+            # Prefer colorama for broad console compatibility (PowerShell, cmd.exe).
+            try:
+                import colorama
+
+                colorama.just_fix_windows_console()
+            except Exception:
+                pass
+
             # Try to enable ANSI escape sequences on Windows 10+
             import ctypes
             kernel32 = ctypes.windll.kernel32

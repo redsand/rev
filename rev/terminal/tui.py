@@ -9,6 +9,7 @@ import curses.textpad
 import threading
 import queue
 import time
+import re
 from typing import Callable, Optional
 
 
@@ -35,26 +36,42 @@ class TuiStream:
         return False
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _strip_ansi(text: str) -> str:
+    if not text:
+        return ""
+    return _ANSI_RE.sub("", text)
+
+
 class TUI:
     """Curses wrapper with scrollback and bottom prompt."""
 
     def __init__(self, prompt: str = "rev> "):
         self.prompt = prompt
         self.lines: list[str] = []
-        self.input_queue: queue.Queue[str] = queue.Queue()
+        self._log_queue: "queue.Queue[str]" = queue.Queue()
         self._stop = threading.Event()
         self._screen = None
         self._input_win = None
         self._log_win = None
         self._input_buffer = ""
+        self._worker: Optional[threading.Thread] = None
 
     def log(self, text: str) -> None:
-        """Append text to scrollback and refresh."""
-        for line in (text or "").splitlines():
-            self.lines.append(line)
-        self._refresh_log()
+        """Queue text for append to scrollback (thread-safe)."""
+        if text is None:
+            return
+        # Curses cannot render ANSI escape sequences; strip them.
+        text = _strip_ansi(str(text)).replace("\r\n", "\n").replace("\r", "\n")
+        for line in text.splitlines():
+            self._log_queue.put(line)
 
-    def run(self, on_input: Callable[[str], None]) -> None:
+    def set_prompt(self, prompt: str) -> None:
+        self.prompt = prompt
+
+    def run(self, on_input: Callable[[str], None], *, initial_input: Optional[str] = None) -> None:
         """Start the curses UI and dispatch input lines to on_input."""
 
         def _curses_main(stdscr):
@@ -64,7 +81,13 @@ class TUI:
             self._resize_windows()
             self._render_input()
 
+            if initial_input and initial_input.strip():
+                self.log(self.prompt + initial_input)
+                self._start_worker(on_input, initial_input)
+
             while not self._stop.is_set():
+                self._drain_log_queue()
+
                 try:
                     ch = stdscr.getch()
                 except Exception:
@@ -83,8 +106,12 @@ class TUI:
                     self._input_buffer = ""
                     self._render_input()
                     if line.strip():
-                        on_input(line)
+                        self.log(self.prompt + line)
+                        self._start_worker(on_input, line)
                     continue
+                if ch in (27,):  # ESC
+                    self.stop()
+                    break
                 if ch in (curses.KEY_BACKSPACE, 127, 8):
                     self._input_buffer = self._input_buffer[:-1]
                     self._render_input()
@@ -99,6 +126,37 @@ class TUI:
         self._stop.set()
 
     # Internal helpers
+    def _start_worker(self, on_input: Callable[[str], None], line: str) -> None:
+        if self._worker and self._worker.is_alive():
+            self.log("[TUI] Busy (previous command still running)")
+            return
+
+        def _run():
+            self.log("[running]")
+            try:
+                on_input(line)
+            except SystemExit:
+                self.stop()
+            except Exception as e:
+                self.log(f"[TUI ERROR] {e}")
+            finally:
+                self.log("[done]")
+
+        self._worker = threading.Thread(target=_run, daemon=True)
+        self._worker.start()
+
+    def _drain_log_queue(self) -> None:
+        changed = False
+        try:
+            while True:
+                line = self._log_queue.get_nowait()
+                self.lines.append(line)
+                changed = True
+        except queue.Empty:
+            pass
+        if changed:
+            self._refresh_log()
+
     def _resize_windows(self) -> None:
         if not self._screen:
             return
@@ -117,7 +175,11 @@ class TUI:
         max_y, max_x = self._log_win.getmaxyx()
         start = max(0, len(self.lines) - max_y)
         for idx, line in enumerate(self.lines[start:]):
-            self._log_win.addnstr(idx, 0, line, max_x - 1)
+            try:
+                self._log_win.addnstr(idx, 0, line, max_x - 1)
+            except curses.error:
+                # Window may be too small; ignore render errors.
+                pass
         self._log_win.refresh()
 
     def _render_input(self) -> None:
@@ -127,6 +189,9 @@ class TUI:
         max_y, max_x = self._input_win.getmaxyx()
         prompt = self.prompt
         buf = self._input_buffer
-        self._input_win.addnstr(0, 0, prompt + buf, max_x - 1)
-        self._input_win.move(0, min(len(prompt + buf), max_x - 1))
+        try:
+            self._input_win.addnstr(0, 0, prompt + buf, max_x - 1)
+            self._input_win.move(0, min(len(prompt + buf), max_x - 1))
+        except curses.error:
+            pass
         self._input_win.refresh()

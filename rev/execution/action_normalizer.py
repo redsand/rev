@@ -23,6 +23,11 @@ _EXACT_ALIASES: dict[str, str] = {
     "fix": "edit",
     "general": "refactor",
     "investigate": "research",
+    # read-only synonyms
+    "read": "read",
+    "inspect": "read",
+    "view": "read",
+    "explain": "read",
     # known refactor typos
     "refator": "refactor",
     "refracto": "refactor",
