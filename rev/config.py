@@ -73,7 +73,7 @@ def get_allowed_roots() -> List[pathlib.Path]:
 # Initialize derived paths at import time.
 _recompute_derived_paths()
 DEFAULT_OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3-coder:480b-cloud")  # default model
+DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "devstral-2:123b-cloud")  # default model
 
 # Determine default provider based on configured credentials
 # Priority: explicit REV_LLM_PROVIDER > Gemini > Anthropic > OpenAI > Ollama
