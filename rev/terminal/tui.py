@@ -12,6 +12,29 @@ import time
 from typing import Callable, Optional
 
 
+class TuiStream:
+    """File-like stream that routes writes to a TUI log callback."""
+
+    def __init__(self, write_cb: Callable[[str], None]):
+        self.write_cb = write_cb
+
+    def write(self, data: str) -> int:
+        if not data:
+            return 0
+        for line in data.splitlines():
+            self.write_cb(line)
+        if data.endswith("\n"):
+            # Preserve trailing newline as empty line
+            self.write_cb("")
+        return len(data)
+
+    def flush(self) -> None:
+        return None
+
+    def isatty(self) -> bool:
+        return False
+
+
 class TUI:
     """Curses wrapper with scrollback and bottom prompt."""
 
@@ -107,4 +130,3 @@ class TUI:
         self._input_win.addnstr(0, 0, prompt + buf, max_x - 1)
         self._input_win.move(0, min(len(prompt + buf), max_x - 1))
         self._input_win.refresh()
-

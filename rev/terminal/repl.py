@@ -38,7 +38,8 @@ def repl_mode(force_tui: bool = False, init_logs: list[str] | None = None):
     # Print welcome message with styling
     if use_tui:
         try:
-            from rev.terminal.tui import TUI
+            import sys as _sys
+            from rev.terminal.tui import TUI, TuiStream
             import rev.terminal.formatting as fmt
             # Disable ANSI colors inside curses UI to avoid escape artifacts on Windows.
             fmt._COLORS_ENABLED = False
@@ -52,6 +53,10 @@ def repl_mode(force_tui: bool = False, init_logs: list[str] | None = None):
                 tui.log(msg)
             printer = _tui_print
             logger = _tui_log
+            # Redirect stdout/stderr into TUI
+            _orig_out, _orig_err = _sys.stdout, _sys.stderr
+            _sys.stdout = TuiStream(tui.log)
+            _sys.stderr = TuiStream(tui.log)
         except Exception as e:
             print(f"[rev] TUI unavailable ({e}); falling back to standard REPL.")
             use_tui = False
@@ -182,6 +187,12 @@ def repl_mode(force_tui: bool = False, init_logs: list[str] | None = None):
             pass
         except Exception as e:
             tui.log(f"[TUI ERROR] {e}")
+        finally:
+            try:
+                _sys.stdout = _orig_out  # type: ignore[name-defined]
+                _sys.stderr = _orig_err  # type: ignore[name-defined]
+            except Exception:
+                pass
     else:
         while True:
             try:
