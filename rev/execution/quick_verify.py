@@ -209,6 +209,32 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
                     if target_dir:
                         details["target_dir_path"] = str(target_dir)
 
+    if not target_dir and getattr(task, "tool_events", None):
+        # Look at recorded tool events (most recent first)
+        for ev in reversed(list(task.tool_events)):
+            args = ev.get("args") or {}
+            if not isinstance(args, dict):
+                continue
+            # Prefer explicit target_directory/directory keys
+            for key in ("target_directory", "directory", "dir_path"):
+                candidate = args.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    resolved = _resolve_for_verification(candidate.strip(), purpose="verify refactoring target dir (event)")
+                    if resolved:
+                        target_dir = resolved
+                        details["target_dir_path"] = str(target_dir)
+                        break
+            if target_dir:
+                break
+            # Fallback: path pointing to a module/init; use parent
+            path_candidate = args.get("path")
+            if isinstance(path_candidate, str) and path_candidate.strip():
+                resolved_file = _resolve_for_verification(path_candidate.strip(), purpose="verify refactoring target dir (event path)")
+                if resolved_file:
+                    target_dir = resolved_file.parent
+                    details["target_dir_path"] = str(target_dir)
+                    break
+
     if not target_dir:
         # Fallback 1: if a .py file path is mentioned, use its parent directory.
         file_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\\\-]+\.py)'
