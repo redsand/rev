@@ -15,7 +15,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Set
 
 from rev import config
 from rev.execution.redaction import redact_sensitive, REDACTION_RULES_VERSION
@@ -69,6 +69,68 @@ def _sha256_json(value: Any) -> str:
 
 def _line_count(text: str) -> int:
     return text.count("\n") + (1 if text and not text.endswith("\n") else 0)
+
+
+def _max_tool_outputs_to_keep() -> int:
+    """Return retention limit for tool output artifacts (default=20)."""
+    try:
+        env_value = os.getenv("REV_TOOL_OUTPUTS_MAX_KEEP", "").strip()
+        if env_value:
+            return max(1, int(env_value))
+    except Exception:
+        pass
+    return 20
+
+
+def _session_from_filename(path: Path) -> Optional[str]:
+    """Extract session_id token from the artifact filename if present."""
+    try:
+        parts = path.stem.split("_")
+        # Filename format: stamp_counter_pid_session_task_tool.json
+        if len(parts) >= 6:
+            return parts[3]
+    except Exception:
+        return None
+    return None
+
+
+def _prune_old_tool_outputs(max_keep: int, keep_sessions: Optional[Set[str]] = None) -> None:
+    """Prune old tool output artifacts, preserving newest + protected sessions."""
+    try:
+        files = sorted(
+            config.TOOL_OUTPUTS_DIR.glob("*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except Exception:
+        return
+
+    keep_sessions = keep_sessions or set()
+    protected: Set[Path] = set()
+    for path in files:
+        session = _session_from_filename(path)
+        if session and session in keep_sessions:
+            protected.add(path)
+            # Only the newest artifact per keep_session should be protected
+            keep_sessions.remove(session)
+        if not keep_sessions:
+            break
+
+    allow_remaining = max_keep - len(protected)
+    if allow_remaining < 0:
+        allow_remaining = 0
+
+    kept_remaining = 0
+    for path in files:
+        if path in protected:
+            continue
+        if kept_remaining < allow_remaining:
+            kept_remaining += 1
+            continue
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            continue
 
 
 def _tool_allowlisted_payload(tool: str, raw_output: str) -> Tuple[Any, str]:
@@ -166,6 +228,13 @@ def write_tool_output_artifact(
     except Exception:
         pass
     os.replace(tmp_path, final_path)
+
+    # Enforce retention: keep newest N artifacts, always preserving current session.
+    try:
+        keep_sessions = {session_id} if session_id else set()
+        _prune_old_tool_outputs(_max_tool_outputs_to_keep(), keep_sessions=keep_sessions)
+    except Exception:
+        pass
 
     ref = ArtifactRef(path=final_path)
     meta = {

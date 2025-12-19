@@ -375,10 +375,14 @@ class SetCommand(CommandHandler):
         for section, settings in list_runtime_settings_by_section().items():
             output.append(create_section(section))
             for setting in settings:
+                try:
+                    value = setting.getter()
+                except Exception as exc:
+                    value = f"(error: {exc})"
                 output.append(
                     create_item(
                         setting.key,
-                        f"{setting.getter()}  — {setting.description}"
+                        f"{value}  - {setting.description}"
                     )
                 )
 
