@@ -545,10 +545,10 @@ class ContextBuilder:
         query: str,
         tool_universe: Sequence[Dict[str, Any]],
         tool_candidates: Optional[Sequence[str]] = None,
-        top_k_code: int = 6,
-        top_k_docs: int = 4,
-        top_k_tools: int = 7,
-        top_k_memory: int = 4,
+        top_k_code: int = 4,
+        top_k_docs: int = 3,
+        top_k_tools: int = 5,
+        top_k_memory: int = 3,
         memory_items: Optional[Sequence[Tuple[str, str]]] = None,
     ) -> ContextBundle:
         self.tools.build(tool_universe)
@@ -599,19 +599,19 @@ class ContextBuilder:
             parts.append("Selected memory:")
             for item in bundle.selected_memory_items:
                 parts.append(f"- {item.location} (score={item.score:.2f})")
-                parts.append(item.content.strip()[:800])
+                parts.append(item.content.strip()[:400])
 
         if bundle.selected_docs_chunks:
             parts.append("\nSelected docs:")
             for chunk in bundle.selected_docs_chunks:
                 parts.append(f"- {chunk.location} (score={chunk.score:.2f})")
-                parts.append(chunk.content.strip()[:1200])
+                parts.append(chunk.content.strip()[:500])
 
         if bundle.selected_code_chunks:
             parts.append("\nSelected code:")
             for chunk in bundle.selected_code_chunks:
                 parts.append(f"- {chunk.location} (score={chunk.score:.2f})")
-                parts.append(chunk.content.strip()[:1200])
+                parts.append(chunk.content.strip()[:500])
 
         if bundle.selected_tool_schemas:
             parts.append("\nSelected tools (schema + example):")

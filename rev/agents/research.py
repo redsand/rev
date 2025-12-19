@@ -169,11 +169,23 @@ class ResearchAgent(BaseAgent):
                 if error_type == "text_instead_of_tool_call":
                     recovered = recover_tool_call_from_text(
                         response.get("message", {}).get("content", ""),
-                        allowed_tools=[t["function"]["name"] for t in available_tools],
+                        allowed_tools=[t["function"]["name"] for t in get_available_tools()],
                     )
                     if recovered:
                         print(f"  -> Recovered tool call from text output: {recovered.name}")
-                        raw_result = execute_tool(recovered.name, recovered.arguments)
+                        if (
+                            recovered.name == "read_file"
+                            and isinstance(recovered.arguments, dict)
+                            and isinstance(recovered.arguments.get("paths"), list)
+                        ):
+                            outputs = {}
+                            for path in recovered.arguments.get("paths", []):
+                                if not isinstance(path, str):
+                                    continue
+                                outputs[path] = execute_tool("read_file", {"path": path})
+                            raw_result = json.dumps(outputs)
+                        else:
+                            raw_result = execute_tool(recovered.name, recovered.arguments)
                         context.add_insight("research_agent", f"task_{task.task_id}_result", {
                             "tool": recovered.name,
                             "result": raw_result[:500] if isinstance(raw_result, str) else str(raw_result)[:500]

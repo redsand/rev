@@ -968,6 +968,8 @@ class Orchestrator:
         iteration = 0
         action_counts: Dict[str, int] = defaultdict(int)
         failure_counts: Dict[str, int] = defaultdict(int)
+        last_task_signature: Optional[str] = None
+        repeat_same_action: int = 0
 
         while True:
             iteration += 1
@@ -1208,7 +1210,15 @@ class Orchestrator:
                 log_entry += f" | Verification: {verification_result.message}"
 
             completed_tasks_log.append(log_entry)
-            print(f"  {'âœ ভारী' if next_task.status == TaskStatus.COMPLETED else '✗'} {log_entry}")
+            try:
+                recent = self.context.agent_state.get("recent_tasks", [])
+                if not isinstance(recent, list):
+                    recent = []
+                recent.append(f"{next_task.action_type or '?'}: {next_task.description}")
+                self.context.agent_state["recent_tasks"] = recent[-8:]
+            except Exception:
+                pass
+            print(f"  {'✓' if next_task.status == TaskStatus.COMPLETED else '✗'} {log_entry}")
 
             self.context.update_repo_context()
             clear_analysis_caches()

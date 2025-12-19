@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from rev.core.context import RevContext
 from rev.models.task import Task
 from rev.retrieval.context_builder import ContextBuilder, ContextBundle
+from rev import config
 
 
 _BUILDER: ContextBuilder | None = None
@@ -25,6 +26,12 @@ def get_context_builder(root: Optional[Path] = None) -> ContextBuilder:
 
 def _collect_memory_items(context: RevContext) -> List[Tuple[str, str]]:
     items: List[Tuple[str, str]] = []
+
+    # Always include workspace root so sub-agents don’t drift.
+    try:
+        items.append(("workspace_root", str(config.ROOT)))
+    except Exception:
+        pass
 
     # Errors (often the most relevant "memory" signal)
     for i, err in enumerate(context.errors[-10:], start=1):
@@ -44,6 +51,16 @@ def _collect_memory_items(context: RevContext) -> List[Tuple[str, str]]:
             items.append((f"clarification[{i}]", json.dumps(entry, indent=2)[:2000]))
         except Exception:
             items.append((f"clarification[{i}]", str(entry)[:2000]))
+
+    # Recently selected tools (helps avoid repeated ref/grep loops)
+    selected = context.agent_state.get("selected_tools") or []
+    if selected:
+        items.append(("selected_tools", ", ".join(selected[:10])))
+
+    # Recent task summaries to keep planner grounded.
+    recent_tasks = context.agent_state.get("recent_tasks") or []
+    if isinstance(recent_tasks, list) and recent_tasks:
+        items.append(("recent_tasks", "; ".join(recent_tasks[-5:])))
 
     return items
 
@@ -78,4 +95,3 @@ def build_context_and_tools(
 
     context.agent_state["selected_tools"] = [t.get("function", {}).get("name") for t in selected_tool_schemas]
     return rendered, selected_tool_schemas, bundle
-
