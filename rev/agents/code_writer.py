@@ -37,13 +37,17 @@ def _extract_target_files_from_description(description: str) -> list[str]:
         if match.group(1) not in paths:
             paths.append(match.group(1))
 
-    # Match bare paths like lib/analysts/__init__.py
+    # Match bare paths like lib/analysts/__init__.py or main.py
     bare_pattern = r'\b([\w./\\-]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini))\b'
     for match in re.finditer(bare_pattern, description, re.IGNORECASE):
         candidate = match.group(1)
         # Filter out common false positives
-        if candidate not in paths and not candidate.startswith('.') and '/' in candidate or '\\' in candidate:
-            paths.append(candidate)
+        # We allow root files (no slash) if they have a recognized extension, 
+        # but avoid simple things like ".py" or just "a.py" unless it's likely a real path
+        if candidate not in paths and not candidate.startswith('.'):
+            # Include if it has a slash OR if it's a multi-character name with extension
+            if '/' in candidate or '\\' in candidate or len(candidate.split('.')[0]) > 1:
+                paths.append(candidate)
 
     return paths
 

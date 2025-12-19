@@ -429,6 +429,34 @@ def _find_python_symbol_usages(symbol: str) -> List[Dict[str, Any]]:
                             "type": "reference",
                             "context": f"Usage of {symbol}"
                         })
+                    
+                    # Check imports (added)
+                    elif isinstance(node, ast.Import):
+                        for alias in node.names:
+                            if alias.name == symbol or alias.name.split('.')[0] == symbol:
+                                usages.append({
+                                    "file": py_file.relative_to(config.ROOT).as_posix(),
+                                    "line": node.lineno,
+                                    "type": "import",
+                                    "context": f"import {alias.name}"
+                                })
+                    
+                    elif isinstance(node, ast.ImportFrom):
+                        if node.module and (node.module == symbol or node.module.startswith(symbol + '.')):
+                            usages.append({
+                                "file": py_file.relative_to(config.ROOT).as_posix(),
+                                "line": node.lineno,
+                                "type": "import",
+                                "context": f"from {node.module} import ..."
+                            })
+                        for alias in node.names:
+                            if alias.name == symbol:
+                                usages.append({
+                                    "file": py_file.relative_to(config.ROOT).as_posix(),
+                                    "line": node.lineno,
+                                    "type": "import",
+                                    "context": f"from {node.module or ''} import {alias.name}"
+                                })
             except Exception:
                 continue
 
@@ -590,16 +618,15 @@ def _analyze_file_dependencies(file_path: Path, depth: int) -> Dict[str, Any]:
                 deps["depends_on"].append(match.group(1))
 
         # Find what imports this file (reverse dependencies)
-        file_name = file_path.stem
-        for py_file in config.ROOT.rglob("*.py"):
-            if py_file == file_path:
-                continue
-            try:
-                with open(py_file, 'r', encoding='utf-8') as f:
-                    if file_name in f.read():
-                        deps["used_by"].append(py_file.relative_to(config.ROOT).as_posix())
-            except Exception:
-                continue
+        # Use our improved find_symbol_usages for accurate detection
+        module_path = rel_path.replace('.py', '').replace('/', '.')
+        
+        usages_json = find_symbol_usages(module_path)
+        usages = json.loads(usages_json)
+        
+        for usage in usages.get("usages", []):
+            if usage["file"] != rel_path and usage["file"] not in deps["used_by"]:
+                deps["used_by"].append(usage["file"])
 
         return deps
 
