@@ -750,19 +750,19 @@ class Orchestrator:
         Rather than using brittle keyword detection, we let the LLM evaluate the failed
         task and suggest a decomposition strategy if one exists.
         """
-            decomposition_prompt = (
-                f"A task has failed: {failed_task.description}\n\n"
-                f"Error: {failed_task.error if failed_task.error else 'Unknown'}\n\n"
-                f"Can this task be decomposed into smaller, more specific subtasks that might succeed?\n"
-                f"If yes, describe the first subtask that should be attempted next in detail.\n"
-                f"If no, just respond with 'CANNOT_DECOMPOSE'.\n\n"
-                "Important import strategy note (avoid churn):\n"
-                "- If a refactor split creates a package (directory with __init__.py exports), update call sites/tests to\n"
-                "  import from the package exports (e.g., `from package import ExportedSymbol`).\n"
-                "- Do NOT expand `from pkg import *` into dozens of per-module imports.\n\n"
-                f"Important: Be specific about what concrete action the next task should take. "
-                f"Use [ACTION_TYPE] format like [CREATE] or [EDIT] or [REFACTOR]."
-            )
+        decomposition_prompt = (
+            f"A task has failed: {failed_task.description}\n\n"
+            f"Error: {failed_task.error if failed_task.error else 'Unknown'}\n\n"
+            f"Can this task be decomposed into smaller, more specific subtasks that might succeed?\n"
+            f"If yes, describe the first subtask that should be attempted next in detail.\n"
+            f"If no, just respond with 'CANNOT_DECOMPOSE'.\n\n"
+            "Important import strategy note (avoid churn):\n"
+            "- If a refactor split creates a package (directory with __init__.py exports), update call sites/tests to\n"
+            "  import from the package exports (e.g., `from package import ExportedSymbol`).\n"
+            "- Do NOT expand `from pkg import *` into dozens of per-module imports.\n\n"
+            f"Important: Be specific about what concrete action the next task should take. "
+            f"Use [ACTION_TYPE] format like [CREATE] or [EDIT] or [REFACTOR]."
+        )
 
         response_data = ollama_chat([{"role": "user", "content": decomposition_prompt}])
 
