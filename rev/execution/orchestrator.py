@@ -818,6 +818,8 @@ class Orchestrator:
             "ACTION SEMANTICS (critical):\n"
             "- Use [READ] or [ANALYZE] when the next step is inspection only (open files, search, inventory imports, understand structure).\n"
             "- Use [EDIT]/[ADD]/[CREATE_DIRECTORY]/[REFACTOR] only when you will perform a repo-changing tool call in this step.\n"
+            "- Use [TOOL] only to execute an existing built-in tool (e.g., `split_python_module_classes`).\n"
+            "- Use [CREATE_TOOL] only when no existing tool can do the job and you must create a new tool.\n"
             "- If unsure whether a path exists, choose [READ] first to locate the correct file path(s).\n"
             "\n"
              "Constraints to avoid duplicating work:\n"

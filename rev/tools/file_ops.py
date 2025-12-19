@@ -202,6 +202,38 @@ def read_file(path: str) -> str:
         return json.dumps({"error": str(e)})
     if not p.exists():
         return json.dumps({"error": f"Not found: {path}"})
+    if p.is_dir():
+        rel = _rel_to_root_posix(p)
+        try:
+            children = sorted(p.iterdir(), key=lambda c: (not c.is_dir(), c.name.lower()))
+        except Exception as e:
+            return json.dumps({"error": f"{type(e).__name__}: {e}", "path": rel, "is_dir": True})
+
+        entries = []
+        for child in children:
+            if _should_skip(child):
+                continue
+            entries.append(
+                {
+                    "name": child.name,
+                    "path": _rel_to_root_posix(child),
+                    "type": "dir" if child.is_dir() else "file",
+                }
+            )
+            if len(entries) >= LIST_LIMIT:
+                break
+
+        pattern = "**/*" if rel in {"", "."} else f"{rel}/**/*"
+        return json.dumps(
+            {
+                "path": rel,
+                "is_dir": True,
+                "count": len(entries),
+                "entries": entries,
+                "hint": f"Use list_dir with pattern '{pattern}' for recursive listing.",
+            },
+            ensure_ascii=False,
+        )
     if p.stat().st_size > MAX_FILE_BYTES:
         return json.dumps({"error": f"Too large (> {MAX_FILE_BYTES} bytes): {path}"})
 

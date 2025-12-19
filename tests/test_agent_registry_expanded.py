@@ -13,6 +13,7 @@ from rev.agents.documentation import DocumentationAgent
 from rev.agents.research import ResearchAgent
 from rev.agents.analysis import AnalysisAgent
 from rev.agents.tool_creation import ToolCreationAgent
+from rev.agents.tool_executor import ToolExecutorAgent
 
 
 class TestAgentRegistryExpanded(unittest.TestCase):
@@ -24,9 +25,9 @@ class TestAgentRegistryExpanded(unittest.TestCase):
             "add", "edit", "refactor",  # Code modification
             "test", "debug", "fix",  # Testing and debugging
             "document", "docs",  # Documentation
-            "research", "investigate",  # Research
+            "read", "research", "investigate",  # Research
             "analyze", "review",  # Analysis
-            "create_tool", "tool"  # Tool creation
+            "create_tool", "tool"  # Tooling (create vs execute)
         ]
 
         registered_types = AgentRegistry.get_registered_action_types()
@@ -79,9 +80,11 @@ class TestAgentRegistryExpanded(unittest.TestCase):
 
     def test_research_agents(self):
         """Test research agent types."""
-        # research and investigate should use ResearchAgent
+        # read/research/investigate should use ResearchAgent
+        read_agent = AgentRegistry.get_agent_instance("read")
         research_agent = AgentRegistry.get_agent_instance("research")
         investigate_agent = AgentRegistry.get_agent_instance("investigate")
+        self.assertIsInstance(read_agent, ResearchAgent)
         self.assertIsInstance(research_agent, ResearchAgent)
         self.assertIsInstance(investigate_agent, ResearchAgent)
 
@@ -95,11 +98,11 @@ class TestAgentRegistryExpanded(unittest.TestCase):
 
     def test_tool_creation_agents(self):
         """Test tool creation agent types."""
-        # create_tool and tool should use ToolCreationAgent
+        # create_tool should use ToolCreationAgent; tool should use ToolExecutorAgent
         create_tool_agent = AgentRegistry.get_agent_instance("create_tool")
         tool_agent = AgentRegistry.get_agent_instance("tool")
         self.assertIsInstance(create_tool_agent, ToolCreationAgent)
-        self.assertIsInstance(tool_agent, ToolCreationAgent)
+        self.assertIsInstance(tool_agent, ToolExecutorAgent)
 
     def test_invalid_action_type(self):
         """Test that invalid action types raise ValueError."""
