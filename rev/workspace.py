@@ -181,6 +181,10 @@ class Workspace:
         # strict=False: allow resolving paths that don't exist yet (create/write flows).
         abs_path = candidate.resolve(strict=False)
 
+        deduped = _dedupe_redundant_prefix_path(abs_path, self.root)
+        if deduped and deduped != abs_path:
+            abs_path = deduped
+
         # Check if path is within allowed roots
         allowed_roots = [r.resolve() for r in self.get_allowed_roots()]
         for allowed_root in allowed_roots:
@@ -215,6 +219,50 @@ class Workspace:
                     f"Path is outside the current workspace: '{raw}'. "
                     f"Provide --workspace {abs_path.parent} or enable external paths via --allow-external-paths."
                 )
+
+
+def _dedupe_redundant_prefix_path(abs_path: Path, root: Path) -> Optional[Path]:
+    """
+    Collapse accidental repeated leading segments like
+    '<root>/lib/analysts/lib/analysts/__init__.py' into the shortest suffix.
+    This prevents agents from drifting into nested duplicates when they keep
+    appending the same subpath.
+    """
+    try:
+        rel_parts = abs_path.relative_to(root).parts
+        prefix_parts = abs_path.parts[: len(abs_path.parts) - len(rel_parts)]
+    except Exception:
+        rel_parts = abs_path.parts
+        prefix_parts = abs_path.parts[:0]
+
+    # Need at least X/Y/X/Y to consider it duplicated
+    if len(rel_parts) < 4:
+        return None
+
+    parts = list(rel_parts)
+    changed = False
+    while len(parts) >= 4:
+        reduced = False
+        for prefix_len in range(1, len(parts) // 2 + 1):
+            prefix = parts[:prefix_len]
+            if parts[prefix_len : 2 * prefix_len] == prefix:
+                parts = parts[prefix_len:]
+                changed = True
+                reduced = True
+                break
+        if not reduced:
+            break
+
+    if not changed:
+        return None
+
+    dedup_rel = Path(*parts)
+    if prefix_parts:
+        dedup_abs = Path(*prefix_parts) / dedup_rel
+    else:
+        dedup_abs = root / dedup_rel
+
+    return dedup_abs.resolve(strict=False)
 
 
 # ---------------------------------------------------------------------------

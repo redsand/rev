@@ -422,7 +422,11 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
 
     # Check 1: Directory exists
     if not target_dir.exists():
-        issues.append(f"[FAIL] Target directory '{target_dir}' does not exist - extraction was never started")
+        missing_msg = f"[FAIL] Target directory '{target_dir}' does not exist - extraction was never started"
+        issues.append(missing_msg)
+        details["next_step_hint"] = (
+            f"Create the directory '{target_dir}' (or ensure it exists) before rerunning split_python_module_classes."
+        )
         debug_info["status"] = "DIRECTORY_NOT_CREATED"
     else:
         details["directory_exists"] = True

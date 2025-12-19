@@ -86,3 +86,20 @@ def test_preflight_refuses_operating_on_backup_only():
 
     assert ok is False
     assert any("only backup" in m.lower() for m in msgs)
+
+
+def test_preflight_dedupes_redundant_prefix_paths():
+    root = _make_workspace()
+    config.set_workspace_root(root)
+    (root / "lib" / "analysts").mkdir(parents=True, exist_ok=True)
+    (root / "lib" / "analysts" / "__init__.py").write_text("# init\n", encoding="utf-8")
+
+    task = Task(
+        description="read lib/analysts/lib/analysts/__init__.py and summarize",
+        action_type="read",
+    )
+    ok, msgs = _preflight_correct_task_paths(task=task, project_root=root)
+
+    assert ok is True
+    assert "lib/analysts/__init__.py" in task.description.replace("\\", "/")
+    assert any("duplicated" in m for m in msgs)

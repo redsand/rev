@@ -321,6 +321,55 @@ def _is_goal_achieved_response(response: Optional[str]) -> bool:
     return normalized == "goal achieved"
 
 
+def _dedupe_redundant_prefix_path(norm_path: str, project_root: Path) -> Optional[str]:
+    """
+    Collapse accidental repeated leading segments like
+    'lib/analysts/lib/analysts/__init__.py' into the shortest suffix that
+    already exists. This prevents recursive path drift when planners keep
+    appending the same subpath.
+    """
+    if not norm_path:
+        return None
+
+    parts = list(Path(norm_path.replace("/", os.sep)).parts)
+    # Need at least X/Y/X/Y to consider it a duplicated prefix.
+    if len(parts) < 4:
+        return None
+
+    changed = False
+    while len(parts) >= 4:
+        reduced = False
+        for prefix_len in range(1, len(parts) // 2 + 1):
+            prefix = parts[:prefix_len]
+            if parts[prefix_len: 2 * prefix_len] == prefix:
+                parts = parts[prefix_len:]
+                changed = True
+                reduced = True
+                break
+        if not reduced:
+            break
+
+    if not changed:
+        return None
+
+    candidate = Path(*parts)
+    try:
+        if not candidate.is_absolute():
+            candidate_abs = (project_root / candidate).resolve(strict=False)
+        else:
+            candidate_abs = candidate
+    except Exception:
+        return None
+
+    if not candidate_abs.exists():
+        return None
+
+    try:
+        return normalize_to_workspace_relative(candidate_abs, workspace_root=project_root)
+    except Exception:
+        return str(candidate_abs).replace("\\", "/")
+
+
 def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bool, List[str]]:
     """Best-effort path correction for lightweight planner outputs.
 
@@ -364,6 +413,15 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
 
     for raw in candidates:
         normalized = normalize_path(raw)
+
+        deduped = _dedupe_redundant_prefix_path(normalized, project_root=project_root)
+        if deduped and deduped != normalized:
+            if raw in desc:
+                desc = desc.replace(raw, deduped)
+            if normalized in desc:
+                desc = desc.replace(normalized, deduped)
+            messages.append(f"normalized duplicated path '{raw}' -> '{deduped}'")
+            normalized = deduped
 
         abs_path = _abs_for_normalized(normalized)
         if abs_path is None:

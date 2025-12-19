@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Iterable, Optional
 
+import json
+
 from rev.core.tool_call_recovery import recover_tool_call_from_text
 from rev.tools.registry import execute_tool
 
@@ -38,6 +40,20 @@ def maybe_execute_tool_call_from_text(
     if not recovered:
         return None
 
+    # Special-case: allow "read_file" requests that provide multiple paths.
+    if recovered.name == "read_file" and isinstance(recovered.arguments, dict) and isinstance(recovered.arguments.get("paths"), list):
+        outputs = {}
+        for path in recovered.arguments.get("paths", []):
+            if not isinstance(path, str):
+                continue
+            outputs[path] = execute_tool("read_file", {"path": path})
+        return ExecutedTextToolCall(
+            tool_name="read_file",
+            tool_args={"paths": recovered.arguments.get("paths", [])},
+            tool_output=json.dumps(outputs),
+            recovered=True,
+        )
+
     tool_output = execute_tool(recovered.name, recovered.arguments)
     return ExecutedTextToolCall(
         tool_name=recovered.name,
@@ -45,4 +61,3 @@ def maybe_execute_tool_call_from_text(
         tool_output=tool_output,
         recovered=True,
     )
-
