@@ -28,13 +28,13 @@ When asked to extract classes from a file into separate files:
 4. Update the original file to import from the new files (or replace with imports)
 5. Prefer the `split_python_module_classes` tool to automate this process when working with large modules.
 
-IMPORT STRATEGY (IMPORTANT):
-- If you create a package (directory with `__init__.py` exporting symbols), update call sites/tests to import from the package
-  exports, not from each individual module file.
-  Prefer: `from package import ExportedSymbol` (or `import package as pkg`)
-  Avoid: `from package.module import ExportedSymbol` when `package/__init__.py` exports it, and avoid expanding
-  `from ... import *` into dozens of imports.
-- Only import the symbols actually used at the call site.
+IMPORT STRATEGY (CRITICAL):
+- If you have just split a module into a package (a directory with `__init__.py` exporting symbols), STOP and THINK.
+- Existing imports like `import package` or `from package import Symbol` are often STILL VALID because the `__init__.py` exports them.
+- Do NOT replace a single valid import with dozens of individual module imports (e.g., `from package.module1 import ...`, `from package.module2 import ...`). This causes massive churn and linter errors.
+- ONLY update an import if it is actually broken (e.g., `ModuleNotFoundError`).
+- Prefer package-level imports: `from package import Symbol` is better than `from package.module import Symbol`.
+- Never use `from module import *` in new code.
 
 AST-AWARE EDITS (IMPORTANT):
 - When updating Python import paths (e.g., after splitting/moving modules), prefer the `rewrite_python_imports` tool over

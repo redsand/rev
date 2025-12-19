@@ -251,15 +251,44 @@ class DebugLogger:
         self.log("llm", "LLM_RESPONSE", data, "DEBUG")
 
     def log_llm_transcript(self, *, model: str, messages: Any, response: Any, tools: Any = None):
-        """Persist full LLM request/response (no truncation) when tracing is enabled."""
+        """Persist full LLM request/response (no truncation) when tracing is enabled.
+        
+        Includes additional system state for easier debugging.
+        """
         if not getattr(config, "LLM_TRANSACTION_LOG_ENABLED", False):
             return
         try:
+            # Gather extra context for debugging
+            extra_context = {
+                "cwd": os.getcwd(),
+            }
+            
+            # Simple file listing of root
+            try:
+                extra_context["files_root"] = os.listdir(".")[:50]
+            except Exception:
+                pass
+                
+            # Available tools
+            try:
+                from rev.tools.registry import get_available_tools
+                extra_context["available_tools"] = [t.get("function", {}).get("name") for t in get_available_tools() if isinstance(t, dict)]
+            except Exception:
+                pass
+                
+            # Git status (to see actual file changes)
+            try:
+                import subprocess
+                extra_context["git_status"] = subprocess.check_output(["git", "status", "--short"], timeout=5).decode("utf-8")
+            except Exception:
+                pass
+
             payload = {
                 "model": model,
                 "messages": messages,
                 "tools": tools,
                 "response": response,
+                "system_state": extra_context
             }
             content = json.dumps(payload, ensure_ascii=False, indent=2)
             path_val = getattr(config, "LLM_TRANSACTION_LOG_PATH", "")
@@ -275,7 +304,7 @@ class DebugLogger:
             # Best-effort tracing; never crash caller
             pass
 
-    def log_tool_execution(self, tool_name: str, arguments: dict, result: Any = None, error: Optional[str] = None):
+    def log_tool_execution(self, tool_name: str, arguments: dict, result: Any = None, error: Optional[str] = None, duration_ms: float = 0.0):
         """Log a tool execution.
 
         Args:
@@ -283,6 +312,7 @@ class DebugLogger:
             arguments: Tool arguments
             result: Tool execution result
             error: Error message if execution failed
+            duration_ms: How long the tool took to run
         """
         if not self._enabled:
             return
@@ -290,6 +320,7 @@ class DebugLogger:
         data = {
             "tool": tool_name,
             "arguments": {k: str(v)[:200] for k, v in arguments.items()},
+            "duration_ms": round(duration_ms, 2)
         }
 
         if error:

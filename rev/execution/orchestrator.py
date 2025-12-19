@@ -61,6 +61,39 @@ from rev.execution.action_normalizer import normalize_action_type
 from difflib import SequenceMatcher
 
 
+def _format_verification_feedback(result: VerificationResult) -> str:
+    """Format verification result for LLM feedback."""
+    feedback = result.message or "Verification failed"
+    
+    details = result.details or {}
+    
+    # Extract validation command outputs if present (from quick_verify.py)
+    validation = details.get("validation") or details.get("strict")
+    if isinstance(validation, dict):
+        for label, res in validation.items():
+            if not isinstance(res, dict):
+                continue
+            rc = res.get("rc")
+            if rc is not None and rc != 0:
+                stdout = (res.get("stdout") or "").strip()
+                stderr = (res.get("stderr") or "").strip()
+                feedback += f"\n\n--- {label} failure (exit code: {rc}) ---"
+                if stderr:
+                    # Take last 20 lines of stderr for context
+                    stderr_lines = stderr.splitlines()
+                    feedback += "\nstderr:\n" + "\n".join(stderr_lines[-20:])
+                elif stdout:
+                    # Take last 20 lines of stdout
+                    stdout_lines = stdout.splitlines()
+                    feedback += "\nstdout:\n" + "\n".join(stdout_lines[-20:])
+    
+    # Extract debug info if present
+    if "debug" in details:
+        feedback += f"\n\nDebug Info:\n{json.dumps(details['debug'], indent=2)}"
+        
+    return feedback
+
+
 def _extract_file_path_from_description(desc: str) -> Optional[str]:
     """Extract a file path from a task description for read tracking.
 
@@ -1128,7 +1161,7 @@ class Orchestrator:
                 action_type="refactor"
             )
 
-    def _determine_next_action(self, user_request: str, work_summary: str, coding_mode: bool) -> Optional[Task]:
+    def _determine_next_action(self, user_request: str, work_summary: str, coding_mode: bool, failure_notes: str = "") -> Optional[Task]:
         """A truly lightweight planner that makes a direct LLM call."""
         available_actions = _order_available_actions(AgentRegistry.get_registered_action_types())
 
@@ -1145,6 +1178,7 @@ class Orchestrator:
         prompt = (
             f"Original Request: {user_request}\n\n"
             f"{work_summary}\n\n"
+            f"{failure_notes}\n"
             f"{blocked_note}"
             "Based on the work completed, what is the single next most important action to take? "
             "If a previous action failed, propose a different action to achieve the goal.\n"
@@ -1269,7 +1303,16 @@ class Orchestrator:
                         for filename, count in high_read_files:
                             work_summary += f"  - {filename}: read {count}x (MUST transition to [EDIT] now)\n"
 
-            next_task = self._determine_next_action(user_request, work_summary, coding_mode)
+            # Calculate repetitive failure notes for the planner
+            failure_notes = []
+            if action_counts:
+                for sig, count in action_counts.items():
+                    if count >= 2:
+                        failure_notes.append(f"⚠️ REPETITION WARNING: You have already proposed the action '[{sig}]' {count} times. It is not making forward progress or is failing verification. DO NOT REPEAT IT. Try a different strategy, such as reading the file again to check for subtle syntax errors or using a different tool.")
+            
+            failure_notes_str = "\n".join(failure_notes)
+
+            next_task = self._determine_next_action(user_request, work_summary, coding_mode, failure_notes=failure_notes_str)
 
             if not next_task:
                 planner_error = self.context.get_agent_state("planner_error") if self.context else None
@@ -1484,7 +1527,7 @@ class Orchestrator:
                 if not verification_result.passed:
                     # Verification failed - mark task as failed and mark for re-planning
                     next_task.status = TaskStatus.FAILED
-                    next_task.error = verification_result.message
+                    next_task.error = _format_verification_feedback(verification_result)
                     execution_success = False
                     print(f"  [!] Verification failed, marking for re-planning")
 
@@ -1543,6 +1586,9 @@ class Orchestrator:
                 log_entry += f" | Reason: {next_task.error}"
             if verification_result and not verification_result.passed:
                 log_entry += f" | Verification: {verification_result.message}"
+
+            completed_tasks_log.append(log_entry)
+            self.context.work_history = completed_tasks_log  # Sync to context for logging/visibility
 
             # Add a summary of the tool output to the log
             if hasattr(next_task, 'tool_events') and next_task.tool_events:

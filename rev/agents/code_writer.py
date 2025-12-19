@@ -120,11 +120,13 @@ CRITICAL RULES FOR CODE EXTRACTION:
     - Proper error handling and validation
     - Docstrings explaining non-obvious logic
 
-IMPORT STRATEGY (IMPORTANT):
-- When updating imports after a refactor/split into a package (a directory with `__init__.py`), prefer importing from the
-  package exports (the `__init__.py`) instead of importing from each individual module file.
-- Do NOT replace `from pkg import *` with dozens of explicit imports. Only import the names actually used in the file,
-  or import from the package namespace if it already re-exports them.
+IMPORT STRATEGY (CRITICAL):
+- If you have just split a module into a package (a directory with `__init__.py` exporting symbols), STOP and THINK.
+- Existing imports like `import package` or `from package import Symbol` are often STILL VALID because the `__init__.py` exports them.
+- Do NOT replace a single valid import with dozens of individual module imports (e.g., `from package.module1 import ...`, `from package.module2 import ...`). This causes massive churn and linter errors.
+- ONLY update an import if it is actually broken (e.g., `ModuleNotFoundError`).
+- Prefer package-level imports: `from package import Symbol` is better than `from package.module import Symbol`.
+- Never use `from module import *` in new code.
 
 AST-AWARE EDITS (IMPORTANT):
 - For Python import path migrations, prefer `rewrite_python_imports` over brittle string replacement.

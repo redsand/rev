@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Dict, Any, TYPE_CHECKING
 
@@ -660,9 +661,11 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
 
     try:
         # Check if it's an MCP tool (special handling for lazy imports)
+        start_time = time.time()
         if name.startswith("mcp_"):
             result = _handle_mcp_tool(name, args)
-            debug_logger.log_tool_execution(name, args, result)
+            duration = (time.time() - start_time) * 1000
+            debug_logger.log_tool_execution(name, args, result, duration_ms=duration)
             return result
 
         # O(1) dictionary lookup
@@ -682,7 +685,8 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
                         f"{name}({', '.join(f'{k}={v!r}' for k, v in list(args.items())[:2])})",
                         args
                     )
-                    debug_logger.log_tool_execution(name, args, result)
+                    duration = (time.time() - start_time) * 1000
+                    debug_logger.log_tool_execution(name, args, result, duration_ms=duration)
                     return result
                 except Exception as e:
                     # Timeout or max retries exceeded
@@ -692,7 +696,8 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
 
         # Execute the tool handler without timeout protection
         result = handler(args)
-        debug_logger.log_tool_execution(name, args, result)
+        duration = (time.time() - start_time) * 1000
+        debug_logger.log_tool_execution(name, args, result, duration_ms=duration)
         return result
 
     except Exception as e:

@@ -110,6 +110,7 @@ class RevContext:
         self.context_sufficiency: Optional[Any] = None # ContextSufficiency from context_guard phase
         self.clarification_history: List[Dict[str, Any]] = [] # History of user clarifications
         self.purified_context: Optional[Any] = None # FilteredContext from context_guard phase
+        self.work_history: List[str] = [] # History of completed/failed tasks for context and loop detection
 
     def update_plan(self, new_plan: ExecutionPlan):
         """Update the current execution plan."""
