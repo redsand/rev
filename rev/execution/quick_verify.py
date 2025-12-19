@@ -60,7 +60,11 @@ def _extract_tool_noop(tool: str, raw_result: Any) -> Optional[str]:
     except Exception:
         return None
     if isinstance(payload, dict) and payload.get("replaced") == 0:
-        return "tool_noop: replace_in_file made no changes (replaced=0)"
+        return (
+            "tool_noop: replace_in_file made no changes (replaced=0). "
+            "RECOVERY: Ensure you're not escaping content incorrectly and check whitespace, indentation, and context. "
+            "Use read_file tool to verify the actual file content before retrying."
+        )
     return None
 
 
@@ -931,11 +935,18 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
         )
 
     # Optional lint/type checks if allowed
+    # Run only on modified paths to avoid pre-existing errors in unrelated files
     optional_checks = []
     if "ruff" in config.ALLOW_CMDS:
-        optional_checks.append(("ruff", "ruff check ."))
+        py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]
+        if py_paths:
+            ruff_targets = " ".join(_quote_path(p) for p in py_paths[:10])  # Limit to 10 files
+            optional_checks.append(("ruff", f"ruff check {ruff_targets}"))
     if "mypy" in config.ALLOW_CMDS:
-        optional_checks.append(("mypy", "mypy ."))
+        py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]
+        if py_paths:
+            mypy_targets = " ".join(_quote_path(p) for p in py_paths[:10])
+            optional_checks.append(("mypy", f"mypy {mypy_targets}"))
     for label, cmd in optional_checks:
         res = _run_validation_command(cmd, timeout=config.VALIDATION_TIMEOUT_SECONDS)
         strict_details[label] = res
@@ -966,17 +977,26 @@ def _run_validation_steps(validation_steps: list[str], details: Dict[str, Any], 
         seen_cmds.add(cmd)
         commands.append((label, cmd, tool))
 
+    # Get Python file paths for targeted linting
+    py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]
+
     for step in validation_steps:
         text = step.lower()
         if "syntax" in text or "compile" in text:
             cmd = "python -m compileall " + " ".join(_quote_path(p) for p in paths)
             _add("compileall", cmd)
         if "lint" in text or "linter" in text:
-            _add("ruff", "ruff check .")
+            # Run ruff only on modified files to avoid pre-existing errors
+            if py_paths:
+                ruff_targets = " ".join(_quote_path(p) for p in py_paths[:10])
+                _add("ruff", f"ruff check {ruff_targets}")
         if "test" in text:
             _add("pytest", "pytest -q", "run_tests")
         if "mypy" in text or "type" in text:
-            _add("mypy", "mypy .")
+            # Run mypy only on modified files to avoid pre-existing errors
+            if py_paths:
+                mypy_targets = " ".join(_quote_path(p) for p in py_paths[:10])
+                _add("mypy", f"mypy {mypy_targets}")
 
     if not commands:
         return None

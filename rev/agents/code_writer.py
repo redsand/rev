@@ -13,6 +13,71 @@ from pathlib import Path
 from rev.core.tool_call_recovery import recover_tool_call_from_text
 from rev.agents.context_provider import build_context_and_tools
 from rev.agents.subagent_io import build_subagent_output
+from rev.tools.registry import execute_tool as execute_registry_tool
+
+
+def _extract_target_files_from_description(description: str) -> list[str]:
+    """Extract file paths mentioned in a task description.
+
+    Returns a list of potential file paths found in the description.
+    """
+    if not description:
+        return []
+
+    paths = []
+
+    # Match backticked paths like `lib/analysts/__init__.py`
+    backtick_pattern = r'`([^`]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini))`'
+    for match in re.finditer(backtick_pattern, description, re.IGNORECASE):
+        paths.append(match.group(1))
+
+    # Match quoted paths like "lib/analysts/__init__.py"
+    quote_pattern = r'"([^"]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini))"'
+    for match in re.finditer(quote_pattern, description, re.IGNORECASE):
+        if match.group(1) not in paths:
+            paths.append(match.group(1))
+
+    # Match bare paths like lib/analysts/__init__.py
+    bare_pattern = r'\b([\w./\\-]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini))\b'
+    for match in re.finditer(bare_pattern, description, re.IGNORECASE):
+        candidate = match.group(1)
+        # Filter out common false positives
+        if candidate not in paths and not candidate.startswith('.') and '/' in candidate or '\\' in candidate:
+            paths.append(candidate)
+
+    return paths
+
+
+def _read_file_content_for_edit(file_path: str, max_lines: int = 500) -> str | None:
+    """Read file content to include in edit context.
+
+    Returns the file content or None if the file cannot be read.
+    """
+    try:
+        result = execute_registry_tool("read_file", {"path": file_path})
+        if isinstance(result, str):
+            # Check for error in result
+            try:
+                result_json = json.loads(result)
+                if isinstance(result_json, dict) and "error" in result_json:
+                    return None
+                # Return the content from the read_file result
+                if isinstance(result_json, dict) and "content" in result_json:
+                    content = result_json["content"]
+                    # Limit to max_lines
+                    lines = content.split('\n')
+                    if len(lines) > max_lines:
+                        return '\n'.join(lines[:max_lines]) + f"\n... (truncated, {len(lines) - max_lines} more lines)"
+                    return content
+            except json.JSONDecodeError:
+                # Result is plain text content
+                lines = result.split('\n')
+                if len(lines) > max_lines:
+                    return '\n'.join(lines[:max_lines]) + f"\n... (truncated, {len(lines) - max_lines} more lines)"
+                return result
+    except Exception:
+        pass
+    return None
 
 CODE_WRITER_SYSTEM_PROMPT = """You are a specialized Code Writer agent. Your sole purpose is to execute a single coding task by calling the ONLY available tool for this specific task.
 
@@ -203,7 +268,11 @@ class CodeWriterAgent(BaseAgent):
         if tool == "replace_in_file":
             replaced = payload.get("replaced")
             if isinstance(replaced, int) and replaced == 0:
-                return True, "replace_in_file made no changes (replaced=0); likely `find` did not match the file"
+                return True, (
+                    "replace_in_file made no changes (replaced=0); likely `find` did not match the file. "
+                    "RECOVERY: Ensure you're not escaping content incorrectly and check whitespace, indentation, and context. "
+                    "Use read_file tool to verify the actual file content before retrying."
+                )
         if tool == "rewrite_python_imports":
             changed = payload.get("changed")
             if isinstance(changed, int) and changed == 0:
@@ -499,9 +568,25 @@ class CodeWriterAgent(BaseAgent):
 - Do NOT use "pass" statements or TODO comments in new code
 - Document any assumptions or changes from original implementation"""
 
+        # For edit/refactor tasks, read target files and include their content
+        # This ensures the LLM has the exact file content for replace_in_file
+        file_content_section = ""
+        if task.action_type in ("edit", "refactor"):
+            target_files = _extract_target_files_from_description(task.description)
+            if target_files:
+                file_contents = []
+                for file_path in target_files[:3]:  # Limit to 3 files to avoid context overflow
+                    content = _read_file_content_for_edit(file_path)
+                    if content:
+                        file_contents.append(f"=== ACTUAL FILE CONTENT: {file_path} ===\n{content}\n=== END OF {file_path} ===")
+                        print(f"  -> Including actual content of {file_path} for edit context")
+                if file_contents:
+                    file_content_section = "\n\nIMPORTANT - ACTUAL FILE CONTENT TO EDIT:\n" + "\n\n".join(file_contents)
+                    file_content_section += "\n\nCRITICAL: When using replace_in_file, the 'find' parameter MUST be an EXACT substring from the ACTUAL FILE CONTENT above. Do NOT guess or fabricate the content."
+
         messages = [
             {"role": "system", "content": CODE_WRITER_SYSTEM_PROMPT},
-            {"role": "user", "content": f"{task_guidance}\n\nSelected Context:\n{rendered_context}"}
+            {"role": "user", "content": f"{task_guidance}\n\nSelected Context:\n{rendered_context}{file_content_section}"}
         ]
 
         try:
