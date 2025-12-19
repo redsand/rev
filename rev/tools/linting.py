@@ -8,7 +8,7 @@ import shlex
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
-from rev.config import ROOT
+from rev import config
 from rev.tools.utils import _run_shell, _safe_path
 from rev.tools.analysis import analyze_static_types
 
@@ -167,9 +167,9 @@ def run_linters(paths: Optional[List[str]] = None) -> str:
         if not resolved_paths:
             return json.dumps({"error": "No valid paths to lint", "missing_paths": missing})
 
-        python_found = _has_files(resolved_paths, [".py"]) or (ROOT / "pyproject.toml").exists()
-        js_ts_found = _has_files(resolved_paths, [".js", ".ts", ".jsx", ".tsx"]) or (ROOT / "package.json").exists()
-        go_found = _has_files(resolved_paths, [".go"]) or (ROOT / "go.mod").exists()
+        python_found = _has_files(resolved_paths, [".py"]) or (config.ROOT / "pyproject.toml").exists()
+        js_ts_found = _has_files(resolved_paths, [".js", ".ts", ".jsx", ".tsx"]) or (config.ROOT / "package.json").exists()
+        go_found = _has_files(resolved_paths, [".go"]) or (config.ROOT / "go.mod").exists()
 
         issues: List[Dict[str, Any]] = []
         summary_tools: Dict[str, Dict[str, Any]] = {}
@@ -244,7 +244,7 @@ def run_type_checks(paths: Optional[List[str]] = None) -> str:
 
         # Python: mypy (only if config present)
         mypy_configs = ["mypy.ini", "pyproject.toml", "setup.cfg"]
-        has_mypy_config = any((ROOT / cfg).exists() for cfg in mypy_configs)
+        has_mypy_config = any((config.ROOT / cfg).exists() for cfg in mypy_configs)
         if has_mypy_config:
             mypy_result = analyze_static_types(paths=[str(p) for p in resolved_paths], config_file="mypy.ini", strict=False)
             try:
@@ -259,7 +259,7 @@ def run_type_checks(paths: Optional[List[str]] = None) -> str:
             summary["missing_tools"].append("mypy (no config)")
 
         # Python: pyright
-        pyright_config = (ROOT / "pyrightconfig.json")
+        pyright_config = (config.ROOT / "pyrightconfig.json")
         if pyright_config.exists():
             rc, pyright_issues, status = _run_and_parse(f"pyright {joined_paths}", _parse_pyright, timeout=400)
             if status == "not_installed":
@@ -270,7 +270,7 @@ def run_type_checks(paths: Optional[List[str]] = None) -> str:
                 summary["tools_run"].append({"tool": "pyright", "issues": len(pyright_issues), "returncode": rc})
 
         # TypeScript: tsc --noEmit
-        tsconfig = ROOT / "tsconfig.json"
+        tsconfig = config.ROOT / "tsconfig.json"
         if tsconfig.exists():
             rc, tsc_issues, status = _run_and_parse(f"tsc --noEmit", _parse_tsc, timeout=400)
             if status == "not_installed":

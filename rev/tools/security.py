@@ -7,7 +7,7 @@ import shlex
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
-from rev.config import ROOT
+from rev import config
 from rev.tools.utils import _run_shell, _safe_path
 
 
@@ -42,7 +42,7 @@ def scan_security_issues(
 
         def _rel_path(path_str: str) -> str:
             try:
-                return str(Path(path_str).resolve().relative_to(ROOT))
+                return Path(path_str).resolve().relative_to(config.ROOT).as_posix()
             except Exception:
                 return path_str
 
@@ -137,7 +137,7 @@ def scan_security_issues(
             by_severity[sev] = by_severity.get(sev, 0) + 1
 
         summary = {
-            "paths": [str(p.relative_to(ROOT)) for p in resolved_paths],
+            "paths": [p.relative_to(config.ROOT).as_posix() for p in resolved_paths],
             "tools_used": tools_used,
             "severity_threshold": severity_threshold.upper(),
             "issue_count": len(issues),
@@ -188,7 +188,7 @@ def detect_secrets(path: str = ".") -> str:
                 by_file[file_path] = len(secrets)
 
             return json.dumps({
-                "scanned": str(scan_path.relative_to(ROOT)),
+                "scanned": scan_path.relative_to(config.ROOT).as_posix(),
                 "tool": "detect-secrets",
                 "secrets_found": total_secrets,
                 "files_with_secrets": len(results),
@@ -196,7 +196,7 @@ def detect_secrets(path: str = ".") -> str:
             })
         except Exception:
             return json.dumps({
-                "scanned": str(scan_path.relative_to(ROOT)),
+                "scanned": scan_path.relative_to(config.ROOT).as_posix(),
                 "message": "No secrets detected or scan completed successfully"
             })
 
@@ -220,7 +220,7 @@ def check_license_compliance(path: str = ".") -> str:
 
     try:
         for lang, config in lang_config.items():
-            if (ROOT / config["file"]).exists():
+            if (config.ROOT / config["file"]).exists():
                 proc = _run_shell(config["command"], timeout=60)
                 if proc.returncode != 127:
                     continue

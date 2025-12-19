@@ -9,19 +9,61 @@ import os
 import tempfile
 from pathlib import Path
 import uuid
+import shutil
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_TEST_TMP_BASE = _REPO_ROOT / "tmp_test" / "temp"
+
+def _choose_temp_base() -> Path:
+    """Pick a temp base directory that is reliably writable/listable on Windows."""
+    candidates = [
+        Path(tempfile.gettempdir()) / "rev_tmp_test",
+        _REPO_ROOT / "tmp_test",
+    ]
+    for base in candidates:
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            probe = base / f"probe_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+            probe.mkdir(parents=True, exist_ok=True)
+            # Ensure we can list and remove it (some environments create dirs with restrictive ACLs).
+            list(probe.iterdir())
+            shutil.rmtree(probe, ignore_errors=True)
+            return base
+        except Exception:
+            continue
+    # Last resort: system temp root
+    return Path(tempfile.gettempdir())
+
+
+_BASE_TMP = _choose_temp_base()
+_TEST_TMP_BASE = _BASE_TMP / "temp"
 _TEST_TMP_BASE.mkdir(parents=True, exist_ok=True)
+
 # Avoid colliding with prior runs that may leave behind locked/ACL-protected dirs.
 _TEST_TMP = _TEST_TMP_BASE / f"run_{os.getpid()}_{uuid.uuid4().hex[:8]}"
 _TEST_TMP.mkdir(parents=True, exist_ok=True)
 
-os.environ.setdefault("TMP", str(_TEST_TMP))
-os.environ.setdefault("TEMP", str(_TEST_TMP))
-os.environ.setdefault("TMPDIR", str(_TEST_TMP))
-tempfile.tempdir = str(_TEST_TMP)
+def _temp_root_is_usable(root: Path) -> bool:
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        probe = root / f"probe_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+        probe.mkdir(parents=True, exist_ok=True)
+        list(probe.iterdir())
+        shutil.rmtree(probe, ignore_errors=True)
+        return True
+    except Exception:
+        return False
+
+
+# Only override TEMP/TMP when the environment temp root is unusable.
+# Some Windows security setups can create temp subdirectories that become
+# unreadable (WinError 5) under custom temp roots, which breaks pytest's tmp_path.
+_SYS_TEMP = Path(tempfile.gettempdir())
+if not _temp_root_is_usable(_SYS_TEMP):
+    os.environ.setdefault("TMP", str(_TEST_TMP))
+    os.environ.setdefault("TEMP", str(_TEST_TMP))
+    os.environ.setdefault("TMPDIR", str(_TEST_TMP))
+    tempfile.tempdir = str(_TEST_TMP)
 
 # ---------------------------------------------------------------------------
 # Pytest cleanup robustness (Windows restricted environments)
@@ -60,15 +102,13 @@ except Exception:
 
 
 def pytest_configure(config):  # pragma: no cover
-    """Force a unique basetemp per run.
+    """Optionally customize pytest basetemp.
 
-    Some Windows environments can end up with temp dirs that become undeletable
-    (WinError 5). Using a unique basetemp per run avoids pytest trying to clean
-    up/reuse a previously-problematic directory.
+    Historically this repo forced a per-run `basetemp` to avoid teardown issues
+    on Windows (WinError 5). In some environments, however, creating or using a
+    custom basetemp can itself trigger restrictive ACL behavior.
+
+    Defaulting to pytest's own temp root has proven more reliable across a wider
+    set of restricted Windows setups.
     """
-    try:
-        base = _REPO_ROOT / "tmp_test" / "basetemp_runs" / f"run_{os.getpid()}_{uuid.uuid4().hex[:8]}"
-        base.mkdir(parents=True, exist_ok=True)
-        config.option.basetemp = str(base)
-    except Exception:
-        return
+    return

@@ -307,6 +307,20 @@ def _order_available_actions(actions: List[str]) -> List[str]:
     return sorted(cleaned, key=_key)
 
 
+def _is_goal_achieved_response(response: Optional[str]) -> bool:
+    """Detect when the planner says the goal is already achieved."""
+    if not response:
+        return False
+    normalized = re.sub(r"[\[\]_\s]+", " ", response).strip().lower()
+    if not normalized:
+        return False
+    if normalized == "goal":
+        return True
+    if normalized.startswith("goal "):
+        return "achieved" in normalized or "complete" in normalized or "done" in normalized
+    return normalized == "goal achieved"
+
+
 def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bool, List[str]]:
     """Best-effort path correction for lightweight planner outputs.
 
@@ -846,6 +860,8 @@ class Orchestrator:
             return None
 
         response_content = response_data.get("message", {}).get("content", "")
+        if _is_goal_achieved_response(response_content):
+            return None
         if not response_content or response_content.strip().upper() == "GOAL_ACHIEVED":
             return None
         
@@ -917,6 +933,15 @@ class Orchestrator:
             if not ok:
                 self.context.add_error("Preflight failed: " + "; ".join(sem_msgs))
                 completed_tasks_log.append(f"[FAILED] Preflight: {'; '.join(sem_msgs)}")
+                if any("conflicts with write intent" in msg for msg in sem_msgs):
+                    self.context.add_agent_request(
+                        "REPLAN_REQUEST",
+                        {
+                            "agent": "Orchestrator",
+                            "reason": "preflight read/write mismatch",
+                            "detailed_reason": sem_msgs[0],
+                        },
+                    )
                 sig = f"action_semantics::{(next_task.action_type or '').strip().lower()}::{';'.join(sem_msgs).strip().lower()}"
                 failure_counts[sig] += 1
                 if failure_counts[sig] >= 3:

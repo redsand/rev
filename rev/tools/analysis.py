@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
 
-from rev.config import ROOT
+from rev import config
 from rev.tools.utils import _run_shell, _safe_path
 from rev.cache import get_ast_cache
 
@@ -91,7 +91,7 @@ def analyze_ast_patterns(path: str, patterns: Optional[List[str]] = None) -> str
                 cached_result = ast_cache.get_file_analysis(py_file, all_patterns)
                 if cached_result is not None:
                     # Cache hit! Skip expensive AST parsing
-                    rel_path = str(py_file.relative_to(ROOT))
+                    rel_path = py_file.relative_to(config.ROOT).as_posix()
                     results["files"][rel_path] = cached_result
                     cache_hits += 1
                     continue
@@ -190,7 +190,7 @@ def analyze_ast_patterns(path: str, patterns: Optional[List[str]] = None) -> str
                         file_issues["global_variables"] = globals_found
 
                 if file_issues:
-                    rel_path = str(py_file.relative_to(ROOT))
+                    rel_path = py_file.relative_to(config.ROOT).as_posix()
                     results["files"][rel_path] = file_issues
 
                     # CACHE THE RESULT for future calls
@@ -198,7 +198,7 @@ def analyze_ast_patterns(path: str, patterns: Optional[List[str]] = None) -> str
                         ast_cache.set_file_analysis(py_file, all_patterns, file_issues)
 
             except Exception as e:
-                rel_path = str(py_file.relative_to(ROOT))
+                rel_path = py_file.relative_to(config.ROOT).as_posix()
                 results["files"][rel_path] = {
                     "error": f"Failed to parse: {type(e).__name__}"
                 }
@@ -298,7 +298,7 @@ def run_pylint(path: str = ".", config: Optional[str] = None) -> str:
 
             return json.dumps({
                 "tool": "pylint",
-                "scanned": str(scan_path.relative_to(ROOT)),
+                "scanned": scan_path.relative_to(config.ROOT).as_posix(),
                 "total_issues": len(issues),
                 "by_type": {k: len(v) for k, v in by_type.items()},
                 "issues": issues,
@@ -309,7 +309,7 @@ def run_pylint(path: str = ".", config: Optional[str] = None) -> str:
         except json.JSONDecodeError:
             return json.dumps({
                 "tool": "pylint",
-                "scanned": str(scan_path.relative_to(ROOT)),
+                "scanned": scan_path.relative_to(config.ROOT).as_posix(),
                 "message": "Analysis completed",
                 "output": proc.stdout[:500] if proc.stdout else ""
             })
@@ -406,7 +406,7 @@ def analyze_static_types(
             try:
                 cfg_path = _safe_path(config_file)
                 if cfg_path.exists():
-                    config_used = str(cfg_path.relative_to(ROOT))
+                    config_used = cfg_path.relative_to(config.ROOT).as_posix()
                     cmd_parts.append(f"--config-file={shlex.quote(str(cfg_path))}")
             except Exception:
                 pass
@@ -428,7 +428,7 @@ def analyze_static_types(
             by_severity[severity] = by_severity.get(severity, 0) + 1
 
         summary = {
-            "paths": [str(p.relative_to(ROOT)) for p in resolved_paths],
+            "paths": [p.relative_to(config.ROOT).as_posix() for p in resolved_paths],
             "config_used": config_used,
             "strict": strict,
             "issue_count": len(issues),
@@ -467,7 +467,7 @@ def _parse_mypy_issues(output: str) -> List[Dict[str, Any]]:
             message = message[:code_match.start()].rstrip()
 
         try:
-            rel_file = str(Path(file_path).resolve().relative_to(ROOT))
+            rel_file = Path(file_path).resolve().relative_to(config.ROOT).as_posix()
         except Exception:
             rel_file = file_path
 
@@ -579,7 +579,7 @@ def run_radon_complexity(path: str = ".", min_rank: str = "C") -> str:
 
         return json.dumps({
             "tool": "radon",
-            "scanned": str(scan_path.relative_to(ROOT)),
+            "scanned": scan_path.relative_to(config.ROOT).as_posix(),
             "results": results
         }, indent=2)
 
@@ -673,7 +673,7 @@ def find_dead_code(path: str = ".") -> str:
 
         return json.dumps({
             "tool": "vulture",
-            "scanned": str(scan_path.relative_to(ROOT)),
+            "scanned": scan_path.relative_to(config.ROOT).as_posix(),
             "total_findings": len(findings),
             "by_type": {k: len(v) for k, v in by_type.items() if v},
             "findings": findings,
@@ -777,7 +777,7 @@ def analyze_code_structures(path: str = ".") -> str:
             try:
                 with open(file, 'r', encoding='utf-8') as f:
                     content = f.read()
-                rel_path = str(file.relative_to(ROOT))
+                rel_path = file.relative_to(config.ROOT).as_posix()
 
                 # Parse Prisma enums
                 for match in re.finditer(r'enum\s+(\w+)\s*\{([^}]+)\}', content):
@@ -808,7 +808,7 @@ def analyze_code_structures(path: str = ".") -> str:
             try:
                 with open(file, 'r', encoding='utf-8') as f:
                     content = f.read()
-                rel_path = str(file.relative_to(ROOT))
+                rel_path = file.relative_to(config.ROOT).as_posix()
 
                 # Parse TS enums
                 for match in re.finditer(r'enum\s+(\w+)\s*\{', content):
@@ -856,7 +856,7 @@ def analyze_code_structures(path: str = ".") -> str:
             try:
                 with open(file, 'r', encoding='utf-8') as f:
                     content = f.read()
-                rel_path = str(file.relative_to(ROOT))
+                rel_path = file.relative_to(config.ROOT).as_posix()
 
                 # Parse Python classes
                 for match in re.finditer(r'class\s+(\w+)', content):
@@ -886,7 +886,7 @@ def analyze_code_structures(path: str = ".") -> str:
             try:
                 with open(file, 'r', encoding='utf-8') as f:
                     content = f.read()
-                rel_path = str(file.relative_to(ROOT))
+                rel_path = file.relative_to(config.ROOT).as_posix()
 
                 # Parse C/C++ structs
                 for match in re.finditer(r'struct\s+(\w+)', content):
@@ -934,7 +934,7 @@ def analyze_code_structures(path: str = ".") -> str:
             try:
                 with open(file, 'r', encoding='utf-8') as f:
                     content = f.read()
-                rel_path = str(file.relative_to(ROOT))
+                rel_path = file.relative_to(config.ROOT).as_posix()
 
                 # Parse SQL tables
                 for match in re.finditer(r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)', content, re.IGNORECASE):
@@ -962,7 +962,7 @@ def analyze_code_structures(path: str = ".") -> str:
         # Process config files
         for file in structure_files['config']:
             try:
-                rel_path = str(file.relative_to(ROOT))
+                rel_path = file.relative_to(config.ROOT).as_posix()
                 results["configs"].append({
                     "name": file.name,
                     "file": rel_path,
@@ -977,7 +977,7 @@ def analyze_code_structures(path: str = ".") -> str:
         # Process documentation files
         for file in structure_files['docs']:
             try:
-                rel_path = str(file.relative_to(ROOT))
+                rel_path = file.relative_to(config.ROOT).as_posix()
                 results["docs"].append({
                     "name": file.name,
                     "file": rel_path,
@@ -1046,7 +1046,7 @@ def check_structural_consistency(path: str = ".", entity: Optional[str] = None) 
         inconsistencies = _compare_entity_layers(entities, entity_filter)
 
         summary = {
-            "scanned": str(scan_path.relative_to(ROOT)),
+            "scanned": scan_path.relative_to(config.ROOT).as_posix(),
             "entities_found": len(entities),
             "entities_compared": len([n for n, layers in entities.items() if len(layers) > 1]),
             "issues_found": len(inconsistencies),
@@ -1087,7 +1087,7 @@ def _add_entity_entry(
     values: Optional[List[str]] = None,
 ) -> None:
     """Add a parsed entity to the collection."""
-    rel_path = str(file_path.relative_to(ROOT))
+    rel_path = file_path.relative_to(config.ROOT).as_posix()
     entry = {
         "kind": kind,
         "file": rel_path,
@@ -1385,7 +1385,7 @@ def run_all_analysis(path: str = ".") -> str:
             return json.dumps({"error": f"Path not found: {path}"})
 
         results = {
-            "scanned": str(scan_path.relative_to(ROOT)),
+            "scanned": scan_path.relative_to(config.ROOT).as_posix(),
             "tools_run": []
         }
 

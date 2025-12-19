@@ -7,7 +7,7 @@ from rev.versioning import get_version
 __version__ = get_version()
 
 # Configuration
-from rev.config import ROOT
+import rev.config as _config
 from rev.workspace import get_workspace, Workspace
 
 # Core models
@@ -131,6 +131,14 @@ from rev.mcp import (
 
 # Internal functions (for testing)
 from rev.tools.file_ops import _safe_path
+
+
+def __getattr__(name: str):
+    # Keep `rev.ROOT` consistent with the Workspace singleton even if the workspace root
+    # is changed after import-time (common in tests).
+    if name == "ROOT":
+        return _config.ROOT
+    raise AttributeError(f"module 'rev' has no attribute {name!r}")
 
 __all__ = [
     # Version

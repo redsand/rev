@@ -5,7 +5,7 @@
 import json
 from typing import Dict, Any, Optional, List
 
-from rev.config import ROOT
+from rev import config
 from rev.tools.utils import _run_shell
 try:
     from packaging.version import Version, InvalidVersion
@@ -54,7 +54,9 @@ def analyze_dependencies(language: str = "auto") -> str:
     try:
         if language == "auto":
             for lang, config in lang_config.items():
-                if (ROOT / config["file"]).exists() or (config.get("alt_file") and (ROOT / config["alt_file"]).exists()):
+                if (config.ROOT / config["file"]).exists() or (
+                    config.get("alt_file") and (config.ROOT / config["alt_file"]).exists()
+                ):
                     language = lang
                     break
         
@@ -76,7 +78,7 @@ def analyze_dependencies(language: str = "auto") -> str:
 
         if language == "python":
             # Check requirements.txt
-            req_file = ROOT / lang_config["python"]["file"]
+            req_file = config.ROOT / lang_config["python"]["file"]
             if req_file.exists():
                 content = req_file.read_text(encoding='utf-8')
                 deps = [line.strip() for line in content.split('\n') if line.strip() and not line.startswith('#')]
@@ -94,14 +96,14 @@ def analyze_dependencies(language: str = "auto") -> str:
                     })
 
             # Check for virtual environment
-            if not (ROOT / "venv").exists() and not (ROOT / ".venv").exists():
+            if not (config.ROOT / "venv").exists() and not (config.ROOT / ".venv").exists():
                 result["issues"].append({
                     "type": "no_virtual_environment",
                     "message": "No virtual environment detected"
                 })
 
         elif language == "javascript":
-            pkg_file = ROOT / lang_config["javascript"]["file"]
+            pkg_file = config.ROOT / lang_config["javascript"]["file"]
             if pkg_file.exists():
                 pkg_data = json.loads(pkg_file.read_text(encoding='utf-8'))
                 deps = pkg_data.get("dependencies", {})
@@ -149,7 +151,9 @@ def check_dependency_updates(language: str = "auto") -> str:
     try:
         if language == "auto":
             for lang, config in lang_config.items():
-                if (ROOT / config["file"]).exists() or (config.get("alt_file") and (ROOT / config["alt_file"]).exists()):
+                if (config.ROOT / config["file"]).exists() or (
+                    config.get("alt_file") and (config.ROOT / config["alt_file"]).exists()
+                ):
                     language = lang
                     break
 
@@ -201,7 +205,9 @@ def check_dependency_vulnerabilities(language: str = "auto") -> str:
     try:
         if language == "auto":
             for lang, config in lang_config.items():
-                if (ROOT / config["file"]).exists() or (config.get("alt_file") and (ROOT / config["alt_file"]).exists()):
+                if (config.ROOT / config["file"]).exists() or (
+                    config.get("alt_file") and (config.ROOT / config["alt_file"]).exists()
+                ):
                     language = lang
                     break
 
@@ -209,7 +215,7 @@ def check_dependency_vulnerabilities(language: str = "auto") -> str:
             return json.dumps({"error": f"Language '{language}' not supported"})
 
         cmd = lang_config[language]["command"]
-        if language == "python" and (ROOT / "requirements.txt").exists():
+        if language == "python" and (config.ROOT / "requirements.txt").exists():
             cmd = "pip-audit -r requirements.txt -f json"
 
         proc = _run_shell(cmd, timeout=180)

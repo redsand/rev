@@ -367,6 +367,7 @@ def _build_tool_dispatch() -> Dict[str, callable]:
             args["source_path"],
             args.get("target_directory"),
             args.get("overwrite", False),
+            args.get("delete_source", True),
         ),
         "run_property_tests": lambda args: run_property_tests(args.get("test_paths"), args.get("max_examples", 200)),
         "generate_property_tests": lambda args: generate_property_tests(args.get("targets", []), args.get("max_examples", 200)),
@@ -578,6 +579,15 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
     # Compatibility shim: normalize common alternate argument names that some models emit
     # (e.g. "file_path" vs the canonical "path") so tools don't KeyError.
     if isinstance(args, dict):
+        # Some models mistakenly wrap tool args one level deep (e.g. {"arguments": {...}}).
+        # Unwrap safely to avoid tools defaulting to empty args and doing the wrong thing.
+        while (
+            isinstance(args, dict)
+            and len(args) == 1
+            and isinstance(args.get("arguments"), dict)
+        ):
+            args = args["arguments"]
+
         tool = (name or "").lower()
         normalized_args = dict(args)
 
@@ -594,6 +604,13 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
                         normalized_args["content"] = normalized_args[alt]
                         break
 
+        if tool == "list_dir":
+            if "pattern" not in normalized_args:
+                for alt in ("path", "dir", "directory", "folder", "glob"):
+                    if isinstance(normalized_args.get(alt), str):
+                        normalized_args["pattern"] = normalized_args[alt]
+                        break
+
         if tool == "replace_in_file":
             if "path" not in normalized_args and isinstance(normalized_args.get("file_path"), str):
                 normalized_args["path"] = normalized_args["file_path"]
@@ -608,6 +625,15 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
                     if isinstance(normalized_args.get(alt), str):
                         normalized_args["path"] = normalized_args[alt]
                         break
+
+        if tool == "split_python_module_classes":
+            if "source_path" not in normalized_args and isinstance(normalized_args.get("module_path"), str):
+                normalized_args["source_path"] = normalized_args["module_path"]
+            if "target_directory" not in normalized_args and isinstance(normalized_args.get("output_dir"), str):
+                normalized_args["target_directory"] = normalized_args["output_dir"]
+            if "delete_source" not in normalized_args:
+                # Default to True to align with "convert module to package" semantics.
+                normalized_args["delete_source"] = True
 
         args = normalized_args
 
@@ -1958,13 +1984,14 @@ def get_available_tools() -> list:
             "type": "function",
             "function": {
                 "name": "split_python_module_classes",
-                "description": "Split top-level classes from a module into individual files inside a package directory and regenerate __init__.py exports.",
+                "description": "Split top-level classes from a module into individual files inside a package directory and regenerate __init__.py exports. Note: some models use aliases `module_path` for `source_path` and `output_dir` for `target_directory` (both are accepted).",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "source_path": {"type": "string", "description": "Path to the module to split (e.g., src/module.py)"},
                         "target_directory": {"type": "string", "description": "Directory/package for extracted classes", "default": None},
-                        "overwrite": {"type": "boolean", "description": "Overwrite files if they already exist", "default": False}
+                        "overwrite": {"type": "boolean", "description": "Overwrite files if they already exist", "default": False},
+                        "delete_source": {"type": "boolean", "description": "Move the original source module aside (.bak) so the package becomes the import target", "default": True}
                     },
                     "required": ["source_path"]
                 }

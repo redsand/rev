@@ -316,6 +316,12 @@ def write_file(path: str, content: str) -> str:
 
 def list_dir(pattern: str = "**/*") -> str:
     """List files matching pattern."""
+    # If a model passes a directory path (no glob), treat it as recursive listing.
+    if isinstance(pattern, str):
+        p = pattern.strip().strip('"').strip("'")
+        if p and not re.search(r"[*?\[\]]", p):
+            p = p.rstrip("/\\")
+            pattern = f"{p}/**/*" if p else "**/*"
     files = _iter_files(pattern)
     rels = sorted(_rel_to_root(p).replace("\\", "/") for p in files)[:LIST_LIMIT]
     return json.dumps({"count": len(rels), "files": rels})

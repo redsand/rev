@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Set, Tuple
 from collections import defaultdict
 
-from rev.config import ROOT
+from rev import config
 from rev.tools.file_ops import _iter_files, _is_text_file
 
 
@@ -25,7 +25,7 @@ class ReuseAnalyzer:
         Args:
             root: Root directory to analyze (defaults to config.ROOT)
         """
-        self.root = root or ROOT
+        self.root = root or config.ROOT
 
     def find_duplicate_file_names(self, pattern: str = "**/*.py") -> Dict[str, List[str]]:
         """Find files with similar names that might indicate duplication.
@@ -47,7 +47,7 @@ class ReuseAnalyzer:
             normalized = re.sub(r'(utils?|helpers?|lib)', '', normalized)
 
             if normalized:
-                name_groups[normalized].append(str(file_path.relative_to(self.root)))
+                name_groups[normalized].append(file_path.relative_to(self.root).as_posix())
 
         # Filter to only groups with multiple files
         duplicates = {k: v for k, v in name_groups.items() if len(v) > 1}
@@ -82,10 +82,10 @@ class ReuseAnalyzer:
                                          ['util', 'helper', 'lib', 'common', 'shared', 'tool'])
 
                         small_files.append({
-                            "path": str(file_path.relative_to(self.root)),
+                            "path": file_path.relative_to(self.root).as_posix(),
                             "lines": line_count,
                             "is_utility": is_utility,
-                            "directory": str(file_path.parent.relative_to(self.root))
+                            "directory": file_path.parent.relative_to(self.root).as_posix()
                         })
             except Exception:
                 continue
@@ -117,7 +117,7 @@ class ReuseAnalyzer:
                     for imp in imports:
                         # Skip relative imports and standard library (simplified)
                         if not imp.startswith('.') and imp not in {'os', 'sys', 're', 'json', 'pathlib'}:
-                            import_map[imp].add(str(file_path.relative_to(self.root)))
+                            import_map[imp].add(file_path.relative_to(self.root).as_posix())
             except Exception:
                 continue
 
