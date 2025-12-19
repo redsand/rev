@@ -458,6 +458,20 @@ class CodeWriterAgent(BaseAgent):
             print(f"\nDirectory: {dir_path}")
             print(f"Action: {self._COLOR_GREEN}CREATE DIRECTORY{self._COLOR_RESET}")
 
+        elif tool_name == "move_file":
+            src = arguments.get("src", "unknown")
+            dest = arguments.get("dest", "unknown")
+            print(f"\nSource: {src}")
+            print(f"Destination: {dest}")
+            print(f"Action: {self._COLOR_GREEN}MOVE/RENAME{self._COLOR_RESET}")
+
+        elif tool_name == "copy_file":
+            src = arguments.get("src", "unknown")
+            dest = arguments.get("dest", "unknown")
+            print(f"\nSource: {src}")
+            print(f"Destination: {dest}")
+            print(f"Action: {self._COLOR_GREEN}COPY{self._COLOR_RESET}")
+
         print(f"\n{'='*70}")
 
     def _prompt_for_approval(self, tool_name: str, file_path: str, context: 'RevContext' = None) -> bool:
@@ -529,6 +543,8 @@ class CodeWriterAgent(BaseAgent):
                 'move_imported_symbols',
                 'rewrite_python_function_parameters',
                 'replace_in_file',
+                'copy_file',
+                'move_file',
             ]
         elif task.action_type == "refactor":
             # Refactoring may need to create or modify files
@@ -540,10 +556,12 @@ class CodeWriterAgent(BaseAgent):
                 'move_imported_symbols',
                 'rewrite_python_function_parameters',
                 'replace_in_file',
+                'copy_file',
+                'move_file',
             ]
         else:
             # Unknown action types get all tools (fallback)
-            tool_names = ['write_file', 'replace_in_file', 'create_directory']
+            tool_names = ['write_file', 'replace_in_file', 'create_directory', 'copy_file', 'move_file']
 
         available_tools = [tool for tool in all_tools if tool['function']['name'] in tool_names]
         rendered_context, selected_tools, _bundle = build_context_and_tools(
@@ -632,12 +650,12 @@ class CodeWriterAgent(BaseAgent):
                     if not error_type:
                         print(f"  -> CodeWriterAgent will call tool '{tool_name}'")
 
-                        # Display change preview for write, replace, and create_directory operations
-                        if tool_name in ["write_file", "replace_in_file", "create_directory"]:
+                        # Display change preview for file modifying operations
+                        if tool_name in ["write_file", "replace_in_file", "create_directory", "move_file", "copy_file"]:
                             self._display_change_preview(tool_name, arguments)
 
                             # Validate import targets before proceeding
-                            file_path = arguments.get("path", "unknown")
+                            file_path = arguments.get("path") or arguments.get("dest") or "unknown"
                             if tool_name == "write_file":
                                 content = arguments.get("content", "")
                                 is_valid, warning_msg = self._validate_import_targets(file_path, content)
@@ -716,10 +734,10 @@ class CodeWriterAgent(BaseAgent):
                         arguments = recovered.arguments
                         print(f"  -> Recovered tool call from text output: {tool_name}")
 
-                        if tool_name in ["write_file", "replace_in_file", "create_directory"]:
+                        if tool_name in ["write_file", "replace_in_file", "create_directory", "move_file", "copy_file"]:
                             self._display_change_preview(tool_name, arguments)
 
-                            file_path = arguments.get("path", "unknown")
+                            file_path = arguments.get("path") or arguments.get("dest") or "unknown"
                             if tool_name == "write_file":
                                 content = arguments.get("content", "")
                                 is_valid, warning_msg = self._validate_import_targets(file_path, content)

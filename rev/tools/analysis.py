@@ -857,28 +857,38 @@ def analyze_code_structures(path: str = ".") -> str:
                 with open(file, 'r', encoding='utf-8') as f:
                     content = f.read()
                 rel_path = file.relative_to(config.ROOT).as_posix()
+                
+                tree = ast.parse(content, filename=str(file))
+                
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.ClassDef):
+                        base_names = [getattr(b, 'id', None) for b in node.bases]
+                        is_enum = any(b and 'Enum' in b for b in base_names)
 
-                # Parse Python classes
-                for match in re.finditer(r'class\s+(\w+)', content):
-                    results["classes"].append({
-                        "name": match.group(1),
-                        "file": rel_path,
-                        "language": "python",
-                        "line": content[:match.start()].count('\n') + 1
-                    })
-
-                # Parse Python Enums
-                for match in re.finditer(r'class\s+(\w+)\(Enum\)', content):
-                    results["enums"].append({
-                        "name": match.group(1),
-                        "file": rel_path,
-                        "language": "python",
-                        "line": content[:match.start()].count('\n') + 1
-                    })
+                        # Add to enums list if it's an Enum
+                        if is_enum:
+                            # Avoid duplicating in both enums and classes
+                            if not any(e['name'] == node.name and e['file'] == rel_path for e in results["enums"]):
+                                results["enums"].append({
+                                    "name": node.name,
+                                    "file": rel_path,
+                                    "language": "python",
+                                    "line": node.lineno
+                                })
+                        
+                        # Add to classes list (including enums, as they are classes)
+                        if not any(c['name'] == node.name and c['file'] == rel_path for c in results["classes"]):
+                            results["classes"].append({
+                                "name": node.name,
+                                "file": rel_path,
+                                "language": "python",
+                                "line": node.lineno
+                            })
             except Exception as e:
+                rel_path = str(file.relative_to(config.ROOT).as_posix())
                 results.setdefault("errors", []).append({
                     "file": rel_path,
-                    "error": f"Python parse error: {e}"
+                    "error": f"Python AST parse error: {e}"
                 })
 
         # Process C/C++ files
