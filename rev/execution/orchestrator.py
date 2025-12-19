@@ -1067,6 +1067,17 @@ class Orchestrator:
                 print("Blocking issue: planner is not making forward progress; refusing to repeat the same step.")
                 print("Next step: run with `--debug` and share the last verification failure + tool args.\n")
                 return False
+            if (
+                config.LOOP_GUARD_ENABLED
+                and action_counts[action_sig] == 2
+                and (next_task.action_type or "").lower() in {"read", "analyze", "research"}
+            ):
+                print("  [loop-guard] Repeated READ/ANALYZE detected; inject a directory listing + run step.")
+                next_task.action_type = "read"
+                next_task.description = (
+                    "List lib/analysts and summarize missing exports; then run the auto-registration entrypoint "
+                    "to compare expected vs actual analysts."
+                )
 
             # Fast-path: don't dispatch a no-op create_directory if it already exists.
             if (next_task.action_type or "").lower() == "create_directory":

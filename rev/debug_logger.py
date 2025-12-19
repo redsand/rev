@@ -239,6 +239,31 @@ class DebugLogger:
 
         self.log("llm", "LLM_RESPONSE", data, "DEBUG")
 
+    def log_llm_transcript(self, *, model: str, messages: Any, response: Any, tools: Any = None):
+        """Persist full LLM request/response (no truncation) when tracing is enabled."""
+        if not getattr(config, "LLM_TRANSACTION_LOG_ENABLED", False):
+            return
+        try:
+            payload = {
+                "model": model,
+                "messages": messages,
+                "tools": tools,
+                "response": response,
+            }
+            content = json.dumps(payload, ensure_ascii=False, indent=2)
+            path_val = getattr(config, "LLM_TRANSACTION_LOG_PATH", "")
+            if not path_val:
+                return
+            path = Path(path_val)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as f:
+                f.write(f"==== LLM TRANSCRIPT {datetime.utcnow().isoformat()}Z ====\n")
+                f.write(content)
+                f.write("\n\n")
+        except Exception:
+            # Best-effort tracing; never crash caller
+            pass
+
     def log_tool_execution(self, tool_name: str, arguments: dict, result: Any = None, error: Optional[str] = None):
         """Log a tool execution.
 

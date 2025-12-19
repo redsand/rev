@@ -348,6 +348,12 @@ MAX_EXECUTION_ITERATIONS = int(os.getenv("REV_MAX_EXEC_ITER", "45"))
 MAX_TASK_ITERATIONS = int(os.getenv("REV_MAX_TASK_ITER", "45"))
 MAX_PLANNING_TOOL_ITERATIONS = int(os.getenv("REV_MAX_PLANNING_ITER", "45"))
 CONTEXT_WINDOW_HISTORY = int(os.getenv("REV_CONTEXT_WINDOW_HISTORY", "8"))
+LOOP_GUARD_ENABLED = os.getenv("REV_LOOP_GUARD_ENABLED", "true").strip().lower() != "false"
+LLM_TRANSACTION_LOG_ENABLED = os.getenv("REV_LLM_TRACE", "false").strip().lower() == "true"
+LLM_TRANSACTION_LOG_PATH = os.getenv(
+    "REV_LLM_TRACE_PATH",
+    str((REV_DIR / "logs" / "llm_transactions.log").resolve()),
+)
 
 EXCLUDE_DIRS = {
     ".git", ".hg", ".svn", ".idea", ".vscode", "__pycache__", ".pytest_cache",

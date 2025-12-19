@@ -387,6 +387,15 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         setter=lambda value: setattr(config, "CONTEXT_WINDOW_HISTORY", value),
         default=config.CONTEXT_WINDOW_HISTORY,
     ),
+    "loop_guard_enabled": RuntimeSetting(
+        key="loop_guard_enabled",
+        description="Enable loop guard that injects alternative actions after repeated identical tasks",
+        section="Execution Limits",
+        parser=_parse_bool,
+        getter=lambda: getattr(config, "LOOP_GUARD_ENABLED", True),
+        setter=lambda value: setattr(config, "LOOP_GUARD_ENABLED", value),
+        default=getattr(config, "LOOP_GUARD_ENABLED", True),
+    ),
     "max_planning_iterations": RuntimeSetting(
         key="max_planning_iterations",
         description="Maximum tool-calling iterations during planning (separate from max_plan_tasks)",
@@ -496,6 +505,15 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         getter=lambda: config.LOG_RETENTION_LIMIT,
         setter=lambda value: setattr(config, "LOG_RETENTION_LIMIT", value),
         default=config.LOG_RETENTION_LIMIT_DEFAULT,
+    ),
+    "llm_trace_enabled": RuntimeSetting(
+        key="llm_trace_enabled",
+        description="Log full LLM requests/responses to llm_transactions.log",
+        section="Logging",
+        parser=_parse_bool,
+        getter=lambda: getattr(config, "LLM_TRANSACTION_LOG_ENABLED", False),
+        setter=lambda value: setattr(config, "LLM_TRANSACTION_LOG_ENABLED", value),
+        default=getattr(config, "LLM_TRANSACTION_LOG_ENABLED", False),
     ),
     "history_size": RuntimeSetting(
         key="history_size",
