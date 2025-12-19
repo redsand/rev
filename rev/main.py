@@ -237,6 +237,12 @@ def main():
         help="Relevance threshold for context filtering (0.0-1.0, default: 0.3)"
     )
     parser.add_argument(
+        "--preflight",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable/disable preflight path/action corrections (default: enabled)",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable detailed debug logging to file for LLM review"
@@ -353,6 +359,8 @@ def main():
 
     context_guard_threshold = args.context_guard_threshold
 
+    config.PREFLIGHT_ENABLED = args.preflight
+
     if args.version:
         from rev.versioning import build_version_output
 
@@ -387,6 +395,7 @@ def main():
         "context_guard_enabled": enable_context_guard,
         "context_guard_interactive": context_guard_interactive,
         "context_guard_threshold": context_guard_threshold,
+        "preflight_enabled": config.PREFLIGHT_ENABLED,
     })
 
     # Handle list-checkpoints command
