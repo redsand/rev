@@ -122,7 +122,7 @@ class RefactoringAgent(BaseAgent):
         if not target_dir:
             target_dir = default_target
 
-        print(f"  → Using split_python_module_classes on {source_path} → {target_dir}")
+        print(f"  -> Using split_python_module_classes on {source_path} -> {target_dir}")
         arguments = {
             "source_path": source_path,
             "target_directory": target_dir,
@@ -228,7 +228,7 @@ class RefactoringAgent(BaseAgent):
                     try:
                         arguments = json.loads(arguments_str) if isinstance(arguments_str, str) else arguments_str
                         logger.info(f"[REFACTORING] Executing tool '{tool_name}' with parsed arguments")
-                        print(f"  → RefactoringAgent will call tool '{tool_name}'")
+                        print(f"  -> RefactoringAgent will call tool '{tool_name}'")
                         print(f"    Arguments: {json.dumps(arguments, indent=2)[:200]}...")
 
                         result = execute_tool(tool_name, arguments)
@@ -264,7 +264,7 @@ class RefactoringAgent(BaseAgent):
                         task_id=task.task_id,
                     )
 
-                print(f"  ⚠️ RefactoringAgent: {error_detail}")
+                print(f"  [WARN] RefactoringAgent: {error_detail}")
                 logger.warning(f"[REFACTORING] {error_type}: {error_detail}")
 
                 if self.should_attempt_recovery(task, context):
@@ -277,7 +277,7 @@ class RefactoringAgent(BaseAgent):
 
         except Exception as e:
             error_msg = f"Exception in RefactoringAgent: {e}"
-            print(f"  ⚠️ {error_msg}")
+            print(f"  [WARN] {error_msg}")
             logger.exception(f"[REFACTORING] {error_msg}")
 
             if self.should_attempt_recovery(task, context):

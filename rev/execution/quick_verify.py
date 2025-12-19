@@ -1118,7 +1118,10 @@ def _verify_read_like(task: Task, context: RevContext) -> VerificationResult:
                     return VerificationResult(
                         passed=False,
                         message=f"Tool returned error: {payload.get('error')}",
-                        details={"tool": ev.get("tool")},
+                        details={
+                            "tool": ev.get("tool"),
+                            "raw_result_snippet": raw[:500],
+                        },
                         should_replan=True,
                     )
             except Exception:
@@ -1126,7 +1129,10 @@ def _verify_read_like(task: Task, context: RevContext) -> VerificationResult:
                     return VerificationResult(
                         passed=False,
                         message="Tool output contains error",
-                        details={"tool": ev.get("tool")},
+                        details={
+                            "tool": ev.get("tool"),
+                            "raw_result_snippet": raw[:500],
+                        },
                         should_replan=True,
                     )
     return VerificationResult(

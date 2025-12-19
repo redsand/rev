@@ -208,6 +208,13 @@ def _choose_best_path_match_with_context(*, original: str, matches: List[str], d
             if part_l and part_l != "." and part_l in desc:
                 score += 2
 
+        # Penalize obviously duplicated segment paths (e.g., lib/analysts/lib/analysts/...).
+        parts = Path(p).parts
+        for i in range(1, len(parts)):
+            if parts[:i] == parts[i : 2 * i] and len(parts) >= 2 * i + 1:
+                score -= 25
+                break
+
         depth = p.count("/")
         return (score, depth, len(p))
 
@@ -332,16 +339,16 @@ def _dedupe_redundant_prefix_path(norm_path: str, project_root: Path) -> Optiona
         return None
 
     parts = list(Path(norm_path.replace("/", os.sep)).parts)
-    # Need at least X/Y/X/Y to consider it a duplicated prefix.
-    if len(parts) < 4:
+    # Need at least X/X to consider it a duplicated prefix.
+    if len(parts) < 2:
         return None
 
     changed = False
-    while len(parts) >= 4:
+    while len(parts) >= 2:
         reduced = False
         for prefix_len in range(1, len(parts) // 2 + 1):
             prefix = parts[:prefix_len]
-            if parts[prefix_len: 2 * prefix_len] == prefix:
+            if parts[prefix_len : 2 * prefix_len] == prefix:
                 parts = parts[prefix_len:]
                 changed = True
                 reduced = True
@@ -457,23 +464,45 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
         preferred_pool = primary_matches if primary_matches else matches
         chosen = _choose_best_path_match_with_context(original=normalized, matches=preferred_pool, description=desc)
 
+        # If the planner only emitted a bare filename (e.g., "__init__.py") and
+        # there are multiple matches in the workspace, avoid "helpfully" picking
+        # one and accidentally duplicating a path (lib/analysts/lib/analysts/...).
+        if not ("/" in normalized or "\\" in normalized) and len(preferred_pool) > 1 and not chosen:
+            missing_unresolved.append(
+                f"ambiguous missing path '{raw}' (multiple candidates for bare filename)"
+            )
+            continue
+
         if not chosen and backup_matches and not primary_matches and action not in read_actions:
             missing_unresolved.append(
                 f"missing path '{raw}' (only backup(s) found: {backup_matches[:3]})"
             )
             continue
         if chosen:
+            print(f"DEBUG: raw='{raw}', chosen='{chosen}'")
             if chosen.endswith(".bak") and action not in read_actions:
                 missing_unresolved.append(
                     f"missing path '{raw}' (only backup found: {chosen}; restore original before mutating)"
                 )
                 continue
+            # If the resolved path already appears in the description, avoid
+            # duplicating segments like "lib/analysts/lib/analysts/__init__.py".
+            if chosen in desc:
+                messages.append(
+                    f"resolved missing path to '{chosen}' (already present; left unchanged)"
+                )
+                existing_any += 1
+                continue
             # Replace occurrences of the raw token as well as its normalized variant.
             if raw in desc:
+                print(f"DEBUG: replacing '{raw}' with '{chosen}' in '{desc}'")
                 desc = desc.replace(raw, chosen)
+                print(f"DEBUG: desc is now '{desc}'")
             if normalized in desc:
+                print(f"DEBUG: replacing normalized '{normalized}' with '{chosen}' in '{desc}'")
                 desc = desc.replace(normalized, chosen)
-            messages.append(f"corrected missing path '{raw}' -> '{chosen}'")
+                print(f"DEBUG: desc is now '{desc}'")
+            messages.append(f"resolved missing path to '{chosen}' (requested '{raw}')")
             existing_any += 1
             continue
 
@@ -481,6 +510,21 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
             missing_unresolved.append(f"ambiguous missing path '{raw}' (matches={matches[:5]})")
         else:
             missing_unresolved.append(f"missing path '{raw}' (no matches found)")
+
+    # Final cleanup pass to dedupe any paths that were constructed during replacement.
+    final_candidates = sorted(
+        set(
+            re.findall(
+                r'([A-Za-z]:[\\/][^\s"\'`]+\.py(?:\.bak)?\b|(?:\./)?[A-Za-z0-9_./\\-]+\.py(?:\.bak)?\b)',
+                desc,
+            )
+        )
+    )
+    for cand in final_candidates:
+        deduped = _dedupe_redundant_prefix_path(cand, project_root=project_root)
+        if deduped and deduped != cand:
+            desc = desc.replace(cand, deduped)
+            messages.append(f"cleaned up duplicated path segment in '{cand}' -> '{deduped}'")
 
     task.description = desc
 
@@ -1003,54 +1047,55 @@ class Orchestrator:
                 next_task.validation_steps = ExecutionPlan().generate_validation_steps(next_task)
             except Exception:
                 pass
-            ok, sem_msgs = _preflight_correct_action_semantics(next_task)
-            for msg in sem_msgs:
-                print(f"  [preflight] {msg}")
-            if not ok:
-                self.context.add_error("Preflight failed: " + "; ".join(sem_msgs))
-                completed_tasks_log.append(f"[FAILED] Preflight: {'; '.join(sem_msgs)}")
-                if any("conflicts with write intent" in msg for msg in sem_msgs):
-                    self.context.add_agent_request(
-                        "REPLAN_REQUEST",
-                        {
-                            "agent": "Orchestrator",
-                            "reason": "preflight read/write mismatch",
-                            "detailed_reason": sem_msgs[0],
-                        },
-                    )
-                sig = f"action_semantics::{(next_task.action_type or '').strip().lower()}::{';'.join(sem_msgs).strip().lower()}"
-                failure_counts[sig] += 1
-                if failure_counts[sig] >= 3:
-                    self.context.set_agent_state("no_retry", True)
-                    self.context.add_error("Circuit breaker: repeating preflight action semantics failure")
-                    print("\n" + "=" * 70)
-                    print("CIRCUIT BREAKER - PREFLIGHT FAILURE")
-                    print("=" * 70)
-                    print(f"Repeated preflight failure {failure_counts[sig]}x: {'; '.join(sem_msgs)}")
-                    print("Blocking issue: planner is not producing an executable action; refusing to loop.\n")
-                    return False
-                continue
-            ok, preflight_msgs = _preflight_correct_task_paths(task=next_task, project_root=self.project_root)
-            for msg in preflight_msgs:
-                print(f"  [preflight] {msg}")
-            if not ok:
-                # Do not execute with missing/ambiguous paths; feed this back into planning.
-                self.context.add_error("Preflight failed: " + "; ".join(preflight_msgs))
-                completed_tasks_log.append(f"[FAILED] Preflight: {'; '.join(preflight_msgs)}")
-                key_msg = preflight_msgs[0] if preflight_msgs else "unknown"
-                sig = f"paths::{(next_task.action_type or '').strip().lower()}::{key_msg.strip().lower()}"
-                failure_counts[sig] += 1
-                if failure_counts[sig] >= 3:
-                    self.context.set_agent_state("no_retry", True)
-                    self.context.add_error("Circuit breaker: repeating preflight path failure")
-                    print("\n" + "=" * 70)
-                    print("CIRCUIT BREAKER - PREFLIGHT FAILURE")
-                    print("=" * 70)
-                    print(f"Repeated preflight failure {failure_counts[sig]}x: {key_msg}")
-                    print("Blocking issue: planner is not producing an executable action; refusing to loop.\n")
-                    return False
-                continue
-            print(f"  â†' Next action: [{next_task.action_type.upper()}] {next_task.description[:80]}")
+            if config.PREFLIGHT_ENABLED:
+                ok, sem_msgs = _preflight_correct_action_semantics(next_task)
+                for msg in sem_msgs:
+                    print(f"  [preflight] {msg}")
+                if not ok:
+                    self.context.add_error("Preflight failed: " + "; ".join(sem_msgs))
+                    completed_tasks_log.append(f"[FAILED] Preflight: {'; '.join(sem_msgs)}")
+                    if any("conflicts with write intent" in msg for msg in sem_msgs):
+                        self.context.add_agent_request(
+                            "REPLAN_REQUEST",
+                            {
+                                "agent": "Orchestrator",
+                                "reason": "preflight read/write mismatch",
+                                "detailed_reason": sem_msgs[0],
+                            },
+                        )
+                    sig = f"action_semantics::{(next_task.action_type or '').strip().lower()}::{';'.join(sem_msgs).strip().lower()}"
+                    failure_counts[sig] += 1
+                    if failure_counts[sig] >= 3:
+                        self.context.set_agent_state("no_retry", True)
+                        self.context.add_error("Circuit breaker: repeating preflight action semantics failure")
+                        print("\n" + "=" * 70)
+                        print("CIRCUIT BREAKER - PREFLIGHT FAILURE")
+                        print("=" * 70)
+                        print(f"Repeated preflight failure {failure_counts[sig]}x: {'; '.join(sem_msgs)}")
+                        print("Blocking issue: planner is not producing an executable action; refusing to loop.\n")
+                        return False
+                    continue
+                ok, preflight_msgs = _preflight_correct_task_paths(task=next_task, project_root=self.project_root)
+                for msg in preflight_msgs:
+                    print(f"  [preflight] {msg}")
+                if not ok:
+                    # Do not execute with missing/ambiguous paths; feed this back into planning.
+                    self.context.add_error("Preflight failed: " + "; ".join(preflight_msgs))
+                    completed_tasks_log.append(f"[FAILED] Preflight: {'; '.join(preflight_msgs)}")
+                    key_msg = preflight_msgs[0] if preflight_msgs else "unknown"
+                    sig = f"paths::{(next_task.action_type or '').strip().lower()}::{key_msg.strip().lower()}"
+                    failure_counts[sig] += 1
+                    if failure_counts[sig] >= 3:
+                        self.context.set_agent_state("no_retry", True)
+                        self.context.add_error("Circuit breaker: repeating preflight path failure")
+                        print("\n" + "=" * 70)
+                        print("CIRCUIT BREAKER - PREFLIGHT FAILURE")
+                        print("=" * 70)
+                        print(f"Repeated preflight failure {failure_counts[sig]}x: {key_msg}")
+                        print("Blocking issue: planner is not producing an executable action; refusing to loop.\n")
+                        return False
+                    continue
+            print(f"  -> Next action: [{next_task.action_type.upper()}] {next_task.description[:80]}")
 
             self.context.plan = ExecutionPlan(tasks=[next_task])
 
@@ -1129,7 +1174,17 @@ class Orchestrator:
             verification_result = None
             if execution_success:
                 # Only verify actions we have a handler for; otherwise skip verification noise.
-                verifiable_actions = {"refactor", "add", "create", "edit", "create_directory", "test"}
+                verifiable_actions = {
+                    "refactor",
+                    "add",
+                    "create",
+                    "edit",
+                    "create_directory",
+                    "test",
+                    "read",
+                    "analyze",
+                    "research",
+                }
                 action_type = (next_task.action_type or "").lower()
                 if action_type in verifiable_actions:
                     print(f"  -> Verifying execution...")

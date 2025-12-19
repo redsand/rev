@@ -1,4 +1,5 @@
 import json
+from typing import Any, Optional
 from rev.agents.base import BaseAgent
 from rev.models.task import Task
 from rev.tools.registry import execute_tool, get_available_tools
@@ -200,8 +201,16 @@ class ResearchAgent(BaseAgent):
                             error_type = "invalid_json"
                             error_detail = f"Invalid JSON in tool arguments: {arguments_str[:200]}"
 
+                    # Unwrap nested {"arguments": {...}} payloads when present.
+                    if not error_type and isinstance(arguments, dict) and "arguments" in arguments and not any(
+                        k in arguments for k in ("path", "paths")
+                    ):
+                        inner = arguments.get("arguments")
+                        if isinstance(inner, dict):
+                            arguments = inner
+
                     if not error_type:
-                        print(f"  → ResearchAgent will call tool '{tool_name}' with arguments: {arguments}")
+                        print(f"  -> ResearchAgent will call tool '{tool_name}' with arguments: {arguments}")
                         raw_result = execute_tool(tool_name, arguments)
 
                         snippet = _extract_snippet(tool_name, arguments, raw_result)
@@ -255,10 +264,10 @@ class ResearchAgent(BaseAgent):
                             task_id=task.task_id,
                         )
 
-                print(f"  ⚠️ ResearchAgent: {error_detail}")
+                print(f"  [WARN] ResearchAgent: {error_detail}")
 
                 if self.should_attempt_recovery(task, context):
-                    print(f"  → Requesting replan (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
+                    print(f"  -> Requesting replan (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
                     self.request_replan(
                         context,
                         reason="Tool call generation failed",
@@ -266,16 +275,16 @@ class ResearchAgent(BaseAgent):
                     )
                     return self.make_recovery_request(error_type, error_detail)
                 else:
-                    print(f"  → Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
+                    print(f"  -> Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
                     context.add_error(f"ResearchAgent: {error_detail} (after {recovery_attempts} recovery attempts)")
                     return self.make_failure_signal(error_type, error_detail)
 
         except Exception as e:
             error_msg = f"Exception in ResearchAgent: {e}"
-            print(f"  ⚠️ {error_msg}")
+            print(f"  [WARN] {error_msg}")
 
             if self.should_attempt_recovery(task, context):
-                print(f"  → Requesting replan due to exception (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
+                print(f"  -> Requesting replan due to exception (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
                 self.request_replan(
                     context,
                     reason="Exception during research",
@@ -283,6 +292,6 @@ class ResearchAgent(BaseAgent):
                 )
                 return self.make_recovery_request("exception", str(e))
             else:
-                print(f"  → Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
+                print(f"  -> Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
                 context.add_error(error_msg)
                 return self.make_failure_signal("exception", error_msg)

@@ -349,7 +349,7 @@ class CodeWriterAgent(BaseAgent):
             # Statistics
             old_lines = len(old_string.splitlines())
             new_lines = len(new_string.splitlines())
-            print(f"\n{self._COLOR_CYAN}Changes:{self._COLOR_RESET} {old_lines} → {new_lines} lines")
+            print(f"\n{self._COLOR_CYAN}Changes:{self._COLOR_RESET} {old_lines} -> {new_lines} lines")
 
         elif tool_name == "rewrite_python_imports":
             file_path = arguments.get("path", "unknown")
@@ -545,7 +545,7 @@ class CodeWriterAgent(BaseAgent):
                             error_detail = f"Invalid JSON in tool arguments: {arguments_str[:200]}"
 
                     if not error_type:
-                        print(f"  → CodeWriterAgent will call tool '{tool_name}'")
+                        print(f"  -> CodeWriterAgent will call tool '{tool_name}'")
 
                         # Display change preview for write, replace, and create_directory operations
                         if tool_name in ["write_file", "replace_in_file", "create_directory"]:
@@ -557,7 +557,7 @@ class CodeWriterAgent(BaseAgent):
                                 content = arguments.get("content", "")
                                 is_valid, warning_msg = self._validate_import_targets(file_path, content)
                                 if not is_valid:
-                                    print(f"\n  ⚠️  Import validation warning:")
+                                    print(f"\n  [WARN]  Import validation warning:")
                                     print(f"  {warning_msg}")
                                     print(f"  Note: This file has imports that may not exist. Proceed with caution.")
 
@@ -621,7 +621,7 @@ class CodeWriterAgent(BaseAgent):
 
             # If we reach here, there was an error
             if error_type:
-                if error_type == "text_instead_of_tool_call":
+                if error_type in {"text_instead_of_tool_call", "empty_tool_calls", "missing_tool_calls"}:
                     recovered = recover_tool_call_from_text(
                         response.get("message", {}).get("content", ""),
                         allowed_tools=[t["function"]["name"] for t in available_tools],
@@ -699,11 +699,11 @@ class CodeWriterAgent(BaseAgent):
                             task_id=task.task_id,
                         )
 
-                print(f"  ⚠️ CodeWriterAgent: {error_detail}")
+                print(f"  [WARN] CodeWriterAgent: {error_detail}")
 
                 # Check if we should attempt recovery
                 if self.should_attempt_recovery(task, context):
-                    print(f"  → Requesting replan (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
+                    print(f"  -> Requesting replan (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
                     self.request_replan(
                         context,
                         reason="Tool call generation failed",
@@ -711,17 +711,17 @@ class CodeWriterAgent(BaseAgent):
                     )
                     return self.make_recovery_request(error_type, error_detail)
                 else:
-                    print(f"  → Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
+                    print(f"  -> Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
                     context.add_error(f"CodeWriterAgent: {error_detail} (after {recovery_attempts} recovery attempts)")
                     return self.make_failure_signal(error_type, error_detail)
 
         except Exception as e:
             error_msg = f"Exception in CodeWriterAgent: {e}"
-            print(f"  ⚠️ {error_msg}")
+            print(f"  [WARN] {error_msg}")
 
             # Request recovery for exceptions
             if self.should_attempt_recovery(task, context):
-                print(f"  → Requesting replan due to exception (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
+                print(f"  -> Requesting replan due to exception (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
                 self.request_replan(
                     context,
                     reason="Exception during code writing",
@@ -729,6 +729,6 @@ class CodeWriterAgent(BaseAgent):
                 )
                 return self.make_recovery_request("exception", str(e))
             else:
-                print(f"  → Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
+                print(f"  -> Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
                 context.add_error(error_msg)
                 return self.make_failure_signal("exception", error_msg)

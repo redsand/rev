@@ -133,7 +133,7 @@ class DocumentationAgent(BaseAgent):
                             error_detail = f"Invalid JSON in tool arguments: {arguments_str[:200]}"
 
                     if not error_type:
-                        print(f"  → DocumentationAgent will call tool '{tool_name}' with arguments: {arguments}")
+                        print(f"  -> DocumentationAgent will call tool '{tool_name}' with arguments: {arguments}")
                         raw_result = execute_tool(tool_name, arguments)
                         return build_subagent_output(
                             agent_name="DocumentationAgent",
@@ -146,7 +146,7 @@ class DocumentationAgent(BaseAgent):
 
             # Error handling
             if error_type:
-                if error_type == "text_instead_of_tool_call":
+                if error_type in {"text_instead_of_tool_call", "empty_tool_calls", "missing_tool_calls"}:
                     recovered = recover_tool_call_from_text(
                         response.get("message", {}).get("content", ""),
                         allowed_tools=[t["function"]["name"] for t in available_tools],
@@ -163,10 +163,10 @@ class DocumentationAgent(BaseAgent):
                             task_id=task.task_id,
                         )
 
-                print(f"  ⚠️ DocumentationAgent: {error_detail}")
+                print(f"  [WARN] DocumentationAgent: {error_detail}")
 
                 if self.should_attempt_recovery(task, context):
-                    print(f"  → Requesting replan (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
+                    print(f"  -> Requesting replan (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
                     self.request_replan(
                         context,
                         reason="Tool call generation failed",
@@ -174,16 +174,16 @@ class DocumentationAgent(BaseAgent):
                     )
                     return self.make_recovery_request(error_type, error_detail)
                 else:
-                    print(f"  → Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
+                    print(f"  -> Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
                     context.add_error(f"DocumentationAgent: {error_detail} (after {recovery_attempts} recovery attempts)")
                     return self.make_failure_signal(error_type, error_detail)
 
         except Exception as e:
             error_msg = f"Exception in DocumentationAgent: {e}"
-            print(f"  ⚠️ {error_msg}")
+            print(f"  [WARN] {error_msg}")
 
             if self.should_attempt_recovery(task, context):
-                print(f"  → Requesting replan due to exception (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
+                print(f"  -> Requesting replan due to exception (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
                 self.request_replan(
                     context,
                     reason="Exception during documentation",
@@ -191,6 +191,6 @@ class DocumentationAgent(BaseAgent):
                 )
                 return self.make_recovery_request("exception", str(e))
             else:
-                print(f"  → Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
+                print(f"  -> Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
                 context.add_error(error_msg)
                 return self.make_failure_signal("exception", error_msg)

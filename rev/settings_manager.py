@@ -396,6 +396,15 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         setter=lambda value: setattr(config, "LOOP_GUARD_ENABLED", value),
         default=getattr(config, "LOOP_GUARD_ENABLED", True),
     ),
+    "preflight_enabled": RuntimeSetting(
+        key="preflight_enabled",
+        description="Enable preflight path/action corrections before executing tasks",
+        section="Execution Limits",
+        parser=_parse_bool,
+        getter=lambda: getattr(config, "PREFLIGHT_ENABLED", True),
+        setter=lambda value: setattr(config, "PREFLIGHT_ENABLED", value),
+        default=getattr(config, "PREFLIGHT_ENABLED", True),
+    ),
     "max_planning_iterations": RuntimeSetting(
         key="max_planning_iterations",
         description="Maximum tool-calling iterations during planning (separate from max_plan_tasks)",

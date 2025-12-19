@@ -153,7 +153,7 @@ class TestExecutorAgent(BaseAgent):
 
         if is_pytest and not self._should_run_pytest(context):
             warning = "[SKIPPED_TESTS] No code changes detected since last run; skipping pytest."
-            print(f"  ⚠️  {warning}")
+            print(f"  [WARN]  {warning}")
             return json.dumps(
                 {
                     "skipped": True,

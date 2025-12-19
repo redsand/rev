@@ -1,4 +1,5 @@
 import json
+from typing import Any, Optional
 from rev.agents.base import BaseAgent
 from rev.models.task import Task
 from rev.tools.registry import execute_tool, get_available_tools
@@ -6,6 +7,7 @@ from rev.llm.client import ollama_chat
 from rev.core.context import RevContext
 from rev.core.tool_call_recovery import recover_tool_call_from_text
 from rev.agents.context_provider import build_context_and_tools
+from rev.agents.subagent_io import build_subagent_output
 
 KEYWORD_SNIPPET_PATTERNS = [
     "register",
@@ -17,14 +19,14 @@ KEYWORD_SNIPPET_PATTERNS = [
 ]
 
 
-def _extract_snippet(tool_name: str, tool_args: dict, raw_result: any) -> str:
+def _extract_snippet(tool_name: str, tool_args: dict, raw_result: Any) -> str:
     """Return a relevant snippet for read_file/read_file_lines outputs."""
     try:
         text = raw_result if isinstance(raw_result, str) else str(raw_result)
     except Exception:
         return str(raw_result)[:500]
 
-    def _keyword_window(txt: str) -> str | None:
+    def _keyword_window(txt: str) -> Optional[str]:
         lines = txt.splitlines()
         for idx, line in enumerate(lines):
             if any(k.lower() in line.lower() for k in KEYWORD_SNIPPET_PATTERNS):
@@ -198,8 +200,16 @@ class AnalysisAgent(BaseAgent):
                             error_type = "invalid_json"
                             error_detail = f"Invalid JSON in tool arguments: {arguments_str[:200]}"
 
+                    # Unwrap nested {"arguments": {...}} payloads that some recoveries return.
+                    if not error_type and isinstance(arguments, dict) and "arguments" in arguments and not any(
+                        k in arguments for k in ("path", "paths")
+                    ):
+                        inner = arguments.get("arguments")
+                        if isinstance(inner, dict):
+                            arguments = inner
+
                     if not error_type:
-                        print(f"  → AnalysisAgent will call tool '{tool_name}' with arguments: {arguments}")
+                        print(f"  -> AnalysisAgent will call tool '{tool_name}' with arguments: {arguments}")
                         result = execute_tool(tool_name, arguments)
 
                         snippet = _extract_snippet(tool_name, arguments, result)
@@ -207,35 +217,58 @@ class AnalysisAgent(BaseAgent):
                             "tool": tool_name,
                             "summary": snippet
                         })
-                        return result
+                        return build_subagent_output(
+                            agent_name="AnalysisAgent",
+                            tool_name=tool_name,
+                            tool_args=arguments,
+                            tool_output=result,
+                            context=context,
+                            task_id=task.task_id,
+                        )
 
             # If we reach here, there was an error
             if error_type:
-                if error_type == "text_instead_of_tool_call":
+                if error_type in {"text_instead_of_tool_call", "empty_tool_calls", "missing_tool_calls"}:
                     recovered = recover_tool_call_from_text(
                         response.get("message", {}).get("content", ""),
                         allowed_tools=[t["function"]["name"] for t in get_available_tools()],
                     )
                     if recovered:
                         print(f"  -> Recovered tool call from text output: {recovered.name}")
+                        tool_args = recovered.arguments
                         if (
                             recovered.name == "read_file"
-                            and isinstance(recovered.arguments, dict)
-                            and isinstance(recovered.arguments.get("paths"), list)
+                            and isinstance(tool_args, dict)
+                            and isinstance(tool_args.get("paths"), list)
                         ):
                             outputs = {}
-                            for path in recovered.arguments.get("paths", []):
+                            for path in tool_args.get("paths", []):
                                 if not isinstance(path, str):
                                     continue
                                 outputs[path] = execute_tool("read_file", {"path": path})
-                            return json.dumps(outputs)
-                        return execute_tool(recovered.name, recovered.arguments)
+                            raw_result = json.dumps(outputs)
+                        else:
+                            raw_result = execute_tool(recovered.name, tool_args)
 
-                print(f"  ⚠️ AnalysisAgent: {error_detail}")
+                        snippet = _extract_snippet(recovered.name, tool_args, raw_result)
+                        context.add_insight("analysis_agent", f"task_{task.task_id}_analysis", {
+                            "tool": recovered.name,
+                            "summary": snippet
+                        })
+                        return build_subagent_output(
+                            agent_name="AnalysisAgent",
+                            tool_name=recovered.name,
+                            tool_args=tool_args,
+                            tool_output=raw_result,
+                            context=context,
+                            task_id=task.task_id,
+                        )
+
+                print(f"  -> AnalysisAgent: {error_detail}")
 
                 # Check if we should attempt recovery
                 if self.should_attempt_recovery(task, context):
-                    print(f"  → Requesting replan (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
+                    print(f"  -> Requesting replan (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
                     self.request_replan(
                         context,
                         reason="Tool call generation failed",
@@ -243,17 +276,17 @@ class AnalysisAgent(BaseAgent):
                     )
                     return self.make_recovery_request(error_type, error_detail)
                 else:
-                    print(f"  → Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
+                    print(f"  -> Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
                     context.add_error(f"AnalysisAgent: {error_detail} (after {recovery_attempts} recovery attempts)")
                     return self.make_failure_signal(error_type, error_detail)
 
         except Exception as e:
             error_msg = f"Exception in AnalysisAgent: {e}"
-            print(f"  ⚠️ {error_msg}")
+            print(f"  -> {error_msg}")
 
             # Request recovery for exceptions
             if self.should_attempt_recovery(task, context):
-                print(f"  → Requesting replan due to exception (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
+                print(f"  -> Requesting replan due to exception (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
                 self.request_replan(
                     context,
                     reason="Exception during analysis",
@@ -261,6 +294,6 @@ class AnalysisAgent(BaseAgent):
                 )
                 return self.make_recovery_request("exception", str(e))
             else:
-                print(f"  → Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
+                print(f"  -> Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
                 context.add_error(error_msg)
                 return self.make_failure_signal("exception", error_msg)
