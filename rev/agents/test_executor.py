@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Optional, Dict, Any
 
 from rev.agents.base import BaseAgent
@@ -21,7 +22,6 @@ class TestExecutorAgent(BaseAgent):
             for token in (
                 "auto-registered",
                 "auto registered",
-                "[analysts]",
                 "on startup",
                 "startup",
                 "run the application",
@@ -50,12 +50,25 @@ class TestExecutorAgent(BaseAgent):
         if "import" not in desc_lower:
             return None
 
-        module = None
-        if "lib/analysts" in desc_lower or "lib.analysts" in desc_lower or "analyst class" in desc_lower:
-            module = "lib.analysts"
-
-        if not module:
+        desc = description or ""
+        module_candidates: list[str] = []
+        module_candidates.extend(
+            re.findall(
+                r"\bfrom\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s+import\b",
+                desc,
+            )
+        )
+        module_candidates.extend(
+            re.findall(
+                r"\bimport\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\b",
+                desc,
+            )
+        )
+        module_candidates = [m.strip() for m in module_candidates if m and m.strip()]
+        if not module_candidates:
             return None
+
+        module = module_candidates[0]
 
         wants_pytest = any(token in desc_lower for token in ("pytest", "run tests", "unit test", "test suite"))
         import_only = ("import" in desc_lower) and not wants_pytest

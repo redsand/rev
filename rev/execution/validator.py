@@ -988,8 +988,8 @@ def validate_no_destructive_interdependencies(plan: ExecutionPlan) -> Validation
     PRE-EXECUTION validation: Check that destructive operations don't break subsequent tasks.
 
     CRITICAL: This prevents the situation where:
-    - Task 1: Extract BreakoutAnalyst from lib/analysts.py (DESTRUCTIVE - truncates file)
-    - Task 2: Extract VolumeAnalyst from lib/analysts.py (FAILS - file already truncated)
+    - Task 1: Extract ClassA from module.py (DESTRUCTIVE - truncates file)
+    - Task 2: Extract ClassB from module.py (FAILS - file already truncated)
 
     Args:
         plan: The execution plan to validate

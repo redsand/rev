@@ -180,6 +180,43 @@ def _choose_best_path_match(*, original: str, matches: List[str]) -> Optional[st
     return best
 
 
+def _choose_best_path_match_with_context(*, original: str, matches: List[str], description: str) -> Optional[str]:
+    """Pick the most likely intended match, using description text to break ties."""
+    chosen = _choose_best_path_match(original=original, matches=matches)
+    if chosen or not matches or len(matches) == 1:
+        return chosen
+
+    desc = (description or "").replace("\\", "/").lower()
+    if not desc:
+        return None
+
+    def _context_score(rel_posix: str) -> tuple[int, int, int]:
+        p = rel_posix.replace("\\", "/").lower()
+        parent = Path(p).parent.as_posix().lower()
+        score = 0
+
+        # Strongest signal: the full parent path appears in the description.
+        if parent and parent != ".":
+            needle = f"/{parent.strip('/')}/"
+            hay = f"/{desc.strip('/')}/"
+            if needle in hay:
+                score += 50 + len(parent)
+
+        # Secondary: directory/file names appear in the description.
+        for part in Path(p).parts:
+            part_l = str(part).lower()
+            if part_l and part_l != "." and part_l in desc:
+                score += 2
+
+        depth = p.count("/")
+        return (score, depth, len(p))
+
+    ranked = sorted(matches, key=_context_score, reverse=True)
+    if _context_score(ranked[0])[0] == _context_score(ranked[1])[0]:
+        return None
+    return ranked[0]
+
+
 def _preflight_correct_action_semantics(task: Task) -> tuple[bool, List[str]]:
     """Coerce overloaded actions into read-only vs mutating actions.
 
@@ -195,7 +232,7 @@ def _preflight_correct_action_semantics(task: Task) -> tuple[bool, List[str]]:
     read_actions = {"read", "analyze", "review", "research"}
 
     # Heuristic intent detection (word-boundary based to avoid false positives like
-    # matching "analy" inside "analysts").
+    # matching "analy" inside "analysis").
     desc_l = desc.lower()
     read_intent = bool(
         re.search(
@@ -313,9 +350,6 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
 
     for raw in candidates:
         normalized = normalize_path(raw)
-        # Avoid truncating "__init__.py" -> "__init__" in later heuristics.
-        if normalized.lower().endswith("/__init__.py"):
-            continue
 
         abs_path = _abs_for_normalized(normalized)
         if abs_path is None:
@@ -344,7 +378,7 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
         for bn in basenames:
             matches.extend(_find_workspace_matches_by_basename(root=project_root, basename=bn))
         matches = sorted(set(matches))
-        chosen = _choose_best_path_match(original=normalized, matches=matches)
+        chosen = _choose_best_path_match_with_context(original=normalized, matches=matches, description=desc)
         if chosen:
             # Replace occurrences of the raw token as well as its normalized variant.
             if raw in desc:
@@ -716,19 +750,19 @@ class Orchestrator:
         Rather than using brittle keyword detection, we let the LLM evaluate the failed
         task and suggest a decomposition strategy if one exists.
         """
-        decomposition_prompt = (
-            f"A task has failed: {failed_task.description}\n\n"
-            f"Error: {failed_task.error if failed_task.error else 'Unknown'}\n\n"
-            f"Can this task be decomposed into smaller, more specific subtasks that might succeed?\n"
-            f"If yes, describe the first subtask that should be attempted next in detail.\n"
-            f"If no, just respond with 'CANNOT_DECOMPOSE'.\n\n"
-            "Important import strategy note (avoid churn):\n"
-            "- If a refactor split creates a package (directory with __init__.py exports), update call sites/tests to\n"
-            "  import from the package exports (e.g., `from lib.analysts import BreakoutAnalyst`).\n"
-            "- Do NOT expand `from pkg import *` into dozens of per-module imports.\n\n"
-            f"Important: Be specific about what concrete action the next task should take. "
-            f"Use [ACTION_TYPE] format like [CREATE] or [EDIT] or [REFACTOR]."
-        )
+            decomposition_prompt = (
+                f"A task has failed: {failed_task.description}\n\n"
+                f"Error: {failed_task.error if failed_task.error else 'Unknown'}\n\n"
+                f"Can this task be decomposed into smaller, more specific subtasks that might succeed?\n"
+                f"If yes, describe the first subtask that should be attempted next in detail.\n"
+                f"If no, just respond with 'CANNOT_DECOMPOSE'.\n\n"
+                "Important import strategy note (avoid churn):\n"
+                "- If a refactor split creates a package (directory with __init__.py exports), update call sites/tests to\n"
+                "  import from the package exports (e.g., `from package import ExportedSymbol`).\n"
+                "- Do NOT expand `from pkg import *` into dozens of per-module imports.\n\n"
+                f"Important: Be specific about what concrete action the next task should take. "
+                f"Use [ACTION_TYPE] format like [CREATE] or [EDIT] or [REFACTOR]."
+            )
 
         response_data = ollama_chat([{"role": "user", "content": decomposition_prompt}])
 
@@ -786,18 +820,18 @@ class Orchestrator:
             "- Use [EDIT]/[ADD]/[CREATE_DIRECTORY]/[REFACTOR] only when you will perform a repo-changing tool call in this step.\n"
             "- If unsure whether a path exists, choose [READ] first to locate the correct file path(s).\n"
             "\n"
-            "Constraints to avoid duplicating work:\n"
-            "- Do not propose repeating a step that is already complete (e.g., do not re-create a directory that exists).\n"
-            "- If you are going to use `split_python_module_classes`, do not hand-author `lib/analysts/__init__.py` first; let the tool generate it.\n"
-            "- After `split_python_module_classes` runs, the source file is renamed to `*.py.bak`. Do not try to edit the old `*.py` path.\n"
-            "- If a source file was split into a package (directory with __init__.py) and the original single-file path no longer exists, do NOT propose edits to that missing file; operate on the package files that actually exist.\n"
-            "- If the code was split into a package with __init__.py exports, prefer package-export imports at call sites.\n"
-            "- Avoid replacing `from pkg import *` with dozens of per-module imports; only import names actually used.\n"
-            "- Prefer `from lib.analysts import SomeAnalyst` over `from lib.analysts.some_file import SomeAnalyst` when `lib/analysts/__init__.py` exports it.\n"
-            f"You MUST choose one of the following action types: {available_actions}\n"
-            "Your response should be a single line in the format: [ACTION_TYPE] description of the action.\n"
-            "Example: [EDIT] refactor the authentication middleware to use the new session manager.\n"
-            "If the goal has been achieved, respond with only the text 'GOAL_ACHIEVED'."
+             "Constraints to avoid duplicating work:\n"
+             "- Do not propose repeating a step that is already complete (e.g., do not re-create a directory that exists).\n"
+             "- If you are going to use `split_python_module_classes`, do not hand-author the package `__init__.py` first; let the tool generate it.\n"
+             "- After `split_python_module_classes` runs, treat the directory as the source of truth; prefer editing the package files rather than the original monolithic module.\n"
+             "- If a source file was split into a package (directory with __init__.py) and the original single-file path no longer exists, do NOT propose edits to that missing file; operate on the package files that actually exist.\n"
+             "- If the code was split into a package with __init__.py exports, prefer package-export imports at call sites.\n"
+             "- Avoid replacing `from pkg import *` with dozens of per-module imports; only import names actually used.\n"
+             "- Prefer `from package import ExportedSymbol` over `from package.module import ExportedSymbol` when the package exports it.\n"
+             f"You MUST choose one of the following action types: {available_actions}\n"
+             "Your response should be a single line in the format: [ACTION_TYPE] description of the action.\n"
+             "Example: [EDIT] refactor the authentication middleware to use the new session manager.\n"
+             "If the goal has been achieved, respond with only the text 'GOAL_ACHIEVED'."
         )
         
         response_data = ollama_chat([{"role": "user", "content": prompt}])

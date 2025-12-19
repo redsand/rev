@@ -29,10 +29,11 @@ When asked to extract classes from a file into separate files:
 5. Prefer the `split_python_module_classes` tool to automate this process when working with large modules.
 
 IMPORT STRATEGY (IMPORTANT):
-- If you create a package (e.g., lib/analysts/__init__.py exporting classes), update call sites/tests to import from the package
+- If you create a package (directory with `__init__.py` exporting symbols), update call sites/tests to import from the package
   exports, not from each individual module file.
-  Prefer: `from lib.analysts import BreakoutAnalyst` (or `import lib.analysts as analysts`)
-  Avoid: `from lib.analysts.BreakoutAnalyst import BreakoutAnalyst` and avoid expanding `from ... import *` into dozens of imports.
+  Prefer: `from package import ExportedSymbol` (or `import package as pkg`)
+  Avoid: `from package.module import ExportedSymbol` when `package/__init__.py` exports it, and avoid expanding
+  `from ... import *` into dozens of imports.
 - Only import the symbols actually used at the call site.
 
 AST-AWARE EDITS (IMPORTANT):
@@ -83,7 +84,6 @@ class RefactoringAgent(BaseAgent):
             "its own file",
             "into its own file",
             "each class",
-            "each analyst",
         )
         has_source = bool(re.search(r'([A-Za-z0-9_\-./]+\.py)', task.description))
         has_target_dir = bool(re.search(r'([A-Za-z0-9_\-./]+/)', task.description))

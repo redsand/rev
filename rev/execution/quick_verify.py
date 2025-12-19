@@ -225,7 +225,7 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
     """
     Verify that a refactoring task actually extracted/reorganized code.
 
-    For extraction tasks like "break out analysts into individual files":
+    For extraction tasks like "break out classes into individual files":
     - Check that new files were created
     - Check that imports in new files are valid
     - Check that the old file was updated with imports
@@ -473,7 +473,7 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
     if old_file_matches:
         old_file = _resolve_for_verification(old_file_matches[0], purpose="verify refactoring source file")
         if not old_file and target_dir:
-            # Heuristic: source next to target_dir, e.g., lib/analysts.py when target_dir=lib/analysts
+            # Heuristic: source next to target_dir, e.g., module.py when target_dir=module/
             alt_source = (target_dir.parent / f"{target_dir.name}.py").resolve()
             if alt_source.exists():
                 old_file = alt_source
@@ -536,18 +536,27 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
                         debug_info["main_file_status"] = "MISSING"
 
     if issues:
-        if call_sites_updated:
-            non_benign = [issue for issue in issues if "Original file" not in issue]
-            if not non_benign:
-                warning_msg = "Source module still exists but class files and call sites were updated"
-                details["warnings"] = issues
-                debug_info["warnings"] = issues
-                return VerificationResult(
-                    passed=True,
-                    message=f"[OK] Extraction succeeded with call site updates ({len(call_sites_updated)} files); "
-                            f"{warning_msg}",
-                    details={**details, "debug": debug_info}
-                )
+        non_benign = [issue for issue in issues if "Original file" not in issue]
+        extraction_looks_ok = bool(
+            target_dir
+            and target_dir.exists()
+            and details.get("files_created", 0) > 0
+            and details.get("imports_valid") is True
+        )
+
+        # If the only failures are about the original monolithic module still being present / unchanged,
+        # treat this as a warning. Some projects intentionally keep the original file for reference.
+        if extraction_looks_ok and not non_benign:
+            details["warnings"] = issues
+            debug_info["warnings"] = issues
+            call_site_msg = (
+                f" with call site updates ({len(call_sites_updated)} files)" if call_sites_updated else ""
+            )
+            return VerificationResult(
+                passed=True,
+                message=f"[OK] Extraction successful{call_site_msg} (source module left unchanged)",
+                details={**details, "debug": debug_info},
+            )
         return VerificationResult(
             passed=False,
             message=f"Extraction verification failed: {len(issues)} issue(s) found\n\nDetails:\n" + "\n".join(issues),

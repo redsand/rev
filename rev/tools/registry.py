@@ -1962,7 +1962,7 @@ def get_available_tools() -> list:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "source_path": {"type": "string", "description": "Path to the module (e.g., lib/analysts.py)"},
+                        "source_path": {"type": "string", "description": "Path to the module to split (e.g., src/module.py)"},
                         "target_directory": {"type": "string", "description": "Directory/package for extracted classes", "default": None},
                         "overwrite": {"type": "boolean", "description": "Overwrite files if they already exist", "default": False}
                     },

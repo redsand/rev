@@ -194,9 +194,9 @@ def _detect_vague_tasks_in_plan(plan: "ExecutionPlan") -> List[Dict[str, Any]]:
         ("second identified", "Uses ordinal placeholder - specify the actual name"),
         ("third identified", "Uses ordinal placeholder - specify the actual name"),
         ("the identified", "Uses generic 'the identified' - specify what was identified"),
-        ("identified feature", "Uses vague 'identified feature' - name the specific feature"),
-        ("identified analyst", "Uses vague 'identified analyst' - name the specific analyst class"),
-        ("identified class", "Uses vague 'identified class' - name the specific class"),
+         ("identified feature", "Uses vague 'identified feature' - name the specific feature"),
+         ("identified component", "Uses vague 'identified component' - name the specific component"),
+         ("identified class", "Uses vague 'identified class' - name the specific class"),
         ("relevant code", "Uses vague 'relevant code' - specify which code"),
         ("relevant functionality", "Uses vague 'relevant functionality' - specify what functionality"),
         ("missing feature", "Uses vague 'missing feature' - name the specific feature"),
@@ -289,19 +289,19 @@ Your job is to review execution plans and identify:
 12) SPECIFICITY: Do tasks contain SPECIFIC names (classes, functions, files) or VAGUE placeholders?
 
 CRITICAL - VAGUE PLACEHOLDER DETECTION:
-If a plan contains vague terms like "the identified feature", "the first analyst", "relevant code",
+If a plan contains vague terms like "the identified feature", "the first item", "relevant code",
 or "missing functionality", this implies the agent does NOT actually know what it is building.
 
 VAGUE TASKS TO REJECT:
-- "Implement the first identified analyst" -> REJECT: Which analyst? Name it.
+ - "Implement the first identified item" -> REJECT: Which item? Name it.
 - "Port the feature from the other repo" -> REJECT: Which feature? Name the class/function.
 - "Add relevant functionality" -> REJECT: What functionality specifically?
 - "Implement missing features" -> REJECT: Which features? List them by name.
 
 GOOD SPECIFIC TASKS TO APPROVE:
-- "Port 'MovingAverageCrossover' class from ../external/analysts.py"
+ - "Port 'MovingAverageCrossover' class from ../external/strategies.py"
 - "Implement 'calculate_rsi' function in indicators.py"
-- "Add 'BollingerBandAnalyst' to the matrix_recipes.py registry"
+ - "Add 'BollingerBand' to the app registry/configuration"
 
 WHEN YOU DETECT VAGUE TASKS (Discovery Phase Needed):
 1. Set decision to "requires_changes"
@@ -309,7 +309,7 @@ WHEN YOU DETECT VAGUE TASKS (Discovery Phase Needed):
 3. Specify: "Before implementation, create tasks to IDENTIFY and LIST the specific items to port/implement"
 4. Example suggestions:
    - "Replace vague implementation tasks with discovery tasks to identify specific items first"
-   - "Add discovery task: 'Scan ../external-repo to list all Analyst classes available for porting'"
+   - "Add discovery task: 'Scan ../external-repo to list all candidate classes available for porting'"
    - "Add discovery task: 'List all files in [directory] matching [pattern] to identify modules'"
    - "Add discovery task: 'Grep for [pattern] in [source] to find specific class/function names'"
 5. In your overall_assessment, include the phrase "Discovery phase needed" to trigger the correct workflow

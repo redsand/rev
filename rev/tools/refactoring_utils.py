@@ -68,8 +68,7 @@ def split_python_module_classes(
     """Split each top-level class in a Python module into individual files.
 
     The original module is converted into a package (directory) containing the
-    extracted files and an __init__.py aggregator. The original .py file is
-    renamed with a .bak suffix for reference.
+    extracted files and an __init__.py aggregator.
     """
     try:
         source_file = _safe_path(source_path)
@@ -130,7 +129,7 @@ def split_python_module_classes(
         if remaining_content:
             aggregator_parts.append(remaining_content.rstrip() + "\n\n")
 
-        aggregator_parts.append("# Auto-generated exports for analyst classes\n")
+        aggregator_parts.append("# Auto-generated exports for extracted classes\n")
         for seg in class_segments:
             module_name = seg["name"]
             aggregator_parts.append(f"from .{module_name} import {seg['name']}\n")
@@ -148,10 +147,6 @@ def split_python_module_classes(
             package_module = source_file.with_suffix("").name
         call_site_updates = _rewrite_package_imports(package_module, target_dir)
 
-        # Backup original file so imports resolve to the new package
-        backup_path = source_file.with_suffix(f"{source_file.suffix}.bak")
-        source_file.rename(backup_path)
-
         return json.dumps(
             {
                 "classes_split": len(class_segments),
@@ -160,7 +155,6 @@ def split_python_module_classes(
                 "package_dir": str(target_dir.relative_to(ROOT)),
                 "package_init": str(package_init.relative_to(ROOT)),
                 "call_sites_updated": call_site_updates,
-                "original_backup": str(backup_path.relative_to(ROOT)),
             },
             indent=2,
         )

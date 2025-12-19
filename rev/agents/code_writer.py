@@ -141,8 +141,8 @@ class CodeWriterAgent(BaseAgent):
 
         warnings = []
         # Resolve import targets relative to the file being written (not CWD).
-        # This avoids false warnings like checking `<repo>/analysts.py` for imports
-        # inside `lib/analysts/__init__.py`.
+        # This avoids false warnings like checking `<repo>/module.py` for imports
+        # inside `<package>/__init__.py`.
         try:
             base_dir = (Path.cwd() / Path(file_path)).resolve(strict=False).parent
         except Exception:
