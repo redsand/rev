@@ -237,6 +237,16 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
     result_payload = _parse_task_result_payload(task.result)
     call_sites_updated = []
 
+    # If the refactor tool reported an already-split source, treat as a benign outcome
+    # to avoid verification loops on backup-only states.
+    if result_payload and result_payload.get("status") == "source_already_split":
+        return VerificationResult(
+            passed=True,
+            message="Extraction skipped: source already split (backup exists)",
+            details={"result": result_payload},
+            should_replan=False,
+        )
+
     # Refactor tasks must include a write/extraction tool call; a lone read_file is not completion.
     events = getattr(task, "tool_events", None) or []
     if events:

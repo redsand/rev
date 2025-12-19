@@ -72,3 +72,17 @@ def test_preflight_fails_for_read_task_when_any_path_missing():
 
     assert ok is False
     assert any("missing path" in m for m in msgs)
+
+
+def test_preflight_refuses_operating_on_backup_only():
+    root = _make_workspace()
+    config.set_workspace_root(root)
+    (root / "lib").mkdir(parents=True, exist_ok=True)
+    # Only backup exists; original source is gone.
+    (root / "lib" / "analysts.py.bak").write_text("class A: pass\n", encoding="utf-8")
+
+    task = Task(description="split lib/analysts.py into lib/analysts/", action_type="refactor")
+    ok, msgs = _preflight_correct_task_paths(task=task, project_root=root)
+
+    assert ok is False
+    assert any("only backup" in m.lower() for m in msgs)

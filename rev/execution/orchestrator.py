@@ -392,8 +392,24 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
         for bn in basenames:
             matches.extend(_find_workspace_matches_by_basename(root=project_root, basename=bn))
         matches = sorted(set(matches))
-        chosen = _choose_best_path_match_with_context(original=normalized, matches=matches, description=desc)
+        primary_matches = [m for m in matches if not m.endswith(".bak")]
+        backup_matches = [m for m in matches if m.endswith(".bak")]
+
+        # Prefer real sources over backups; avoid auto-operating on backups for mutating actions.
+        preferred_pool = primary_matches if primary_matches else matches
+        chosen = _choose_best_path_match_with_context(original=normalized, matches=preferred_pool, description=desc)
+
+        if not chosen and backup_matches and not primary_matches and action not in read_actions:
+            missing_unresolved.append(
+                f"missing path '{raw}' (only backup(s) found: {backup_matches[:3]})"
+            )
+            continue
         if chosen:
+            if chosen.endswith(".bak") and action not in read_actions:
+                missing_unresolved.append(
+                    f"missing path '{raw}' (only backup found: {chosen}; restore original before mutating)"
+                )
+                continue
             # Replace occurrences of the raw token as well as its normalized variant.
             if raw in desc:
                 desc = desc.replace(raw, chosen)

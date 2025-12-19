@@ -58,12 +58,12 @@ def _temp_root_is_usable(root: Path) -> bool:
 # Only override TEMP/TMP when the environment temp root is unusable.
 # Some Windows security setups can create temp subdirectories that become
 # unreadable (WinError 5) under custom temp roots, which breaks pytest's tmp_path.
-_SYS_TEMP = Path(tempfile.gettempdir())
-if not _temp_root_is_usable(_SYS_TEMP):
-    os.environ.setdefault("TMP", str(_TEST_TMP))
-    os.environ.setdefault("TEMP", str(_TEST_TMP))
-    os.environ.setdefault("TMPDIR", str(_TEST_TMP))
-    tempfile.tempdir = str(_TEST_TMP)
+# Force all temp usage for tests into the validated per-run temp directory to avoid
+# Windows ACL/EDR issues with default %TEMP% paths.
+os.environ["TMP"] = str(_TEST_TMP)
+os.environ["TEMP"] = str(_TEST_TMP)
+os.environ["TMPDIR"] = str(_TEST_TMP)
+tempfile.tempdir = str(_TEST_TMP)
 
 # ---------------------------------------------------------------------------
 # Pytest cleanup robustness (Windows restricted environments)

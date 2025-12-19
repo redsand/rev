@@ -597,6 +597,11 @@ class CodeWriterAgent(BaseAgent):
                         if is_noop:
                             print(f"  ? Tool made no changes: {noop_msg}")
                             if self.should_attempt_recovery(task, context):
+                                if tool_name == "replace_in_file":
+                                    noop_msg = (
+                                        f"{noop_msg}. Read the file and emit an explicit apply_patch/write_file "
+                                        f"with the exact original snippet and full replacement content."
+                                    )
                                 self.request_replan(
                                     context,
                                     reason="Tool made no changes",

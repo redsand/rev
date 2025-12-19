@@ -6,6 +6,7 @@ Plan → Execute → Verify → Report → Re-plan if needed
 """
 
 import tempfile
+import os
 import pytest
 from pathlib import Path
 from unittest.mock import Mock, MagicMock, patch
@@ -22,6 +23,14 @@ from rev.execution.quick_verify import (
     _verify_directory_creation,
     quick_verify_extraction_completeness,
 )
+
+# Stabilize temp paths for Windows/CI to avoid permission-denied on default %TEMP%.
+_TEST_TMP = (Path("tmp_test").resolve() / "manual" / "quick_verify_env")
+_TEST_TMP.mkdir(parents=True, exist_ok=True)
+os.environ["TMP"] = str(_TEST_TMP)
+os.environ["TEMP"] = str(_TEST_TMP)
+os.environ["TMPDIR"] = str(_TEST_TMP)
+tempfile.tempdir = str(_TEST_TMP)
 
 
 class TestVerificationResult:
@@ -443,6 +452,39 @@ class TestVerifyRefactoringExtraction:
                 # Should fail because directory is empty
                 assert result.passed is False
                 assert result.should_replan is True
+            finally:
+                os.chdir(old_cwd)
+
+    def test_verify_extraction_source_already_split(self):
+        """Test verification passes when tool reports source_already_split."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            (tmpdir_path / "lib" / "analysts").mkdir(parents=True, exist_ok=True)
+
+            import os
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir_path)
+
+                payload = {
+                    "status": "source_already_split",
+                    "backup": "lib/analysts.py.bak",
+                    "package_dir": "lib/analysts",
+                }
+
+                task = Task(
+                    description="split lib/analysts.py into lib/analysts/",
+                    action_type="refactor"
+                )
+                task.status = TaskStatus.COMPLETED
+                task.result = json.dumps(payload)
+
+                context = RevContext(user_request="Test")
+                result = _verify_refactoring(task, context)
+
+                assert result.passed is True
+                assert result.should_replan is False
+                assert "already split" in result.message.lower()
             finally:
                 os.chdir(old_cwd)
 
