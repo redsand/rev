@@ -29,11 +29,17 @@ When asked to extract classes from a file into separate files:
 5. Prefer the `split_python_module_classes` tool to automate this process when working with large modules.
 
 IMPORT STRATEGY (IMPORTANT):
-- If you create a package (e.g., lib/analysts/__init__.py exporting classes), update call sites/tests to import from the package
+- If you create a package (directory with `__init__.py` exporting symbols), update call sites/tests to import from the package
   exports, not from each individual module file.
-  Prefer: `from lib.analysts import BreakoutAnalyst` (or `import lib.analysts as analysts`)
-  Avoid: `from lib.analysts.BreakoutAnalyst import BreakoutAnalyst` and avoid expanding `from ... import *` into dozens of imports.
+  Prefer: `from package import ExportedSymbol` (or `import package as pkg`)
+  Avoid: `from package.module import ExportedSymbol` when `package/__init__.py` exports it, and avoid expanding
+  `from ... import *` into dozens of imports.
 - Only import the symbols actually used at the call site.
+
+AST-AWARE EDITS (IMPORTANT):
+- When updating Python import paths (e.g., after splitting/moving modules), prefer the `rewrite_python_imports` tool over
+  brittle string replacement.
+- If preserving multiline import formatting/comments/parentheses is important, set `"engine": "libcst"`.
 
 You MUST use the write_file tool for each extracted file. Do not just read files - you must CREATE new files."""
 
@@ -78,7 +84,6 @@ class RefactoringAgent(BaseAgent):
             "its own file",
             "into its own file",
             "each class",
-            "each analyst",
         )
         has_source = bool(re.search(r'([A-Za-z0-9_\-./]+\.py)', task.description))
         has_target_dir = bool(re.search(r'([A-Za-z0-9_\-./]+/)', task.description))
@@ -148,12 +153,32 @@ class RefactoringAgent(BaseAgent):
         available_tools = [
             tool
             for tool in get_available_tools()
-            if tool['function']['name'] in ['write_file', 'replace_in_file', 'read_file', 'split_python_module_classes']
+            if tool['function']['name'] in [
+                'write_file',
+                'replace_in_file',
+                'rewrite_python_imports',
+                'rewrite_python_keyword_args',
+                'rename_imported_symbols',
+                'move_imported_symbols',
+                'rewrite_python_function_parameters',
+                'read_file',
+                'split_python_module_classes',
+            ]
         ]
         logger.debug(f"[REFACTORING] Available tools: {[t['function']['name'] for t in available_tools]}")
 
         all_tools = get_available_tools()
-        candidate_tool_names = ['write_file', 'replace_in_file', 'read_file', 'split_python_module_classes']
+        candidate_tool_names = [
+            'write_file',
+            'rewrite_python_imports',
+            'rewrite_python_keyword_args',
+            'rename_imported_symbols',
+            'move_imported_symbols',
+            'rewrite_python_function_parameters',
+            'replace_in_file',
+            'read_file',
+            'split_python_module_classes',
+        ]
         rendered_context, selected_tools, _bundle = build_context_and_tools(
             task,
             context,

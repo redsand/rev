@@ -7,7 +7,7 @@ import re
 import shlex
 from typing import List, Dict, Any
 
-from rev.config import ROOT
+from rev import config
 from rev.tools.utils import _safe_path, _run_shell
 
 
@@ -32,7 +32,7 @@ def remove_unused_imports(file_path: str, language: str = "python") -> str:
                 result = _run_shell(f"autoflake --remove-all-unused-imports --in-place {shlex.quote(str(file))}")
                 if result.returncode == 0:
                     return json.dumps({
-                        "refactored": str(file.relative_to(ROOT)),
+                        "refactored": file.relative_to(config.ROOT).as_posix(),
                         "removed": "unused imports",
                         "language": "Python"
                     })
@@ -105,7 +105,7 @@ def extract_constants(file_path: str, threshold: int = 3) -> str:
                 })
 
         return json.dumps({
-            "file": str(file.relative_to(ROOT)),
+            "file": file.relative_to(config.ROOT).as_posix(),
             "suggestions": suggestions,
             "count": len(suggestions)
         })
@@ -160,7 +160,7 @@ def simplify_conditionals(file_path: str) -> str:
                 })
 
         return json.dumps({
-            "file": str(file.relative_to(ROOT)),
+            "file": file.relative_to(config.ROOT).as_posix(),
             "complex_conditionals": suggestions,
             "count": len(suggestions)
         })

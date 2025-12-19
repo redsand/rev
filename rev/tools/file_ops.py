@@ -202,6 +202,38 @@ def read_file(path: str) -> str:
         return json.dumps({"error": str(e)})
     if not p.exists():
         return json.dumps({"error": f"Not found: {path}"})
+    if p.is_dir():
+        rel = _rel_to_root_posix(p)
+        try:
+            children = sorted(p.iterdir(), key=lambda c: (not c.is_dir(), c.name.lower()))
+        except Exception as e:
+            return json.dumps({"error": f"{type(e).__name__}: {e}", "path": rel, "is_dir": True})
+
+        entries = []
+        for child in children:
+            if _should_skip(child):
+                continue
+            entries.append(
+                {
+                    "name": child.name,
+                    "path": _rel_to_root_posix(child),
+                    "type": "dir" if child.is_dir() else "file",
+                }
+            )
+            if len(entries) >= LIST_LIMIT:
+                break
+
+        pattern = "**/*" if rel in {"", "."} else f"{rel}/**/*"
+        return json.dumps(
+            {
+                "path": rel,
+                "is_dir": True,
+                "count": len(entries),
+                "entries": entries,
+                "hint": f"Use list_dir with pattern '{pattern}' for recursive listing.",
+            },
+            ensure_ascii=False,
+        )
     if p.stat().st_size > MAX_FILE_BYTES:
         return json.dumps({"error": f"Too large (> {MAX_FILE_BYTES} bytes): {path}"})
 
@@ -284,6 +316,12 @@ def write_file(path: str, content: str) -> str:
 
 def list_dir(pattern: str = "**/*") -> str:
     """List files matching pattern."""
+    # If a model passes a directory path (no glob), treat it as recursive listing.
+    if isinstance(pattern, str):
+        p = pattern.strip().strip('"').strip("'")
+        if p and not re.search(r"[*?\[\]]", p):
+            p = p.rstrip("/\\")
+            pattern = f"{p}/**/*" if p else "**/*"
     files = _iter_files(pattern)
     rels = sorted(_rel_to_root(p).replace("\\", "/") for p in files)[:LIST_LIMIT]
     return json.dumps({"count": len(rels), "files": rels})
@@ -401,6 +439,17 @@ def replace_in_file(path: str, find: str, replace: str, regex: bool = False) -> 
             return json.dumps({"error": f"Not found: {path}"})
         content = p.read_text(encoding="utf-8", errors="ignore")
 
+        # Determine match count up front (used for no-op detection and error messages).
+        if regex:
+            match_count = len(re.findall(find, content))
+        else:
+            match_count = content.count(find)
+
+        if match_count == 0:
+            return json.dumps(
+                {"replaced": 0, "file": _rel_to_root(p), "path_abs": str(p), "path_rel": _rel_to_root_posix(p)}
+            )
+
         if regex:
             new_content = re.sub(find, replace, content)
         else:
@@ -408,8 +457,38 @@ def replace_in_file(path: str, find: str, replace: str, regex: bool = False) -> 
 
         if content == new_content:
             return json.dumps(
-                {"replaced": 0, "file": _rel_to_root(p), "path_abs": str(p), "path_rel": _rel_to_root_posix(p)}
+                {
+                    "replaced": 0,
+                    "matches": match_count,
+                    "file": _rel_to_root(p),
+                    "path_abs": str(p),
+                    "path_rel": _rel_to_root_posix(p),
+                }
             )
+
+        # Safety: prevent breaking Python syntax on edits to .py files.
+        # Validate the resulting content before writing it.
+        if p.suffix.lower() == ".py":
+            try:
+                import ast
+
+                ast.parse(new_content, filename=str(p))
+            except SyntaxError as e:
+                return json.dumps(
+                    {
+                        "error": f"SyntaxError: {e.msg} (line {e.lineno}:{e.offset})",
+                        "replaced": match_count,
+                        "file": _rel_to_root(p),
+                        "path_abs": str(p),
+                        "path_rel": _rel_to_root_posix(p),
+                        "syntax_error": {
+                            "msg": e.msg,
+                            "lineno": e.lineno,
+                            "offset": e.offset,
+                            "text": getattr(e, "text", None),
+                        },
+                    }
+                )
 
         p.write_text(new_content, encoding="utf-8")
 
@@ -418,7 +497,7 @@ def replace_in_file(path: str, find: str, replace: str, regex: bool = False) -> 
         if file_cache is not None:
             file_cache.invalidate_file(p)
 
-        count = len(content.split(find)) - 1 if not regex else len(re.findall(find, content))
+        count = match_count
         return json.dumps(
             {
                 "replaced": count,

@@ -51,6 +51,9 @@ def main():
 
     # Ensure rev data directory exists
     config.REV_DIR.mkdir(parents=True, exist_ok=True)
+    # Always-on run log (separate from --debug structured logging)
+    from rev.run_log import start_run_log, write_run_log_line
+    run_log_path = start_run_log()
 
     # Initialize cache system
     cache_dir = config.CACHE_DIR
@@ -252,10 +255,26 @@ def main():
 
 
     args = parser.parse_args()
+    # Windows: ensure ANSI output is handled correctly in classic consoles.
+    try:
+        if os.name == "nt":
+            import colorama
+
+            colorama.just_fix_windows_console()
+    except Exception:
+        pass
+
     use_tui_main = args.tui or os.getenv("REV_TUI", "").lower() in {"1", "true", "yes", "on"}
     buffered_logs: list[str] = []
+    initial_command: Optional[str] = None
     def _log(msg: str):
-        if use_tui_main and (args.repl or not args.task):
+        if use_tui_main:
+            try:
+                # In TUI startup we buffer instead of printing; still persist to run log.
+                write_run_log_line(msg)
+            except Exception:
+                pass
+        if use_tui_main:
             buffered_logs.append(msg)
         else:
             print(msg)
@@ -272,6 +291,8 @@ def main():
     # Log workspace roots for transparency (Isolate).
     _log(f"workspace_root={config.ROOT}")
     _log(f"allowed_roots={[str(p) for p in config.get_allowed_roots()]}")
+    if run_log_path:
+        _log(f"run_log={run_log_path}")
 
     # Enforce single-worker execution regardless of CLI input
     if args.parallel != 1:
@@ -491,9 +512,20 @@ def main():
             except Exception as e:
                 print(f"✗ Failed to load checkpoint: {e}")
                 sys.exit(1)
+        if args.tui and args.task:
+            # TUI is inherently interactive; treat one-shot tasks as the initial REPL command
+            # so the user can see scrollback and keep the prompt at the bottom.
+            initial_command = " ".join(args.task)
+            args.repl = True
+            args.task = []
+
         if args.repl or not args.task:
             debug_logger.log_workflow_phase("repl", {})
-            repl_mode(force_tui=args.tui, init_logs=buffered_logs if use_tui_main else None)
+            repl_mode(
+                force_tui=args.tui,
+                init_logs=buffered_logs if use_tui_main else None,
+                initial_command=initial_command,
+            )
         else:
             task_description = " ".join(args.task)
             debug_logger.log("main", "TASK_DESCRIPTION", {"task": task_description})

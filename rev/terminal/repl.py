@@ -20,7 +20,11 @@ from rev.settings_manager import get_default_mode, apply_saved_settings
 from rev.llm.client import get_token_usage
 
 
-def repl_mode(force_tui: bool = False, init_logs: list[str] | None = None):
+def repl_mode(
+    force_tui: bool = False,
+    init_logs: list[str] | None = None,
+    initial_command: str | None = None,
+):
     """Interactive REPL for iterative development with session memory.
 
     The REPL is intended for interactive use. When standard input is not a TTY
@@ -41,9 +45,10 @@ def repl_mode(force_tui: bool = False, init_logs: list[str] | None = None):
             import sys as _sys
             from rev.terminal.tui import TUI, TuiStream
             import rev.terminal.formatting as fmt
+            from rev.run_log import wrap_stream
             # Disable ANSI colors inside curses UI to avoid escape artifacts on Windows.
             fmt._COLORS_ENABLED = False
-            tui = TUI(prompt=f"{colorize('rev', Colors.BRIGHT_MAGENTA)}{colorize('>', Colors.BRIGHT_BLACK)} ")
+            tui = TUI(prompt="rev> ")
             if init_logs:
                 for line in init_logs:
                     tui.log(line)
@@ -55,8 +60,8 @@ def repl_mode(force_tui: bool = False, init_logs: list[str] | None = None):
             logger = _tui_log
             # Redirect stdout/stderr into TUI
             _orig_out, _orig_err = _sys.stdout, _sys.stderr
-            _sys.stdout = TuiStream(tui.log)
-            _sys.stderr = TuiStream(tui.log)
+            _sys.stdout = wrap_stream(TuiStream(tui.log))  # type: ignore[assignment]
+            _sys.stderr = wrap_stream(TuiStream(tui.log))  # type: ignore[assignment]
         except Exception as e:
             print(f"[rev] TUI unavailable ({e}); falling back to standard REPL.")
             use_tui = False
@@ -182,7 +187,7 @@ def repl_mode(force_tui: bool = False, init_logs: list[str] | None = None):
         tui.log(f"{colorize('[i] Running in autonomous mode - destructive operations will prompt', Colors.BRIGHT_YELLOW)}")
         tui.log(f"{colorize(f'[!] Press ESC to submit input immediately', Colors.BRIGHT_GREEN)}")
         try:
-            tui.run(_handle_input_line)
+            tui.run(_handle_input_line, initial_input=initial_command)
         except SystemExit:
             pass
         except Exception as e:

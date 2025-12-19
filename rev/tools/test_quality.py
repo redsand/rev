@@ -12,7 +12,7 @@ import textwrap
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
-from rev.config import ROOT
+from rev import config
 from rev.tools.utils import _run_shell, _safe_path
 
 
@@ -71,7 +71,7 @@ def generate_property_tests(targets: List[str], max_examples: int = 200) -> str:
             return json.dumps({"error": "No targets provided"})
 
         generated: List[str] = []
-        test_dir = ROOT / "tests" / "property"
+        test_dir = config.ROOT / "tests" / "property"
         test_dir.mkdir(parents=True, exist_ok=True)
 
         for target in targets:
@@ -85,7 +85,7 @@ def generate_property_tests(targets: List[str], max_examples: int = 200) -> str:
             safe_name = func_name.lower().replace(".", "_").replace("::", "_").replace(":", "_")
             test_file = test_dir / f"test_property_{safe_name}.py"
             test_file.write_text(test_code, encoding="utf-8")
-            generated.append(str(test_file.relative_to(ROOT)))
+            generated.append(test_file.relative_to(config.ROOT).as_posix())
 
         run_result = json.loads(run_property_tests([str(test_dir)], max_examples))
 
@@ -124,7 +124,7 @@ def check_contracts(paths: Optional[List[str]] = None, timeout_seconds: int = 60
             "summary": {
                 "returncode": proc.returncode,
                 "missing_paths": missing,
-                "paths": [str(p.relative_to(ROOT)) for p in resolved_paths]
+                "paths": [p.relative_to(config.ROOT).as_posix() for p in resolved_paths]
             }
         }, indent=2)
 
@@ -456,7 +456,7 @@ def generate_repro_case(context: str, target_path: str = "tests/regressions/test
         target.write_text(test_code, encoding="utf-8")
         proc = _run_shell(f"pytest -q {shlex.quote(str(target))}", timeout=300)
         return json.dumps({
-            "test_path": str(target.relative_to(ROOT)),
+            "test_path": target.relative_to(config.ROOT).as_posix(),
             "run_output": (proc.stdout + proc.stderr)[:4000],
             "returncode": proc.returncode
         }, indent=2)

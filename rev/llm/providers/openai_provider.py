@@ -50,6 +50,11 @@ class OpenAIProvider(LLMProvider):
             "temperature": float(os.getenv("OPENAI_TEMPERATURE", "0.1")),
         }
 
+        # Optional: thinking mode for OpenAI-compatible backends (e.g., DeepSeek).
+        # Passed through as-is; auto-detection is handled at a higher level.
+        if "thinking" in kwargs and kwargs["thinking"] is not None:
+            request_params["thinking"] = kwargs["thinking"]
+
         # Add tools if provided and supported
         if tools and supports_tools:
             request_params["tools"] = tools
@@ -121,6 +126,9 @@ class OpenAIProvider(LLMProvider):
             "temperature": float(os.getenv("OPENAI_TEMPERATURE", "0.1")),
             "stream": True,
         }
+
+        if "thinking" in kwargs and kwargs["thinking"] is not None:
+            request_params["thinking"] = kwargs["thinking"]
 
         if tools and supports_tools:
             request_params["tools"] = tools

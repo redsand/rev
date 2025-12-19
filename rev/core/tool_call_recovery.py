@@ -27,6 +27,16 @@ def _extract_json_snippet(text: str) -> Optional[str]:
     if not text:
         return None
 
+    stripped = text.lstrip()
+    # Fast-path: message begins with a fenced JSON block
+    if stripped.startswith("```json") or stripped.startswith("```JSON") or stripped.startswith("```"):
+        # Remove the opening fence and grab everything up to the next fence (if present)
+        fence_stripped = re.sub(r"^```(?:json)?", "", stripped, flags=re.IGNORECASE).lstrip()
+        if "```" in fence_stripped:
+            return fence_stripped.split("```", 1)[0].strip()
+        # If no closing fence, fall through to best-effort braces extraction below
+        stripped = fence_stripped
+
     fenced = re.findall(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.DOTALL | re.IGNORECASE)
     if fenced:
         # Prefer the first fenced block; models typically emit one.

@@ -50,14 +50,14 @@ CRITICAL CONSTRAINT - CONCRETE NOUNS ONLY:
 You generally cannot create tasks with placeholders or vague references.
 
 BAD (too vague - will be REJECTED):
-- "Implement the first identified analyst."
+- "Implement the first identified component."
 - "Port the feature from the other repo."
 - "Add the identified functionality."
 - "Implement relevant code from external source."
 
 GOOD (specific and actionable):
-- "Port 'RSI_Strategy' class from '../other-repo/strategies.py' to 'lib/analysts.py'."
-- "Implement 'MovingAverageCrossover' analyst based on existing 'BollingerBand' pattern."
+- "Port 'FooStrategy' class from '../other-repo/strategies.py' to 'src/strategies.py'."
+- "Implement 'MovingAverageCrossover' feature based on existing 'BollingerBand' pattern."
 - "Add 'calculate_macd' function to indicators.py following existing indicator pattern."
 
 HANDLING UNKNOWNS:
@@ -168,18 +168,18 @@ You MUST use specific names in task descriptions. NEVER use placeholders.
 
 BAD (WILL BE REJECTED):
 - "Implement first missing feature/module"
-- "Port the identified analyst"
+- "Port the identified component"
 - "Add relevant functionality"
 
 GOOD (SPECIFIC AND ACTIONABLE):
-- "Implement 'BollingerBandAnalyst' class in lib/analysts.py"
-- "Port 'MacdStrategy' from ../external/strategies.py to lib/strategies.py"
+- "Implement 'BollingerBand' feature in src/indicators.py"
+ - "Port 'MacdStrategy' from ../external/strategies.py to src/strategies.py"
 - "Add 'calculate_rsi' function to indicators.py"
 
 IF SPECIFIC NAMES ARE UNKNOWN:
 - Your first tasks MUST be discovery/research tasks to identify the specific items.
 - Only AFTER discovery tasks can you add implementation tasks.
-- Discovery task example: "Scan ../external-repo to list all Analyst classes to be ported"
+- Discovery task example: "Scan ../external-repo to list all candidate classes to be ported"
 
 IF THE RESEARCH IS INSUFFICIENT:
 Generate a "Discovery Plan" with [REVIEW] tasks to identify specific items:
@@ -200,15 +200,15 @@ MINIMUM BREAKDOWN PATTERN:
 
 EXAMPLE for "implement features from another repository/framework" (WITH SPECIFIC NAMES):
 [
-  {"description": "Review existing codebase structure in lib/analysts.py to identify integration points", "action_type": "review", "complexity": "low"},
-  {"description": "Scan ../algorithmic-trading-with-python to list all Analyst classes available", "action_type": "review", "complexity": "low"},
-  {"description": "Compare external analysts with existing ones to identify non-duplicates", "action_type": "review", "complexity": "low"},
-  {"description": "Port 'MovingAverageCrossoverAnalyst' from ../algorithmic-trading-with-python/analysts.py", "action_type": "add", "complexity": "medium"},
-  {"description": "Port 'BollingerBandAnalyst' from ../algorithmic-trading-with-python/analysts.py", "action_type": "add", "complexity": "medium"},
-  {"description": "Port 'MacdAnalyst' from ../algorithmic-trading-with-python/analysts.py", "action_type": "add", "complexity": "medium"},
-  {"description": "Register new analysts in matrix_recipes.py configuration", "action_type": "edit", "complexity": "low"},
-  {"description": "Write unit tests for MovingAverageCrossoverAnalyst, BollingerBandAnalyst, MacdAnalyst", "action_type": "add", "complexity": "medium"},
-  {"description": "Run pytest tests/test_analysts.py to validate integration", "action_type": "test", "complexity": "low"}
+  {"description": "Review existing codebase structure in src/ to identify integration points", "action_type": "review", "complexity": "low"},
+  {"description": "Scan ../external-repo to list all candidate classes/functions available", "action_type": "review", "complexity": "low"},
+  {"description": "Compare external implementations with existing ones to identify non-duplicates", "action_type": "review", "complexity": "low"},
+  {"description": "Port 'MovingAverageCrossover' implementation from ../external-repo/strategies.py", "action_type": "add", "complexity": "medium"},
+  {"description": "Port 'BollingerBand' implementation from ../external-repo/indicators.py", "action_type": "add", "complexity": "medium"},
+  {"description": "Port 'Macd' implementation from ../external-repo/indicators.py", "action_type": "add", "complexity": "medium"},
+  {"description": "Register new components in app configuration", "action_type": "edit", "complexity": "low"},
+  {"description": "Write unit tests for MovingAverageCrossover, BollingerBand, Macd", "action_type": "add", "complexity": "medium"},
+  {"description": "Run pytest tests/ to validate integration", "action_type": "test", "complexity": "low"}
 ]
 
 CRITICAL - Output Format (PURE JSON ONLY):
@@ -461,7 +461,7 @@ def _is_overly_broad_task(task_description: str, user_request: str = "") -> bool
         # Generic goals
         "goal is to", "should be", "exponential",
         # File/module references suggesting multiple targets
-        "analysts", "strategies", "indicators", "modules",
+        "components", "strategies", "indicators", "modules",
         # External reference suggesting integration work
         "from ../", "from another", "algorithmic", "trading"
     ]
@@ -503,7 +503,7 @@ def _has_vague_placeholder(task_description: str) -> bool:
         "first feature", "second feature", "third feature",
         # Generic references
         "the identified", "the relevant", "the appropriate",
-        "identified feature", "identified analyst", "identified class",
+        "identified feature", "identified component", "identified class",
         "identified function", "identified module", "identified item",
         "relevant feature", "relevant code", "relevant functionality",
         "appropriate feature", "appropriate implementation",
@@ -529,7 +529,7 @@ def _has_vague_placeholder(task_description: str) -> bool:
         return True
 
     # Check for "the X" where X is a generic term without a specific name
-    generic_the_pattern = r'\bthe\s+(feature|analyst|class|function|module|item|code|functionality)\b'
+    generic_the_pattern = r'\bthe\s+(feature|component|class|function|module|item|code|functionality)\b'
     matches = re.findall(generic_the_pattern, description_lower)
     if matches:
         # Only flag if there's no quoted specific name nearby
@@ -670,7 +670,7 @@ Task: {task_description}
 REQUIREMENTS:
 - You MUST return at least 5 subtasks
 - Each subtask must be a SINGLE action (e.g., \"Add SMA indicator\" not \"Add indicators\")
-- If the task mentions multiple items (analysts, features, etc.), create ONE subtask per item
+ - If the task mentions multiple items (components, features, etc.), create ONE subtask per item
 - Start with review/analysis tasks, then implementation tasks, then test tasks
 
 Example for \"add multiple modules/features\":
@@ -871,7 +871,7 @@ def _extract_concrete_references(user_request: str) -> Dict[str, Any]:
     references like "extract identified classes".
 
     Returns a dict with:
-    - class_names: List of specific class names mentioned (e.g., ["BreakoutAnalyst", "VolumeAnalyst"])
+    - class_names: List of specific class names mentioned (e.g., ["FooStrategy", "BarHandler"])
     - function_names: List of specific function names mentioned
     - file_paths: List of specific file paths mentioned
     """
@@ -882,14 +882,14 @@ def _extract_concrete_references(user_request: str) -> Dict[str, Any]:
     }
 
     # Extract class names: CapitalizedWords that look like class names
-    # Pattern: PascalCase followed by optional 'Analyst', 'Strategy', 'Handler', etc.
-    class_pattern = r'\b([A-Z][a-z]+(?:[A-Z][a-z]+)*(?:Analyst|Strategy|Handler|Manager|Service|Factory|Builder|Observer|Validator|Processor)?)\b'
+    # Pattern: PascalCase followed by optional 'Strategy', 'Handler', etc.
+    class_pattern = r'\b([A-Z][a-z]+(?:[A-Z][a-z]+)*(?:Strategy|Handler|Manager|Service|Factory|Builder|Observer|Validator|Processor)?)\b'
     for match in re.finditer(class_pattern, user_request):
         name = match.group(1)
         # Filter out common English words and single words that aren't likely class names
         if len(name) > 2 and name not in references["class_names"]:
-            # More likely to be a class if it's long or has "Analyst" etc. suffix
-            if len(name) > 8 or any(suffix in name for suffix in ["Analyst", "Strategy", "Handler", "Manager", "Service"]):
+            # More likely to be a class if it's long or has a common class suffix.
+            if len(name) > 8 or any(suffix in name for suffix in ["Strategy", "Handler", "Manager", "Service"]):
                 references["class_names"].append(name)
 
     # Extract function names: snake_case words starting with verb or common patterns
@@ -1554,8 +1554,8 @@ Return ONLY a JSON object, no other text:
 }}
 
 EXAMPLES:
-{{"action_type": "add", "description": "Create lib/analysts/breakout.py with BreakoutAnalyst class"}}
-{{"action_type": "edit", "description": "Update lib/__init__.py to import new analyst modules"}}
+{{"action_type": "add", "description": "Create src/components/breakout.py with Breakout component"}}
+{{"action_type": "edit", "description": "Update src/__init__.py to export new components"}}
 {{"action_type": "test", "description": "Run pytest to verify refactoring is successful"}}
 {{"action_type": "review", "description": "GOAL_ACHIEVED"}}
 

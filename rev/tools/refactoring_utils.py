@@ -10,8 +10,35 @@ import re
 from pathlib import Path
 from typing import List, Dict, Optional, Set
 
-from rev.config import ROOT
+from rev import config
 from rev.tools.file_ops import _safe_path
+
+
+def _find_adjacent_backup(source_file: Path) -> Optional[Path]:
+    """Return an existing backup path for a previously split module."""
+    pattern = f"{source_file.name}.bak*"
+    try:
+        for candidate in source_file.parent.glob(pattern):
+            if candidate.is_file():
+                return candidate
+    except Exception:
+        pass
+    return None
+
+
+def _compute_backup_path(source_file: Path) -> Path:
+    """Choose a deterministic backup path without double .bak suffixes."""
+    if source_file.name.endswith(".bak"):
+        return source_file
+    candidate = source_file.with_suffix(source_file.suffix + ".bak")
+    if not candidate.exists():
+        return candidate
+    suffix_index = 1
+    while True:
+        numbered = source_file.with_suffix(source_file.suffix + f".bak.{suffix_index}")
+        if not numbered.exists():
+            return numbered
+        suffix_index += 1
 
 
 def _get_class_segments(source: str, tree: ast.Module) -> List[Dict[str, any]]:
@@ -64,16 +91,31 @@ def split_python_module_classes(
     source_path: str,
     target_directory: Optional[str] = None,
     overwrite: bool = False,
+    delete_source: bool = True,
 ) -> str:
     """Split each top-level class in a Python module into individual files.
 
     The original module is converted into a package (directory) containing the
-    extracted files and an __init__.py aggregator. The original .py file is
-    renamed with a .bak suffix for reference.
+    extracted files and an __init__.py aggregator.
     """
     try:
         source_file = _safe_path(source_path)
+        if target_directory:
+            target_dir = _safe_path(target_directory)
+        else:
+            target_dir = source_file.with_suffix("")
         if not source_file.exists():
+            backup_candidate = _find_adjacent_backup(source_file)
+            if backup_candidate:
+                return json.dumps(
+                    {
+                        "error": f"Source already split (backup exists): {backup_candidate.name}",
+                        "status": "source_already_split",
+                        "backup": backup_candidate.relative_to(config.ROOT).as_posix(),
+                        "package_dir": target_dir.relative_to(config.ROOT).as_posix(),
+                    },
+                    indent=2,
+                )
             return json.dumps({"error": f"Source file not found: {source_path}"})
 
         content = source_file.read_text(encoding="utf-8")
@@ -118,7 +160,7 @@ def split_python_module_classes(
                 parts.append("\n".join(trailing_imports).rstrip() + "\n\n")
             parts.append(seg["source"].lstrip("\n"))
             class_file.write_text("".join(parts).rstrip() + "\n", encoding="utf-8")
-            created_files.append(str(class_file.relative_to(ROOT)))
+            created_files.append(class_file.relative_to(config.ROOT).as_posix())
 
         # Build remaining content (original minus classes)
         lines = content.splitlines(keepends=True)
@@ -130,7 +172,7 @@ def split_python_module_classes(
         if remaining_content:
             aggregator_parts.append(remaining_content.rstrip() + "\n\n")
 
-        aggregator_parts.append("# Auto-generated exports for analyst classes\n")
+        aggregator_parts.append("# Auto-generated exports for extracted classes\n")
         for seg in class_segments:
             module_name = seg["name"]
             aggregator_parts.append(f"from .{module_name} import {seg['name']}\n")
@@ -142,25 +184,34 @@ def split_python_module_classes(
 
         package_init.write_text("".join(aggregator_parts), encoding="utf-8")
 
+        source_moved_to: Optional[str] = None
+        if delete_source:
+            try:
+                backup = _compute_backup_path(source_file)
+                source_file.rename(backup)
+                source_moved_to = backup.relative_to(config.ROOT).as_posix()
+            except Exception:
+                source_moved_to = None
+
         try:
-            package_module = str(source_file.relative_to(ROOT).with_suffix("")).replace("\\", "/").replace("/", ".")
+            package_module = (
+                str(source_file.relative_to(config.ROOT).with_suffix(""))
+                .replace("\\", "/")
+                .replace("/", ".")
+            )
         except ValueError:
             package_module = source_file.with_suffix("").name
         call_site_updates = _rewrite_package_imports(package_module, target_dir)
-
-        # Backup original file so imports resolve to the new package
-        backup_path = source_file.with_suffix(f"{source_file.suffix}.bak")
-        source_file.rename(backup_path)
 
         return json.dumps(
             {
                 "classes_split": len(class_segments),
                 "created_files": created_files,
                 "skipped": skipped,
-                "package_dir": str(target_dir.relative_to(ROOT)),
-                "package_init": str(package_init.relative_to(ROOT)),
+                "package_dir": target_dir.relative_to(config.ROOT).as_posix(),
+                "package_init": package_init.relative_to(config.ROOT).as_posix(),
                 "call_sites_updated": call_site_updates,
-                "original_backup": str(backup_path.relative_to(ROOT)),
+                "source_moved_to": source_moved_to,
             },
             indent=2,
         )
@@ -173,7 +224,7 @@ def _rewrite_package_imports(package_module: str, target_dir: Path) -> List[str]
     updated_files: List[str] = []
     pattern = re.compile(rf"^\s*from\s+{re.escape(package_module)}\.[A-Za-z0-9_]+\s+import\s+(.+)$")
 
-    for file_path in ROOT.rglob("*.py"):
+    for file_path in config.ROOT.rglob("*.py"):
         try:
             if target_dir in file_path.parents:
                 continue
@@ -202,7 +253,7 @@ def _rewrite_package_imports(package_module: str, target_dir: Path) -> List[str]
                     insert_idx = _find_import_insertion_index(new_lines)
                     new_lines.insert(insert_idx, block)
                 file_path.write_text("".join(new_lines), encoding="utf-8")
-                updated_files.append(str(file_path.relative_to(ROOT)))
+                updated_files.append(file_path.relative_to(config.ROOT).as_posix())
         except Exception:
             continue
 

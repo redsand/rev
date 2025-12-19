@@ -8,6 +8,7 @@ from rev.agents.documentation import DocumentationAgent
 from rev.agents.research import ResearchAgent
 from rev.agents.analysis import AnalysisAgent
 from rev.agents.tool_creation import ToolCreationAgent
+from rev.agents.tool_executor import ToolExecutorAgent
 
 class AgentRegistry:
     """
@@ -61,7 +62,8 @@ AgentRegistry.register_agent("research", ResearchAgent)
 AgentRegistry.register_agent("investigate", ResearchAgent)
 AgentRegistry.register_agent("analyze", AnalysisAgent)
 AgentRegistry.register_agent("review", AnalysisAgent)
+AgentRegistry.register_agent("read", ResearchAgent)
 
 # Advanced agents
 AgentRegistry.register_agent("create_tool", ToolCreationAgent)
-AgentRegistry.register_agent("tool", ToolCreationAgent)
+AgentRegistry.register_agent("tool", ToolExecutorAgent)

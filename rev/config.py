@@ -224,6 +224,15 @@ OLLAMA_TOP_P = float(os.getenv("OLLAMA_TOP_P", "0.9"))
 # Top-k for limiting vocabulary selection
 OLLAMA_TOP_K = int(os.getenv("OLLAMA_TOP_K", "40"))
 
+# ---------------------------------------------------------------------------
+# Thinking mode (best-effort auto-detect)
+# ---------------------------------------------------------------------------
+# Some OpenAI-compatible backends (e.g. DeepSeek) support a "thinking" parameter.
+# We default to auto: try once per model, disable on failure.
+LLM_THINKING_MODE = os.getenv("REV_THINKING_MODE", "auto").strip().lower()
+if LLM_THINKING_MODE not in {"auto", "off"}:
+    LLM_THINKING_MODE = "auto"
+
 # ============================================================================
 # Multi-Provider LLM Configuration
 # ============================================================================

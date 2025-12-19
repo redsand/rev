@@ -58,6 +58,449 @@ from rev.tools.workspace_resolver import resolve_workspace_path
 from rev.core.text_tool_shim import maybe_execute_tool_call_from_text
 from rev.agents.subagent_io import build_subagent_output
 from rev.execution.action_normalizer import normalize_action_type
+from rev.tools.workspace_resolver import normalize_path, normalize_to_workspace_relative, WorkspacePathError
+
+
+def _append_task_tool_event(task: Task, result_payload: Any) -> None:
+    """Best-effort: extract tool execution evidence and attach to task.tool_events.
+
+    Sub-agents often return standardized JSON (see rev/agents/subagent_io.py).
+    Persisting tool evidence on the Task lets quick_verify validate what actually ran
+    instead of guessing from task text or global "last tool call" state.
+    """
+    payload: Optional[Dict[str, Any]] = None
+    if isinstance(result_payload, dict):
+        payload = result_payload
+    elif isinstance(result_payload, str):
+        try:
+            parsed = json.loads(result_payload)
+            payload = parsed if isinstance(parsed, dict) else None
+        except Exception:
+            payload = None
+
+    if not payload:
+        return
+
+    tool_name = payload.get("tool_name")
+    tool_args = payload.get("tool_args")
+    tool_output = payload.get("tool_output")
+    evidence = payload.get("evidence")
+
+    if not isinstance(tool_name, str) or not tool_name.strip():
+        return
+
+    artifact_ref = None
+    summary = None
+    if isinstance(evidence, list) and evidence and isinstance(evidence[0], dict):
+        artifact_ref = evidence[0].get("artifact_ref")
+        summary = evidence[0].get("summary")
+
+    if not hasattr(task, "tool_events") or task.tool_events is None:
+        task.tool_events = []
+
+    task.tool_events.append(
+        {
+            "tool": tool_name,
+            "args": tool_args if isinstance(tool_args, dict) else {"args": tool_args},
+            "raw_result": tool_output,
+            "artifact_ref": artifact_ref,
+            "summary": summary,
+        }
+    )
+
+
+def _find_workspace_matches_by_basename(*, root: Path, basename: str, limit: int = 25) -> List[str]:
+    """Return workspace-relative POSIX paths matching basename."""
+    if not basename:
+        return []
+
+    basename_lower = basename.lower()
+    hits: List[str] = []
+    # Avoid scanning transient/internal directories.
+    exclude = set(getattr(config, "EXCLUDE_DIRS", set())) | {
+        ".rev",
+        ".pytest_cache",
+        ".pytest_tmp",
+        "tmp_test",
+        "artifacts",
+        "cache",
+        "logs",
+        "sessions",
+        "__pycache__",
+    }
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Prune excluded directories in-place.
+        dirnames[:] = [d for d in dirnames if d not in exclude]
+        for fn in filenames:
+            if fn.lower() != basename_lower:
+                continue
+            try:
+                rel = Path(dirpath, fn).resolve().relative_to(root.resolve()).as_posix()
+            except Exception:
+                continue
+            hits.append(rel)
+            if len(hits) >= limit:
+                return hits
+    return hits
+
+
+def _choose_best_path_match(*, original: str, matches: List[str]) -> Optional[str]:
+    """Pick the most likely intended match, or None if ambiguous."""
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+
+    original_lower = original.replace("\\", "/").lower()
+
+    def _score(rel_posix: str) -> tuple[int, int]:
+        p = rel_posix.lower()
+        score = 0
+        # Prefer typical source roots.
+        if "/lib/" in f"/{p}/":
+            score += 10
+        if "/src/" in f"/{p}/":
+            score += 8
+        if "/app/" in f"/{p}/":
+            score += 6
+        if "/tests/" in f"/{p}/":
+            score -= 5
+        # Prefer matches that end with the original (e.g., missing prefix).
+        if original_lower and p.endswith(original_lower):
+            score += 3
+        # Slightly prefer shallower paths to avoid deep vendor/test duplicates.
+        depth = p.count("/")
+        return (score, -depth)
+
+    ranked = sorted(matches, key=_score, reverse=True)
+    best = ranked[0]
+    if _score(best)[0] == _score(ranked[1])[0]:
+        return None
+    return best
+
+
+def _choose_best_path_match_with_context(*, original: str, matches: List[str], description: str) -> Optional[str]:
+    """Pick the most likely intended match, using description text to break ties."""
+    chosen = _choose_best_path_match(original=original, matches=matches)
+    if chosen or not matches or len(matches) == 1:
+        return chosen
+
+    desc = (description or "").replace("\\", "/").lower()
+    if not desc:
+        return None
+
+    def _context_score(rel_posix: str) -> tuple[int, int, int]:
+        p = rel_posix.replace("\\", "/").lower()
+        parent = Path(p).parent.as_posix().lower()
+        score = 0
+
+        # Strongest signal: the full parent path appears in the description.
+        if parent and parent != ".":
+            needle = f"/{parent.strip('/')}/"
+            hay = f"/{desc.strip('/')}/"
+            if needle in hay:
+                score += 50 + len(parent)
+
+        # Secondary: directory/file names appear in the description.
+        for part in Path(p).parts:
+            part_l = str(part).lower()
+            if part_l and part_l != "." and part_l in desc:
+                score += 2
+
+        depth = p.count("/")
+        return (score, depth, len(p))
+
+    ranked = sorted(matches, key=_context_score, reverse=True)
+    if _context_score(ranked[0])[0] == _context_score(ranked[1])[0]:
+        return None
+    return ranked[0]
+
+
+def _preflight_correct_action_semantics(task: Task) -> tuple[bool, List[str]]:
+    """Coerce overloaded actions into read-only vs mutating actions.
+
+    Returns:
+        (ok_to_execute, messages)
+    """
+    action = (task.action_type or "").strip().lower()
+    desc = (task.description or "").strip()
+    if not action or not desc:
+        return True, []
+
+    mutate_actions = {"edit", "add", "create", "create_directory", "refactor", "delete", "rename", "fix"}
+    read_actions = {"read", "analyze", "review", "research"}
+
+    # Heuristic intent detection (word-boundary based to avoid false positives like
+    # matching "analy" inside "analysis").
+    desc_l = desc.lower()
+    read_intent = bool(
+        re.search(
+            r"\b(read|inspect|review|analyze|analysis|understand|locate|find|search|inventory|identify|list|show|explain)\b",
+            desc_l,
+        )
+    )
+    write_intent = bool(
+        re.search(
+            r"\b(edit|update|modify|change|refactor|remove|delete|rename|create|add|write|generate|apply)\b"
+            r"|split_python_module_classes|replace_in_file|write_file|apply_patch|append_to_file|create_directory",
+            desc_l,
+        )
+    )
+
+    messages: List[str] = []
+
+    # If action says mutate but description is clearly inspection-only, coerce to READ.
+    if action in mutate_actions and read_intent and not write_intent:
+        task.action_type = "read"
+        messages.append(f"coerced action '{action}' -> 'read' (inspection-only task)")
+        return True, messages
+
+    # If action says read-only but description includes mutation verbs, fail fast to replan.
+    if action in read_actions and write_intent and not read_intent:
+        messages.append(f"action '{action}' conflicts with write intent; choose edit/refactor instead")
+        return False, messages
+
+    return True, messages
+
+
+def _order_available_actions(actions: List[str]) -> List[str]:
+    """Return actions ordered to bias the lightweight planner toward READ first."""
+    cleaned: List[str] = []
+    for a in actions:
+        if not isinstance(a, str):
+            continue
+        a = a.strip().lower()
+        if not a:
+            continue
+        if a not in cleaned:
+            cleaned.append(a)
+
+    # Priority buckets: smaller comes earlier.
+    priorities: dict[str, int] = {
+        # Read-only first (better stability)
+        "read": 0,
+        "analyze": 1,
+        "review": 2,
+        "research": 3,
+        "investigate": 3,
+        # Then mutating actions
+        "create_directory": 10,
+        "add": 11,
+        "edit": 12,
+        "refactor": 13,
+        "delete": 14,
+        "rename": 15,
+        "fix": 16,
+        # Then execution actions
+        "test": 30,
+        # Advanced tooling last
+        "create_tool": 40,
+        "tool": 41,
+        # Legacy shim last-last
+        "general": 90,
+    }
+
+    def _key(a: str) -> tuple[int, int, str]:
+        return (priorities.get(a, 50), cleaned.index(a), a)
+
+    return sorted(cleaned, key=_key)
+
+
+def _is_goal_achieved_response(response: Optional[str]) -> bool:
+    """Detect when the planner says the goal is already achieved."""
+    if not response:
+        return False
+    normalized = re.sub(r"[\[\]_\s]+", " ", response).strip().lower()
+    if not normalized:
+        return False
+    if normalized == "goal":
+        return True
+    if normalized.startswith("goal "):
+        return "achieved" in normalized or "complete" in normalized or "done" in normalized
+    return normalized == "goal achieved"
+
+
+def _dedupe_redundant_prefix_path(norm_path: str, project_root: Path) -> Optional[str]:
+    """
+    Collapse accidental repeated leading segments like
+    'lib/analysts/lib/analysts/__init__.py' into the shortest suffix that
+    already exists. This prevents recursive path drift when planners keep
+    appending the same subpath.
+    """
+    if not norm_path:
+        return None
+
+    parts = list(Path(norm_path.replace("/", os.sep)).parts)
+    # Need at least X/Y/X/Y to consider it a duplicated prefix.
+    if len(parts) < 4:
+        return None
+
+    changed = False
+    while len(parts) >= 4:
+        reduced = False
+        for prefix_len in range(1, len(parts) // 2 + 1):
+            prefix = parts[:prefix_len]
+            if parts[prefix_len: 2 * prefix_len] == prefix:
+                parts = parts[prefix_len:]
+                changed = True
+                reduced = True
+                break
+        if not reduced:
+            break
+
+    if not changed:
+        return None
+
+    candidate = Path(*parts)
+    try:
+        if not candidate.is_absolute():
+            candidate_abs = (project_root / candidate).resolve(strict=False)
+        else:
+            candidate_abs = candidate
+    except Exception:
+        return None
+
+    if not candidate_abs.exists():
+        return None
+
+    try:
+        return normalize_to_workspace_relative(candidate_abs, workspace_root=project_root)
+    except Exception:
+        return str(candidate_abs).replace("\\", "/")
+
+
+def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bool, List[str]]:
+    """Best-effort path correction for lightweight planner outputs.
+
+    Returns:
+        (ok_to_execute, messages)
+    """
+    desc = task.description or ""
+    messages: List[str] = []
+    action = (task.action_type or "").strip().lower()
+    read_actions = {"read", "analyze", "review", "research", "investigate"}
+
+    # Focus on Python path mistakes first.
+    # Keep this regex intentionally simple to avoid escaping bugs.
+    candidates = sorted(
+        set(
+            re.findall(
+                r'([A-Za-z]:[\\/][^\s"\'`]+\.py(?:\.bak)?\b|(?:\./)?[A-Za-z0-9_./\\-]+\.py(?:\.bak)?\b)',
+                desc,
+            )
+        )
+    )
+    if not candidates:
+        return True, messages
+
+    def _abs_for_normalized(norm: str) -> Optional[Path]:
+        """Resolve a normalized path to an absolute path for existence checks.
+
+        Prefer project_root for relative paths (planner preflight) to avoid
+        split-brain issues if Workspace isn't initialized yet.
+        """
+        p = Path(norm.replace("/", os.sep))
+        if not p.is_absolute():
+            return (project_root / p).resolve(strict=False)
+        try:
+            return resolve_workspace_path(norm, purpose="preflight").abs_path
+        except WorkspacePathError:
+            return None
+
+    existing_any = 0
+    missing_unresolved: List[str] = []
+
+    for raw in candidates:
+        normalized = normalize_path(raw)
+
+        deduped = _dedupe_redundant_prefix_path(normalized, project_root=project_root)
+        if deduped and deduped != normalized:
+            if raw in desc:
+                desc = desc.replace(raw, deduped)
+            if normalized in desc:
+                desc = desc.replace(normalized, deduped)
+            messages.append(f"normalized duplicated path '{raw}' -> '{deduped}'")
+            normalized = deduped
+
+        abs_path = _abs_for_normalized(normalized)
+        if abs_path is None:
+            # Leave it to the main allowlist error path.
+            continue
+
+        if abs_path.exists():
+            existing_any += 1
+            # Canonicalize absolute paths to workspace-relative for future tool calls.
+            rel = normalize_to_workspace_relative(abs_path, workspace_root=project_root)
+            if rel and rel != normalized and raw in desc:
+                desc = desc.replace(raw, rel)
+                messages.append(f"normalized path '{raw}' -> '{rel}'")
+            continue
+
+        # Missing path: try to locate by basename.
+        basename = Path(normalized.replace("/", os.sep)).name
+        basenames = [basename]
+        # Common tool behavior: keep backups as *.py.bak
+        if basename.lower().endswith(".py") and not basename.lower().endswith(".py.bak"):
+            basenames.append(basename + ".bak")
+        if basename.lower().endswith(".py.bak"):
+            basenames.append(basename[: -len(".bak")])
+
+        matches: List[str] = []
+        for bn in basenames:
+            matches.extend(_find_workspace_matches_by_basename(root=project_root, basename=bn))
+        matches = sorted(set(matches))
+        primary_matches = [m for m in matches if not m.endswith(".bak")]
+        backup_matches = [m for m in matches if m.endswith(".bak")]
+
+        # Prefer real sources over backups; avoid auto-operating on backups for mutating actions.
+        preferred_pool = primary_matches if primary_matches else matches
+        chosen = _choose_best_path_match_with_context(original=normalized, matches=preferred_pool, description=desc)
+
+        if not chosen and backup_matches and not primary_matches and action not in read_actions:
+            missing_unresolved.append(
+                f"missing path '{raw}' (only backup(s) found: {backup_matches[:3]})"
+            )
+            continue
+        if chosen:
+            if chosen.endswith(".bak") and action not in read_actions:
+                missing_unresolved.append(
+                    f"missing path '{raw}' (only backup found: {chosen}; restore original before mutating)"
+                )
+                continue
+            # Replace occurrences of the raw token as well as its normalized variant.
+            if raw in desc:
+                desc = desc.replace(raw, chosen)
+            if normalized in desc:
+                desc = desc.replace(normalized, chosen)
+            messages.append(f"corrected missing path '{raw}' -> '{chosen}'")
+            existing_any += 1
+            continue
+
+        if matches:
+            missing_unresolved.append(f"ambiguous missing path '{raw}' (matches={matches[:5]})")
+        else:
+            missing_unresolved.append(f"missing path '{raw}' (no matches found)")
+
+    task.description = desc
+
+    if not missing_unresolved:
+        return True, messages
+
+    # READ-like tasks should not reference missing files.
+    if action in read_actions:
+        messages.extend(missing_unresolved[:1])
+        return False, messages
+
+    # Mutating tasks commonly mention output paths that don't exist yet; only fail
+    # if NONE of the referenced paths could be resolved to an existing file.
+    if existing_any == 0:
+        messages.extend(missing_unresolved[:1])
+        return False, messages
+
+    # Otherwise, allow execution to proceed (best-effort). Avoid spamming logs.
+    messages.append("ignored missing output path(s); at least one input path exists")
+    return True, messages
 
 
 @dataclass
@@ -403,7 +846,7 @@ class Orchestrator:
             f"If no, just respond with 'CANNOT_DECOMPOSE'.\n\n"
             "Important import strategy note (avoid churn):\n"
             "- If a refactor split creates a package (directory with __init__.py exports), update call sites/tests to\n"
-            "  import from the package exports (e.g., `from lib.analysts import BreakoutAnalyst`).\n"
+            "  import from the package exports (e.g., `from package import ExportedSymbol`).\n"
             "- Do NOT expand `from pkg import *` into dozens of per-module imports.\n\n"
             f"Important: Be specific about what concrete action the next task should take. "
             f"Use [ACTION_TYPE] format like [CREATE] or [EDIT] or [REFACTOR]."
@@ -441,7 +884,7 @@ class Orchestrator:
 
     def _determine_next_action(self, user_request: str, work_summary: str, coding_mode: bool) -> Optional[Task]:
         """A truly lightweight planner that makes a direct LLM call."""
-        available_actions = AgentRegistry.get_registered_action_types()
+        available_actions = _order_available_actions(AgentRegistry.get_registered_action_types())
 
         blocked_note = ""
         if self.context:
@@ -459,18 +902,26 @@ class Orchestrator:
             f"{blocked_note}"
             "Based on the work completed, what is the single next most important action to take? "
             "If a previous action failed, propose a different action to achieve the goal.\n"
-            "Constraints to avoid duplicating work:\n"
-            "- Do not propose repeating a step that is already complete (e.g., do not re-create a directory that exists).\n"
-            "- If you are going to use `split_python_module_classes`, do not hand-author `lib/analysts/__init__.py` first; let the tool generate it.\n"
-            "- After `split_python_module_classes` runs, the source file is renamed to `*.py.bak`. Do not try to edit the old `*.py` path.\n"
-            "- If a source file was split into a package (directory with __init__.py) and the original single-file path no longer exists, do NOT propose edits to that missing file; operate on the package files that actually exist.\n"
-            "- If the code was split into a package with __init__.py exports, prefer package-export imports at call sites.\n"
-            "- Avoid replacing `from pkg import *` with dozens of per-module imports; only import names actually used.\n"
-            "- Prefer `from lib.analysts import SomeAnalyst` over `from lib.analysts.some_file import SomeAnalyst` when `lib/analysts/__init__.py` exports it.\n"
-            f"You MUST choose one of the following action types: {available_actions}\n"
-            "Your response should be a single line in the format: [ACTION_TYPE] description of the action.\n"
-            "Example: [EDIT] refactor the authentication middleware to use the new session manager.\n"
-            "If the goal has been achieved, respond with only the text 'GOAL_ACHIEVED'."
+            "\n"
+            "ACTION SEMANTICS (critical):\n"
+            "- Use [READ] or [ANALYZE] when the next step is inspection only (open files, search, inventory imports, understand structure).\n"
+            "- Use [EDIT]/[ADD]/[CREATE_DIRECTORY]/[REFACTOR] only when you will perform a repo-changing tool call in this step.\n"
+            "- Use [TOOL] only to execute an existing built-in tool (e.g., `split_python_module_classes`).\n"
+            "- Use [CREATE_TOOL] only when no existing tool can do the job and you must create a new tool.\n"
+            "- If unsure whether a path exists, choose [READ] first to locate the correct file path(s).\n"
+            "\n"
+             "Constraints to avoid duplicating work:\n"
+             "- Do not propose repeating a step that is already complete (e.g., do not re-create a directory that exists).\n"
+             "- If you are going to use `split_python_module_classes`, do not hand-author the package `__init__.py` first; let the tool generate it.\n"
+             "- After `split_python_module_classes` runs, treat the directory as the source of truth; prefer editing the package files rather than the original monolithic module.\n"
+             "- If a source file was split into a package (directory with __init__.py) and the original single-file path no longer exists, do NOT propose edits to that missing file; operate on the package files that actually exist.\n"
+             "- If the code was split into a package with __init__.py exports, prefer package-export imports at call sites.\n"
+             "- Avoid replacing `from pkg import *` with dozens of per-module imports; only import names actually used.\n"
+             "- Prefer `from package import ExportedSymbol` over `from package.module import ExportedSymbol` when the package exports it.\n"
+             f"You MUST choose one of the following action types: {available_actions}\n"
+             "Your response should be a single line in the format: [ACTION_TYPE] description of the action.\n"
+             "Example: [EDIT] refactor the authentication middleware to use the new session manager.\n"
+             "If the goal has been achieved, respond with only the text 'GOAL_ACHIEVED'."
         )
         
         response_data = ollama_chat([{"role": "user", "content": prompt}])
@@ -483,6 +934,8 @@ class Orchestrator:
             return None
 
         response_content = response_data.get("message", {}).get("content", "")
+        if _is_goal_achieved_response(response_content):
+            return None
         if not response_content or response_content.strip().upper() == "GOAL_ACHIEVED":
             return None
         
@@ -522,7 +975,9 @@ class Orchestrator:
             self.context.resource_budget.update_step()
             if self.context.resource_budget.is_exceeded():
                 print(f"\n⚠️ Resource budget exceeded at step {iteration}")
-                return True
+                self.context.set_agent_state("no_retry", True)
+                self.context.add_error(f"Resource budget exceeded at step {iteration}")
+                return False
 
             work_summary = "No actions taken yet."
             if completed_tasks_log:
@@ -541,6 +996,58 @@ class Orchestrator:
                 return True
 
             next_task.task_id = iteration
+            try:
+                # Ensure validation_steps are always present so quick_verify can enforce them.
+                next_task.validation_steps = ExecutionPlan().generate_validation_steps(next_task)
+            except Exception:
+                pass
+            ok, sem_msgs = _preflight_correct_action_semantics(next_task)
+            for msg in sem_msgs:
+                print(f"  [preflight] {msg}")
+            if not ok:
+                self.context.add_error("Preflight failed: " + "; ".join(sem_msgs))
+                completed_tasks_log.append(f"[FAILED] Preflight: {'; '.join(sem_msgs)}")
+                if any("conflicts with write intent" in msg for msg in sem_msgs):
+                    self.context.add_agent_request(
+                        "REPLAN_REQUEST",
+                        {
+                            "agent": "Orchestrator",
+                            "reason": "preflight read/write mismatch",
+                            "detailed_reason": sem_msgs[0],
+                        },
+                    )
+                sig = f"action_semantics::{(next_task.action_type or '').strip().lower()}::{';'.join(sem_msgs).strip().lower()}"
+                failure_counts[sig] += 1
+                if failure_counts[sig] >= 3:
+                    self.context.set_agent_state("no_retry", True)
+                    self.context.add_error("Circuit breaker: repeating preflight action semantics failure")
+                    print("\n" + "=" * 70)
+                    print("CIRCUIT BREAKER - PREFLIGHT FAILURE")
+                    print("=" * 70)
+                    print(f"Repeated preflight failure {failure_counts[sig]}x: {'; '.join(sem_msgs)}")
+                    print("Blocking issue: planner is not producing an executable action; refusing to loop.\n")
+                    return False
+                continue
+            ok, preflight_msgs = _preflight_correct_task_paths(task=next_task, project_root=self.project_root)
+            for msg in preflight_msgs:
+                print(f"  [preflight] {msg}")
+            if not ok:
+                # Do not execute with missing/ambiguous paths; feed this back into planning.
+                self.context.add_error("Preflight failed: " + "; ".join(preflight_msgs))
+                completed_tasks_log.append(f"[FAILED] Preflight: {'; '.join(preflight_msgs)}")
+                key_msg = preflight_msgs[0] if preflight_msgs else "unknown"
+                sig = f"paths::{(next_task.action_type or '').strip().lower()}::{key_msg.strip().lower()}"
+                failure_counts[sig] += 1
+                if failure_counts[sig] >= 3:
+                    self.context.set_agent_state("no_retry", True)
+                    self.context.add_error("Circuit breaker: repeating preflight path failure")
+                    print("\n" + "=" * 70)
+                    print("CIRCUIT BREAKER - PREFLIGHT FAILURE")
+                    print("=" * 70)
+                    print(f"Repeated preflight failure {failure_counts[sig]}x: {key_msg}")
+                    print("Blocking issue: planner is not producing an executable action; refusing to loop.\n")
+                    return False
+                continue
             print(f"  â†' Next action: [{next_task.action_type.upper()}] {next_task.description[:80]}")
 
             self.context.plan = ExecutionPlan(tasks=[next_task])
@@ -735,6 +1242,35 @@ class Orchestrator:
                 else:
                     print(f"  {key}: {value}")
 
+        # Display strict/validation command outputs (compileall/pytest/etc)
+        details = verification_result.details or {}
+        for block_key in ("strict", "validation"):
+            block = details.get(block_key)
+            if not isinstance(block, dict) or not block:
+                continue
+            print(f"\n{block_key.upper()} OUTPUTS:")
+            print("-" * 70)
+            for label, res in block.items():
+                if not isinstance(res, dict):
+                    continue
+                cmd = res.get("cmd")
+                rc = res.get("rc")
+                stdout = (res.get("stdout") or "").strip()
+                stderr = (res.get("stderr") or "").strip()
+                stdout_log = res.get("stdout_log")
+                stderr_log = res.get("stderr_log")
+                print(f"  [{label}] rc={rc} cmd={cmd}")
+                if stdout:
+                    print("    stdout:")
+                    for line in str(stdout).splitlines()[-25:]:
+                        print(f"      {line}")
+                if stderr:
+                    print("    stderr:")
+                    for line in str(stderr).splitlines()[-25:]:
+                        print(f"      {line}")
+                if stdout_log or stderr_log:
+                    print(f"    logs: stdout_log={stdout_log} stderr_log={stderr_log}")
+
         print("\n" + "=" * 70)
         print("NEXT ACTION: Re-planning with different approach...")
         print("=" * 70 + "\n")
@@ -816,6 +1352,10 @@ class Orchestrator:
                     )
 
             task.result = result
+            try:
+                _append_task_tool_event(task, result)
+            except Exception:
+                pass
             if isinstance(result, str) and (result.startswith("[RECOVERY_REQUESTED]") or result.startswith("[FINAL_FAILURE]") or result.startswith("[USER_REJECTED]")):
                 if result.startswith("[RECOVERY_REQUESTED]"):
                     task.status = TaskStatus.FAILED

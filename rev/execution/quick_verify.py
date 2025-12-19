@@ -25,6 +25,55 @@ from rev.tools.workspace_resolver import (
     normalize_to_workspace_relative,
 )
 
+_READ_ONLY_TOOLS = {
+    "read_file",
+    "read_file_lines",
+    "list_dir",
+    "tree_view",
+    "search_code",
+    "get_file_info",
+    "file_exists",
+}
+
+_WRITE_TOOLS = {
+    "write_file",
+    "append_to_file",
+    "replace_in_file",
+    "apply_patch",
+    "delete_file",
+    "move_file",
+    "copy_file",
+    "create_directory",
+    "split_python_module_classes",
+}
+
+
+def _extract_tool_noop(tool: str, raw_result: Any) -> Optional[str]:
+    """Return a tool_noop reason string when a tool reports no changes."""
+    tool_l = (tool or "").lower()
+    if tool_l != "replace_in_file":
+        return None
+    if not isinstance(raw_result, str) or not raw_result.strip():
+        return None
+    try:
+        payload = json.loads(raw_result)
+    except Exception:
+        return None
+    if isinstance(payload, dict) and payload.get("replaced") == 0:
+        return "tool_noop: replace_in_file made no changes (replaced=0)"
+    return None
+
+
+def _task_executed_only_reads(task: Task) -> bool:
+    """Return True if the task executed tool(s) but only read-only ones."""
+    events = getattr(task, "tool_events", None) or []
+    if not events:
+        return False
+    tools = [str(ev.get("tool") or "").lower() for ev in events if ev.get("tool")]
+    if not tools:
+        return False
+    return all(t in _READ_ONLY_TOOLS for t in tools) and not any(t in _WRITE_TOOLS for t in tools)
+
 
 def _read_file_with_fallback_encoding(file_path: Path) -> Optional[str]:
     """
@@ -98,6 +147,29 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
     action_type = task.action_type.lower()
     verification_mode = _get_verification_mode()
 
+    # Surface tool no-ops clearly (e.g., replace_in_file with replaced=0).
+    if action_type in {"add", "create", "edit", "refactor", "delete", "rename"}:
+        events = getattr(task, "tool_events", None) or []
+        for ev in reversed(list(events)):
+            reason = _extract_tool_noop(str(ev.get("tool") or ""), ev.get("raw_result"))
+            if reason:
+                return VerificationResult(
+                    passed=False,
+                    message=reason,
+                    details={"tool": ev.get("tool"), "artifact_ref": ev.get("artifact_ref")},
+                    should_replan=True,
+                )
+
+    # Prevent "looks done vs is done": an edit/refactor task that only read files
+    # should not be marked as completed.
+    if action_type in {"add", "create", "edit", "refactor", "delete", "rename"} and _task_executed_only_reads(task):
+        return VerificationResult(
+            passed=False,
+            message="Task performed only read-only tool calls; no changes were made",
+            details={"tools": [ev.get("tool") for ev in (getattr(task, 'tool_events', None) or [])]},
+            should_replan=True,
+        )
+
     # If the planner mislabeled the action type but the tool call clearly indicates
     # a directory creation, verify it as such. This prevents false failures like
     # "File created but is empty" when a directory was created.
@@ -125,24 +197,26 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
             details={"action_type": action_type, "note": "Verification skipped for this action type"}
         )
 
-    # Apply strict verification (compileall + targeted tests) when enabled
-    if result.passed and action_type in {"add", "create", "edit", "refactor"} and verification_mode:
-        strict_paths = _collect_paths_for_strict_checks(
-            action_type, result.details, getattr(task, "tool_events", None)
-        )
-        strict_outcome = _maybe_run_strict_verification(action_type, strict_paths, mode=verification_mode)
-        if isinstance(strict_outcome, VerificationResult):
-            return strict_outcome
-        if strict_outcome:
-            result.details["strict"] = strict_outcome
-
-    # Execute declarative validation steps when provided
-    if result.passed and task.validation_steps:
-        validation_outcome = _run_validation_steps(task.validation_steps, result.details, getattr(task, "tool_events", None))
-        if isinstance(validation_outcome, VerificationResult):
-            return validation_outcome
-        if validation_outcome:
-            result.details["validation"] = validation_outcome
+    # Enforce validation_steps when provided; otherwise fall back to strict verification
+    # mode (default: fast compileall).
+    if result.passed and action_type in {"add", "create", "edit", "refactor"}:
+        if task.validation_steps:
+            validation_outcome = _run_validation_steps(
+                task.validation_steps, result.details, getattr(task, "tool_events", None)
+            )
+            if isinstance(validation_outcome, VerificationResult):
+                return validation_outcome
+            if validation_outcome:
+                result.details["validation"] = validation_outcome
+        elif verification_mode:
+            strict_paths = _collect_paths_for_strict_checks(
+                action_type, result.details, getattr(task, "tool_events", None)
+            )
+            strict_outcome = _maybe_run_strict_verification(action_type, strict_paths, mode=verification_mode)
+            if isinstance(strict_outcome, VerificationResult):
+                return strict_outcome
+            if strict_outcome:
+                result.details["strict"] = strict_outcome
 
     return result
 
@@ -151,7 +225,7 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
     """
     Verify that a refactoring task actually extracted/reorganized code.
 
-    For extraction tasks like "break out analysts into individual files":
+    For extraction tasks like "break out classes into individual files":
     - Check that new files were created
     - Check that imports in new files are valid
     - Check that the old file was updated with imports
@@ -162,6 +236,39 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
     debug_info = {}
     result_payload = _parse_task_result_payload(task.result)
     call_sites_updated = []
+
+    # If the refactor tool reported an already-split source, treat as a benign outcome
+    # to avoid verification loops on backup-only states.
+    if result_payload and result_payload.get("status") == "source_already_split":
+        return VerificationResult(
+            passed=True,
+            message="Extraction skipped: source already split (backup exists)",
+            details={"result": result_payload},
+            should_replan=False,
+        )
+
+    # Refactor tasks must include a write/extraction tool call; a lone read_file is not completion.
+    events = getattr(task, "tool_events", None) or []
+    if events:
+        tools = [str(ev.get("tool") or "").lower() for ev in events if ev.get("tool")]
+        if tools and all(t in _READ_ONLY_TOOLS for t in tools):
+            return VerificationResult(
+                passed=False,
+                message="Refactor task executed only read-only tools; extraction/refactor was not performed",
+                details={"tools": tools},
+                should_replan=True,
+            )
+    else:
+        last_call = get_last_tool_call() or {}
+        last_tool = str(last_call.get("name") or "").lower()
+        if last_tool in _READ_ONLY_TOOLS:
+            return VerificationResult(
+                passed=False,
+                message=f"Refactor task did not perform changes (last tool was {last_tool})",
+                details={"last_tool": last_tool},
+                should_replan=True,
+            )
+
     if result_payload:
         raw_call_sites = result_payload.get("call_sites_updated") or result_payload.get("call_sites") or []
         if isinstance(raw_call_sites, list):
@@ -290,9 +397,17 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
         dir_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\\\-]+\/[a-zA-Z0-9_\-]+)(?:\/)?'
         dir_matches = re.findall(dir_pattern, task.description)
         if dir_matches:
-            best_dir = max(dir_matches, key=len)
-            target_dir = _resolve_for_verification(best_dir.strip("/"), purpose="verify refactoring target dir")
-            if target_dir:
+            candidates: list[Path] = []
+            for raw in sorted(set(dir_matches), key=len, reverse=True):
+                # Avoid truncating file paths like "__init__.py" -> "__init__".
+                leaf = raw.replace("\\", "/").split("/")[-1]
+                if "." in leaf:
+                    continue
+                resolved = _resolve_for_verification(raw.strip("/"), purpose="verify refactoring target dir")
+                if resolved and resolved.exists() and resolved.is_dir():
+                    candidates.append(resolved)
+            if candidates:
+                target_dir = candidates[0]
                 details["target_dir_path"] = str(target_dir)
 
     if not target_dir:
@@ -307,7 +422,11 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
 
     # Check 1: Directory exists
     if not target_dir.exists():
-        issues.append(f"[FAIL] Target directory '{target_dir}' does not exist - extraction was never started")
+        missing_msg = f"[FAIL] Target directory '{target_dir}' does not exist - extraction was never started"
+        issues.append(missing_msg)
+        details["next_step_hint"] = (
+            f"Create the directory '{target_dir}' (or ensure it exists) before rerunning split_python_module_classes."
+        )
         debug_info["status"] = "DIRECTORY_NOT_CREATED"
     else:
         details["directory_exists"] = True
@@ -368,7 +487,7 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
     if old_file_matches:
         old_file = _resolve_for_verification(old_file_matches[0], purpose="verify refactoring source file")
         if not old_file and target_dir:
-            # Heuristic: source next to target_dir, e.g., lib/analysts.py when target_dir=lib/analysts
+            # Heuristic: source next to target_dir, e.g., module.py when target_dir=module/
             alt_source = (target_dir.parent / f"{target_dir.name}.py").resolve()
             if alt_source.exists():
                 old_file = alt_source
@@ -431,18 +550,27 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
                         debug_info["main_file_status"] = "MISSING"
 
     if issues:
-        if call_sites_updated:
-            non_benign = [issue for issue in issues if "Original file" not in issue]
-            if not non_benign:
-                warning_msg = "Source module still exists but class files and call sites were updated"
-                details["warnings"] = issues
-                debug_info["warnings"] = issues
-                return VerificationResult(
-                    passed=True,
-                    message=f"[OK] Extraction succeeded with call site updates ({len(call_sites_updated)} files); "
-                            f"{warning_msg}",
-                    details={**details, "debug": debug_info}
-                )
+        non_benign = [issue for issue in issues if "Original file" not in issue]
+        extraction_looks_ok = bool(
+            target_dir
+            and target_dir.exists()
+            and details.get("files_created", 0) > 0
+            and details.get("imports_valid") is True
+        )
+
+        # If the only failures are about the original monolithic module still being present / unchanged,
+        # treat this as a warning. Some projects intentionally keep the original file for reference.
+        if extraction_looks_ok and not non_benign:
+            details["warnings"] = issues
+            debug_info["warnings"] = issues
+            call_site_msg = (
+                f" with call site updates ({len(call_sites_updated)} files)" if call_sites_updated else ""
+            )
+            return VerificationResult(
+                passed=True,
+                message=f"[OK] Extraction successful{call_site_msg} (source module left unchanged)",
+                details={**details, "debug": debug_info},
+            )
         return VerificationResult(
             passed=False,
             message=f"Extraction verification failed: {len(issues)} issue(s) found\n\nDetails:\n" + "\n".join(issues),

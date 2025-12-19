@@ -7,7 +7,7 @@ from rev.versioning import get_version
 __version__ = get_version()
 
 # Configuration
-from rev.config import ROOT
+import rev.config as _config
 from rev.workspace import get_workspace, Workspace
 
 # Core models
@@ -44,6 +44,11 @@ from rev.tools import (
     move_file,
     append_to_file,
     replace_in_file,
+    rewrite_python_imports,
+    rewrite_python_keyword_args,
+    rename_imported_symbols,
+    move_imported_symbols,
+    rewrite_python_function_parameters,
     create_directory,
     get_file_info,
     copy_file,
@@ -127,6 +132,14 @@ from rev.mcp import (
 # Internal functions (for testing)
 from rev.tools.file_ops import _safe_path
 
+
+def __getattr__(name: str):
+    # Keep `rev.ROOT` consistent with the Workspace singleton even if the workspace root
+    # is changed after import-time (common in tests).
+    if name == "ROOT":
+        return _config.ROOT
+    raise AttributeError(f"module 'rev' has no attribute {name!r}")
+
 __all__ = [
     # Version
     "__version__",
@@ -157,6 +170,11 @@ __all__ = [
     "move_file",
     "append_to_file",
     "replace_in_file",
+    "rewrite_python_imports",
+    "rewrite_python_keyword_args",
+    "rename_imported_symbols",
+    "move_imported_symbols",
+    "rewrite_python_function_parameters",
     "create_directory",
     "get_file_info",
     "copy_file",

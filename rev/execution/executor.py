@@ -527,6 +527,48 @@ def _has_error_result(result: str) -> bool:
     return isinstance(data, dict) and "error" in data
 
 
+def _replace_in_file_noop_reason(result: str) -> str:
+    """Return a non-empty reason string if replace_in_file made no changes."""
+    try:
+        data = json.loads(result)
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    replaced = data.get("replaced")
+    if isinstance(replaced, int) and replaced == 0:
+        return "replace_in_file made no changes (replaced=0); likely `find` did not match the file"
+    return ""
+
+
+def _rewrite_python_imports_noop_reason(result: str) -> str:
+    """Return a non-empty reason string if rewrite_python_imports made no changes."""
+    try:
+        data = json.loads(result)
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    changed = data.get("changed")
+    if isinstance(changed, int) and changed == 0:
+        return "rewrite_python_imports made no changes (changed=0); likely no matching imports were found"
+    return ""
+
+
+def _changed_noop_reason(result: str, tool_name: str) -> str:
+    """Return a non-empty reason string if a tool returned changed=0."""
+    try:
+        data = json.loads(result)
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    changed = data.get("changed")
+    if isinstance(changed, int) and changed == 0:
+        return f"{tool_name} made no changes (changed=0)"
+    return ""
+
+
 def _consume_tool_budget(tool_name: str, counters: Dict[str, int], limits: Dict[str, int]) -> Tuple[bool, str]:
     """Enforce per-task tool budgets."""
     limit = limits.get(tool_name)
@@ -1644,6 +1686,29 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                             exec_context.clear_code_cache()
                     else:
                         result = execute_tool(tool_name, tool_args)
+                        # Edit safety: treat no-ops as failures for mutating tasks,
+                        # so the model can't "complete" without actually changing anything.
+                        if current_task and (current_task.action_type or "").lower() in {"edit", "refactor"}:
+                            reason = ""
+                            if tool_name == "replace_in_file":
+                                reason = _replace_in_file_noop_reason(result)
+                            elif tool_name == "rewrite_python_imports":
+                                reason = _rewrite_python_imports_noop_reason(result)
+                            elif tool_name in {
+                                "rewrite_python_keyword_args",
+                                "rename_imported_symbols",
+                                "move_imported_symbols",
+                                "rewrite_python_function_parameters",
+                            }:
+                                reason = _changed_noop_reason(result, tool_name)
+                            if reason and not _has_error_result(result):
+                                try:
+                                    payload = json.loads(result)
+                                except Exception:
+                                    payload = {"raw": result}
+                                if isinstance(payload, dict):
+                                    payload["error"] = reason
+                                    result = json.dumps(payload)
 
                     # Track tool usage
                     session_tracker.track_tool_call(tool_name, tool_args)

@@ -23,8 +23,8 @@ CRITICAL RULES FOR IMPLEMENTATION QUALITY:
 2.  Use ONLY the tool(s) provided for this task's action_type. Other tools are NOT available:
     - For action_type="create_directory": ONLY use `create_directory`
     - For action_type="add": ONLY use `write_file`
-    - For action_type="edit": ONLY use `replace_in_file`
-    - For action_type="refactor": use `write_file` or `replace_in_file` as needed
+    - For action_type="edit": use `rewrite_python_imports` (preferred for Python import rewrites) OR `replace_in_file`
+    - For action_type="refactor": use `write_file`, `rewrite_python_imports`, or `replace_in_file` as needed
 3.  If using `replace_in_file`, you MUST provide the *exact* `old_string` content to be replaced, including all original indentation and surrounding lines for context. Use the provided file content to construct this.
 4.  Ensure the `new_string` is complete and correctly indented to match the surrounding code.
 5.  If creating a new file, ensure the COMPLETE, FULL file content is provided to the `write_file` tool - not stubs or placeholders.
@@ -57,13 +57,34 @@ IMPORT STRATEGY (IMPORTANT):
 - Do NOT replace `from pkg import *` with dozens of explicit imports. Only import the names actually used in the file,
   or import from the package namespace if it already re-exports them.
 
+AST-AWARE EDITS (IMPORTANT):
+- For Python import path migrations, prefer `rewrite_python_imports` over brittle string replacement.
+- If preserving multiline import formatting/comments/parentheses is important, set `"engine": "libcst"`.
+- For safer Python refactors, prefer these libcst tools over raw string edits:
+  - `rewrite_python_keyword_args` (rename kw args at call sites)
+  - `rename_imported_symbols` (rename imported symbols + update references in-file)
+  - `move_imported_symbols` (move `from ... import ...` symbols between modules)
+  - `rewrite_python_function_parameters` (rename/add/remove params + update calls; conservative)
+- Use `replace_in_file` only when you cannot express the change as import rewrite rules (or when editing non-import code).
+
 Example for `replace_in_file`:
 {
   "tool_name": "replace_in_file",
   "arguments": {
-    "file_path": "path/to/file.py",
-    "old_string": "...\nline to be replaced\n...",
-    "new_string": "...\nnew line of code\n..."
+    "path": "path/to/file.py",
+    "find": "...\nline to be replaced\n...",
+    "replace": "...\nnew line of code\n..."
+  }
+}
+
+Example for `rewrite_python_imports`:
+{
+  "tool_name": "rewrite_python_imports",
+  "arguments": {
+    "path": "path/to/file.py",
+    "rules": [
+      {"from_module": "old.module", "to_module": "new.module", "match": "exact"}
+    ]
   }
 }
 
@@ -71,7 +92,7 @@ Example for `write_file`:
 {
   "tool_name": "write_file",
   "arguments": {
-    "file_path": "path/to/new_file.py",
+    "path": "path/to/new_file.py",
     "content": "full content of the new file"
   }
 }
@@ -120,8 +141,8 @@ class CodeWriterAgent(BaseAgent):
 
         warnings = []
         # Resolve import targets relative to the file being written (not CWD).
-        # This avoids false warnings like checking `<repo>/analysts.py` for imports
-        # inside `lib/analysts/__init__.py`.
+        # This avoids false warnings like checking `<repo>/module.py` for imports
+        # inside `<package>/__init__.py`.
         try:
             base_dir = (Path.cwd() / Path(file_path)).resolve(strict=False).parent
         except Exception:
@@ -183,6 +204,19 @@ class CodeWriterAgent(BaseAgent):
             replaced = payload.get("replaced")
             if isinstance(replaced, int) and replaced == 0:
                 return True, "replace_in_file made no changes (replaced=0); likely `find` did not match the file"
+        if tool == "rewrite_python_imports":
+            changed = payload.get("changed")
+            if isinstance(changed, int) and changed == 0:
+                return True, "rewrite_python_imports made no changes (changed=0); likely no matching imports were found"
+        if tool in {
+            "rewrite_python_keyword_args",
+            "rename_imported_symbols",
+            "move_imported_symbols",
+            "rewrite_python_function_parameters",
+        }:
+            changed = payload.get("changed")
+            if isinstance(changed, int) and changed == 0:
+                return True, f"{tool} made no changes (changed=0)"
 
         return False, ""
 
@@ -199,6 +233,36 @@ class CodeWriterAgent(BaseAgent):
             missing = [k for k in ("path", "find", "replace") if not _has_str(k)]
             if missing:
                 return False, f"replace_in_file missing required keys: {', '.join(missing)}"
+        elif tool == "rewrite_python_imports":
+            if not _has_str("path"):
+                return False, "rewrite_python_imports missing required key: path"
+            rules = arguments.get("rules")
+            if not isinstance(rules, list) or not rules:
+                return False, "rewrite_python_imports missing required key: rules (non-empty list)"
+        elif tool == "rewrite_python_keyword_args":
+            missing = [k for k in ("path", "callee") if not _has_str(k)]
+            if missing:
+                return False, f"rewrite_python_keyword_args missing required keys: {', '.join(missing)}"
+            renames = arguments.get("renames")
+            if not isinstance(renames, list) or not renames:
+                return False, "rewrite_python_keyword_args missing required key: renames (non-empty list)"
+        elif tool == "rename_imported_symbols":
+            if not _has_str("path"):
+                return False, "rename_imported_symbols missing required key: path"
+            renames = arguments.get("renames")
+            if not isinstance(renames, list) or not renames:
+                return False, "rename_imported_symbols missing required key: renames (non-empty list)"
+        elif tool == "move_imported_symbols":
+            missing = [k for k in ("path", "old_module", "new_module") if not _has_str(k)]
+            if missing:
+                return False, f"move_imported_symbols missing required keys: {', '.join(missing)}"
+            symbols = arguments.get("symbols")
+            if not isinstance(symbols, list) or not symbols:
+                return False, "move_imported_symbols missing required key: symbols (non-empty list)"
+        elif tool == "rewrite_python_function_parameters":
+            missing = [k for k in ("path", "function") if not _has_str(k)]
+            if missing:
+                return False, f"rewrite_python_function_parameters missing required keys: {', '.join(missing)}"
         elif tool == "write_file":
             missing = [k for k in ("path", "content") if not _has_str(k)]
             if missing:
@@ -287,6 +351,22 @@ class CodeWriterAgent(BaseAgent):
             new_lines = len(new_string.splitlines())
             print(f"\n{self._COLOR_CYAN}Changes:{self._COLOR_RESET} {old_lines} → {new_lines} lines")
 
+        elif tool_name == "rewrite_python_imports":
+            file_path = arguments.get("path", "unknown")
+            rules = arguments.get("rules", [])
+            dry_run = bool(arguments.get("dry_run", False))
+
+            print(f"\nFile: {file_path}")
+            print(f"Action: {self._COLOR_GREEN}REWRITE IMPORTS{self._COLOR_RESET}")
+            if dry_run:
+                print(f"{self._COLOR_CYAN}Mode:{self._COLOR_RESET} dry_run=True (no file write)")
+
+            print(f"\n{self._COLOR_CYAN}Rules:{self._COLOR_RESET}")
+            try:
+                print(json.dumps(rules, indent=2)[:4000])
+            except Exception:
+                print(str(rules)[:4000])
+
         elif tool_name == "write_file":
             file_path = arguments.get("path", "unknown")
             content = arguments.get("content", "")
@@ -372,11 +452,26 @@ class CodeWriterAgent(BaseAgent):
             # File creation tasks only get write_file tool
             tool_names = ['write_file']
         elif task.action_type == "edit":
-            # File modification tasks only get replace_in_file tool
-            tool_names = ['replace_in_file']
+            # File modification tasks may use AST-aware edits for safer Python refactors
+            tool_names = [
+                'rewrite_python_imports',
+                'rewrite_python_keyword_args',
+                'rename_imported_symbols',
+                'move_imported_symbols',
+                'rewrite_python_function_parameters',
+                'replace_in_file',
+            ]
         elif task.action_type == "refactor":
             # Refactoring may need to create or modify files
-            tool_names = ['write_file', 'replace_in_file']
+            tool_names = [
+                'write_file',
+                'rewrite_python_imports',
+                'rewrite_python_keyword_args',
+                'rename_imported_symbols',
+                'move_imported_symbols',
+                'rewrite_python_function_parameters',
+                'replace_in_file',
+            ]
         else:
             # Unknown action types get all tools (fallback)
             tool_names = ['write_file', 'replace_in_file', 'create_directory']
@@ -502,6 +597,11 @@ class CodeWriterAgent(BaseAgent):
                         if is_noop:
                             print(f"  ? Tool made no changes: {noop_msg}")
                             if self.should_attempt_recovery(task, context):
+                                if tool_name == "replace_in_file":
+                                    noop_msg = (
+                                        f"{noop_msg}. Read the file and emit an explicit apply_patch/write_file "
+                                        f"with the exact original snippet and full replacement content."
+                                    )
                                 self.request_replan(
                                     context,
                                     reason="Tool made no changes",
@@ -577,6 +677,11 @@ class CodeWriterAgent(BaseAgent):
                         if is_noop:
                             print(f"  Tool made no changes: {noop_msg}")
                             if self.should_attempt_recovery(task, context):
+                                if tool_name == "replace_in_file":
+                                    noop_msg = (
+                                        f"{noop_msg}. Read the file and emit an explicit apply_patch/write_file "
+                                        f"with the exact original snippet and full replacement content."
+                                    )
                                 self.request_replan(
                                     context,
                                     reason="Tool made no changes",

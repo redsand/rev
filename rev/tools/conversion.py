@@ -6,7 +6,7 @@ import json
 import csv
 from typing import Optional
 
-from rev.config import ROOT
+from rev import config
 from rev.tools.utils import _safe_path
 
 
@@ -45,8 +45,8 @@ def convert_json_to_yaml(json_path: str, yaml_path: str = None) -> str:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
         return json.dumps({
-            "converted": str(json_file.relative_to(ROOT)),
-            "to": str(yaml_file.relative_to(ROOT)),
+            "converted": json_file.relative_to(config.ROOT).as_posix(),
+            "to": yaml_file.relative_to(config.ROOT).as_posix(),
             "format": "YAML"
         })
     except Exception as e:
@@ -88,8 +88,8 @@ def convert_yaml_to_json(yaml_path: str, json_path: str = None) -> str:
             json.dump(data, f, indent=2)
 
         return json.dumps({
-            "converted": str(yaml_file.relative_to(ROOT)),
-            "to": str(json_file.relative_to(ROOT)),
+            "converted": yaml_file.relative_to(config.ROOT).as_posix(),
+            "to": json_file.relative_to(config.ROOT).as_posix(),
             "format": "JSON"
         })
     except Exception as e:
@@ -127,8 +127,8 @@ def convert_csv_to_json(csv_path: str, json_path: str = None) -> str:
             json.dump(data, f, indent=2)
 
         return json.dumps({
-            "converted": str(csv_file.relative_to(ROOT)),
-            "to": str(json_file.relative_to(ROOT)),
+            "converted": csv_file.relative_to(config.ROOT).as_posix(),
+            "to": json_file.relative_to(config.ROOT).as_posix(),
             "rows": len(data),
             "format": "JSON"
         })
@@ -173,8 +173,8 @@ def convert_json_to_csv(json_path: str, csv_path: str = None) -> str:
                 writer.writerows(data)
 
         return json.dumps({
-            "converted": str(json_file.relative_to(ROOT)),
-            "to": str(csv_file.relative_to(ROOT)),
+            "converted": json_file.relative_to(config.ROOT).as_posix(),
+            "to": csv_file.relative_to(config.ROOT).as_posix(),
             "rows": len(data),
             "format": "CSV"
         })
@@ -220,8 +220,8 @@ def convert_env_to_json(env_path: str, json_path: str = None) -> str:
             json.dump(data, f, indent=2)
 
         return json.dumps({
-            "converted": str(env_file.relative_to(ROOT)),
-            "to": str(json_file.relative_to(ROOT)),
+            "converted": env_file.relative_to(config.ROOT).as_posix(),
+            "to": json_file.relative_to(config.ROOT).as_posix(),
             "variables": len(data),
             "format": "JSON"
         })

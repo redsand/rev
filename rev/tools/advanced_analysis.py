@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Set, Tuple, Optional
 from collections import defaultdict
 
-from rev.config import ROOT
+from rev import config
 from rev.tools.utils import _run_shell, _safe_path
 
 
@@ -222,7 +222,7 @@ def analyze_code_context(file_path: str, line_range: Optional[Tuple[int, int]] =
         if not file.exists():
             return json.dumps({"error": f"File not found: {file_path}"})
 
-        rel_path = str(file.relative_to(ROOT))
+        rel_path = file.relative_to(config.ROOT).as_posix()
 
         results = {
             "file": rel_path,
@@ -403,7 +403,7 @@ def _find_python_symbol_usages(symbol: str) -> List[Dict[str, Any]]:
     usages = []
 
     try:
-        for py_file in Path(ROOT).rglob("*.py"):
+        for py_file in config.ROOT.rglob("*.py"):
             try:
                 with open(py_file, 'r', encoding='utf-8') as f:
                     content = f.read()
@@ -415,7 +415,7 @@ def _find_python_symbol_usages(symbol: str) -> List[Dict[str, Any]]:
                     if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
                         if node.name == symbol:
                             usages.append({
-                                "file": str(py_file.relative_to(ROOT)),
+                                "file": py_file.relative_to(config.ROOT).as_posix(),
                                 "line": node.lineno,
                                 "type": "definition",
                                 "context": f"{'def' if isinstance(node, ast.FunctionDef) else 'class'} {symbol}"
@@ -424,7 +424,7 @@ def _find_python_symbol_usages(symbol: str) -> List[Dict[str, Any]]:
                     # Check name references
                     elif isinstance(node, ast.Name) and node.id == symbol:
                         usages.append({
-                            "file": str(py_file.relative_to(ROOT)),
+                            "file": py_file.relative_to(config.ROOT).as_posix(),
                             "line": node.lineno,
                             "type": "reference",
                             "context": f"Usage of {symbol}"
@@ -455,7 +455,7 @@ def _find_typescript_symbol_usages(symbol: str) -> List[Dict[str, Any]]:
         ]
 
         for ext in [".ts", ".tsx", ".js", ".jsx"]:
-            for file in Path(ROOT).rglob(f"*{ext}"):
+            for file in config.ROOT.rglob(f"*{ext}"):
                 try:
                     with open(file, 'r', encoding='utf-8') as f:
                         content = f.read()
@@ -464,7 +464,7 @@ def _find_typescript_symbol_usages(symbol: str) -> List[Dict[str, Any]]:
                         for pattern in patterns:
                             if re.search(pattern, line):
                                 usages.append({
-                                    "file": str(file.relative_to(ROOT)),
+                                    "file": file.relative_to(config.ROOT).as_posix(),
                                     "line": line_num,
                                     "type": "usage",
                                     "context": line.strip()[:100]
@@ -573,7 +573,7 @@ def _analyze_file_dependencies(file_path: Path, depth: int) -> Dict[str, Any]:
             "circular_dependencies": []
         }
 
-        rel_path = str(file_path.relative_to(ROOT))
+        rel_path = file_path.relative_to(config.ROOT).as_posix()
 
         # Find what this file imports/requires
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -591,13 +591,13 @@ def _analyze_file_dependencies(file_path: Path, depth: int) -> Dict[str, Any]:
 
         # Find what imports this file (reverse dependencies)
         file_name = file_path.stem
-        for py_file in Path(ROOT).rglob("*.py"):
+        for py_file in config.ROOT.rglob("*.py"):
             if py_file == file_path:
                 continue
             try:
                 with open(py_file, 'r', encoding='utf-8') as f:
                     if file_name in f.read():
-                        deps["used_by"].append(str(py_file.relative_to(ROOT)))
+                        deps["used_by"].append(py_file.relative_to(config.ROOT).as_posix())
             except Exception:
                 continue
 
@@ -637,7 +637,7 @@ def analyze_semantic_diff(file_path: str, compare_to: str = "HEAD") -> str:
         if not file.exists():
             return json.dumps({"error": f"File not found: {file_path}"})
 
-        rel_path = str(file.relative_to(ROOT))
+        rel_path = file.relative_to(config.ROOT).as_posix()
 
         results = {
             "file": rel_path,

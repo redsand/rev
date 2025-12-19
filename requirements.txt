@@ -1,6 +1,7 @@
 # Minimal requirements for agent.min
 requests>=2.31.0
 packaging>=24.0
+libcst>=1.4.0
 
 # Optional: For SSH remote execution
 # paramiko>=3.0.0
@@ -12,4 +13,3 @@ setuptools
 anthropic
 google-generativeai
 windows-curses; platform_system == "Windows"
-ncurses; platform_system != "Windows"

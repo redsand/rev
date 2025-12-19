@@ -6,9 +6,12 @@ Plan → Execute → Verify → Report → Re-plan if needed
 """
 
 import tempfile
+import os
 import pytest
 from pathlib import Path
 from unittest.mock import Mock, MagicMock, patch
+import json
+import uuid
 
 from rev.models.task import Task, TaskStatus
 from rev.core.context import RevContext
@@ -20,6 +23,14 @@ from rev.execution.quick_verify import (
     _verify_directory_creation,
     quick_verify_extraction_completeness,
 )
+
+# Stabilize temp paths for Windows/CI to avoid permission-denied on default %TEMP%.
+_TEST_TMP = (Path("tmp_test").resolve() / "manual" / "quick_verify_env")
+_TEST_TMP.mkdir(parents=True, exist_ok=True)
+os.environ["TMP"] = str(_TEST_TMP)
+os.environ["TEMP"] = str(_TEST_TMP)
+os.environ["TMPDIR"] = str(_TEST_TMP)
+tempfile.tempdir = str(_TEST_TMP)
 
 
 class TestVerificationResult:
@@ -80,6 +91,80 @@ class TestVerifyTaskExecution:
         # Should pass because we skip verification for unknown types
         assert result.passed is True
         assert "No specific verification available" in result.message
+
+    def test_edit_replace_in_file_noop_fails(self):
+        """replace_in_file with replaced=0 must fail verification (prevents silent no-ops)."""
+        from rev import config
+
+        base = Path("tmp_test/manual").resolve()
+        base.mkdir(parents=True, exist_ok=True)
+        tmp_path = base / f"noop_{uuid.uuid4().hex[:8]}"
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        config.set_workspace_root(tmp_path)
+        (tmp_path / "main.py").write_text("print('hello')\n", encoding="utf-8")
+
+        task = Task(description="Edit main.py to update imports", action_type="edit")
+        task.status = TaskStatus.COMPLETED
+        task.tool_events = [
+            {
+                "tool": "replace_in_file",
+                "args": {"path": "main.py", "find": "x", "replace": "y"},
+                "raw_result": json.dumps({"replaced": 0, "path_rel": "main.py"}),
+            }
+        ]
+
+        context = RevContext(user_request="Test")
+        result = verify_task_execution(task, context)
+        assert result.passed is False
+        assert "tool_noop" in result.message
+
+    def test_refactor_read_only_fails(self):
+        """A refactor task that only read files should not be marked completed."""
+        from rev import config
+
+        base = Path("tmp_test/manual").resolve()
+        base.mkdir(parents=True, exist_ok=True)
+        tmp_path = base / f"readonly_{uuid.uuid4().hex[:8]}"
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        config.set_workspace_root(tmp_path)
+        (tmp_path / "lib").mkdir()
+        (tmp_path / "lib" / "analysts.py").write_text("class A: pass\n", encoding="utf-8")
+
+        task = Task(description="Refactor lib/analysts.py into a package", action_type="refactor")
+        task.status = TaskStatus.COMPLETED
+        task.tool_events = [
+            {"tool": "read_file", "args": {"path": "lib/analysts.py"}, "raw_result": json.dumps({"path_rel": "lib/analysts.py"})}
+        ]
+
+        context = RevContext(user_request="Test")
+        result = verify_task_execution(task, context)
+        assert result.passed is False
+        assert "read-only" in result.message.lower()
+
+    def test_refactor_does_not_truncate_init_py_as_directory(self):
+        """Guard against '__init__.py' being mis-parsed as a '__init__' directory."""
+        from rev import config
+        from rev.execution.quick_verify import _verify_refactoring
+
+        base = Path("tmp_test/manual").resolve()
+        base.mkdir(parents=True, exist_ok=True)
+        tmp_path = base / f"initpy_{uuid.uuid4().hex[:8]}"
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        config.set_workspace_root(tmp_path)
+        analysts_dir = tmp_path / "lib" / "analysts"
+        analysts_dir.mkdir(parents=True)
+        (analysts_dir / "__init__.py").write_text("# init\n", encoding="utf-8")
+        (analysts_dir / "breakout.py").write_text("class Breakout: pass\n", encoding="utf-8")
+
+        task = Task(description="Update lib/analysts/__init__.py exports", action_type="refactor")
+        task.status = TaskStatus.COMPLETED
+
+        context = RevContext(user_request="Test")
+        result = _verify_refactoring(task, context)
+        # It may still fail for other reasons, but it must not choose __init__ as a directory.
+        debug = (result.details or {}).get("debug", {})
+        target_dir = str(debug.get("target_directory", ""))
+        assert "__init__" not in target_dir.replace("\\", "/").split("/")[-1]
 
 
 class TestVerifyFileCreation:
@@ -367,6 +452,39 @@ class TestVerifyRefactoringExtraction:
                 # Should fail because directory is empty
                 assert result.passed is False
                 assert result.should_replan is True
+            finally:
+                os.chdir(old_cwd)
+
+    def test_verify_extraction_source_already_split(self):
+        """Test verification passes when tool reports source_already_split."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            (tmpdir_path / "lib" / "analysts").mkdir(parents=True, exist_ok=True)
+
+            import os
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir_path)
+
+                payload = {
+                    "status": "source_already_split",
+                    "backup": "lib/analysts.py.bak",
+                    "package_dir": "lib/analysts",
+                }
+
+                task = Task(
+                    description="split lib/analysts.py into lib/analysts/",
+                    action_type="refactor"
+                )
+                task.status = TaskStatus.COMPLETED
+                task.result = json.dumps(payload)
+
+                context = RevContext(user_request="Test")
+                result = _verify_refactoring(task, context)
+
+                assert result.passed is True
+                assert result.should_replan is False
+                assert "already split" in result.message.lower()
             finally:
                 os.chdir(old_cwd)
 
