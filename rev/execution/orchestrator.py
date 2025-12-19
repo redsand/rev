@@ -278,13 +278,15 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
     """
     desc = task.description or ""
     messages: List[str] = []
+    action = (task.action_type or "").strip().lower()
+    read_actions = {"read", "analyze", "review", "research", "investigate"}
 
     # Focus on Python path mistakes first.
     # Keep this regex intentionally simple to avoid escaping bugs.
     candidates = sorted(
         set(
             re.findall(
-                r'([A-Za-z]:[\\/][^\s"\'`]+\.py\b|(?:\./)?[A-Za-z0-9_./\\-]+\.py\b)',
+                r'([A-Za-z]:[\\/][^\s"\'`]+\.py(?:\.bak)?\b|(?:\./)?[A-Za-z0-9_./\\-]+\.py(?:\.bak)?\b)',
                 desc,
             )
         )
@@ -292,21 +294,38 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
     if not candidates:
         return True, messages
 
+    def _abs_for_normalized(norm: str) -> Optional[Path]:
+        """Resolve a normalized path to an absolute path for existence checks.
+
+        Prefer project_root for relative paths (planner preflight) to avoid
+        split-brain issues if Workspace isn't initialized yet.
+        """
+        p = Path(norm.replace("/", os.sep))
+        if not p.is_absolute():
+            return (project_root / p).resolve(strict=False)
+        try:
+            return resolve_workspace_path(norm, purpose="preflight").abs_path
+        except WorkspacePathError:
+            return None
+
+    existing_any = 0
+    missing_unresolved: List[str] = []
+
     for raw in candidates:
         normalized = normalize_path(raw)
         # Avoid truncating "__init__.py" -> "__init__" in later heuristics.
         if normalized.lower().endswith("/__init__.py"):
             continue
 
-        try:
-            abs_path = resolve_workspace_path(normalized, purpose="preflight").abs_path
-        except WorkspacePathError:
+        abs_path = _abs_for_normalized(normalized)
+        if abs_path is None:
             # Leave it to the main allowlist error path.
             continue
 
         if abs_path.exists():
+            existing_any += 1
             # Canonicalize absolute paths to workspace-relative for future tool calls.
-            rel = normalize_to_workspace_relative(abs_path)
+            rel = normalize_to_workspace_relative(abs_path, workspace_root=project_root)
             if rel and rel != normalized and raw in desc:
                 desc = desc.replace(raw, rel)
                 messages.append(f"normalized path '{raw}' -> '{rel}'")
@@ -314,7 +333,17 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
 
         # Missing path: try to locate by basename.
         basename = Path(normalized.replace("/", os.sep)).name
-        matches = _find_workspace_matches_by_basename(root=project_root, basename=basename)
+        basenames = [basename]
+        # Common tool behavior: keep backups as *.py.bak
+        if basename.lower().endswith(".py") and not basename.lower().endswith(".py.bak"):
+            basenames.append(basename + ".bak")
+        if basename.lower().endswith(".py.bak"):
+            basenames.append(basename[: -len(".bak")])
+
+        matches: List[str] = []
+        for bn in basenames:
+            matches.extend(_find_workspace_matches_by_basename(root=project_root, basename=bn))
+        matches = sorted(set(matches))
         chosen = _choose_best_path_match(original=normalized, matches=matches)
         if chosen:
             # Replace occurrences of the raw token as well as its normalized variant.
@@ -323,15 +352,32 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
             if normalized in desc:
                 desc = desc.replace(normalized, chosen)
             messages.append(f"corrected missing path '{raw}' -> '{chosen}'")
+            existing_any += 1
             continue
 
         if matches:
-            messages.append(f"ambiguous missing path '{raw}' (matches={matches[:5]})")
-            return False, messages
-        messages.append(f"missing path '{raw}' (no matches found)")
-        return False, messages
+            missing_unresolved.append(f"ambiguous missing path '{raw}' (matches={matches[:5]})")
+        else:
+            missing_unresolved.append(f"missing path '{raw}' (no matches found)")
 
     task.description = desc
+
+    if not missing_unresolved:
+        return True, messages
+
+    # READ-like tasks should not reference missing files.
+    if action in read_actions:
+        messages.extend(missing_unresolved[:1])
+        return False, messages
+
+    # Mutating tasks commonly mention output paths that don't exist yet; only fail
+    # if NONE of the referenced paths could be resolved to an existing file.
+    if existing_any == 0:
+        messages.extend(missing_unresolved[:1])
+        return False, messages
+
+    # Otherwise, allow execution to proceed (best-effort). Avoid spamming logs.
+    messages.append("ignored missing output path(s); at least one input path exists")
     return True, messages
 
 
@@ -835,6 +881,17 @@ class Orchestrator:
             if not ok:
                 self.context.add_error("Preflight failed: " + "; ".join(sem_msgs))
                 completed_tasks_log.append(f"[FAILED] Preflight: {'; '.join(sem_msgs)}")
+                sig = f"action_semantics::{(next_task.action_type or '').strip().lower()}::{';'.join(sem_msgs).strip().lower()}"
+                failure_counts[sig] += 1
+                if failure_counts[sig] >= 3:
+                    self.context.set_agent_state("no_retry", True)
+                    self.context.add_error("Circuit breaker: repeating preflight action semantics failure")
+                    print("\n" + "=" * 70)
+                    print("CIRCUIT BREAKER - PREFLIGHT FAILURE")
+                    print("=" * 70)
+                    print(f"Repeated preflight failure {failure_counts[sig]}x: {'; '.join(sem_msgs)}")
+                    print("Blocking issue: planner is not producing an executable action; refusing to loop.\n")
+                    return False
                 continue
             ok, preflight_msgs = _preflight_correct_task_paths(task=next_task, project_root=self.project_root)
             for msg in preflight_msgs:
@@ -843,6 +900,18 @@ class Orchestrator:
                 # Do not execute with missing/ambiguous paths; feed this back into planning.
                 self.context.add_error("Preflight failed: " + "; ".join(preflight_msgs))
                 completed_tasks_log.append(f"[FAILED] Preflight: {'; '.join(preflight_msgs)}")
+                key_msg = preflight_msgs[0] if preflight_msgs else "unknown"
+                sig = f"paths::{(next_task.action_type or '').strip().lower()}::{key_msg.strip().lower()}"
+                failure_counts[sig] += 1
+                if failure_counts[sig] >= 3:
+                    self.context.set_agent_state("no_retry", True)
+                    self.context.add_error("Circuit breaker: repeating preflight path failure")
+                    print("\n" + "=" * 70)
+                    print("CIRCUIT BREAKER - PREFLIGHT FAILURE")
+                    print("=" * 70)
+                    print(f"Repeated preflight failure {failure_counts[sig]}x: {key_msg}")
+                    print("Blocking issue: planner is not producing an executable action; refusing to loop.\n")
+                    return False
                 continue
             print(f"  â†' Next action: [{next_task.action_type.upper()}] {next_task.description[:80]}")
 
