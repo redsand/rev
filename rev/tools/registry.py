@@ -576,6 +576,11 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
     Optimized for O(1) lookup using dictionary dispatch instead of O(n) elif chain.
     Tools in the timeout-protected list will be executed with automatic retry on timeout.
     """
+    try:
+        args = maybe_fix_tool_paths(args)
+    except Exception:
+        pass
+
     # Compatibility shim: normalize common alternate argument names that some models emit
     # (e.g. "file_path" vs the canonical "path") so tools don't KeyError.
     if isinstance(args, dict):

@@ -189,6 +189,8 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
         result = _verify_directory_creation(task, context)
     elif action_type == "test":
         result = _verify_test_execution(task, context)
+    elif action_type in {"read", "analyze", "research"}:
+        result = _verify_read_like(task, context)
     else:
         # For unknown action types, return a passing result but flag for caution
         return VerificationResult(
@@ -1094,6 +1096,43 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
         passed=True,
         message=f"File exists and can be edited: {file_path.name}",
         details={"file_path": str(file_path), "note": "Full edit verification requires content comparison"}
+    )
+
+
+def _verify_read_like(task: Task, context: RevContext) -> VerificationResult:
+    """Minimal verification for read/analyze/research tasks."""
+    events = getattr(task, "tool_events", None) or []
+    if not events:
+        return VerificationResult(
+            passed=False,
+            message="No tool events were executed for a read-like task",
+            details={},
+            should_replan=True,
+        )
+    for ev in events:
+        raw = ev.get("raw_result")
+        if isinstance(raw, str):
+            try:
+                payload = json.loads(raw)
+                if isinstance(payload, dict) and payload.get("error"):
+                    return VerificationResult(
+                        passed=False,
+                        message=f"Tool returned error: {payload.get('error')}",
+                        details={"tool": ev.get("tool")},
+                        should_replan=True,
+                    )
+            except Exception:
+                if "error" in raw.lower():
+                    return VerificationResult(
+                        passed=False,
+                        message="Tool output contains error",
+                        details={"tool": ev.get("tool")},
+                        should_replan=True,
+                    )
+    return VerificationResult(
+        passed=True,
+        message="Read-like task executed tool(s)",
+        details={"tools": [ev.get("tool") for ev in events]},
     )
 
 

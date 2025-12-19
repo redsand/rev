@@ -1377,6 +1377,21 @@ class Orchestrator:
                 _append_task_tool_event(task, result)
             except Exception:
                 pass
+            # If sub-agent reported tool error, fail the task and replan.
+            try:
+                if isinstance(result, str):
+                    parsed = json.loads(result)
+                    ev = None
+                    if isinstance(parsed, dict):
+                        ev_list = parsed.get("evidence") or []
+                        if isinstance(ev_list, list) and ev_list:
+                            ev = ev_list[0]
+                    if ev and ev.get("result") == "error":
+                        task.status = TaskStatus.FAILED
+                        task.error = ev.get("summary") or "tool error"
+                        return False
+            except Exception:
+                pass
             if isinstance(result, str) and (result.startswith("[RECOVERY_REQUESTED]") or result.startswith("[FINAL_FAILURE]") or result.startswith("[USER_REJECTED]")):
                 if result.startswith("[RECOVERY_REQUESTED]"):
                     task.status = TaskStatus.FAILED

@@ -7,6 +7,61 @@ from rev.core.context import RevContext
 from rev.core.tool_call_recovery import recover_tool_call_from_text
 from rev.agents.context_provider import build_context_and_tools
 
+KEYWORD_SNIPPET_PATTERNS = [
+    "register",
+    "_build_analyst_registry",
+    "inspect.getmembers",
+    "pkgutil",
+    "importlib",
+    "registry",
+]
+
+
+def _extract_snippet(tool_name: str, tool_args: dict, raw_result: any) -> str:
+    """Return a relevant snippet for read_file/read_file_lines outputs."""
+    try:
+        text = raw_result if isinstance(raw_result, str) else str(raw_result)
+    except Exception:
+        return str(raw_result)[:500]
+
+    def _keyword_window(txt: str) -> str | None:
+        lines = txt.splitlines()
+        for idx, line in enumerate(lines):
+            if any(k.lower() in line.lower() for k in KEYWORD_SNIPPET_PATTERNS):
+                start = max(0, idx - 2)
+                end = min(len(lines), idx + 3)
+                return "\n".join(lines[start:end])
+        return None
+
+    if tool_name in {"read_file", "read_file_lines"}:
+        if "...[truncated]..." in text or len(text) > 5000:
+            try:
+                path = tool_args.get("path") if isinstance(tool_args, dict) else None
+                include = path if isinstance(path, str) else "**/*"
+                search = execute_tool(
+                    "search_code",
+                    {"pattern": "register|pkgutil|importlib|getmembers|registry", "include": include, "regex": True},
+                )
+                payload = json.loads(search) if isinstance(search, str) else {}
+                matches = payload.get("matches") or []
+                if matches:
+                    m = matches[0]
+                    file = m.get("file")
+                    line = m.get("line")
+                    if file and isinstance(line, int):
+                        window = execute_tool(
+                            "read_file_lines",
+                            {"path": file, "start": max(1, line - 3), "end": line + 3},
+                        )
+                        if isinstance(window, str) and window.strip():
+                            return window
+            except Exception:
+                pass
+        kw = _keyword_window(text)
+        if kw:
+            return kw
+    return text[:500]
+
 ANALYSIS_SYSTEM_PROMPT = """You are a specialized Analysis agent. Your purpose is to perform deep code analysis, identify issues, and provide nuanced feedback and alternative suggestions.
 
 You will be given an analysis task and context about the repository. Your goal is to analyze code quality, security, and design.
@@ -87,7 +142,7 @@ class AnalysisAgent(BaseAgent):
             'analyze_test_coverage', 'analyze_semantic_diff', 'analyze_code_context',
             'run_all_analysis', 'analyze_code_structures', 'check_structural_consistency',
             'analyze_runtime_logs', 'analyze_performance_regression', 'analyze_error_traces',
-            'read_file'
+            'read_file', 'read_file_lines', 'search_code', 'list_dir', 'get_file_info'
         ]
         rendered_context, selected_tools, _bundle = build_context_and_tools(
             task,
@@ -147,10 +202,10 @@ class AnalysisAgent(BaseAgent):
                         print(f"  → AnalysisAgent will call tool '{tool_name}' with arguments: {arguments}")
                         result = execute_tool(tool_name, arguments)
 
-                        # Store analysis findings in context
+                        snippet = _extract_snippet(tool_name, arguments, result)
                         context.add_insight("analysis_agent", f"task_{task.task_id}_analysis", {
                             "tool": tool_name,
-                            "summary": result[:500] if isinstance(result, str) else str(result)[:500]
+                            "summary": snippet
                         })
                         return result
 

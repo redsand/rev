@@ -265,6 +265,43 @@ def _dedupe_redundant_prefix_path(abs_path: Path, root: Path) -> Optional[Path]:
     return dedup_abs.resolve(strict=False)
 
 
+def maybe_fix_tool_paths(args: dict) -> dict:
+    """
+    Best-effort fix for common path drift (e.g., duplicated prefixes like lib/analysts/lib/analysts).
+    Returns a new args dict with normalized paths; non-path entries unchanged.
+    """
+    if not isinstance(args, dict):
+        return args
+
+    keys = {"path", "file", "file_path", "directory", "dir"}
+    list_keys = {"paths", "files"}
+
+    def _fix_one(val: str) -> str:
+        try:
+            ws = get_workspace()
+            norm = normalize_path(val)
+            p = Path(norm.replace("/", os.sep))
+            if not p.is_absolute():
+                p = ws.root / p
+            dedup = _dedupe_redundant_prefix_path(p, ws.root)
+            target = dedup or p
+            try:
+                rel = target.relative_to(ws.root).as_posix()
+                return rel
+            except Exception:
+                return str(target).replace("\\", "/")
+        except Exception:
+            return val
+
+    fixed = dict(args)
+    for k, v in list(args.items()):
+        if k in keys and isinstance(v, str):
+            fixed[k] = _fix_one(v)
+        if k in list_keys and isinstance(v, list):
+            fixed[k] = [_fix_one(x) if isinstance(x, str) else x for x in v]
+    return fixed
+
+
 # ---------------------------------------------------------------------------
 # Module-level singleton and accessors
 # ---------------------------------------------------------------------------

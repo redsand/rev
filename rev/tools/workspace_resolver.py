@@ -23,6 +23,7 @@ from rev.workspace import (
     normalize_path,
     normalize_to_workspace_relative,
     is_path_within_workspace,
+    maybe_fix_tool_paths,
 )
 
 __all__ = [
@@ -32,6 +33,7 @@ __all__ = [
     "normalize_path",
     "normalize_to_workspace_relative",
     "is_path_within_workspace",
+    "maybe_fix_tool_paths",
 ]
 
 

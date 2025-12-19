@@ -8,6 +8,61 @@ from rev.core.tool_call_recovery import recover_tool_call_from_text
 from rev.agents.context_provider import build_context_and_tools
 from rev.agents.subagent_io import build_subagent_output
 
+KEYWORD_SNIPPET_PATTERNS = [
+    "register",
+    "_build_analyst_registry",
+    "inspect.getmembers",
+    "pkgutil",
+    "importlib",
+    "registry",
+]
+
+
+def _extract_snippet(tool_name: str, tool_args: dict, raw_result: Any) -> str:
+    """Return a relevant snippet for read_file/read_file_lines outputs."""
+    try:
+        text = raw_result if isinstance(raw_result, str) else str(raw_result)
+    except Exception:
+        return str(raw_result)[:500]
+
+    def _keyword_window(txt: str) -> Optional[str]:
+        lines = txt.splitlines()
+        for idx, line in enumerate(lines):
+            if any(k.lower() in line.lower() for k in KEYWORD_SNIPPET_PATTERNS):
+                start = max(0, idx - 2)
+                end = min(len(lines), idx + 3)
+                return "\n".join(lines[start:end])
+        return None
+
+    if tool_name in {"read_file", "read_file_lines"}:
+        if "...[truncated]..." in text or len(text) > 5000:
+            try:
+                path = tool_args.get("path") if isinstance(tool_args, dict) else None
+                include = path if isinstance(path, str) else "**/*"
+                search = execute_tool(
+                    "search_code",
+                    {"pattern": "register|pkgutil|importlib|getmembers|registry", "include": include, "regex": True},
+                )
+                payload = json.loads(search) if isinstance(search, str) else {}
+                matches = payload.get("matches") or []
+                if matches:
+                    m = matches[0]
+                    file = m.get("file")
+                    line = m.get("line")
+                    if file and isinstance(line, int):
+                        window = execute_tool(
+                            "read_file_lines",
+                            {"path": file, "start": max(1, line - 3), "end": line + 3},
+                        )
+                        if isinstance(window, str) and window.strip():
+                            return window
+            except Exception:
+                pass
+        kw = _keyword_window(text)
+        if kw:
+            return kw
+    return text[:500]
+
 RESEARCH_SYSTEM_PROMPT = """You are a specialized Research agent. Your purpose is to investigate codebases, gather context, analyze code structures, and provide insights.
 
 You will be given a research task and context about the repository. Your goal is to gather information using available tools.
@@ -89,7 +144,7 @@ class ResearchAgent(BaseAgent):
         # Get all available tools, focusing on read-only research tools
         all_tools = get_available_tools()
         research_tool_names = [
-            'read_file', 'search_code', 'rag_search', 'list_dir', 'tree_view',
+            'read_file', 'read_file_lines', 'search_code', 'rag_search', 'list_dir', 'tree_view',
             'analyze_code_structures', 'find_symbol_usages', 'analyze_dependencies',
             'analyze_code_context', 'check_structural_consistency', 'get_file_info'
         ]
@@ -149,10 +204,10 @@ class ResearchAgent(BaseAgent):
                         print(f"  → ResearchAgent will call tool '{tool_name}' with arguments: {arguments}")
                         raw_result = execute_tool(tool_name, arguments)
 
-                        # Store research findings in context for other agents to use
+                        snippet = _extract_snippet(tool_name, arguments, raw_result)
                         context.add_insight("research_agent", f"task_{task.task_id}_result", {
                             "tool": tool_name,
-                            "result": raw_result[:500] if isinstance(raw_result, str) else str(raw_result)[:500]
+                            "result": snippet
                         })
 
                         return build_subagent_output(
@@ -166,7 +221,7 @@ class ResearchAgent(BaseAgent):
 
             # Error handling
             if error_type:
-                if error_type == "text_instead_of_tool_call":
+                if error_type in {"text_instead_of_tool_call", "empty_tool_calls", "missing_tool_calls"}:
                     recovered = recover_tool_call_from_text(
                         response.get("message", {}).get("content", ""),
                         allowed_tools=[t["function"]["name"] for t in get_available_tools()],
@@ -186,9 +241,10 @@ class ResearchAgent(BaseAgent):
                             raw_result = json.dumps(outputs)
                         else:
                             raw_result = execute_tool(recovered.name, recovered.arguments)
+                        snippet = _extract_snippet(recovered.name, recovered.arguments, raw_result)
                         context.add_insight("research_agent", f"task_{task.task_id}_result", {
                             "tool": recovered.name,
-                            "result": raw_result[:500] if isinstance(raw_result, str) else str(raw_result)[:500]
+                            "result": snippet
                         })
                         return build_subagent_output(
                             agent_name="ResearchAgent",
