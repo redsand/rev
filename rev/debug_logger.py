@@ -91,6 +91,17 @@ class DebugLogger:
         """
         if cls._instance is None:
             cls._instance = cls(enabled, log_dir)
+        
+        if getattr(config, "LLM_TRANSACTION_LOG_ENABLED", False):
+            path_val = getattr(config, "LLM_TRANSACTION_LOG_PATH", "")
+            if path_val:
+                log_path = Path(path_val)
+                if log_path.exists():
+                    last_log_path = log_path.with_suffix(log_path.suffix + '.last')
+                    if last_log_path.exists():
+                        last_log_path.unlink()
+                    log_path.rename(last_log_path)
+                    
         return cls._instance
 
     @classmethod

@@ -221,7 +221,7 @@ You MUST output PURE JSON and NOTHING ELSE.
 Output format (strict): return ONLY a JSON array of objects with keys "description", "action_type", "complexity".."""
 
 
-TOOL_RESULT_CHAR_LIMIT = 6000
+TOOL_RESULT_CHAR_LIMIT = 12000  # Increased to prevent truncation of important code context
 
 
 def _truncate_tool_content(content: str, limit: int = TOOL_RESULT_CHAR_LIMIT) -> str:

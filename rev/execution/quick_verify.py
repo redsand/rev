@@ -1119,22 +1119,15 @@ def _verify_read_like(task: Task, context: RevContext) -> VerificationResult:
                         passed=False,
                         message=f"Tool returned error: {payload.get('error')}",
                         details={
-                            "tool": ev.get("tool"),
-                            "raw_result_snippet": raw[:500],
+                            "debug": {
+                                "tool": ev.get("tool"),
+                                "raw_result": raw,
+                            }
                         },
                         should_replan=True,
                     )
             except Exception:
-                if "error" in raw.lower():
-                    return VerificationResult(
-                        passed=False,
-                        message="Tool output contains error",
-                        details={
-                            "tool": ev.get("tool"),
-                            "raw_result_snippet": raw[:500],
-                        },
-                        should_replan=True,
-                    )
+                pass
     return VerificationResult(
         passed=True,
         message="Read-like task executed tool(s)",

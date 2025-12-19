@@ -58,6 +58,198 @@ from rev.tools.workspace_resolver import resolve_workspace_path
 from rev.core.text_tool_shim import maybe_execute_tool_call_from_text
 from rev.agents.subagent_io import build_subagent_output
 from rev.execution.action_normalizer import normalize_action_type
+from difflib import SequenceMatcher
+
+
+def _extract_file_path_from_description(desc: str) -> Optional[str]:
+    """Extract a file path from a task description for read tracking.
+
+    Returns the first path-like string found, or None.
+    """
+    if not desc:
+        return None
+
+    # Match common path patterns
+    patterns = [
+        r'`([^`]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini))`',  # backticked paths
+        r'"([^"]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini))"',  # quoted paths
+        r'\b([A-Za-z]:\\[^\s]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini))\b',  # Windows absolute
+        r'\b(/[^\s]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini))\b',  # Unix absolute
+        r'\b([\w./\\-]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini))\b',  # relative paths
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, desc, re.IGNORECASE)
+        if match:
+            return match.group(1)
+
+    return None
+
+
+def _extract_line_range_from_description(desc: str) -> Optional[str]:
+    """Extract a line range from a task description (e.g., 'lines 95-150').
+
+    Returns the line range string or None.
+    """
+    if not desc:
+        return None
+
+    patterns = [
+        r'lines?\s+(\d+)\s*[-–to]+\s*(\d+)',  # "lines 95-150" or "line 95 to 150"
+        r'lines?\s+(\d+)',  # "line 95" (single line)
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, desc, re.IGNORECASE)
+        if match:
+            return match.group(0)
+
+    return None
+
+
+def _compute_task_similarity(desc1: str, desc2: str) -> float:
+    """Compute semantic similarity between two task descriptions.
+
+    Uses SequenceMatcher ratio plus keyword overlap.
+    Returns a score between 0.0 and 1.0.
+    """
+    if not desc1 or not desc2:
+        return 0.0
+
+    # Normalize descriptions
+    d1 = desc1.strip().lower()
+    d2 = desc2.strip().lower()
+
+    # Direct sequence matching
+    seq_ratio = SequenceMatcher(None, d1, d2).ratio()
+
+    # Check for same file path
+    file1 = _extract_file_path_from_description(desc1)
+    file2 = _extract_file_path_from_description(desc2)
+    same_file = 0.0
+    if file1 and file2:
+        # Normalize paths
+        f1 = file1.replace('\\', '/').lower()
+        f2 = file2.replace('\\', '/').lower()
+        if f1 == f2 or f1.endswith(f2) or f2.endswith(f1):
+            same_file = 0.3  # Bonus for same file
+
+    # Check for same line range
+    lines1 = _extract_line_range_from_description(desc1)
+    lines2 = _extract_line_range_from_description(desc2)
+    same_lines = 0.0
+    if lines1 and lines2 and lines1.lower() == lines2.lower():
+        same_lines = 0.2  # Bonus for same line range
+
+    # Keywords that suggest similar intent
+    intent_keywords = [
+        'inspect', 'examine', 'read', 'analyze', 'review', 'check', 'look', 'find',
+        'identify', 'understand', 'investigate', 'explore', 'verbatim', 'exact'
+    ]
+
+    kw1 = set(word for word in d1.split() if word in intent_keywords)
+    kw2 = set(word for word in d2.split() if word in intent_keywords)
+
+    keyword_overlap = 0.0
+    if kw1 and kw2:
+        overlap = len(kw1 & kw2) / max(len(kw1 | kw2), 1)
+        keyword_overlap = overlap * 0.2  # Up to 0.2 bonus
+
+    # Combine scores, capped at 1.0
+    return min(1.0, seq_ratio + same_file + same_lines + keyword_overlap)
+
+
+def _is_semantically_duplicate_task(
+    new_desc: str,
+    new_action: str,
+    completed_tasks: List[str],
+    threshold: float = 0.7
+) -> bool:
+    """Check if a new task is semantically similar to already-completed tasks.
+
+    Args:
+        new_desc: Description of the new task
+        new_action: Action type of the new task
+        completed_tasks: List of completed task log entries
+        threshold: Similarity threshold (0.7 = 70% similar)
+
+    Returns:
+        True if the task is considered a duplicate
+    """
+    if not completed_tasks:
+        return False
+
+    new_action_lower = (new_action or '').lower()
+
+    # Only check for duplication on read-like actions
+    if new_action_lower not in {'read', 'analyze', 'research', 'investigate', 'review'}:
+        return False
+
+    similar_count = 0
+    for log_entry in completed_tasks:
+        # Parse the log entry to extract action type and description
+        # Format: [STATUS] description | Output: ...
+        match = re.match(r'\[(\w+)\]\s*(.+?)(?:\s*\|.*)?$', log_entry)
+        if not match:
+            continue
+
+        status = match.group(1).upper()
+        desc = match.group(2).strip()
+
+        # Only compare with completed read-like tasks
+        if status != 'COMPLETED':
+            continue
+
+        # Check for read-like keywords in the description
+        desc_lower = desc.lower()
+        is_read_like = any(kw in desc_lower for kw in ['read', 'inspect', 'examine', 'analyze'])
+        if not is_read_like:
+            continue
+
+        similarity = _compute_task_similarity(new_desc, desc)
+        if similarity >= threshold:
+            similar_count += 1
+
+    # If we found 2+ similar completed tasks, this is a duplicate
+    return similar_count >= 2
+
+
+def _count_file_reads(file_path: str, completed_tasks: List[str]) -> int:
+    """Count how many times a file has been read in completed tasks.
+
+    Args:
+        file_path: The file path to check
+        completed_tasks: List of completed task log entries
+
+    Returns:
+        Number of times this file was read
+    """
+    if not file_path or not completed_tasks:
+        return 0
+
+    # Normalize the target path
+    target = file_path.replace('\\', '/').lower()
+    count = 0
+
+    for log_entry in completed_tasks:
+        # Only count completed read-like tasks
+        if not log_entry.startswith('[COMPLETED]'):
+            continue
+
+        desc_lower = log_entry.lower()
+        if not any(kw in desc_lower for kw in ['read', 'inspect', 'examine', 'analyze']):
+            continue
+
+        # Extract file path from the log entry
+        entry_file = _extract_file_path_from_description(log_entry)
+        if entry_file:
+            entry_normalized = entry_file.replace('\\', '/').lower()
+            if target == entry_normalized or target.endswith(entry_normalized) or entry_normalized.endswith(target):
+                count += 1
+
+    return count
+
+
 from rev.tools.workspace_resolver import normalize_path, normalize_to_workspace_relative, WorkspacePathError
 
 
@@ -956,6 +1148,8 @@ class Orchestrator:
             "\n"
              "Constraints to avoid duplicating work:\n"
              "- Do not propose repeating a step that is already complete (e.g., do not re-create a directory that exists).\n"
+             "- CRITICAL: If you have already completed 2+ READ/ANALYZE steps on the same file, you MUST now use [EDIT] to make changes. Do NOT propose another read.\n"
+             "- If the same file/lines have been inspected multiple times, transition to [EDIT] immediately.\n"
              "- If you are going to use `split_python_module_classes`, do not hand-author the package `__init__.py` first; let the tool generate it.\n"
              "- After `split_python_module_classes` runs, treat the directory as the source of truth; prefer editing the package files rather than the original monolithic module.\n"
              "- If a source file was split into a package (directory with __init__.py) and the original single-file path no longer exists, do NOT propose edits to that missing file; operate on the package files that actually exist.\n"
@@ -1029,6 +1223,25 @@ class Orchestrator:
             if completed_tasks_log:
                 work_summary = "Work Completed So Far:\n" + "\n".join(f"- {log}" for log in completed_tasks_log[-5:])
 
+                # Add file read count summary to help LLM understand when to stop reading
+                file_read_counts: Dict[str, int] = defaultdict(int)
+                for log_entry in completed_tasks_log:
+                    if log_entry.startswith('[COMPLETED]'):
+                        desc_lower = log_entry.lower()
+                        if any(kw in desc_lower for kw in ['read', 'inspect', 'examine', 'analyze']):
+                            file_path = _extract_file_path_from_description(log_entry)
+                            if file_path:
+                                # Normalize to filename only for summary
+                                filename = file_path.replace('\\', '/').split('/')[-1]
+                                file_read_counts[filename] += 1
+
+                if file_read_counts:
+                    high_read_files = [(f, c) for f, c in file_read_counts.items() if c >= 2]
+                    if high_read_files:
+                        work_summary += "\n\n⚠️ READ LIMIT WARNING: The following files have been read multiple times:\n"
+                        for filename, count in high_read_files:
+                            work_summary += f"  - {filename}: read {count}x (MUST transition to [EDIT] now)\n"
+
             next_task = self._determine_next_action(user_request, work_summary, coding_mode)
 
             if not next_task:
@@ -1096,6 +1309,35 @@ class Orchestrator:
                         return False
                     continue
             print(f"  -> Next action: [{next_task.action_type.upper()}] {next_task.description[:80]}")
+
+            # SEMANTIC DEDUPLICATION: Check if this is a semantically duplicate read task
+            action_type_lower = (next_task.action_type or '').lower()
+            if action_type_lower in {'read', 'analyze', 'research', 'investigate', 'review'}:
+                if _is_semantically_duplicate_task(
+                    next_task.description,
+                    next_task.action_type,
+                    completed_tasks_log,
+                    threshold=0.65  # 65% similarity threshold
+                ):
+                    # Check if we should force transition to EDIT
+                    file_path = _extract_file_path_from_description(next_task.description)
+                    read_count = _count_file_reads(file_path, completed_tasks_log) if file_path else 0
+
+                    if read_count >= 2:
+                        print("  [semantic-dedup] Detected semantically duplicate read of same file.")
+                        print("  [semantic-dedup] Forcing transition to EDIT - enough reading has been done.")
+
+                        # Force edit mode with context from what was read
+                        next_task.action_type = "edit"
+                        next_task.description = (
+                            f"Based on the prior reads of {file_path or 'the target file'}, "
+                            f"now EDIT the code to implement the required changes. "
+                            f"Use the information already gathered from previous reads to make the necessary modifications."
+                        )
+                        print(f"  -> Converted to: [EDIT] {next_task.description[:80]}")
+                    else:
+                        # Just warn but allow the read to proceed
+                        print("  [semantic-dedup] Warning: similar read already completed, but allowing once more.")
 
             self.context.plan = ExecutionPlan(tasks=[next_task])
 
@@ -1274,6 +1516,19 @@ class Orchestrator:
                 log_entry += f" | Reason: {next_task.error}"
             if verification_result and not verification_result.passed:
                 log_entry += f" | Verification: {verification_result.message}"
+
+            # Add a summary of the tool output to the log
+            if hasattr(next_task, 'tool_events') and next_task.tool_events:
+                # Summarize the result of the last tool event
+                event = next_task.tool_events[-1]
+                tool_output = event.get('raw_result')
+                if isinstance(tool_output, str):
+                    summary = tool_output.strip()
+                    if len(summary) > 300:
+                        summary = summary[:300] + '...'
+                    # Avoid logging huge file contents
+                    if len(summary) > 0:
+                        log_entry += f" | Output: {summary}"
 
             completed_tasks_log.append(log_entry)
             try:
