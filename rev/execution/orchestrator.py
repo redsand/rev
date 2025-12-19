@@ -1106,6 +1106,16 @@ class Orchestrator:
                 available_actions=AgentRegistry.get_registered_action_types(),
             )
             description = match.group(2).strip()
+
+            # Clean up malformed LLM output that contains multiple actions concatenated
+            if '[' in description:
+                bracket_idx = description.find('[')
+                if bracket_idx > 0:
+                    description = description[:bracket_idx].strip()
+
+            # Clean up trailing brackets
+            description = re.sub(r'\]$', '', description).strip()
+
             print(f"\n  [DECOMPOSITION] LLM suggested decomposition:")
             print(f"    Action: {action_type}")
             print(f"    Task: {description}")
@@ -1157,9 +1167,14 @@ class Orchestrator:
              "- Avoid replacing `from pkg import *` with dozens of per-module imports; only import names actually used.\n"
              "- Prefer `from package import ExportedSymbol` over `from package.module import ExportedSymbol` when the package exports it.\n"
              f"You MUST choose one of the following action types: {available_actions}\n"
-             "Your response should be a single line in the format: [ACTION_TYPE] description of the action.\n"
-             "Example: [EDIT] refactor the authentication middleware to use the new session manager.\n"
-             "If the goal has been achieved, respond with only the text 'GOAL_ACHIEVED'."
+             "\n"
+             "RESPONSE FORMAT (CRITICAL - follow exactly):\n"
+             "- Respond with EXACTLY ONE action on a SINGLE LINE\n"
+             "- Format: [ACTION_TYPE] brief description of what to do\n"
+             "- Do NOT output multiple actions or a plan - only the SINGLE NEXT step\n"
+             "- Do NOT chain actions like '[READ] file [ANALYZE] content' - pick ONE\n"
+             "- Example: [EDIT] refactor the authentication middleware to use the new session manager\n"
+             "- If the goal has been achieved, respond with only: GOAL_ACHIEVED"
         )
         
         response_data = ollama_chat([{"role": "user", "content": prompt}])
@@ -1180,12 +1195,24 @@ class Orchestrator:
         match = re.match(r"[\s]*\[(.*?)\]\s*(.*)", response_content.strip())
         if not match:
             return Task(description=response_content.strip(), action_type="general")
-        
+
         action_type = normalize_action_type(
             match.group(1),
             available_actions=available_actions,
         )
         description = match.group(2).strip()
+
+        # Clean up malformed LLM output that contains multiple actions concatenated
+        # e.g. "Open file.[READ] another[ANALYZE] more" -> "Open file."
+        if '[' in description:
+            # Truncate at the first bracket (likely another action type)
+            bracket_idx = description.find('[')
+            if bracket_idx > 0:
+                description = description[:bracket_idx].strip()
+
+        # Also clean up trailing brackets like "lib/analysts]"
+        description = re.sub(r'\]$', '', description).strip()
+
         return Task(description=description, action_type=action_type)
 
     def _continuous_sub_agent_execution(self, user_request: str, coding_mode: bool) -> bool:

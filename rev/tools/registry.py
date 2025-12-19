@@ -363,11 +363,15 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         "scan_security_issues": lambda args: scan_security_issues(args.get("paths"), args.get("severity_threshold", "MEDIUM")),
         "detect_secrets": lambda args: detect_secrets(args.get("path", ".")),
         "check_license_compliance": lambda args: check_license_compliance(args.get("path", ".")),
-        "split_python_module_classes": lambda args: split_python_module_classes(
-            args["source_path"],
-            args.get("target_directory"),
-            args.get("overwrite", False),
-            args.get("delete_source", True),
+        "split_python_module_classes": lambda args: (
+            split_python_module_classes(
+                args["source_path"],
+                args.get("target_directory"),
+                args.get("overwrite", False),
+                args.get("delete_source", True),
+            )
+            if "source_path" in args
+            else json.dumps({"error": "Missing required argument 'source_path' for split_python_module_classes"})
         ),
         "run_property_tests": lambda args: run_property_tests(args.get("test_paths"), args.get("max_examples", 200)),
         "generate_property_tests": lambda args: generate_property_tests(args.get("targets", []), args.get("max_examples", 200)),
