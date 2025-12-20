@@ -947,7 +947,9 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
         py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]
         if py_paths:
             ruff_targets = " ".join(_quote_path(p) for p in py_paths[:10])  # Limit to 10 files
-            optional_checks.append(("ruff", f"ruff check {ruff_targets}"))
+            # Use targeted error codes to avoid failing on pre-existing style issues
+            # E9: Runtime errors, F63: Invalid print syntax, F7: Statement problems, F82: Undefined names
+            optional_checks.append(("ruff", f"ruff check {ruff_targets} --select E9,F63,F7,F82"))
     if "mypy" in config.ALLOW_CMDS:
         py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]
         if py_paths:
@@ -992,10 +994,11 @@ def _run_validation_steps(validation_steps: list[str], details: Dict[str, Any], 
             cmd = "python -m compileall " + " ".join(_quote_path(p) for p in paths)
             _add("compileall", cmd)
         if "lint" in text or "linter" in text:
-            # Run ruff only on modified files to avoid pre-existing errors
+            # Run ruff only on modified files, targeting severe errors to avoid pre-existing style issues
+            # E9: Runtime errors, F63: Invalid print syntax, F7: Statement problems, F82: Undefined names
             if py_paths:
                 ruff_targets = " ".join(_quote_path(p) for p in py_paths[:10])
-                _add("ruff", f"ruff check {ruff_targets}")
+                _add("ruff", f"ruff check {ruff_targets} --select E9,F63,F7,F82")
         if "test" in text:
             _add("pytest", "pytest -q", "run_tests")
         if "mypy" in text or "type" in text:

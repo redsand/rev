@@ -284,6 +284,131 @@ def _count_file_reads(file_path: str, completed_tasks: List[str]) -> int:
     return count
 
 
+def _check_syntax_error_in_verification(verification_result) -> bool:
+    """Check if a verification failure is due to syntax errors.
+
+    Returns True if the failure is caused by syntax errors (F821, E999, etc.)
+    that would leave the code in a broken state.
+    """
+    if not verification_result or not hasattr(verification_result, 'details'):
+        return False
+
+    details_str = str(verification_result.details).lower()
+    message_str = str(verification_result.message).lower()
+
+    # Check for syntax error indicators
+    syntax_indicators = [
+        'f821',  # Undefined name
+        'e999',  # SyntaxError
+        'undefined name',
+        'syntaxerror',
+        'name error',
+        'compilation failed',
+        'import error',
+        'module not found',
+    ]
+
+    combined = f"{details_str} {message_str}"
+    return any(indicator in combined for indicator in syntax_indicators)
+
+
+def _create_syntax_repair_task(failed_task: "Task", verification_result) -> "Task":
+    """Create a focused syntax repair task for the LLM.
+
+    Args:
+        failed_task: The task that failed with syntax errors
+        verification_result: The verification result containing error details
+
+    Returns:
+        A new Task focused on fixing the syntax errors
+    """
+    from rev.models.task import Task
+
+    # Extract file paths from failed task
+    affected_files = set()
+    if hasattr(failed_task, 'tool_events') and failed_task.tool_events:
+        for event in failed_task.tool_events:
+            args = event.get('args', {})
+            if isinstance(args, dict):
+                for key in ['path', 'file_path', 'target', 'source']:
+                    if key in args and isinstance(args[key], str):
+                        affected_files.add(args[key])
+
+    files_str = ', '.join(affected_files) if affected_files else "the modified file(s)"
+
+    # Extract specific error details from verification result
+    error_details = ""
+    if hasattr(verification_result, 'details') and verification_result.details:
+        details = verification_result.details
+        if isinstance(details, dict):
+            # Look for ruff or compileall output
+            for key in ['ruff', 'compileall', 'strict']:
+                if key in details:
+                    val = details[key]
+                    if isinstance(val, dict) and 'stdout' in val:
+                        error_details = val['stdout'][:500]  # Limit to 500 chars
+                        break
+
+    # Create focused repair task description
+    description = (
+        f"Fix the syntax errors in {files_str}. "
+        f"CRITICAL: The code currently has undefined names or syntax errors that prevent it from running. "
+        f"You MUST fix ALL syntax errors - missing imports, undefined variables, etc. "
+    )
+
+    if error_details:
+        description += f"\n\nError details:\n{error_details}"
+
+    description += (
+        "\n\nFocus ONLY on fixing syntax/import errors. "
+        "Do not make other changes. Ensure all imports are present and all names are defined."
+    )
+
+    return Task(
+        description=description,
+        action_type="fix",
+        status=TaskStatus.PENDING
+    )
+
+
+def _attempt_git_revert_for_syntax_errors(task: "Task") -> list[str]:
+    """Attempt to revert files affected by a task using git checkout.
+
+    Returns list of successfully reverted file paths, or empty list if revert failed.
+    """
+    from rev.tools.registry import execute_tool
+
+    # Extract file paths from task events
+    files_to_revert = set()
+    if hasattr(task, 'tool_events') and task.tool_events:
+        for event in task.tool_events:
+            # Check for file paths in tool arguments
+            args = event.get('args', {})
+            if isinstance(args, dict):
+                for key in ['path', 'file_path', 'target', 'source']:
+                    if key in args and isinstance(args[key], str):
+                        files_to_revert.add(args[key])
+
+    if not files_to_revert:
+        return []
+
+    reverted = []
+    for file_path in files_to_revert:
+        try:
+            # Use git checkout to revert the file
+            result = execute_tool("run_cmd", {
+                "cmd": f"git checkout HEAD -- {file_path}",
+                "timeout": 10
+            })
+            if result and "error" not in str(result).lower():
+                reverted.append(file_path)
+        except Exception:
+            # Revert failed for this file, continue with others
+            pass
+
+    return reverted
+
+
 def _check_goal_likely_achieved(user_request: str, completed_tasks_log: List[str]) -> bool:
     """Check if the original goal appears to have been achieved based on completed tasks.
 
@@ -1830,7 +1955,63 @@ class Orchestrator:
                     first_line = verification_result.message.splitlines()[0].strip() if verification_result.message else ""
                     failure_sig = f"{(next_task.action_type or '').lower()}::{first_line}"
                     failure_counts[failure_sig] += 1
+
+                    # Track syntax repair attempts separately
+                    syntax_repair_key = f"syntax_repair::{failure_sig}"
+                    syntax_repair_attempts = self.context.agent_state.get(syntax_repair_key, 0)
+
                     if failure_counts[failure_sig] >= 3:
+                        # SYNTAX RECOVERY: Check if this is a syntax error
+                        is_syntax_error = _check_syntax_error_in_verification(verification_result)
+
+                        if is_syntax_error and syntax_repair_attempts < 5:
+                            # Enter syntax repair mode - give LLM focused attempts to fix
+                            print("\n" + "=" * 70)
+                            print("SYNTAX ERROR RECOVERY MODE")
+                            print("=" * 70)
+                            print(f"Syntax errors detected after {failure_counts[failure_sig]} general attempts.")
+                            print(f"Entering focused syntax repair mode (attempt {syntax_repair_attempts + 1}/5)")
+                            print("=" * 70 + "\n")
+
+                            # Increment syntax repair counter
+                            self.context.set_agent_state(syntax_repair_key, syntax_repair_attempts + 1)
+
+                            # Create a focused syntax repair task
+                            syntax_repair_task = _create_syntax_repair_task(next_task, verification_result)
+
+                            # Reset general failure count to allow more attempts
+                            failure_counts[failure_sig] = 0
+
+                            # Replace the failed task with the repair task
+                            next_task = syntax_repair_task
+                            iteration -= 1  # Don't count this as a regular iteration
+
+                        elif is_syntax_error and syntax_repair_attempts >= 5:
+                            # Exhausted syntax repair attempts - try auto-revert as last resort
+                            print("\n" + "=" * 70)
+                            print("SYNTAX REPAIR EXHAUSTED - ATTEMPTING AUTO-REVERT")
+                            print("=" * 70)
+                            print(f"Failed to fix syntax after {syntax_repair_attempts} focused repair attempts.")
+                            print("Attempting to revert files to restore working state...")
+                            print("=" * 70 + "\n")
+
+                            reverted_files = _attempt_git_revert_for_syntax_errors(next_task)
+                            if reverted_files:
+                                print("\n" + "=" * 70)
+                                print("SYNTAX ERROR RECOVERY - AUTO REVERT SUCCESSFUL")
+                                print("=" * 70)
+                                print(f"Auto-reverted files to restore working state: {', '.join(reverted_files)}")
+                                print("Code restored to working state. Goal NOT achieved - manual fix required.\n")
+                                # Clear syntax repair counter
+                                self.context.set_agent_state(syntax_repair_key, 0)
+                                return False  # Stop execution, but code is in working state
+                            else:
+                                print("\n" + "=" * 70)
+                                print("SYNTAX ERROR RECOVERY - AUTO-REVERT FAILED")
+                                print("=" * 70)
+                                print(f"Auto-revert failed. Manual intervention required.\n")
+
+                        # Non-syntax errors or revert failed - use original circuit breaker
                         self.context.set_agent_state("no_retry", True)
                         self.context.add_error("Circuit breaker: repeating verification failure")
                         print("\n" + "=" * 70)
