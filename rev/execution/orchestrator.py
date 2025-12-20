@@ -104,12 +104,14 @@ def _extract_file_path_from_description(desc: str) -> Optional[str]:
         return None
 
     # Match common path patterns
+    # Support most common source, config, and data extensions
+    ext = r"(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1)"
     patterns = [
-        r'`([^`]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini))`',  # backticked paths
-        r'"([^"]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini))"',  # quoted paths
-        r'\b([A-Za-z]:\\[^\s]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini))\b',  # Windows absolute
-        r'\b(/[^\s]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini))\b',  # Unix absolute
-        r'\b([\w./\\-]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini))\b',  # relative paths
+        rf'`([^`]+\.{ext})`',  # backticked paths
+        rf'"([^"]+\.{ext})"',  # quoted paths
+        rf'\b([A-Za-z]:\\[^\s]+\.{ext})\b',  # Windows absolute
+        rf'\b(/[^\s]+\.{ext})\b',  # Unix absolute
+        rf'\b([\w./\\-]+\.{ext})\b',  # relative paths
     ]
 
     for pattern in patterns:
@@ -570,15 +572,22 @@ def _choose_best_path_match(*, original: str, matches: List[str]) -> Optional[st
     def _score(rel_posix: str) -> tuple[int, int]:
         p = rel_posix.lower()
         score = 0
+        
         # Prefer typical source roots.
-        if "/lib/" in f"/{p}/":
-            score += 10
-        if "/src/" in f"/{p}/":
-            score += 8
-        if "/app/" in f"/{p}/":
-            score += 6
-        if "/tests/" in f"/{p}/":
-            score -= 5
+        # Use dynamic discovery to identify common source patterns.
+        source_roots = ["/src/", "/lib/", "/app/", "/core/", "/pkg/"]
+        test_roots = ["/tests/", "/test/", "/spec/"]
+        
+        for root in source_roots:
+            if root in f"/{p}/":
+                score += 8
+                break
+        
+        for root in test_roots:
+            if root in f"/{p}/":
+                score -= 5
+                break
+                
         # Prefer matches that end with the original (e.g., missing prefix).
         if original_lower and p.endswith(original_lower):
             score += 3
@@ -621,7 +630,7 @@ def _choose_best_path_match_with_context(*, original: str, matches: List[str], d
             if part_l and part_l != "." and part_l in desc:
                 score += 2
 
-        # Penalize obviously duplicated segment paths (e.g., lib/analysts/lib/analysts/...).
+        # Penalize obviously duplicated segment paths.
         parts = Path(p).parts
         for i in range(1, len(parts)):
             if parts[:i] == parts[i : 2 * i] and len(parts) >= 2 * i + 1:
@@ -811,12 +820,12 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
     action = (task.action_type or "").strip().lower()
     read_actions = {"read", "analyze", "review", "research", "investigate"}
 
-    # Focus on Python path mistakes first.
-    # Keep this regex intentionally simple to avoid escaping bugs.
+    # Match path candidates with any common source/config extension.
+    ext = r"(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1)"
     candidates = sorted(
         set(
             re.findall(
-                r'([A-Za-z]:[\\/][^\s"\'`]+\.py(?:\.bak)?\b|(?:\./)?[A-Za-z0-9_./\\-]+\.py(?:\.bak)?\b)',
+                rf'([A-Za-z]:[\\/][^\s"\'`]+\.{ext}(?:\.bak)?\b|(?:\./)?[A-Za-z0-9_./\\-]+\.{ext}(?:\.bak)?\b)',
                 desc,
             )
         )

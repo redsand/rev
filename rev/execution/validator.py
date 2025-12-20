@@ -95,6 +95,23 @@ Return your validation in JSON format:
 Be practical - minor style issues shouldn't fail validation."""
 
 
+def _get_common_dirs() -> Dict[str, List[str]]:
+    """Discover common source and test directories dynamically."""
+    from pathlib import Path
+    root = Path.cwd()
+    
+    source_candidates = ["src", "lib", "app", "core", "pkg"]
+    test_candidates = ["tests", "test", "spec", "unit_tests"]
+    
+    found_sources = [d for d in source_candidates if (root / d).is_dir()]
+    found_tests = [d for d in test_candidates if (root / d).is_dir()]
+    
+    return {
+        "sources": found_sources or ["."],
+        "tests": found_tests or ["tests"]  # Default to tests if nothing found
+    }
+
+
 def _semantic_validation_check(plan: ExecutionPlan) -> ValidationResult:
     """Comprehensive semantic validation of extraction/refactoring results.
 
@@ -128,9 +145,12 @@ def _semantic_validation_check(plan: ExecutionPlan) -> ValidationResult:
 
             # Count Python files created
             try:
-                lib_dir = Path.cwd() / "lib"
-                if lib_dir.exists():
-                    extracted_files = set(f.name for f in lib_dir.rglob("*.py") if f.is_file())
+                common_dirs = _get_common_dirs()
+                source_dirs = [Path.cwd() / d for d in common_dirs["sources"]]
+                
+                for sdir in source_dirs:
+                    if sdir.exists():
+                        extracted_files.update(set(f.name for f in sdir.rglob("*.py") if f.is_file()))
 
                 if mentioned_classes:
                     completeness_ratio = len(extracted_files) / max(len(mentioned_classes), 1)
@@ -146,24 +166,27 @@ def _semantic_validation_check(plan: ExecutionPlan) -> ValidationResult:
             lib_files = {}
             duplicates_found = []
 
-            lib_dir = Path.cwd() / "lib"
-            if lib_dir.exists():
-                for py_file in lib_dir.rglob("*.py"):
-                    try:
-                        content = py_file.read_text()
-                        # Normalize content for comparison
-                        normalized = re.sub(r'#.*$', '', content, flags=re.MULTILINE)
-                        normalized = '\n'.join(line.strip() for line in normalized.split('\n') if line.strip())
+            common_dirs = _get_common_dirs()
+            source_dirs = [Path.cwd() / d for d in common_dirs["sources"]]
+            
+            for sdir in source_dirs:
+                if sdir.exists():
+                    for py_file in sdir.rglob("*.py"):
+                        try:
+                            content = py_file.read_text()
+                            # Normalize content for comparison
+                            normalized = re.sub(r'#.*$', '', content, flags=re.MULTILINE)
+                            normalized = '\n'.join(line.strip() for line in normalized.split('\n') if line.strip())
 
-                        # Simple duplicate detection
-                        if len(normalized) > 50:  # Ignore small files
-                            for other_file, other_normalized in lib_files.items():
-                                if normalized == other_normalized:
-                                    duplicates_found.append((str(py_file.name), other_file))
+                            # Simple duplicate detection
+                            if len(normalized) > 50:  # Ignore small files
+                                for other_file, other_normalized in lib_files.items():
+                                    if normalized == other_normalized:
+                                        duplicates_found.append((str(py_file.name), other_file))
 
-                        lib_files[str(py_file.name)] = normalized
-                    except (PermissionError, UnicodeDecodeError):
-                        pass
+                            lib_files[str(py_file.name)] = normalized
+                        except (PermissionError, UnicodeDecodeError):
+                            pass
 
             if not duplicates_found:
                 checks_passed.append("No duplicate code detected")
@@ -175,21 +198,30 @@ def _semantic_validation_check(plan: ExecutionPlan) -> ValidationResult:
         # Check 3: Import satisfaction
         try:
             unsatisfied_imports = []
-            lib_dir = Path.cwd() / "lib"
+            common_dirs = _get_common_dirs()
+            source_dirs = [Path.cwd() / d for d in common_dirs["sources"]]
 
-            if lib_dir.exists():
-                for py_file in lib_dir.rglob("*.py"):
-                    try:
-                        content = py_file.read_text()
-                        # Extract relative imports
-                        imports = re.findall(r'from\s+\.([a-zA-Z_][a-zA-Z0-9_]*)\s+import', content)
+            for sdir in source_dirs:
+                if sdir.exists():
+                    for py_file in sdir.rglob("*.py"):
+                        try:
+                            content = py_file.read_text()
+                            # Extract relative imports
+                            imports = re.findall(r'from\s+\.([a-zA-Z_][a-zA-Z0-9_]*)\s+import', content)
 
-                        for module in imports:
-                            module_file = lib_dir / f"{module}.py"
-                            if not module_file.exists():
-                                unsatisfied_imports.append((py_file.name, module))
-                    except (PermissionError, UnicodeDecodeError):
-                        pass
+                            for module in imports:
+                                module_file = sdir / f"{module}.py"
+                                if not module_file.exists():
+                                    # Check other source dirs too
+                                    found_elsewhere = False
+                                    for other_sdir in source_dirs:
+                                        if (other_sdir / f"{module}.py").exists():
+                                            found_elsewhere = True
+                                            break
+                                    if not found_elsewhere:
+                                        unsatisfied_imports.append((py_file.name, module))
+                        except (PermissionError, UnicodeDecodeError):
+                            pass
 
             if not unsatisfied_imports:
                 checks_passed.append("All imports satisfied")
@@ -366,6 +398,9 @@ def validate_execution(
         return report
 
     # Configure validation scope
+    common_dirs = _get_common_dirs()
+    primary_test_dir = common_dirs["tests"][0] if common_dirs["tests"] else "tests"
+    
     if validation_mode == "smoke":
         check_syntax = True
         run_tests = True
@@ -376,13 +411,13 @@ def validate_execution(
         check_syntax = True
         run_tests = True
         run_linter = True
-        test_cmd = "pytest -q tests/ --maxfail=1"
+        test_cmd = f"pytest -q {primary_test_dir}/ --maxfail=1"
         lint_cmd = "ruff check . --select E9,F63,F7,F82 --output-format=json"
     else:  # full
         check_syntax = True
         run_tests = True
         run_linter = True
-        test_cmd = "pytest -q tests/"
+        test_cmd = f"pytest -q {primary_test_dir}/"
         lint_cmd = "ruff check . --output-format=json"
 
     # 0. Goal Validation (if goals were set)
@@ -614,13 +649,15 @@ def _run_test_suite(cmd: str) -> ValidationResult:
             )
         elif rc in [4, 5] or "no tests ran" in output.lower() or "no tests found" in output.lower():
             # No tests found or collected
+            common_dirs = _get_common_dirs()
+            test_dir = common_dirs["tests"][0]
             return ValidationResult(
                 name="test_suite",
                 status=ValidationStatus.FAILED,
                 message=f"No tests found or collected (rc={rc})",
                 details={
                     "return_code": rc,
-                    "issue": "No test files found. Ensure test files exist in the tests/ directory.",
+                    "issue": f"No test files found. Ensure test files exist in the {test_dir}/ directory.",
                     "output": output[-500:]
                 }
             )
@@ -826,9 +863,11 @@ def _attempt_auto_fix(test_result: ValidationResult, max_attempts: int = 3) -> b
             attempts.append(f"pytest -q {failures[0]} --maxfail=1")
 
     # 2) Rerun last-failed set
-    attempts.append("pytest -q tests/ --lf --maxfail=1")
+    common_dirs = _get_common_dirs()
+    test_dir = common_dirs["tests"][0]
+    attempts.append(f"pytest -q {test_dir}/ --lf --maxfail=1")
     # 3) Short full-suite rerun
-    attempts.append("pytest -q tests/ --maxfail=1")
+    attempts.append(f"pytest -q {test_dir}/ --maxfail=1")
 
     attempts = attempts[:max_attempts]
 
@@ -1006,8 +1045,8 @@ def validate_no_destructive_interdependencies(plan: ExecutionPlan) -> Validation
         # Tasks that modify files are destructive
         if any(word in task.description.lower() for word in ["extract", "refactor", "remove", "delete", "modify"]):
             # Tasks mentioning file operations are potentially destructive
-            # Extract likely files from description
-            mentioned_files = re.findall(r'(?:lib/|src/|tests/)[a-zA-Z0-9_./\-]+\.py', task.description)
+            # Extract likely files from description - generic pattern for any path-like string ending in .py
+            mentioned_files = re.findall(r'(?:[a-zA-Z0-9_./\-]+)\.py', task.description)
             if mentioned_files:
                 destructive_tasks.append((idx, mentioned_files, task.description))
 
@@ -1075,7 +1114,9 @@ def quick_validate(plan: ExecutionPlan) -> bool:
 
     # Quick test run
     try:
-        result = execute_tool("run_tests", {"test_path": "tests/", "verbose": False})
+        common_dirs = _get_common_dirs()
+        test_dir = common_dirs["tests"][0]
+        result = execute_tool("run_tests", {"test_path": f"{test_dir}/", "verbose": False})
         result_data = json.loads(result)
         return result_data.get("rc", 1) == 0
     except:
