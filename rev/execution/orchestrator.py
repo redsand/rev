@@ -284,6 +284,69 @@ def _count_file_reads(file_path: str, completed_tasks: List[str]) -> int:
     return count
 
 
+def _check_goal_likely_achieved(user_request: str, completed_tasks_log: List[str]) -> bool:
+    """Check if the original goal appears to have been achieved based on completed tasks.
+
+    Looks for evidence of successful tool executions that match the user request intent.
+    Returns True if goal appears achieved, False otherwise.
+    """
+    if not completed_tasks_log:
+        return False
+
+    request_lower = user_request.lower()
+
+    # Key patterns that indicate goal-completing tool executions
+    goal_indicators = []
+
+    # For splitting/breaking out files
+    if any(kw in request_lower for kw in ['split', 'break out', 'separate', 'extract']):
+        goal_indicators.extend([
+            'split_python_module_classes',
+            '"classes_split"',
+            '"created_files"',
+            'classes_split',
+        ])
+
+    # For refactoring
+    if 'refactor' in request_lower:
+        goal_indicators.extend([
+            'refactor',
+            'write_file',
+            'replace_in_file',
+        ])
+
+    # For creating directories/packages
+    if any(kw in request_lower for kw in ['package', 'directory', 'create']):
+        goal_indicators.extend([
+            'create_directory',
+            '__init__.py',
+            'package_init',
+        ])
+
+    if not goal_indicators:
+        # Can't determine goal type, don't force completion
+        return False
+
+    # Check completed tasks for evidence of goal achievement
+    completed_count = 0
+    goal_evidence = 0
+
+    for log_entry in completed_tasks_log:
+        if not log_entry.startswith('[COMPLETED]'):
+            continue
+        completed_count += 1
+
+        log_lower = log_entry.lower()
+        for indicator in goal_indicators:
+            if indicator.lower() in log_lower:
+                goal_evidence += 1
+                break
+
+    # If we have completed tasks with goal evidence, assume goal is achieved
+    # Require at least one completed task with goal evidence
+    return goal_evidence >= 1 and completed_count >= 1
+
+
 from rev.tools.workspace_resolver import normalize_path, normalize_to_workspace_relative, WorkspacePathError
 
 
@@ -1541,11 +1604,33 @@ class Orchestrator:
                     completed_tasks_log,
                     threshold=0.65  # 65% similarity threshold
                 ):
-                    # Check if we should force transition to EDIT
+                    # Check if we should force transition to EDIT or GOAL_ACHIEVED
                     file_path = _extract_file_path_from_description(next_task.description)
                     read_count = _count_file_reads(file_path, completed_tasks_log) if file_path else 0
 
                     if read_count >= 2:
+                        # Check if the original goal appears to be achieved
+                        # Look for successful tool completions that match the user request
+                        goal_likely_achieved = _check_goal_likely_achieved(
+                            user_request, completed_tasks_log
+                        )
+
+                        if goal_likely_achieved:
+                            print("  [semantic-dedup] Detected verification loop on completed work.")
+                            print("  [semantic-dedup] Original goal appears achieved - forcing completion.")
+                            return True  # Goal achieved
+
+                        # Check if this is a pure verification loop (verify/inspect/confirm keywords)
+                        desc_lower = next_task.description.lower()
+                        is_verification_loop = any(kw in desc_lower for kw in [
+                            'verify', 'confirm', 'ensure', 'check', 'validate', 'inspect'
+                        ])
+
+                        if is_verification_loop:
+                            print("  [semantic-dedup] Detected verification loop with no actionable changes.")
+                            print("  [semantic-dedup] Assuming goal is achieved - forcing completion.")
+                            return True  # Goal achieved
+
                         print("  [semantic-dedup] Detected semantically duplicate read of same file.")
                         print("  [semantic-dedup] Forcing transition to EDIT - enough reading has been done.")
 
@@ -1567,6 +1652,20 @@ class Orchestrator:
             action_sig = f"{(next_task.action_type or '').strip().lower()}::{next_task.description.strip().lower()}"
             action_counts[action_sig] += 1
             if action_counts[action_sig] >= 3:
+                # Before failing, check if the goal was actually achieved
+                action_lower = (next_task.action_type or "").lower()
+                is_read_action = action_lower in {"read", "analyze", "research", "investigate", "review"}
+
+                if is_read_action:
+                    goal_achieved = _check_goal_likely_achieved(user_request, completed_tasks_log)
+                    if goal_achieved:
+                        print("\n" + "=" * 70)
+                        print("CIRCUIT BREAKER - GOAL ACHIEVED")
+                        print("=" * 70)
+                        print(f"Repeated verification action {action_counts[action_sig]}x, but goal appears achieved.")
+                        print("Forcing successful completion.\n")
+                        return True
+
                 self.context.set_agent_state("no_retry", True)
                 self.context.add_error(f"Circuit breaker: repeating action '{next_task.action_type}'")
                 print("\n" + "=" * 70)
@@ -1581,12 +1680,27 @@ class Orchestrator:
                 and action_counts[action_sig] == 2
                 and (next_task.action_type or "").lower() in {"read", "analyze", "research"}
             ):
-                print("  [loop-guard] Repeated READ/ANALYZE detected; inject a directory listing + run step.")
-                next_task.action_type = "read"
-                next_task.description = (
-                    "List lib/analysts and summarize missing exports; then run the auto-registration entrypoint "
-                    "to compare expected vs actual analysts."
-                )
+                print("  [loop-guard] Repeated READ/ANALYZE detected; checking if goal is achieved.")
+                # Check if the goal appears to be achieved
+                goal_achieved = _check_goal_likely_achieved(user_request, completed_tasks_log)
+                if goal_achieved:
+                    print("  [loop-guard] Goal appears achieved based on completed tasks - forcing completion.")
+                    return True
+
+                # Extract target path from the task description to create a more relevant fallback
+                target_path = _extract_file_path_from_description(next_task.description)
+                if target_path:
+                    parent_dir = str(Path(target_path.replace('\\', '/')).parent)
+                    next_task.description = (
+                        f"List the directory '{parent_dir}' to confirm all expected files exist, "
+                        f"then verify imports work by running a simple test or syntax check."
+                    )
+                else:
+                    next_task.description = (
+                        "List the target directory and summarize the current state; "
+                        "verify all expected files exist and imports work correctly."
+                    )
+                print(f"  [loop-guard] Injecting fallback: {next_task.description[:80]}")
 
             # Fast-path: don't dispatch a no-op create_directory if it already exists.
             if (next_task.action_type or "").lower() == "create_directory":

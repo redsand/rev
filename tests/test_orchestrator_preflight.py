@@ -24,7 +24,7 @@ def test_preflight_corrects_missing_basename_to_unique_match():
     ok, msgs = _preflight_correct_task_paths(task=task, project_root=root)
 
     assert ok is True
-    assert any("corrected missing path" in m for m in msgs)
+    assert any("resolved missing path" in m for m in msgs)
     assert "lib/analysts.py" in task.description.replace("\\", "/")
 
 
@@ -103,3 +103,49 @@ def test_preflight_dedupes_redundant_prefix_paths():
     assert ok is True
     assert "lib/analysts/__init__.py" in task.description.replace("\\", "/")
     assert any("duplicated" in m for m in msgs)
+
+
+def test_check_goal_likely_achieved_for_split_task():
+    """Test that goal achievement detection works for split tasks."""
+    from rev.execution.orchestrator import _check_goal_likely_achieved
+
+    # User request for splitting a file
+    user_request = "break out the analysts.py file into multiple files"
+
+    # Completed tasks log with successful split
+    completed_tasks = [
+        '[COMPLETED] identify all analyst classes in ./lib/analysts.py | Output: ...',
+        '[COMPLETED] split the lib/analysts.py file using split_python_module_classes | Output: {"classes_split": 36, "created_files": [...]}',
+        '[COMPLETED] verify the contents of lib/analysts/__init__.py | Output: ...',
+    ]
+
+    result = _check_goal_likely_achieved(user_request, completed_tasks)
+    assert result is True, "Should detect goal as achieved when split_python_module_classes completed"
+
+
+def test_check_goal_likely_achieved_returns_false_for_unrelated_tasks():
+    """Test that goal achievement detection returns False for unrelated work."""
+    from rev.execution.orchestrator import _check_goal_likely_achieved
+
+    # User request for splitting a file
+    user_request = "break out the analysts.py file into multiple files"
+
+    # Completed tasks log without any split evidence
+    completed_tasks = [
+        '[COMPLETED] read the README.md file | Output: ...',
+        '[COMPLETED] analyze the project structure | Output: ...',
+    ]
+
+    result = _check_goal_likely_achieved(user_request, completed_tasks)
+    assert result is False, "Should not detect goal as achieved without split evidence"
+
+
+def test_check_goal_likely_achieved_returns_false_for_empty_log():
+    """Test that goal achievement detection returns False for empty log."""
+    from rev.execution.orchestrator import _check_goal_likely_achieved
+
+    user_request = "break out the analysts.py file"
+    completed_tasks = []
+
+    result = _check_goal_likely_achieved(user_request, completed_tasks)
+    assert result is False, "Should not detect goal as achieved with empty log"
