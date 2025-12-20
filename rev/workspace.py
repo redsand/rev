@@ -159,8 +159,8 @@ class Workspace:
         raw = _clean_path_input(path)
 
         # Guard against LLM "nesting" mistake: prefixing workspace-relative path
-        # with the workspace folder name (e.g., in `C:\repo\redtrade` emitting
-        # `redtrade/lib/...` which creates `<ROOT>/redtrade/lib`).
+        # with the workspace folder name (e.g., in `C:\repo\project` emitting
+        # `project/src/...` which creates `<ROOT>/project/src`).
         try:
             raw_norm = raw.replace("\\", "/")
             if not Path(raw).is_absolute():
@@ -224,7 +224,7 @@ class Workspace:
 def _dedupe_redundant_prefix_path(abs_path: Path, root: Path) -> Optional[Path]:
     """
     Collapse accidental repeated leading segments like
-    '<root>/lib/analysts/lib/analysts/__init__.py' into the shortest suffix.
+    '<root>/src/module/src/module/__init__.py' into the shortest suffix.
     This prevents agents from drifting into nested duplicates when they keep
     appending the same subpath.
     """
@@ -264,7 +264,7 @@ def _dedupe_redundant_prefix_path(abs_path: Path, root: Path) -> Optional[Path]:
 
 def maybe_fix_tool_paths(args: dict) -> dict:
     """
-    Best-effort fix for common path drift (e.g., duplicated prefixes like lib/analysts/lib/analysts).
+    Best-effort fix for common path drift (e.g., duplicated prefixes like src/module/src/module).
     Returns a new args dict with normalized paths; non-path entries unchanged.
     """
     if not isinstance(args, dict):

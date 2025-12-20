@@ -764,7 +764,7 @@ def _is_goal_achieved_response(response: Optional[str]) -> bool:
 def _dedupe_redundant_prefix_path(norm_path: str, project_root: Path) -> Optional[str]:
     """
     Collapse accidental repeated leading segments like
-    'lib/analysts/lib/analysts/__init__.py' into the shortest suffix.
+    'src/module/src/module/__init__.py' into the shortest suffix.
     This prevents recursive path drift when planners keep appending the same subpath.
     """
     if not norm_path:
@@ -886,7 +886,7 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
             basenames.append(basename[: -len(".bak")])
 
         # Check if a .py file was split into a package (directory with __init__.py)
-        # e.g., lib/analysts.py -> lib/analysts/__init__.py
+        # e.g., src/module.py -> src/module/__init__.py
         package_init_match: Optional[str] = None
         if basename.lower().endswith(".py") and not basename.lower().endswith(".py.bak"):
             # Look for a package directory with the same name (without .py extension)
@@ -923,7 +923,7 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
 
         # If the planner only emitted a bare filename (e.g., "__init__.py") and
         # there are multiple matches in the workspace, avoid "helpfully" picking
-        # one and accidentally duplicating a path (lib/analysts/lib/analysts/...).
+        # one and accidentally duplicating a path (src/module/src/module/...).
         if not ("/" in normalized or "\\" in normalized) and len(preferred_pool) > 1 and not chosen:
             missing_unresolved.append(
                 f"ambiguous missing path '{raw}' (multiple candidates for bare filename)"
@@ -943,7 +943,7 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
                 continue
 
             # If the resolved path already appears in the description, avoid
-            # duplicating segments like "lib/analysts/lib/analysts/__init__.py".
+            # duplicating segments like "src/module/src/module/__init__.py".
             if chosen in desc:
                 messages.append(
                     f"resolved missing path to '{chosen}' (already present; left unchanged)"
@@ -952,8 +952,8 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
                 continue
 
             # Check if replacing 'raw' with 'chosen' would create a redundant path.
-            # e.g. if desc contains 'lib/analysts.py' and we replace 'analysts.py' with 'lib/analysts.py'
-            # we get 'lib/lib/analysts.py'.
+            # e.g. if desc contains 'src/module.py' and we replace 'module.py' with 'src/module.py'
+            # we get 'src/src/module.py'.
             if f"/{raw}" in desc.replace("\\", "/") or f"\\{raw}" in desc:
                 # If it's already prefixed by something, check if that prefix matches the 'chosen' path's head.
                 # If it does, we should just consider it resolved and not replace.
@@ -1566,7 +1566,7 @@ class Orchestrator:
             if bracket_idx > 0:
                 description = description[:bracket_idx].strip()
 
-        # Also clean up trailing brackets like "lib/analysts]"
+        # Also clean up trailing brackets like "src/module]"
         description = re.sub(r'\]$', '', description).strip()
 
         task = Task(description=description, action_type=action_type)

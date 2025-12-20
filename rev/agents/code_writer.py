@@ -26,19 +26,19 @@ def _extract_target_files_from_description(description: str) -> list[str]:
 
     paths = []
 
-    # Match backticked paths like `lib/analysts/__init__.py`
-    backtick_pattern = r'`([^`]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini))`'
+    # Match backticked paths like `src/module/__init__.py`
+    backtick_pattern = r'`([^`]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1))`'
     for match in re.finditer(backtick_pattern, description, re.IGNORECASE):
         paths.append(match.group(1))
 
-    # Match quoted paths like "lib/analysts/__init__.py"
-    quote_pattern = r'"([^"]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini))"'
+    # Match quoted paths like "src/module/__init__.py"
+    quote_pattern = r'"([^"]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1))"'
     for match in re.finditer(quote_pattern, description, re.IGNORECASE):
         if match.group(1) not in paths:
             paths.append(match.group(1))
 
-    # Match bare paths like lib/analysts/__init__.py or main.py
-    bare_pattern = r'\b([\w./\\-]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini))\b'
+    # Match bare paths like src/module/__init__.py or main.py
+    bare_pattern = r'\b([\w./\\-]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1))\b'
     for match in re.finditer(bare_pattern, description, re.IGNORECASE):
         candidate = match.group(1)
         # Filter out common false positives
