@@ -261,7 +261,19 @@ class DebugLogger:
             # Gather extra context for debugging
             extra_context = {
                 "cwd": os.getcwd(),
+                "platform": sys.platform,
+                "python_version": sys.version,
             }
+            
+            # Filtered environment variables (no secrets)
+            try:
+                secret_keywords = {'key', 'token', 'secret', 'password', 'auth', 'credential', 'cert'}
+                extra_context["env"] = {
+                    k: v for k, v in os.environ.items() 
+                    if not any(kw in k.lower() for kw in secret_keywords)
+                }
+            except Exception:
+                pass
             
             # Simple file listing of root
             try:
@@ -300,8 +312,33 @@ class DebugLogger:
                 f.write(f"==== LLM TRANSCRIPT {datetime.utcnow().isoformat()}Z ====\n")
                 f.write(content)
                 f.write("\n\n")
+                f.flush()
         except Exception:
             # Best-effort tracing; never crash caller
+            pass
+
+    def log_transaction_event(self, event_type: str, data: Dict[str, Any]):
+        """Log a non-LLM event (like a tool result or orchestrator decision) to the transaction log."""
+        if not getattr(config, "LLM_TRANSACTION_LOG_ENABLED", False):
+            return
+        try:
+            payload = {
+                "event_type": event_type,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "data": data
+            }
+            content = json.dumps(payload, ensure_ascii=False, indent=2)
+            path_val = getattr(config, "LLM_TRANSACTION_LOG_PATH", "")
+            if not path_val:
+                return
+            path = Path(path_val)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as f:
+                f.write(f"==== TRANSACTION EVENT {event_type} ====\n")
+                f.write(content)
+                f.write("\n\n")
+                f.flush()
+        except Exception:
             pass
 
     def log_tool_execution(self, tool_name: str, arguments: dict, result: Any = None, error: Optional[str] = None, duration_ms: float = 0.0):

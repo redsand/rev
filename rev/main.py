@@ -567,7 +567,8 @@ def main():
                     auto_optimize_prompt=auto_optimize_prompt,
                     enable_context_guard=enable_context_guard,
                     context_guard_interactive=context_guard_interactive,
-                    context_guard_threshold=context_guard_threshold
+                    context_guard_threshold=context_guard_threshold,
+                    resume=args.resume is not None
                 )
                 if not result.success:
                     sys.exit(1)

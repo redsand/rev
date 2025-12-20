@@ -13,6 +13,7 @@ import shlex
 from typing import List, Optional
 
 from rev.config import (
+    ROOT,
     EXCLUDE_DIRS,
     MAX_FILE_BYTES,
     READ_RETURN_LIMIT,

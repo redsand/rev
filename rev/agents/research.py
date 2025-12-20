@@ -83,6 +83,12 @@ CRITICAL RULES:
 3. Your research should be focused and actionable.
 4. Your response MUST be a single, valid JSON object representing the tool call.
 
+PATH VALIDATION (CRITICAL):
+- Always check the "Work Completed So Far" and tool outputs in your context.
+- If a previous tool (like `split_python_module_classes`) explicitly states it created a file at a specific path, USE THAT EXACT PATH.
+- Do NOT guess paths or assume standard locations if the context provides the actual path.
+- If you are unsure if a file exists at a path mentioned in the task, use `file_exists` or `get_file_info` before attempting a full `read_file`.
+
 RESEARCH STRATEGIES:
 - Code understanding: Read files, analyze structures, find dependencies
 - Symbol tracking: Find definitions, usages, and references

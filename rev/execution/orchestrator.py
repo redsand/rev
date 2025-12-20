@@ -48,6 +48,7 @@ from rev.config import (
 )
 from rev.llm.client import get_token_usage, ollama_chat
 from rev.core.context import RevContext, ResourceBudget
+from rev.execution.session import SessionTracker
 from rev.core.shared_enums import AgentPhase
 from rev.core.agent_registry import AgentRegistry
 from rev.cache import clear_analysis_caches
@@ -540,36 +541,46 @@ def _order_available_actions(actions: List[str]) -> List[str]:
 
 
 def _is_goal_achieved_response(response: Optional[str]) -> bool:
-    """Detect when the planner says the goal is already achieved."""
+    """Detect when the planner says the goal is already achieved.
+    
+    Strictly matches 'GOAL_ACHIEVED' or clear variations like 'Goal achieved'
+    while avoiding false positives on rambling text.
+    """
     if not response:
         return False
+    # Remove brackets, underscores, and extra whitespace
     normalized = re.sub(r"[\[\]_\s]+", " ", response).strip().lower()
     if not normalized:
         return False
-    if normalized == "goal":
+    
+    # Precise matches only
+    if normalized in {"goal achieved", "goal completed", "work complete", "task achieved"}:
         return True
+        
+    # Allow slightly longer but still very clear success statements
     if normalized.startswith("goal "):
-        return "achieved" in normalized or "complete" in normalized or "done" in normalized
+        # Must be exactly 'goal achieved', 'goal is achieved', etc.
+        return bool(re.match(r"^goal (is )?(achieved|completed|done|finished)$", normalized))
+        
     return normalized == "goal achieved"
 
 
 def _dedupe_redundant_prefix_path(norm_path: str, project_root: Path) -> Optional[str]:
     """
     Collapse accidental repeated leading segments like
-    'lib/analysts/lib/analysts/__init__.py' into the shortest suffix that
-    already exists. This prevents recursive path drift when planners keep
-    appending the same subpath.
+    'lib/analysts/lib/analysts/__init__.py' into the shortest suffix.
+    This prevents recursive path drift when planners keep appending the same subpath.
     """
     if not norm_path:
         return None
 
     parts = list(Path(norm_path.replace("/", os.sep)).parts)
-    # Need at least X/X to consider it a duplicated prefix.
-    if len(parts) < 2:
+    # Need at least X/Y/X/Y (4 segments) to consider it a duplicated prefix.
+    if len(parts) < 4:
         return None
 
     changed = False
-    while len(parts) >= 2:
+    while len(parts) >= 4:
         reduced = False
         for prefix_len in range(1, len(parts) // 2 + 1):
             prefix = parts[:prefix_len]
@@ -704,12 +715,12 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
             )
             continue
         if chosen:
-            print(f"DEBUG: raw='{raw}', chosen='{chosen}'")
             if chosen.endswith(".bak") and action not in read_actions:
                 missing_unresolved.append(
                     f"missing path '{raw}' (only backup found: {chosen}; restore original before mutating)"
                 )
                 continue
+
             # If the resolved path already appears in the description, avoid
             # duplicating segments like "lib/analysts/lib/analysts/__init__.py".
             if chosen in desc:
@@ -718,18 +729,35 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
                 )
                 existing_any += 1
                 continue
-            # Replace occurrences of the raw token as well as its normalized variant.
-            if raw in desc:
-                print(f"DEBUG: replacing '{raw}' with '{chosen}' in '{desc}'")
-                desc = desc.replace(raw, chosen)
-                print(f"DEBUG: desc is now '{desc}'")
-            if normalized in desc:
-                print(f"DEBUG: replacing normalized '{normalized}' with '{chosen}' in '{desc}'")
-                desc = desc.replace(normalized, chosen)
-                print(f"DEBUG: desc is now '{desc}'")
-            messages.append(f"resolved missing path to '{chosen}' (requested '{raw}')")
-            existing_any += 1
-            continue
+
+            # Check if replacing 'raw' with 'chosen' would create a redundant path.
+            # e.g. if desc contains 'lib/analysts.py' and we replace 'analysts.py' with 'lib/analysts.py'
+            # we get 'lib/lib/analysts.py'.
+            if f"/{raw}" in desc.replace("\\", "/") or f"\\{raw}" in desc:
+                # If it's already prefixed by something, check if that prefix matches the 'chosen' path's head.
+                # If it does, we should just consider it resolved and not replace.
+                if chosen in desc.replace("\\", "/").replace("//", "/"):
+                     messages.append(
+                        f"resolved missing path to '{chosen}' (already present as suffix; left unchanged)"
+                    )
+                     existing_any += 1
+                     continue
+
+            # Use regex with word boundaries to avoid replacing partial segments of other paths.
+            # We escape regex special characters in the raw/normalized strings.
+            replaced = False
+            for target in sorted({raw, normalized}, key=len, reverse=True):
+                if target in desc:
+                    pattern = r'(?<![A-Za-z0-9_./\\])' + re.escape(target) + r'(?![A-Za-z0-9_./\\])'
+                    new_desc, count = re.subn(pattern, chosen.replace('\\', '\\\\'), desc)
+                    if count > 0:
+                        desc = new_desc
+                        replaced = True
+            
+            if replaced:
+                messages.append(f"resolved missing path to '{chosen}' (requested '{raw}')")
+                existing_any += 1
+                continue
 
         if matches:
             missing_unresolved.append(f"ambiguous missing path '{raw}' (matches={matches[:5]})")
@@ -770,6 +798,35 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
     # Otherwise, allow execution to proceed (best-effort). Avoid spamming logs.
     messages.append("ignored missing output path(s); at least one input path exists")
     return True, messages
+
+
+def _generate_path_hints(completed_tasks_log: List[str]) -> str:
+    """Extract important paths from recent tool outputs to help the planner."""
+    if not completed_tasks_log:
+        return ""
+    
+    hints = []
+    # Look for paths in the last 5 tasks
+    for log in completed_tasks_log[-5:]:
+        # Extract paths mentioned in "Output:" segments
+        if "Output:" in log:
+            output_part = log.split("Output:", 1)[1]
+            # Match likely file paths (with common extensions) or directory-looking paths
+            # 1. Paths with extensions (py, json, etc)
+            # 2. Paths ending in / or \
+            # 3. Quoted strings that look like relative paths
+            matches = re.findall(r'([A-Za-z0-9_./\\-]+\.(?:py|json|md|txt|csv|bak|log)\b)|([A-Za-z0-9_./\\-]+[/\\])|(?:"|\')(\./[A-Za-z0-9_./\\-]+)(?:"|\')', output_part)
+            for m_tuple in matches:
+                # findall with multiple groups returns tuples
+                for m in m_tuple:
+                    if m and ("/" in m or "\\" in m):
+                        hints.append(m.strip('"\''))
+                    
+    if not hints:
+        return ""
+        
+    unique_hints = sorted(set(hints))
+    return "\nPATH HINTS (use these exact paths if relevant):\n" + "\n".join(f"- {h}" for h in unique_hints) + "\n"
 
 
 @dataclass
@@ -922,11 +979,11 @@ class Orchestrator:
             "has_examples_dir": os.path.isdir(self.project_root / "examples"),
         }
 
-    def execute(self, user_request: str) -> OrchestratorResult:
+    def execute(self, user_request: str, resume: bool = False) -> OrchestratorResult:
         """Execute a task through the full agent pipeline."""
         aggregate_errors: List[str] = []
         last_result: Optional[OrchestratorResult] = None
-        self.context = RevContext(user_request=user_request)
+        self.context = RevContext(user_request=user_request, resume=resume)
         ensure_project_memory_file()
         # Keep repo_context minimal; sub-agents will retrieve focused context via ContextBuilder.
         self.context.repo_context = ""
@@ -1005,6 +1062,11 @@ class Orchestrator:
                 self._execute_heavy_path(user_request, coding_mode, result)
         
         except KeyboardInterrupt:
+            if self.context:
+                try:
+                    self.context.save_history()
+                except Exception:
+                    pass
             if self.context.plan and self.context.state_manager:
                 try:
                     self.context.state_manager.on_interrupt(token_usage=get_token_usage())
@@ -1161,7 +1223,7 @@ class Orchestrator:
                 action_type="refactor"
             )
 
-    def _determine_next_action(self, user_request: str, work_summary: str, coding_mode: bool, failure_notes: str = "") -> Optional[Task]:
+    def _determine_next_action(self, user_request: str, work_summary: str, coding_mode: bool, iteration: int = 1, failure_notes: str = "", path_hints: str = "") -> Optional[Task]:
         """A truly lightweight planner that makes a direct LLM call."""
         available_actions = _order_available_actions(AgentRegistry.get_registered_action_types())
 
@@ -1175,11 +1237,20 @@ class Orchestrator:
                     "Do NOT propose another [TEST] until a code-changing step (e.g. [EDIT]/[REFACTOR]) is completed.\n\n"
                 )
         
+        history_note = ""
+        if iteration == 1 and work_summary != "No actions taken yet.":
+            history_note = (
+                "Important: You are resuming a previous session. Do NOT declare GOAL_ACHIEVED on your very first turn. "
+                "Instead, perform a [READ] or [ANALYZE] step to verify that the work from the previous session is still correct and consistent with the current filesystem state.\n\n"
+            )
+
         prompt = (
             f"Original Request: {user_request}\n\n"
             f"{work_summary}\n\n"
+            f"{path_hints}\n"
             f"{failure_notes}\n"
             f"{blocked_note}"
+            f"{history_note}"
             "Based on the work completed, what is the single next most important action to take? "
             "If a previous action failed, propose a different action to achieve the goal.\n"
             "\n"
@@ -1200,6 +1271,7 @@ class Orchestrator:
              "- If the code was split into a package with __init__.py exports, prefer package-export imports at call sites.\n"
              "- Avoid replacing `from pkg import *` with dozens of per-module imports; only import names actually used.\n"
              "- Prefer `from package import ExportedSymbol` over `from package.module import ExportedSymbol` when the package exports it.\n"
+             "- CRITICAL: ONLY declare GOAL_ACHIEVED if you have verified that the current filesystem state matches all parts of the request. If history shows work but you haven't inspected it in this run, VERIFY IT FIRST.\n"
              f"You MUST choose one of the following action types: {available_actions}\n"
              "\n"
              "RESPONSE FORMAT (CRITICAL - follow exactly):\n"
@@ -1221,20 +1293,48 @@ class Orchestrator:
             return None
 
         response_content = response_data.get("message", {}).get("content", "")
+        if hasattr(self, "debug_logger") and self.debug_logger:
+            self.debug_logger.log("orchestrator", "PLANNER_RESPONSE_RAW", {
+                "content": response_content
+            }, "DEBUG")
+
         if _is_goal_achieved_response(response_content):
+            print(f"  [i] Goal achieved detected in response: \"{response_content.strip()}\"")
+            if hasattr(self, "debug_logger") and self.debug_logger:
+                self.debug_logger.log("orchestrator", "GOAL_ACHIEVED_DETECTED", {
+                    "raw_content": response_content
+                }, "INFO")
             return None
+        
         if not response_content or response_content.strip().upper() == "GOAL_ACHIEVED":
+            print(f"  [i] Empty response or explicit GOAL_ACHIEVED detected.")
+            if hasattr(self, "debug_logger") and self.debug_logger:
+                self.debug_logger.log("orchestrator", "EMPTY_OR_GOAL_ACHIEVED_RAW", {
+                    "content": response_content
+                }, "INFO")
             return None
         
         match = re.match(r"[\s]*\[(.*?)\]\s*(.*)", response_content.strip())
         if not match:
+            print(f"  [!] No action brackets found. Raw response: \"{response_content.strip()}\"")
+            if hasattr(self, "debug_logger") and self.debug_logger:
+                self.debug_logger.log("orchestrator", "NO_BRACKET_MATCH", {
+                    "content": response_content
+                }, "DEBUG")
             return Task(description=response_content.strip(), action_type="general")
 
+        action_raw = match.group(1)
         action_type = normalize_action_type(
-            match.group(1),
+            action_raw,
             available_actions=available_actions,
         )
         description = match.group(2).strip()
+
+        if hasattr(self, "debug_logger") and self.debug_logger:
+            self.debug_logger.log("orchestrator", "PARSED_ACTION_TYPE", {
+                "raw": action_raw,
+                "normalized": action_type
+            }, "DEBUG")
 
         # Clean up malformed LLM output that contains multiple actions concatenated
         # e.g. "Open file.[READ] another[ANALYZE] more" -> "Open file."
@@ -1247,7 +1347,23 @@ class Orchestrator:
         # Also clean up trailing brackets like "lib/analysts]"
         description = re.sub(r'\]$', '', description).strip()
 
-        return Task(description=description, action_type=action_type)
+        task = Task(description=description, action_type=action_type)
+        if hasattr(self, "debug_logger") and self.debug_logger:
+            # Log to standard debug log
+            self.debug_logger.log("orchestrator", "TASK_DETERMINED", {
+                "action_type": task.action_type,
+                "description": task.description,
+                "raw_response": response_content
+            }, "DEBUG")
+            
+            # Log to transaction log for centralized review
+            self.debug_logger.log_transaction_event("ORCHESTRATOR_DECISION", {
+                "action_type": task.action_type,
+                "description": task.description,
+                "raw_response": response_content
+            })
+
+        return task
 
     def _continuous_sub_agent_execution(self, user_request: str, coding_mode: bool) -> bool:
         """Executes a task by continuously calling a lightweight planner for the next action.
@@ -1263,7 +1379,11 @@ class Orchestrator:
         print("CONTINUOUS SUB-AGENT MODE (REPL-Style with Verification)")
         print("=" * 60)
 
-        completed_tasks_log: List[str] = []
+        # Persistence: load previous work history
+        completed_tasks_log = self.context.load_history()
+        if completed_tasks_log:
+            print(f"  ✓ Loaded {len(completed_tasks_log)} tasks from history")
+
         iteration = 0
         action_counts: Dict[str, int] = defaultdict(int)
         failure_counts: Dict[str, int] = defaultdict(int)
@@ -1282,7 +1402,14 @@ class Orchestrator:
 
             work_summary = "No actions taken yet."
             if completed_tasks_log:
-                work_summary = "Work Completed So Far:\n" + "\n".join(f"- {log}" for log in completed_tasks_log[-5:])
+                # Provide last 10 tasks for context
+                work_summary = "Work Completed So Far:\n" + "\n".join(f"- {log}" for log in completed_tasks_log[-10:])
+                
+                if hasattr(self, "debug_logger") and self.debug_logger:
+                    self.debug_logger.log("orchestrator", "WORK_SUMMARY_GENERATED", {
+                        "history_count": len(completed_tasks_log),
+                        "summary_length": len(work_summary)
+                    }, "DEBUG")
 
                 # Add file read count summary to help LLM understand when to stop reading
                 file_read_counts: Dict[str, int] = defaultdict(int)
@@ -1311,8 +1438,13 @@ class Orchestrator:
                         failure_notes.append(f"⚠️ REPETITION WARNING: You have already proposed the action '[{sig}]' {count} times. It is not making forward progress or is failing verification. DO NOT REPEAT IT. Try a different strategy, such as reading the file again to check for subtle syntax errors or using a different tool.")
             
             failure_notes_str = "\n".join(failure_notes)
+            path_hints = _generate_path_hints(completed_tasks_log)
 
-            next_task = self._determine_next_action(user_request, work_summary, coding_mode, failure_notes=failure_notes_str)
+            next_task = self._determine_next_action(
+                user_request, work_summary, coding_mode, 
+                iteration=iteration, failure_notes=failure_notes_str,
+                path_hints=path_hints
+            )
 
             if not next_task:
                 planner_error = self.context.get_agent_state("planner_error") if self.context else None
@@ -1321,6 +1453,7 @@ class Orchestrator:
                     print("\n❌ Planner failed to produce a next action (LLM error).")
                     print(f"  Error: {planner_error}")
                     return False
+                
                 print("\n✅ Planner determined the goal is achieved.")
                 return True
 
@@ -1330,6 +1463,7 @@ class Orchestrator:
                 next_task.validation_steps = ExecutionPlan().generate_validation_steps(next_task)
             except Exception:
                 pass
+
             if config.PREFLIGHT_ENABLED:
                 ok, sem_msgs = _preflight_correct_action_semantics(next_task)
                 for msg in sem_msgs:
@@ -1474,6 +1608,7 @@ class Orchestrator:
                             )
                             log_entry = f"[COMPLETED] (skipped) {next_task.description}"
                             completed_tasks_log.append(log_entry)
+                            self.context.work_history = completed_tasks_log
                             print(f"  ✓ {log_entry}")
                             continue
                 except Exception:
@@ -1581,29 +1716,46 @@ class Orchestrator:
                 self.context.set_agent_state("tests_blocked_no_changes", False)
 
             # STEP 4: REPORT
-            log_entry = f"[{next_task.status.name}] {next_task.description}"
-            if next_task.status == TaskStatus.FAILED:
-                log_entry += f" | Reason: {next_task.error}"
-            if verification_result and not verification_result.passed:
-                log_entry += f" | Verification: {verification_result.message}"
-
-            completed_tasks_log.append(log_entry)
-            self.context.work_history = completed_tasks_log  # Sync to context for logging/visibility
-
+            status_tag = f"[{next_task.status.name}]"
+            log_entry = f"{status_tag} {next_task.description}"
+            
+            error_detail = ""
+            if next_task.status == TaskStatus.FAILED and next_task.error:
+                error_detail = str(next_task.error)
+            
             # Add a summary of the tool output to the log
+            output_detail = ""
             if hasattr(next_task, 'tool_events') and next_task.tool_events:
                 # Summarize the result of the last tool event
                 event = next_task.tool_events[-1]
                 tool_output = event.get('raw_result')
                 if isinstance(tool_output, str):
                     summary = tool_output.strip()
-                    if len(summary) > 300:
-                        summary = summary[:300] + '...'
-                    # Avoid logging huge file contents
-                    if len(summary) > 0:
-                        log_entry += f" | Output: {summary}"
+                    # If the error is already in the summary, don't repeat it
+                    if error_detail and error_detail in summary:
+                        output_detail = summary
+                        error_detail = ""
+                    else:
+                        output_detail = summary
+                    
+                    if len(output_detail) > 300:
+                        output_detail = output_detail[:300] + '...'
+
+            if error_detail:
+                log_entry += f" | Reason: {error_detail}"
+            if output_detail:
+                log_entry += f" | Output: {output_detail}"
+            
+            if verification_result and not verification_result.passed:
+                # Only add verification message if it's not redundant with error/output
+                v_msg = verification_result.message
+                if v_msg and v_msg not in log_entry:
+                    log_entry += f" | Verification: {v_msg}"
 
             completed_tasks_log.append(log_entry)
+            self.context.work_history = completed_tasks_log  # Sync to context for logging/visibility
+            self.context.save_history()
+
             try:
                 recent = self.context.agent_state.get("recent_tasks", [])
                 if not isinstance(recent, list):
@@ -1834,6 +1986,7 @@ def run_orchestrated(
     enable_context_guard: bool = True,
     context_guard_interactive: bool = True,
     context_guard_threshold: float = 0.3,
+    resume: bool = False,
 ) -> OrchestratorResult:
     config_obj = OrchestratorConfig(
         enable_learning=enable_learning,
@@ -1858,5 +2011,5 @@ def run_orchestrated(
     )
 
     orchestrator = Orchestrator(project_root, config_obj)
-    return orchestrator.execute(user_request)
+    return orchestrator.execute(user_request, resume=resume)
 

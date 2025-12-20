@@ -17,8 +17,6 @@ from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 
-from rev import config
-
 
 @dataclass
 class SessionSummary:
@@ -27,6 +25,7 @@ class SessionSummary:
     # Session metadata
     session_id: str
     start_time: float
+    initial_request: str = ""
     end_time: Optional[float] = None
     duration_seconds: Optional[float] = None
 
@@ -335,6 +334,7 @@ class SessionTracker:
         Returns:
             Path where summary was saved
         """
+        from rev import config
         if path is None:
             # Default location: .rev/sessions/session_<id>.json
             sessions_dir = config.SESSIONS_DIR
@@ -361,6 +361,7 @@ class SessionTracker:
             Path where metrics were written
         """
         import json
+        from rev import config
 
         if path is None:
             # Default location: .rev/metrics/metrics.jsonl

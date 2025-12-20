@@ -228,18 +228,15 @@ def _dedupe_redundant_prefix_path(abs_path: Path, root: Path) -> Optional[Path]:
     This prevents agents from drifting into nested duplicates when they keep
     appending the same subpath.
     """
-    try:
-        rel_parts = abs_path.relative_to(root).parts
-        prefix_parts = abs_path.parts[: len(abs_path.parts) - len(rel_parts)]
-    except Exception:
-        rel_parts = abs_path.parts
-        prefix_parts = abs_path.parts[:0]
+    rel_parts = list(abs_path.relative_to(root).parts)
+    prefix_parts = abs_path.parts[: len(abs_path.parts) - len(rel_parts)]
 
-    # Need at least X/Y/X/Y to consider it duplicated
+    # Need at least X/Y/X/Y (4 segments) to consider it a duplicated prefix.
+    # A single repeat like lib/lib (2 segments) is too risky to auto-dedupe.
     if len(rel_parts) < 4:
         return None
 
-    parts = list(rel_parts)
+    parts = rel_parts
     changed = False
     while len(parts) >= 4:
         reduced = False
@@ -378,7 +375,7 @@ def reset_workspace() -> None:
 
 
 def _clean_path_input(path: Union[str, Path]) -> str:
-    """Clean incoming path input by stripping quotes and whitespace.
+    """Clean incoming path input by stripping quotes, whitespace, and trailing slashes.
 
     Args:
         path: Raw path string or Path object.
@@ -394,6 +391,11 @@ def _clean_path_input(path: Union[str, Path]) -> str:
         raw.startswith("'") and raw.endswith("'")
     ):
         raw = raw[1:-1].strip()
+    
+    # Remove trailing slashes to avoid issues on Windows directory resolution
+    if len(raw) > 1:
+        raw = raw.rstrip("/\\")
+        
     if not raw:
         raise WorkspacePathError("Empty path")
     return raw

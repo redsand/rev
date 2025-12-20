@@ -12,6 +12,7 @@ from typing import List, Dict, Optional, Set
 
 from rev import config
 from rev.tools.file_ops import _safe_path
+from rev.debug_logger import get_logger
 
 
 def _find_adjacent_backup(source_file: Path) -> Optional[Path]:
@@ -185,13 +186,18 @@ def split_python_module_classes(
         package_init.write_text("".join(aggregator_parts), encoding="utf-8")
 
         source_moved_to: Optional[str] = None
+        source_move_error: Optional[str] = None
         if delete_source:
             try:
                 backup = _compute_backup_path(source_file)
                 source_file.rename(backup)
                 source_moved_to = backup.relative_to(config.ROOT).as_posix()
-            except Exception:
-                source_moved_to = None
+            except Exception as e:
+                source_move_error = f"{type(e).__name__}: {e}"
+                get_logger().log("tools", "FILE_MOVE_ERROR", {
+                    "source": source_path,
+                    "error": source_move_error
+                }, "ERROR")
 
         try:
             package_module = (
@@ -212,6 +218,7 @@ def split_python_module_classes(
                 "package_init": package_init.relative_to(config.ROOT).as_posix(),
                 "call_sites_updated": call_site_updates,
                 "source_moved_to": source_moved_to,
+                "source_move_error": source_move_error,
             },
             indent=2,
         )
