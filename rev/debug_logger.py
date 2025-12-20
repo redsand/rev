@@ -252,12 +252,43 @@ class DebugLogger:
 
     def log_llm_transcript(self, *, model: str, messages: Any, response: Any, tools: Any = None):
         """Persist full LLM request/response (no truncation) when tracing is enabled.
-        
+
         Includes additional system state for easier debugging.
+        Also writes a summary to the run log for unified review.
         """
         if not getattr(config, "LLM_TRANSACTION_LOG_ENABLED", False):
             return
         try:
+            # Write summary to run log first (for unified review)
+            from rev.run_log import write_run_log_line
+            timestamp = datetime.utcnow().isoformat()
+
+            # Extract summary info
+            msg_count = len(messages) if isinstance(messages, list) else 0
+            last_msg = messages[-1] if isinstance(messages, list) and messages else {}
+            last_role = last_msg.get("role", "?") if isinstance(last_msg, dict) else "?"
+            last_content_preview = str(last_msg.get("content", ""))[:100] if isinstance(last_msg, dict) else ""
+
+            has_response = response and not (isinstance(response, dict) and response.get("pending"))
+            response_preview = ""
+            if has_response:
+                if isinstance(response, dict):
+                    resp_msg = response.get("message", {})
+                    if isinstance(resp_msg, dict):
+                        response_preview = str(resp_msg.get("content", ""))[:100]
+
+            write_run_log_line("\n" + "=" * 80)
+            write_run_log_line(f"LLM TRANSCRIPT [{timestamp}Z]")
+            write_run_log_line("=" * 80)
+            write_run_log_line(f"Model: {model}")
+            write_run_log_line(f"Messages: {msg_count} (last: {last_role})")
+            if last_content_preview:
+                write_run_log_line(f"Last message preview: {last_content_preview}...")
+            if has_response and response_preview:
+                write_run_log_line(f"Response preview: {response_preview}...")
+            elif not has_response:
+                write_run_log_line("Response: <pending>")
+            write_run_log_line("=" * 80 + "\n")
             # Gather extra context for debugging
             extra_context = {
                 "cwd": os.getcwd(),
@@ -318,13 +349,26 @@ class DebugLogger:
             pass
 
     def log_transaction_event(self, event_type: str, data: Dict[str, Any]):
-        """Log a non-LLM event (like a tool result or orchestrator decision) to the transaction log."""
+        """Log a non-LLM event (like a tool result or orchestrator decision) to the transaction log.
+
+        Also writes a summary to the run log for unified review.
+        """
         if not getattr(config, "LLM_TRANSACTION_LOG_ENABLED", False):
             return
         try:
+            # Write summary to run log first (for unified review)
+            from rev.run_log import write_run_log_line
+            timestamp = datetime.utcnow().isoformat() + "Z"
+
+            # For orchestrator decisions, include action details
+            if event_type == "ORCHESTRATOR_DECISION":
+                action_type = data.get("action_type", "?")
+                description = data.get("description", "")[:100]
+                write_run_log_line(f"[ORCHESTRATOR] {action_type.upper()}: {description}...")
+
             payload = {
                 "event_type": event_type,
-                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "timestamp": timestamp,
                 "data": data
             }
             content = json.dumps(payload, ensure_ascii=False, indent=2)

@@ -366,8 +366,7 @@ def _create_syntax_repair_task(failed_task: "Task", verification_result) -> "Tas
 
     return Task(
         description=description,
-        action_type="fix",
-        status=TaskStatus.PENDING
+        action_type="fix"
     )
 
 
@@ -1583,7 +1582,7 @@ class Orchestrator:
         """Executes a task by continuously calling a lightweight planner for the next action.
 
         Implements the proper workflow:
-        1. Plan next action
+        1. Plan next action (unless forced_next_task is set)
         2. Execute action
         3. VERIFY execution actually succeeded
         4. Report results
@@ -1603,6 +1602,7 @@ class Orchestrator:
         failure_counts: Dict[str, int] = defaultdict(int)
         last_task_signature: Optional[str] = None
         repeat_same_action: int = 0
+        forced_next_task: Optional[Task] = None
 
         while True:
             iteration += 1
@@ -1614,86 +1614,93 @@ class Orchestrator:
                 self.context.add_error(f"Resource budget exceeded at step {iteration}")
                 return False
 
-            work_summary = "No actions taken yet."
-            if completed_tasks_log:
-                # Provide last 10 tasks for context
-                work_summary = "Work Completed So Far:\n" + "\n".join(f"- {log}" for log in completed_tasks_log[-10:])
+            if forced_next_task:
+                next_task = forced_next_task
+                forced_next_task = None
+                print(f"  -> Using injected task: [{next_task.action_type.upper()}] {next_task.description[:80]}")
+            else:
+                work_summary = "No actions taken yet."
+                if completed_tasks_log:
+                    # Provide last 10 tasks for context
+                    work_summary = "Work Completed So Far:\n" + "\n".join(f"- {log}" for log in completed_tasks_log[-10:])
+                    
+                    if hasattr(self, "debug_logger") and self.debug_logger:
+                        self.debug_logger.log("orchestrator", "WORK_SUMMARY_GENERATED", {
+                            "history_count": len(completed_tasks_log),
+                            "summary_length": len(work_summary)
+                        }, "DEBUG")
+
+                    # Add file read count summary to help LLM understand when to stop reading
+                    file_read_counts: Dict[str, int] = defaultdict(int)
+                    for log_entry in completed_tasks_log:
+                        if log_entry.startswith('[COMPLETED]'):
+                            desc_lower = log_entry.lower()
+                            if any(kw in desc_lower for kw in ['read', 'inspect', 'examine', 'analyze']):
+                                file_path = _extract_file_path_from_description(log_entry)
+                                if file_path:
+                                    # Normalize to filename only for summary
+                                    filename = file_path.replace('\\', '/').split('/')[-1]
+                                    file_read_counts[filename] += 1
+
+                    if file_read_counts:
+                        high_read_files = [(f, c) for f, c in file_read_counts.items() if c >= 2]
+                        if high_read_files:
+                            work_summary += "\n\n⚠️ READ LIMIT WARNING: The following files have been read multiple times:\n"
+                            for filename, count in high_read_files:
+                                work_summary += f"  - {filename}: read {count}x (MUST transition to [EDIT] now)\n"
+
+                # Calculate repetitive failure notes for the planner
+                failure_notes = []
+                if action_counts:
+                    for sig, count in action_counts.items():
+                        if count >= 2:
+                            failure_notes.append(f"⚠️ REPETITION WARNING: You have already proposed the action '[{sig}]' {count} times. It is not making forward progress or is failing verification. DO NOT REPEAT IT. Try a different strategy, such as reading the file again to check for subtle syntax errors or using a different tool.")
                 
-                if hasattr(self, "debug_logger") and self.debug_logger:
-                    self.debug_logger.log("orchestrator", "WORK_SUMMARY_GENERATED", {
-                        "history_count": len(completed_tasks_log),
-                        "summary_length": len(work_summary)
-                    }, "DEBUG")
+                failure_notes_str = "\n".join(failure_notes)
+                path_hints = _generate_path_hints(completed_tasks_log)
 
-                # Add file read count summary to help LLM understand when to stop reading
-                file_read_counts: Dict[str, int] = defaultdict(int)
-                for log_entry in completed_tasks_log:
-                    if log_entry.startswith('[COMPLETED]'):
-                        desc_lower = log_entry.lower()
-                        if any(kw in desc_lower for kw in ['read', 'inspect', 'examine', 'analyze']):
-                            file_path = _extract_file_path_from_description(log_entry)
-                            if file_path:
-                                # Normalize to filename only for summary
-                                filename = file_path.replace('\\', '/').split('/')[-1]
-                                file_read_counts[filename] += 1
+                # Collect and format pending agent requests (recovery instructions)
+                agent_notes = ""
+                if self.context and self.context.agent_requests:
+                    notes = []
+                    for req in self.context.agent_requests:
+                        details = req.get("details", {})
+                        reason = details.get("reason", "unknown")
+                        detailed = details.get("detailed_reason", "")
+                        agent = details.get("agent", "Agent")
+                        note = f"⚠️ {agent} REQUEST: {reason}"
+                        if detailed:
+                            note += f"\n  Instruction: {detailed}"
+                        notes.append(note)
+                    agent_notes = "\n".join(notes)
+                    # Clear requests after collecting them for the prompt
+                    self.context.agent_requests = []
 
-                if file_read_counts:
-                    high_read_files = [(f, c) for f, c in file_read_counts.items() if c >= 2]
-                    if high_read_files:
-                        work_summary += "\n\n⚠️ READ LIMIT WARNING: The following files have been read multiple times:\n"
-                        for filename, count in high_read_files:
-                            work_summary += f"  - {filename}: read {count}x (MUST transition to [EDIT] now)\n"
+                next_task = self._determine_next_action(
+                    user_request, work_summary, coding_mode, 
+                    iteration=iteration, failure_notes=failure_notes_str,
+                    path_hints=path_hints, agent_notes=agent_notes
+                )
 
-            # Calculate repetitive failure notes for the planner
-            failure_notes = []
-            if action_counts:
-                for sig, count in action_counts.items():
-                    if count >= 2:
-                        failure_notes.append(f"⚠️ REPETITION WARNING: You have already proposed the action '[{sig}]' {count} times. It is not making forward progress or is failing verification. DO NOT REPEAT IT. Try a different strategy, such as reading the file again to check for subtle syntax errors or using a different tool.")
-            
-            failure_notes_str = "\n".join(failure_notes)
-            path_hints = _generate_path_hints(completed_tasks_log)
+                if not next_task:
+                    planner_error = self.context.get_agent_state("planner_error") if self.context else None
+                    if isinstance(planner_error, str) and planner_error.strip():
+                        self.context.set_agent_state("no_retry", True)
+                        print("\n❌ Planner failed to produce a next action (LLM error).")
+                        print(f"  Error: {planner_error}")
+                        return False
+                    
+                    print("\n✅ Planner determined the goal is achieved.")
+                    return True
 
-            # Collect and format pending agent requests (recovery instructions)
-            agent_notes = ""
-            if self.context and self.context.agent_requests:
-                notes = []
-                for req in self.context.agent_requests:
-                    details = req.get("details", {})
-                    reason = details.get("reason", "unknown")
-                    detailed = details.get("detailed_reason", "")
-                    agent = details.get("agent", "Agent")
-                    note = f"⚠️ {agent} REQUEST: {reason}"
-                    if detailed:
-                        note += f"\n  Instruction: {detailed}"
-                    notes.append(note)
-                agent_notes = "\n".join(notes)
-                # Clear requests after collecting them for the prompt
-                self.context.agent_requests = []
+                next_task.task_id = iteration
+                try:
+                    # Ensure validation_steps are always present so quick_verify can enforce them.
+                    next_task.validation_steps = ExecutionPlan().generate_validation_steps(next_task)
+                except Exception:
+                    pass
 
-            next_task = self._determine_next_action(
-                user_request, work_summary, coding_mode, 
-                iteration=iteration, failure_notes=failure_notes_str,
-                path_hints=path_hints, agent_notes=agent_notes
-            )
-
-            if not next_task:
-                planner_error = self.context.get_agent_state("planner_error") if self.context else None
-                if isinstance(planner_error, str) and planner_error.strip():
-                    self.context.set_agent_state("no_retry", True)
-                    print("\n❌ Planner failed to produce a next action (LLM error).")
-                    print(f"  Error: {planner_error}")
-                    return False
-                
-                print("\n✅ Planner determined the goal is achieved.")
-                return True
-
-            next_task.task_id = iteration
-            try:
-                # Ensure validation_steps are always present so quick_verify can enforce them.
-                next_task.validation_steps = ExecutionPlan().generate_validation_steps(next_task)
-            except Exception:
-                pass
+                print(f"  -> Next action: [{next_task.action_type.upper()}] {next_task.description[:80]}")
 
             if config.PREFLIGHT_ENABLED:
                 ok, sem_msgs = _preflight_correct_action_semantics(next_task)
@@ -1743,9 +1750,8 @@ class Orchestrator:
                         print("Blocking issue: planner is not producing an executable action; refusing to loop.\n")
                         return False
                     continue
-            print(f"  -> Next action: [{next_task.action_type.upper()}] {next_task.description[:80]}")
 
-            # SEMANTIC DEDUPLICATION: Check if this is a semantically duplicate read task
+            # SEMANTIC DEDUPLICATION: Warn if this is a semantically duplicate read task
             action_type_lower = (next_task.action_type or '').lower()
             if action_type_lower in {'read', 'analyze', 'research', 'investigate', 'review'}:
                 if _is_semantically_duplicate_task(
@@ -1754,47 +1760,7 @@ class Orchestrator:
                     completed_tasks_log,
                     threshold=0.65  # 65% similarity threshold
                 ):
-                    # Check if we should force transition to EDIT or GOAL_ACHIEVED
-                    file_path = _extract_file_path_from_description(next_task.description)
-                    read_count = _count_file_reads(file_path, completed_tasks_log) if file_path else 0
-
-                    if read_count >= 2:
-                        # Check if the original goal appears to be achieved
-                        # Look for successful tool completions that match the user request
-                        goal_likely_achieved = _check_goal_likely_achieved(
-                            user_request, completed_tasks_log
-                        )
-
-                        if goal_likely_achieved:
-                            print("  [semantic-dedup] Detected verification loop on completed work.")
-                            print("  [semantic-dedup] Original goal appears achieved - forcing completion.")
-                            return True  # Goal achieved
-
-                        # Check if this is a pure verification loop (verify/inspect/confirm keywords)
-                        desc_lower = next_task.description.lower()
-                        is_verification_loop = any(kw in desc_lower for kw in [
-                            'verify', 'confirm', 'ensure', 'check', 'validate', 'inspect'
-                        ])
-
-                        if is_verification_loop:
-                            print("  [semantic-dedup] Detected verification loop with no actionable changes.")
-                            print("  [semantic-dedup] Assuming goal is achieved - forcing completion.")
-                            return True  # Goal achieved
-
-                        print("  [semantic-dedup] Detected semantically duplicate read of same file.")
-                        print("  [semantic-dedup] Forcing transition to EDIT - enough reading has been done.")
-
-                        # Force edit mode with context from what was read
-                        next_task.action_type = "edit"
-                        next_task.description = (
-                            f"Based on the prior reads of {file_path or 'the target file'}, "
-                            f"now EDIT the code to implement the required changes. "
-                            f"Use the information already gathered from previous reads to make the necessary modifications."
-                        )
-                        print(f"  -> Converted to: [EDIT] {next_task.description[:80]}")
-                    else:
-                        # Just warn but allow the read to proceed
-                        print("  [semantic-dedup] Warning: similar read already completed, but allowing once more.")
+                    print("  [semantic-dedup] Warning: similar read already completed.")
 
             self.context.plan = ExecutionPlan(tasks=[next_task])
 
@@ -1983,7 +1949,7 @@ class Orchestrator:
                             failure_counts[failure_sig] = 0
 
                             # Replace the failed task with the repair task
-                            next_task = syntax_repair_task
+                            forced_next_task = syntax_repair_task
                             iteration -= 1  # Don't count this as a regular iteration
 
                         elif is_syntax_error and syntax_repair_attempts >= 5:
@@ -2029,7 +1995,7 @@ class Orchestrator:
                         decomposed_task = self._decompose_extraction_task(next_task)
                         if decomposed_task:
                             print(f"  [RETRY] Using decomposed task for next iteration")
-                            next_task = decomposed_task
+                            forced_next_task = decomposed_task
                             iteration -= 1  # Don't count failed task as an iteration
                 else:
                     # If we've just verified a successful test and no code has changed since,
