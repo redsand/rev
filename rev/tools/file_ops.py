@@ -84,7 +84,7 @@ def _run_shell(cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:
     """Execute shell command.
 
     SECURITY NOTE: This function uses shell=True for compatibility with existing code,
-    but commands passed to it should be properly quoted using shlex.quote().
+    but commands passed to it should be properly quoted using quote_cmd_arg() from rev.tools.utils.
     Callers must ensure input is sanitized to prevent command injection.
     """
     import shlex

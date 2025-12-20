@@ -8,6 +8,7 @@ __version__ = get_version()
 
 # Configuration
 import rev.config as _config
+from rev.config import set_workspace_root
 from rev.workspace import get_workspace, Workspace
 
 # Core models
@@ -82,6 +83,7 @@ from rev.tools import (
     update_dependencies,
     scan_dependencies_vulnerabilities,
     # Security tools
+    scan_security_issues,
     detect_secrets,
     check_license_compliance,
     # Linting and type checks
@@ -122,6 +124,9 @@ from rev.tools import (
     get_available_tools,
 )
 
+# Aliases for backward compatibility
+scan_code_security = scan_security_issues
+
 # MCP operations
 from rev.mcp import (
     mcp_add_server,
@@ -138,6 +143,8 @@ def __getattr__(name: str):
     # is changed after import-time (common in tests).
     if name == "ROOT":
         return _config.ROOT
+    if name == "scan_code_security":
+        return scan_security_issues
     raise AttributeError(f"module 'rev' has no attribute {name!r}")
 
 __all__ = [
@@ -147,6 +154,7 @@ __all__ = [
     "ROOT",
     "get_workspace",
     "Workspace",
+    "set_workspace_root",
     # Models
     "Task",
     "TaskStatus",
@@ -208,6 +216,8 @@ __all__ = [
     "update_dependencies",
     "scan_dependencies_vulnerabilities",
     # Security tools
+    "scan_security_issues",
+    "scan_code_security",
     "detect_secrets",
     "check_license_compliance",
     # Linting and type checks

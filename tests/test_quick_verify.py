@@ -12,6 +12,8 @@ from pathlib import Path
 from unittest.mock import Mock, MagicMock, patch
 import json
 import uuid
+import rev
+from rev.config import set_workspace_root
 
 from rev.models.task import Task, TaskStatus
 from rev.core.context import RevContext
@@ -170,6 +172,10 @@ class TestVerifyTaskExecution:
 class TestVerifyFileCreation:
     """Tests for file creation verification."""
 
+    def setup_method(self, method):
+        """Reset workspace root before each test."""
+        set_workspace_root(Path.cwd())
+
     def test_verify_file_created(self):
         """Test verifying that a file was actually created."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -184,6 +190,7 @@ class TestVerifyFileCreation:
             old_cwd = os.getcwd()
             try:
                 os.chdir(tmpdir_path)
+                set_workspace_root(tmpdir_path)
 
                 task = Task(
                     description="create file at ./test.py",
@@ -258,6 +265,10 @@ class TestVerifyFileCreation:
 class TestVerifyDirectoryCreation:
     """Tests for directory creation verification."""
 
+    def setup_method(self, method):
+        """Reset workspace root before each test."""
+        set_workspace_root(Path.cwd())
+
     def test_verify_directory_created(self):
         """Test verifying that a directory was created."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -271,6 +282,7 @@ class TestVerifyDirectoryCreation:
             old_cwd = os.getcwd()
             try:
                 os.chdir(tmpdir_path)
+                set_workspace_root(tmpdir_path)
 
                 task = Task(
                     description="create directory ./test_dir/",
@@ -383,6 +395,10 @@ class TestVerifyExtractionCompleteness:
 class TestVerifyRefactoringExtraction:
     """Tests for refactoring/extraction verification."""
 
+    def setup_method(self, method):
+        """Reset workspace root before each test."""
+        set_workspace_root(Path.cwd())
+
     def test_verify_extraction_with_valid_structure(self):
         """Test verifying a valid extraction refactoring."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -410,12 +426,15 @@ class TestVerifyRefactoringExtraction:
             old_cwd = os.getcwd()
             try:
                 os.chdir(tmpdir_path)
+                set_workspace_root(tmpdir_path)
 
                 task = Task(
                     description="break out analyst classes in ./lib/analysts.py into ./lib/analysts/ directory",
                     action_type="refactor"
                 )
                 task.status = TaskStatus.COMPLETED
+                # Mock tool result to help verification find the directory
+                task.result = json.dumps({"package_dir": "./lib/analysts", "files_created": 2})
 
                 context = RevContext(user_request="Test")
                 result = _verify_refactoring(task, context)
@@ -439,12 +458,15 @@ class TestVerifyRefactoringExtraction:
             old_cwd = os.getcwd()
             try:
                 os.chdir(tmpdir_path)
+                set_workspace_root(tmpdir_path)
 
                 task = Task(
                     description="break out analyst classes in ./lib/analysts.py into ./lib/analysts/ directory",
                     action_type="refactor"
                 )
                 task.status = TaskStatus.COMPLETED
+                # Mock tool result
+                task.result = json.dumps({"package_dir": "./lib/analysts"})
 
                 context = RevContext(user_request="Test")
                 result = _verify_refactoring(task, context)

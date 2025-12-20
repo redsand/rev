@@ -8,7 +8,7 @@ import shlex
 from typing import List, Dict, Any
 
 from rev import config
-from rev.tools.utils import _safe_path, _run_shell
+from rev.tools.utils import _safe_path, _run_shell, quote_cmd_arg
 
 
 def remove_unused_imports(file_path: str, language: str = "python") -> str:
@@ -24,28 +24,50 @@ def remove_unused_imports(file_path: str, language: str = "python") -> str:
     try:
         file = _safe_path(file_path)
         if not file.exists():
-            return json.dumps({"error": f"File not found: {file_path}"})
+            return json.dumps({"file": file_path, "error": f"File not found: {file_path}"})
 
         if language.lower() == "python":
             # Use autoflake if available
             try:
-                result = _run_shell(f"autoflake --remove-all-unused-imports --in-place {shlex.quote(str(file))}")
+                result = _run_shell(f"autoflake --remove-all-unused-imports --in-place {quote_cmd_arg(str(file))}")
                 if result.returncode == 0:
                     return json.dumps({
+                        "file": str(file),
                         "refactored": file.relative_to(config.ROOT).as_posix(),
                         "removed": "unused imports",
-                        "language": "Python"
+                        "language": "Python",
+                        "tool": "autoflake"
                     })
                 else:
-                    return json.dumps({"error": "autoflake not installed or failed. Run: pip install autoflake"})
+                    return json.dumps({
+                        "file": str(file),
+                        "language": "python",
+                        "tool": "autoflake",
+                        "error": "autoflake not installed or failed. Run: pip install autoflake"
+                    })
             except Exception:
-                return json.dumps({"error": "autoflake not installed. Run: pip install autoflake"})
+                return json.dumps({
+                    "file": str(file),
+                    "language": "python",
+                    "tool": "autoflake",
+                    "error": "autoflake not installed. Run: pip install autoflake"
+                })
 
         else:
-            return json.dumps({"error": f"Language '{language}' not supported yet"})
+            return json.dumps({
+                "file": str(file),
+                "language": language,
+                "tool": "unknown",
+                "error": f"Language '{language}' not supported yet"
+            })
 
     except Exception as e:
-        return json.dumps({"error": f"Refactoring failed: {type(e).__name__}: {e}"})
+        return json.dumps({
+            "file": file_path,
+            "language": language,
+            "tool": "unknown",
+            "error": f"Refactoring failed: {type(e).__name__}: {e}"
+        })
 
 
 def extract_constants(file_path: str, threshold: int = 3) -> str:
@@ -105,7 +127,8 @@ def extract_constants(file_path: str, threshold: int = 3) -> str:
                 })
 
         return json.dumps({
-            "file": file.relative_to(config.ROOT).as_posix(),
+            "file": str(file),
+            "refactored": file.relative_to(config.ROOT).as_posix(),
             "suggestions": suggestions,
             "count": len(suggestions)
         })
@@ -160,7 +183,7 @@ def simplify_conditionals(file_path: str) -> str:
                 })
 
         return json.dumps({
-            "file": file.relative_to(config.ROOT).as_posix(),
+            "file": str(file),
             "complex_conditionals": suggestions,
             "count": len(suggestions)
         })

@@ -1223,7 +1223,7 @@ class Orchestrator:
                 action_type="refactor"
             )
 
-    def _determine_next_action(self, user_request: str, work_summary: str, coding_mode: bool, iteration: int = 1, failure_notes: str = "", path_hints: str = "") -> Optional[Task]:
+    def _determine_next_action(self, user_request: str, work_summary: str, coding_mode: bool, iteration: int = 1, failure_notes: str = "", path_hints: str = "", agent_notes: str = "") -> Optional[Task]:
         """A truly lightweight planner that makes a direct LLM call."""
         available_actions = _order_available_actions(AgentRegistry.get_registered_action_types())
 
@@ -1248,6 +1248,7 @@ class Orchestrator:
             f"Original Request: {user_request}\n\n"
             f"{work_summary}\n\n"
             f"{path_hints}\n"
+            f"{agent_notes}\n"
             f"{failure_notes}\n"
             f"{blocked_note}"
             f"{history_note}"
@@ -1440,10 +1441,27 @@ class Orchestrator:
             failure_notes_str = "\n".join(failure_notes)
             path_hints = _generate_path_hints(completed_tasks_log)
 
+            # Collect and format pending agent requests (recovery instructions)
+            agent_notes = ""
+            if self.context and self.context.agent_requests:
+                notes = []
+                for req in self.context.agent_requests:
+                    details = req.get("details", {})
+                    reason = details.get("reason", "unknown")
+                    detailed = details.get("detailed_reason", "")
+                    agent = details.get("agent", "Agent")
+                    note = f"⚠️ {agent} REQUEST: {reason}"
+                    if detailed:
+                        note += f"\n  Instruction: {detailed}"
+                    notes.append(note)
+                agent_notes = "\n".join(notes)
+                # Clear requests after collecting them for the prompt
+                self.context.agent_requests = []
+
             next_task = self._determine_next_action(
                 user_request, work_summary, coding_mode, 
                 iteration=iteration, failure_notes=failure_notes_str,
-                path_hints=path_hints
+                path_hints=path_hints, agent_notes=agent_notes
             )
 
             if not next_task:

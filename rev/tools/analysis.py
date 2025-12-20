@@ -16,13 +16,12 @@ Performance: AST analysis caching provides 10-1000x speedup on cache hits.
 import ast
 import json
 import re
-import shlex
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
 
 from rev import config
-from rev.tools.utils import _run_shell, _safe_path
+from rev.tools.utils import _run_shell, _safe_path, quote_cmd_arg
 from rev.cache import get_ast_cache
 
 
@@ -256,9 +255,9 @@ def run_pylint(path: str = ".", config: Optional[str] = None) -> str:
         if config:
             config_path = _safe_path(config)
             if config_path.exists():
-                cmd_parts.append(f"--rcfile={shlex.quote(str(config_path))}")
+                cmd_parts.append(f"--rcfile={quote_cmd_arg(str(config_path))}")
 
-        cmd_parts.append(shlex.quote(str(scan_path)))
+        cmd_parts.append(quote_cmd_arg(str(scan_path)))
         cmd = " ".join(cmd_parts)
 
         proc = _run_shell(cmd, timeout=180)
@@ -407,11 +406,11 @@ def analyze_static_types(
                 cfg_path = _safe_path(config_file)
                 if cfg_path.exists():
                     config_used = cfg_path.relative_to(config.ROOT).as_posix()
-                    cmd_parts.append(f"--config-file={shlex.quote(str(cfg_path))}")
+                    cmd_parts.append(f"--config-file={quote_cmd_arg(str(cfg_path))}")
             except Exception:
                 pass
 
-        cmd_parts.extend(shlex.quote(str(p)) for p in resolved_paths)
+        cmd_parts.extend(quote_cmd_arg(str(p)) for p in resolved_paths)
         proc = _run_shell(" ".join(cmd_parts), timeout=300)
 
         if proc.returncode == 127:
@@ -506,7 +505,7 @@ def run_radon_complexity(path: str = ".", min_rank: str = "C") -> str:
         results = {}
 
         # Cyclomatic complexity
-        cmd = f"radon cc {shlex.quote(str(scan_path))} -j -a"
+        cmd = f"radon cc {quote_cmd_arg(str(scan_path))} -j -a"
         proc = _run_shell(cmd, timeout=60)
 
         if proc.returncode == 127:
@@ -532,7 +531,7 @@ def run_radon_complexity(path: str = ".", min_rank: str = "C") -> str:
             pass
 
         # Maintainability index
-        cmd = f"radon mi {shlex.quote(str(scan_path))} -j"
+        cmd = f"radon mi {quote_cmd_arg(str(scan_path))} -j"
         proc = _run_shell(cmd, timeout=60)
 
         try:
@@ -556,7 +555,7 @@ def run_radon_complexity(path: str = ".", min_rank: str = "C") -> str:
             pass
 
         # Raw metrics
-        cmd = f"radon raw {shlex.quote(str(scan_path))} -j"
+        cmd = f"radon raw {quote_cmd_arg(str(scan_path))} -j"
         proc = _run_shell(cmd, timeout=60)
 
         try:
@@ -608,7 +607,7 @@ def find_dead_code(path: str = ".") -> str:
             return json.dumps({"error": f"Path not found: {path}"})
 
         # Run vulture
-        cmd = f"vulture {shlex.quote(str(scan_path))} --min-confidence 80"
+        cmd = f"vulture {quote_cmd_arg(str(scan_path))} --min-confidence 80"
         proc = _run_shell(cmd, timeout=120)
 
         if proc.returncode == 127:

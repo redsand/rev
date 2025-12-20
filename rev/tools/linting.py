@@ -4,12 +4,11 @@
 
 import json
 import re
-import shlex
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
 from rev import config
-from rev.tools.utils import _run_shell, _safe_path
+from rev.tools.utils import _run_shell, _safe_path, quote_cmd_arg
 from rev.tools.analysis import analyze_static_types
 
 
@@ -176,7 +175,7 @@ def run_linters(paths: Optional[List[str]] = None) -> str:
         exit_code = 0
         cmd_missing: List[str] = []
 
-        joined_paths = " ".join(shlex.quote(str(p)) for p in resolved_paths)
+        joined_paths = " ".join(quote_cmd_arg(str(p)) for p in resolved_paths)
 
         if python_found:
             rc, py_issues, status = _run_and_parse(f"ruff check {joined_paths} --output-format json", _parse_ruff)
@@ -240,7 +239,7 @@ def run_type_checks(paths: Optional[List[str]] = None) -> str:
         issues: List[Dict[str, Any]] = []
         summary: Dict[str, Any] = {"tools_run": [], "missing_tools": [], "missing_paths": missing}
         exit_code = 0
-        joined_paths = " ".join(shlex.quote(str(p)) for p in resolved_paths)
+        joined_paths = " ".join(quote_cmd_arg(str(p)) for p in resolved_paths)
 
         # Python: mypy (only if config present)
         mypy_configs = ["mypy.ini", "pyproject.toml", "setup.cfg"]

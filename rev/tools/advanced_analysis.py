@@ -18,7 +18,8 @@ from typing import Dict, Any, List, Set, Tuple, Optional
 from collections import defaultdict
 
 from rev import config
-from rev.tools.utils import _run_shell, _safe_path
+from rev.tools.utils import _run_shell, _safe_path, quote_cmd_arg
+from rev.cache import get_ast_cache
 
 
 def analyze_test_coverage(path: str = ".", show_untested: bool = True) -> str:
@@ -100,8 +101,7 @@ def _analyze_python_coverage(path: Path) -> Optional[Dict[str, Any]]:
             tmp_path = tmp_file.name
 
         try:
-            import shlex
-            cmd = f"coverage json -o {shlex.quote(tmp_path)}"
+            cmd = f"coverage json -o {quote_cmd_arg(tmp_path)}"
             proc = _run_shell(cmd, timeout=30)
 
             if proc.returncode != 0:
@@ -514,9 +514,8 @@ def _find_symbol_with_grep(symbol: str) -> List[Dict[str, Any]]:
     usages = []
 
     try:
-        import shlex
-        # Use shlex.quote to prevent command injection
-        quoted_symbol = shlex.quote(symbol)
+        # Use quote_cmd_arg to prevent command injection
+        quoted_symbol = quote_cmd_arg(symbol)
         cmd = f"grep -rn '\\b{quoted_symbol}\\b' . --include='*.py' --include='*.ts' --include='*.js' --include='*.tsx' --include='*.jsx' 2>/dev/null | head -50"
         proc = _run_shell(cmd, timeout=30)
 

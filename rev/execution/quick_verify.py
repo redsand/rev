@@ -9,7 +9,6 @@ for the workflow loop: Plan → Execute → Verify → Report → Re-plan if nee
 import json
 import re
 import os
-import shlex
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, Iterable
 from dataclasses import dataclass
@@ -24,6 +23,7 @@ from rev.tools.workspace_resolver import (
     normalize_path,
     normalize_to_workspace_relative,
 )
+from rev.tools.utils import quote_cmd_arg
 
 _READ_ONLY_TOOLS = {
     "read_file",
@@ -491,69 +491,75 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
     old_file_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\\\-]+\.py)'
     old_file_matches = re.findall(old_file_pattern, task.description)
     if old_file_matches:
-        old_file = _resolve_for_verification(old_file_matches[0], purpose="verify refactoring source file")
+        source_raw = old_file_matches[0]
+        old_file = _resolve_for_verification(source_raw, purpose="verify refactoring source file")
         if not old_file and target_dir:
             # Heuristic: source next to target_dir, e.g., module.py when target_dir=module/
-            alt_source = (target_dir.parent / f"{target_dir.name}.py").resolve()
+            alt_source = target_dir.parent / f"{target_dir.name}.py"
             if alt_source.exists():
                 old_file = alt_source
+        
+        # If it's a directory now, it was likely converted to a package (which is success)
         if not old_file:
-            issues.append(f"[FAIL] Could not resolve source file path for verification: {old_file_matches[0]}")
-            debug_info["main_file_status"] = "UNRESOLVABLE"
-            old_file = None
-        debug_info["source_file"] = str(old_file)
-        debug_info["source_file_exists"] = old_file.exists() if old_file else False
-        if old_file:
-            details["source_file_path"] = str(old_file)
-
-        if old_file and old_file.exists():
+            # Check if it's a directory
             try:
-                # Use helper function for robust multi-encoding file reading
-                content = _read_file_with_fallback_encoding(old_file)
-
-                if content is None:
-                    debug_info["main_file_status"] = "NOT_READABLE"
-                else:
-                    original_size = len(content)
-                    debug_info["source_file_size"] = original_size
-
-                    # Check if it has import statements from the new directory
-                    has_imports_from_new = re.search(rf'from\s+\.{target_dir.name}', content)
-                    if has_imports_from_new:
-                        details["main_file_updated"] = True
-                        debug_info["main_file_status"] = "UPDATED_WITH_IMPORTS"
-                    else:
-                        issues.append(
-                            f"[FAIL] Original file {old_file} was NOT updated with imports from {target_dir}\n"
-                            f"   File still contains {original_size} bytes (should be much smaller if extracted)"
-                        )
-                        debug_info["main_file_status"] = "NOT_UPDATED"
-            except Exception as e:
-                issues.append(f"[FAIL] Could not read {old_file}: {e}")
-                debug_info["main_file_status"] = f"ERROR: {str(e)}"
-        else:
-            if old_file:
-                package_candidate = old_file.with_suffix("")
-                package_init = package_candidate / "__init__.py"
-                if package_candidate.exists() and package_init.exists():
+                candidate = (get_workspace().root / normalize_path(source_raw)).resolve()
+                if candidate.exists() and candidate.is_dir():
+                    # This is success - original file is now the package directory
                     details["main_file_converted_to_package"] = True
                     debug_info["main_file_status"] = "CONVERTED_TO_PACKAGE"
-                    debug_info["package_path"] = str(package_candidate)
-                else:
-                    # If target_dir exists with files, downgrade to warning
-                    if target_dir and target_dir.exists():
-                        warn = (
-                            f"Original file {old_file} missing but extraction target {target_dir} exists; "
-                            "treating as converted package"
-                        )
-                        details["main_file_converted_to_package"] = True
-                        debug_info["main_file_status"] = "MISSING_BUT_TARGET_EXISTS"
-                        debug_info["warnings"] = debug_info.get("warnings", []) + [warn]
+                    old_file = None
+            except Exception:
+                pass
+
+        if old_file:
+            debug_info["source_file"] = str(old_file)
+            debug_info["source_file_exists"] = old_file.exists()
+            details["source_file_path"] = str(old_file)
+
+            if old_file.exists() and old_file.is_file():
+                try:
+                    # Use helper function for robust multi-encoding file reading
+                    content = _read_file_with_fallback_encoding(old_file)
+
+                    if content is None:
+                        debug_info["main_file_status"] = "NOT_READABLE"
                     else:
-                        issues.append(
-                            f"[FAIL] Original file {old_file} no longer exists and package '{package_candidate}' was not found"
+                        original_size = len(content)
+                        debug_info["source_file_size"] = original_size
+
+                        # Check if it has import statements from the new directory
+                        # Handle both relative and absolute-style imports
+                        target_name = target_dir.name
+                        has_imports_from_new = (
+                            re.search(rf'from\s+\.{target_name}', content) or
+                            re.search(rf'import\s+{target_name}', content)
                         )
-                        debug_info["main_file_status"] = "MISSING"
+                        if has_imports_from_new:
+                            details["main_file_updated"] = True
+                            debug_info["main_file_status"] = "UPDATED_WITH_IMPORTS"
+                        else:
+                            issues.append(
+                                f"[FAIL] Original file {old_file} was NOT updated with imports from {target_dir}\n"
+                                f"   File still contains {original_size} bytes (should be much smaller if extracted)"
+                            )
+                            debug_info["main_file_status"] = "NOT_UPDATED"
+                except Exception as e:
+                    issues.append(f"[FAIL] Could not read {old_file}: {e}")
+                    debug_info["main_file_status"] = f"ERROR: {str(e)}"
+            elif old_file.exists() and old_file.is_dir():
+                # It exists but it's a directory - handle as package conversion
+                details["main_file_converted_to_package"] = True
+                debug_info["main_file_status"] = "CONVERTED_TO_PACKAGE"
+        elif not details.get("main_file_converted_to_package"):
+            # Only report error if we didn't determine it was converted to a package
+            issues.append(f"[FAIL] Could not resolve source file path for verification: {source_raw}")
+            debug_info["main_file_status"] = "UNRESOLVABLE"
+    else:
+        # Check if original file exists at a different location (e.g. was already moved)
+        if not target_dir:
+            # Last resort: try to find anything related to the refactoring in task description
+            pass
 
     if issues:
         non_benign = [issue for issue in issues if "Original file" not in issue]
@@ -879,7 +885,7 @@ def _run_validation_command(cmd: str, *, use_tests_tool: bool = False, timeout: 
 
 def _quote_path(path: Path) -> str:
     """Quote a path for shell commands."""
-    return shlex.quote(str(path))
+    return quote_cmd_arg(str(path))
 
 
 def _paths_or_default(paths: list[Path]) -> list[Path]:

@@ -549,6 +549,8 @@ class CodeWriterAgent(BaseAgent):
                 'move_imported_symbols',
                 'rewrite_python_function_parameters',
                 'replace_in_file',
+                'apply_patch',
+                'write_file',
                 'copy_file',
                 'move_file',
             ]
@@ -556,6 +558,7 @@ class CodeWriterAgent(BaseAgent):
             # Refactoring may need to create or modify files
             tool_names = [
                 'write_file',
+                'apply_patch',
                 'rewrite_python_imports',
                 'rewrite_python_keyword_args',
                 'rename_imported_symbols',

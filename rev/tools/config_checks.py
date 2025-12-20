@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 from rev import config
-from rev.tools.utils import _run_shell, _safe_path
+from rev.tools.utils import _run_shell, _safe_path, quote_cmd_arg
 
 
 def validate_ci_config(paths: Optional[List[str]] = None) -> str:
@@ -20,7 +20,7 @@ def validate_ci_config(paths: Optional[List[str]] = None) -> str:
         # actionlint for GitHub workflows
         workflow_files = [p for p in resolved if p.exists() and p.is_file()]
         if workflow_files:
-            cmd = "actionlint " + " ".join(shlex.quote(str(p)) for p in workflow_files)
+            cmd = "actionlint " + " ".join(quote_cmd_arg(str(p)) for p in workflow_files)
             proc = _run_shell(cmd, timeout=120)
             if proc.returncode == 127:
                 results.append({"tool": "actionlint", "error": "actionlint not installed"})
@@ -30,7 +30,7 @@ def validate_ci_config(paths: Optional[List[str]] = None) -> str:
         # yamllint as fallback
         yaml_files = [p for p in resolved if p.suffix in [".yml", ".yaml"]]
         if yaml_files:
-            cmd = "yamllint " + " ".join(shlex.quote(str(p)) for p in yaml_files)
+            cmd = "yamllint " + " ".join(quote_cmd_arg(str(p)) for p in yaml_files)
             proc = _run_shell(cmd, timeout=120)
             if proc.returncode != 127:
                 results.append({"tool": "yamllint", "output": proc.stdout, "returncode": proc.returncode})
