@@ -149,3 +149,29 @@ def test_check_goal_likely_achieved_returns_false_for_empty_log():
 
     result = _check_goal_likely_achieved(user_request, completed_tasks)
     assert result is False, "Should not detect goal as achieved with empty log"
+
+
+def test_preflight_resolves_to_package_init_when_file_was_split():
+    """Test that preflight resolves lib/analysts.py to lib/analysts/__init__.py when the file was split."""
+    root = _make_workspace()
+    config.set_workspace_root(root)
+
+    # Simulate split_python_module_classes behavior:
+    # - Original lib/analysts.py renamed to lib/analysts.py.bak
+    # - New lib/analysts/ package created with __init__.py
+    (root / "lib").mkdir(parents=True, exist_ok=True)
+    (root / "lib" / "analysts.py.bak").write_text("# backup\nclass A: pass\n", encoding="utf-8")
+    (root / "lib" / "analysts").mkdir(parents=True, exist_ok=True)
+    (root / "lib" / "analysts" / "__init__.py").write_text("from .A import A\n", encoding="utf-8")
+    (root / "lib" / "analysts" / "A.py").write_text("class A: pass\n", encoding="utf-8")
+
+    # Agent asks to read lib/analysts.py (which no longer exists)
+    task = Task(description="read lib/analysts.py to verify it was split correctly", action_type="read")
+    ok, msgs = _preflight_correct_task_paths(task=task, project_root=root)
+
+    assert ok is True, "Should succeed in resolving path"
+    # Should resolve to package __init__.py, not the backup
+    assert "lib/analysts/__init__.py" in task.description.replace("\\", "/"), \
+        f"Should resolve to package __init__.py, got: {task.description}"
+    assert any("package" in m.lower() for m in msgs), \
+        f"Should mention package resolution in messages: {msgs}"

@@ -752,12 +752,37 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
         if basename.lower().endswith(".py.bak"):
             basenames.append(basename[: -len(".bak")])
 
+        # Check if a .py file was split into a package (directory with __init__.py)
+        # e.g., lib/analysts.py -> lib/analysts/__init__.py
+        package_init_match: Optional[str] = None
+        if basename.lower().endswith(".py") and not basename.lower().endswith(".py.bak"):
+            # Look for a package directory with the same name (without .py extension)
+            parent_dir = Path(normalized.replace("/", os.sep)).parent
+            package_name = basename[:-3]  # Remove .py
+            package_dir = parent_dir / package_name if str(parent_dir) != "." else Path(package_name)
+            package_init = package_dir / "__init__.py"
+            package_init_abs = (project_root / package_init).resolve(strict=False)
+            if package_init_abs.exists():
+                try:
+                    package_init_match = normalize_to_workspace_relative(package_init_abs, workspace_root=project_root)
+                except Exception:
+                    package_init_match = str(package_init).replace("\\", "/")
+
         matches: List[str] = []
         for bn in basenames:
             matches.extend(_find_workspace_matches_by_basename(root=project_root, basename=bn))
         matches = sorted(set(matches))
         primary_matches = [m for m in matches if not m.endswith(".bak")]
         backup_matches = [m for m in matches if m.endswith(".bak")]
+
+        # Prefer package __init__.py over backup when a file was split into a package
+        if package_init_match and not primary_matches:
+            chosen = package_init_match
+            messages.append(f"resolved missing path to package '{chosen}' (file was split into package)")
+            if raw in desc:
+                desc = desc.replace(raw, chosen)
+            existing_any += 1
+            continue
 
         # Prefer real sources over backups; avoid auto-operating on backups for mutating actions.
         preferred_pool = primary_matches if primary_matches else matches
