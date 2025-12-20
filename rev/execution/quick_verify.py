@@ -1267,26 +1267,11 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
                 should_replan=True,
             )
 
-    # If the task is about auto-registration, surface the observed count from stdout/stderr even if rc != 0.
-    def _extract_auto_registered_count(out: str) -> Optional[int]:
-        if not out:
-            return None
-        match = re.search(r"Auto-registered\s+(\d+)", out, re.IGNORECASE)
-        return int(match.group(1)) if match else None
-
     desc_lower = (task.description or "").lower()
     output_combined = ""
     if payload:
         output_combined = (payload.get("stdout", "") or "") + (payload.get("stderr", "") or "")
-    if "auto-registered" in desc_lower and output_combined:
-        count = _extract_auto_registered_count(output_combined)
-        if count is not None and count <= 0:
-            return VerificationResult(
-                passed=False,
-                message=f"Auto-registration still empty (Auto-registered {count})",
-                details={"count": count, "output": output_combined[:500]},
-                should_replan=True,
-            )
+
     if payload and payload.get("skipped") is True and payload.get("kind") == "skipped_tests":
         last_test_iteration = payload.get("last_test_iteration")
         last_test_rc = payload.get("last_test_rc")
@@ -1322,24 +1307,6 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
         if rc == 0:
             cmd = payload.get("cmd") or payload.get("command")
             if isinstance(cmd, str) and cmd.strip() and "pytest" not in cmd.lower():
-                if "auto-registered" in (task.description or "").lower():
-                    match = re.search(r"Auto-registered\s+(\d+)", output, re.IGNORECASE)
-                    if match:
-                        count = int(match.group(1))
-                        if count <= 0:
-                            return VerificationResult(
-                                passed=False,
-                                message=f"Auto-registration still empty (Auto-registered {count})",
-                                details={"count": count, "command": cmd, "output": output[:500]},
-                                should_replan=True,
-                            )
-                    else:
-                        return VerificationResult(
-                            passed=False,
-                            message="Could not find Auto-registered count in startup output",
-                            details={"command": cmd, "output": output[:500]},
-                            should_replan=True,
-                        )
                 return VerificationResult(
                     passed=True,
                     message="Command succeeded",

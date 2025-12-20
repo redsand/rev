@@ -11,7 +11,6 @@ from rev.agents.subagent_io import build_subagent_output
 
 KEYWORD_SNIPPET_PATTERNS = [
     "register",
-    "_build_analyst_registry",
     "inspect.getmembers",
     "pkgutil",
     "importlib",

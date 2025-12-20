@@ -16,22 +16,6 @@ class TestExecutorAgent(BaseAgent):
     def _select_command(self, description: str) -> tuple[str, Dict[str, Any]]:
         desc_lower = (description or "").lower()
 
-        # If the task is explicitly about "startup" behavior/log output, don't default to pytest.
-        if any(
-            token in desc_lower
-            for token in (
-                "auto-registered",
-                "auto registered",
-                "on startup",
-                "startup",
-                "run the application",
-                "run application",
-                "run main.py",
-                "main.py",
-            )
-        ):
-            return "python main.py", {"timeout": 45}
-
         parts = (description or "").split()
         test_path = None
         for part in parts:
