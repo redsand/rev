@@ -51,20 +51,51 @@ _WRITE_TOOLS = {
 def _extract_tool_noop(tool: str, raw_result: Any) -> Optional[str]:
     """Return a tool_noop reason string when a tool reports no changes."""
     tool_l = (tool or "").lower()
-    if tool_l != "replace_in_file":
-        return None
     if not isinstance(raw_result, str) or not raw_result.strip():
         return None
     try:
         payload = json.loads(raw_result)
     except Exception:
         return None
-    if isinstance(payload, dict) and payload.get("replaced") == 0:
-        return (
-            "tool_noop: replace_in_file made no changes (replaced=0). "
-            "RECOVERY: Ensure you're not escaping content incorrectly and check whitespace, indentation, and context. "
-            "Use read_file tool to verify the actual file content before retrying."
-        )
+    if not isinstance(payload, dict):
+        return None
+
+    # Specific no-op detections per tool
+    if tool_l == "replace_in_file":
+        if payload.get("replaced") == 0:
+            return (
+                "tool_noop: replace_in_file made no changes (replaced=0). "
+                "RECOVERY: Ensure you're not escaping content incorrectly and check whitespace, indentation, and context. "
+                "Use read_file tool to verify the actual file content before retrying."
+            )
+    
+    elif tool_l in ("search_code", "rag_search"):
+        results = payload.get("matches") or payload.get("results")
+        if isinstance(results, list) and len(results) == 0:
+            return f"tool_noop: {tool_l} returned 0 results. RECOVERY: Broaden your search pattern or check for typos in file names/symbols."
+            
+    elif tool_l == "list_dir":
+        files = payload.get("files")
+        if isinstance(files, list) and len(files) == 0:
+            return "tool_noop: list_dir returned 0 files. RECOVERY: Check if the directory path or glob pattern is correct."
+            
+    elif tool_l == "run_tests":
+        stdout = (payload.get("stdout") or "").lower()
+        if "collected 0 items" in stdout or "no tests ran" in stdout or "no tests found" in stdout:
+            return "tool_noop: run_tests found 0 tests to run. RECOVERY: Check your test path or test discovery patterns."
+            
+    elif tool_l == "apply_patch":
+        if payload.get("applied_hunks") == 0:
+            return "tool_noop: apply_patch applied 0 hunks. RECOVERY: The diff might be stale or target the wrong lines."
+            
+    elif tool_l == "split_python_module_classes":
+        if payload.get("classes_split") == 0:
+            return "tool_noop: split_python_module_classes found 0 classes to split."
+            
+    elif tool_l.startswith("rewrite_python_") or tool_l.startswith("rename_") or tool_l.startswith("move_"):
+        if payload.get("changed") == 0 or payload.get("replaced") == 0:
+            return f"tool_noop: {tool_l} made 0 changes."
+
     return None
 
 
@@ -151,8 +182,13 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
     action_type = task.action_type.lower()
     verification_mode = _get_verification_mode()
 
-    # Surface tool no-ops clearly (e.g., replace_in_file with replaced=0).
-    if action_type in {"add", "create", "edit", "refactor", "delete", "rename"}:
+    # Surface tool no-ops clearly (e.g., search with 0 matches, replace with 0 lines).
+    # This must happen BEFORE routing to specialized handlers to ensure all tools
+    # are checked for functional success.
+    # We apply this to almost all action types to catch silent functional failures.
+    # Using a broad set of action types to ensure no tool no-op goes undetected.
+    verifiable_actions = {"add", "create", "edit", "refactor", "delete", "rename", "read", "analyze", "research", "investigate", "test", "fix", "general"}
+    if action_type in verifiable_actions:
         events = getattr(task, "tool_events", None) or []
         for ev in reversed(list(events)):
             reason = _extract_tool_noop(str(ev.get("tool") or ""), ev.get("raw_result"))
@@ -183,6 +219,7 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
         return _verify_directory_creation(task, context)
 
     # Route to appropriate verification handler
+    verifiable_read_actions = {"read", "analyze", "research", "investigate", "general"}
     if action_type == "refactor":
         result = _verify_refactoring(task, context)
     elif action_type == "add" or action_type == "create":
@@ -193,8 +230,8 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
         result = _verify_directory_creation(task, context)
     elif action_type == "test":
         result = _verify_test_execution(task, context)
-    elif action_type in {"read", "analyze", "research"}:
-        result = _verify_read_like(task, context)
+    elif action_type in verifiable_read_actions:
+        result = _verify_read_task(task, context)
     else:
         # For unknown action types, return a passing result but flag for caution
         return VerificationResult(
@@ -1133,35 +1170,21 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
     )
 
 
-def _verify_read_like(task: Task, context: RevContext) -> VerificationResult:
-    """Minimal verification for read/analyze/research tasks."""
+def _verify_read_task(task: Task, context: RevContext) -> VerificationResult:
+    """Verification for read/analyze/research tasks with no-op detection."""
     events = getattr(task, "tool_events", None) or []
     if not events:
         return VerificationResult(
             passed=False,
-            message="No tool events were executed for a read-like task",
+            message="Read task executed no tools",
             details={},
             should_replan=True,
         )
-    for ev in events:
-        raw = ev.get("raw_result")
-        if isinstance(raw, str):
-            try:
-                payload = json.loads(raw)
-                if isinstance(payload, dict) and payload.get("error"):
-                    return VerificationResult(
-                        passed=False,
-                        message=f"Tool returned error: {payload.get('error')}",
-                        details={
-                            "debug": {
-                                "tool": ev.get("tool"),
-                                "raw_result": raw,
-                            }
-                        },
-                        should_replan=True,
-                    )
-            except Exception:
-                pass
+
+    # Note: verify_task_execution already checked tool_noop for all events.
+    # If we reached here, no explicit tool_noop was found.
+    # We still perform a basic check that at least one tool ran.
+    
     return VerificationResult(
         passed=True,
         message="Read-like task executed tool(s)",

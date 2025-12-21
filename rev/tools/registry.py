@@ -148,10 +148,14 @@ _SNAPSHOT_PATH = Path(__file__).with_name("_tool_registry_snapshot.json")
 
 # Tools that should have timeout protection
 _TIMEOUT_PROTECTED_TOOLS = {
+    "read_file",
+    "list_dir",
+    "search_code",
+    "write_file",
+    "replace_in_file",
     "run_cmd",
     "run_tests",
     "execute_python",
-    "search_code",
     "rag_search",
     "web_fetch",
     "ssh_exec",

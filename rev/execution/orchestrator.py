@@ -11,7 +11,7 @@ import os
 import json
 import time
 import traceback
-from typing import Dict, Any, List, Optional, Literal
+from typing import Dict, Any, List, Optional, Literal, Tuple
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections import defaultdict
@@ -1632,10 +1632,13 @@ class Orchestrator:
             
             # 4. Collect errors/mismatches
             if "[FAILED]" in log:
+                # Every failed task is a risk
+                unresolved_symbols.append(log)
                 if "missing path" in log.lower() or "not exist" in log.lower():
                     missing_files.append(log)
                 if "undefined" in log.lower() or "unresolved" in log.lower():
-                    unresolved_symbols.append(log)
+                    # already added to unresolved_symbols, but can add specifically if needed
+                    pass
             
             # 5. Track tool usage
             if "Output:" in log:
@@ -1657,6 +1660,50 @@ class Orchestrator:
             self.debug_logger.log("orchestrator", "ANCHORING_EVALUATION", metrics.__dict__, "INFO")
 
         return metrics.decision
+
+    def _is_completion_grounded(self, completed_tasks_log: List[str]) -> Tuple[bool, str]:
+        """Verify that the completion is grounded in concrete artifacts/evidence."""
+        if not completed_tasks_log:
+            return False, "No work history to verify."
+
+        # A completion must reference:
+        # 1. File diffs/writes
+        # 2. Test output/artifact IDs
+        # 3. Search results
+        # 4. Runtime checks
+        
+        evidence_found = {
+            "files": False,
+            "tests": False,
+            "search": False,
+            "runtime": False
+        }
+
+        for log in completed_tasks_log:
+            log_l = log.lower()
+            # 1. File diffs/writes
+            if any(k in log_l for k in ["wrote", "replaced", "created file", "modified", "diff", "write_file", "replace_in_file", "apply_patch"]):
+                evidence_found["files"] = True
+            # 2. Test outputs
+            if any(k in log_l for k in ["passed", "failed", "test suite", "pytest", "run_tests", "run_cmd"]):
+                evidence_found["tests"] = True
+            # 3. Search results
+            if any(k in log_l for k in ["found", "matches", "listing", "search", "read file", "list_dir", "read_file", "search_code", "rag_search"]):
+                evidence_found["search"] = True
+            # 4. Runtime checks
+            if any(k in log_l for k in ["runtime", "log", "executed", "status", "exit code", "analyze_runtime_logs"]):
+                evidence_found["runtime"] = True
+
+        # Require at least Search (knowing what's there) AND either File/Test/Runtime (doing something)
+        has_research = evidence_found["search"]
+        has_action = evidence_found["files"] or evidence_found["tests"] or evidence_found["runtime"]
+        
+        if not has_research:
+            return False, "Completion rejected: No research/search evidence found. Agent acted without reading."
+        if not has_action:
+            return False, "Completion rejected: No concrete action (file edit, test run, or runtime check) verified."
+            
+        return True, "Completion grounded in artifacts."
 
     def _continuous_sub_agent_execution(self, user_request: str, coding_mode: bool) -> bool:
         """Executes a task by continuously calling a lightweight planner for the next action.
@@ -1779,6 +1826,13 @@ class Orchestrator:
                     elif anchoring_decision == AnchoringDecision.DEBATE:
                         print("\n  [UCCT] High mismatch risk detected. Verifying structural consistency before stopping.")
                         forced_next_task = Task(description="Run a structural consistency check on the modified modules to ensure no unresolved symbols remain.", action_type="analyze")
+                        continue
+
+                    # Grounded Completion Check (Bait Density)
+                    is_grounded, grounding_msg = self._is_completion_grounded(completed_tasks_log)
+                    if not is_grounded:
+                        print(f"\n  [UCCT] {grounding_msg} Forcing verification.")
+                        forced_next_task = Task(description="Provide concrete evidence of the work completed by running tests and inspecting the modified files.", action_type="test")
                         continue
 
                     print("\n✅ Planner determined the goal is achieved.")
@@ -1970,6 +2024,7 @@ class Orchestrator:
                     "read",
                     "analyze",
                     "research",
+                    "investigate",
                 }
                 action_type = (next_task.action_type or "").lower()
                 if action_type in verifiable_actions:
@@ -2354,10 +2409,39 @@ class Orchestrator:
             print(f"\n🔥 Emitting run metrics...")
     
     def _display_summary(self, result: OrchestratorResult):
-        if config.EXECUTION_MODE != 'sub-agent':
-            print("\n" + "=" * 60)
-            print("ORCHESTRATOR - EXECUTION SUMMARY")
-            print("=" * 60)
+        """Display a final execution summary."""
+        if config.EXECUTION_MODE == 'sub-agent':
+            # Sub-agent mode has its own summary logic or is more streamlined
+            return
+
+        print("\n" + "=" * 60)
+        print("ORCHESTRATOR - EXECUTION SUMMARY")
+        print("=" * 60)
+        
+        status = "SUCCESS" if result.success else "FAILED"
+        print(f"Status: {status}")
+        print(f"Phase Reached: {result.phase_reached.value}")
+        print(f"Time Taken: {result.execution_time:.2f} seconds")
+        
+        # Display UCCT Anchoring metrics if available in insights
+        if "anchoring_evaluation" in self.context.agent_insights:
+            metrics = self.context.agent_insights["anchoring_evaluation"]
+            print("\n📊 Measurable Coordination (UCCT):")
+            print(f"   Anchoring Score: {metrics.get('raw_score', 0):.2f}")
+            print(f"   Evidence Density: {metrics.get('evidence_density', 0):.2f}")
+            print(f"   Mismatch Risk: {metrics.get('mismatch_risk', 0)}")
+            print(f"   Anchor Budget (k): {metrics.get('anchor_budget', 0)}")
+            print(f"   Decision: {metrics.get('decision', 'N/A')}")
+
+        if result.plan:
+            print(f"\nTasks: {result.plan.get_summary()}")
+            
+        if result.errors:
+            print("\nErrors:")
+            for err in result.errors:
+                print(f"  - {err}")
+        
+        print("=" * 60)
 
 def run_orchestrated(
     user_request: str,

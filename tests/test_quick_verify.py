@@ -120,6 +120,74 @@ class TestVerifyTaskExecution:
         assert result.passed is False
         assert "tool_noop" in result.message
 
+    def test_search_code_noop_fails(self):
+        """search_code with 0 matches must fail verification."""
+        task = Task(description="Search for something", action_type="research")
+        task.status = TaskStatus.COMPLETED
+        task.tool_events = [
+            {
+                "tool": "search_code",
+                "args": {"pattern": "nonexistent"},
+                "raw_result": json.dumps({"matches": [], "count": 0}),
+            }
+        ]
+        context = RevContext(user_request="Test")
+        result = verify_task_execution(task, context)
+        assert result.passed is False
+        assert "tool_noop" in result.message
+        assert "0 results" in result.message
+
+    def test_list_dir_noop_fails(self):
+        """list_dir with 0 files must fail verification."""
+        task = Task(description="List empty dir", action_type="research")
+        task.status = TaskStatus.COMPLETED
+        task.tool_events = [
+            {
+                "tool": "list_dir",
+                "args": {"pattern": "empty/*"},
+                "raw_result": json.dumps({"files": []}),
+            }
+        ]
+        context = RevContext(user_request="Test")
+        result = verify_task_execution(task, context)
+        assert result.passed is False
+        assert "tool_noop" in result.message
+        assert "0 files" in result.message
+
+    def test_run_tests_noop_fails(self):
+        """run_tests with 0 tests found must fail verification."""
+        task = Task(description="Run tests", action_type="test")
+        task.status = TaskStatus.COMPLETED
+        task.tool_events = [
+            {
+                "tool": "run_tests",
+                "args": {"cmd": "pytest"},
+                "raw_result": json.dumps({"stdout": "collected 0 items", "rc": 0}),
+            }
+        ]
+        context = RevContext(user_request="Test")
+        result = verify_task_execution(task, context)
+        assert result.passed is False
+        assert "tool_noop" in result.message
+        assert "0 tests" in result.message
+
+    def test_apply_patch_noop_fails(self):
+        """apply_patch with 0 hunks applied must fail verification."""
+        task = Task(description="Apply fix", action_type="edit")
+        task.status = TaskStatus.COMPLETED
+        task.tool_events = [
+            {
+                "tool": "apply_patch",
+                "args": {"patch": "..."},
+                "raw_result": json.dumps({"applied_hunks": 0, "success": True}),
+            }
+        ]
+        context = RevContext(user_request="Test")
+        result = verify_task_execution(task, context)
+        assert result.passed is False
+        assert "tool_noop" in result.message
+        assert "0 hunks" in result.message
+
     def test_refactor_read_only_fails(self):
         """A refactor task that only read files should not be marked completed."""
         from rev import config
@@ -435,6 +503,14 @@ class TestVerifyRefactoringExtraction:
                 task.status = TaskStatus.COMPLETED
                 # Mock tool result to help verification find the directory
                 task.result = json.dumps({"package_dir": "./lib/analysts", "files_created": 2})
+                # Add tool event to satisfy no-op detection (classes_split > 0)
+                task.tool_events = [
+                    {
+                        "tool": "split_python_module_classes",
+                        "args": {"source_path": "lib/analysts.py", "target_directory": "lib/analysts"},
+                        "raw_result": json.dumps({"classes_split": 2, "package_dir": "lib/analysts"})
+                    }
+                ]
 
                 context = RevContext(user_request="Test")
                 result = _verify_refactoring(task, context)
