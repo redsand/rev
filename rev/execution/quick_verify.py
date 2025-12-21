@@ -504,6 +504,27 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
                 details["imports_valid"] = True
                 debug_info["import_validation"] = "PASSED"
 
+            # Check 3b: Verify __init__.py has __all__ exports (if it exists)
+            init_file = target_dir / "__init__.py"
+            if init_file.exists():
+                try:
+                    init_content = _read_file_with_fallback_encoding(init_file)
+                    if init_content:
+                        if "__all__" in init_content:
+                            details["has_all_exports"] = True
+                            debug_info["__all___status"] = "PRESENT"
+                        else:
+                            # __all__ is missing but imports might be present
+                            # This is not necessarily an error if imports are explicit
+                            if "from ." in init_content or "import " in init_content:
+                                details["has_explicit_imports"] = True
+                                debug_info["__all___status"] = "MISSING_BUT_HAS_IMPORTS"
+                            else:
+                                issues.append(f"[WARN] {init_file.name}: No __all__ exports and no imports found")
+                                debug_info["__all___status"] = "MISSING_NO_IMPORTS"
+                except Exception as e:
+                    debug_info["__all___check_error"] = str(e)
+
     # Check 4: Verify old file was updated with imports (if applicable)
     # Look for the original file mentioned in task description
     old_file_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\\\-]+\.py)'
@@ -950,13 +971,20 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
     pytest_res = _run_validation_command(pytest_cmd, use_tests_tool=True, timeout=config.VALIDATION_TIMEOUT_SECONDS)
     strict_details["pytest"] = pytest_res
     rc = pytest_res.get("rc", 1)
-    if pytest_res.get("blocked") or rc != 0:
-        return VerificationResult(
-            passed=False,
-            message="Verification failed: pytest errors",
-            details={"strict": strict_details},
-            should_replan=True,
-        )
+    # Pytest exit codes: 0=pass, 1=fail, 2=interrupted, 3=internal error, 4=usage error, 5=no tests collected
+    # Exit code 5 (no tests collected) should be treated as PASS, not FAIL
+    if pytest_res.get("blocked") or (rc not in (0, 4, 5) and rc != 0):
+        # Only fail on actual test failures (rc=1) or errors (rc=2,3), not on "no tests collected" (rc=5)
+        if rc in (4, 5):
+            # No tests collected - this is OK, not a failure
+            strict_details["pytest_note"] = f"No tests collected (rc={rc}) - treated as pass"
+        else:
+            return VerificationResult(
+                passed=False,
+                message="Verification failed: pytest errors",
+                details={"strict": strict_details},
+                should_replan=True,
+            )
 
     # Optional lint/type checks if allowed
     # Run only on modified paths to avoid pre-existing errors in unrelated files

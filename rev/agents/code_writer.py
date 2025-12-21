@@ -304,10 +304,26 @@ class CodeWriterAgent(BaseAgent):
         def _has_str(key: str) -> bool:
             return isinstance(arguments.get(key), str) and arguments.get(key).strip() != ""
 
+        def _has_str_or_empty(key: str) -> bool:
+            """Check if key exists and is a string (can be empty)."""
+            return isinstance(arguments.get(key), str)
+
         if tool == "replace_in_file":
-            missing = [k for k in ("path", "find", "replace") if not _has_str(k)]
-            if missing:
-                return False, f"replace_in_file missing required keys: {', '.join(missing)}"
+            # Special handling: 'replace' can be empty string (for deletions), but must exist
+            if not _has_str("path") or not _has_str("find"):
+                missing = [k for k in ("path", "find") if not _has_str(k)]
+                return False, (
+                    f"replace_in_file missing required keys: {', '.join(missing)}. "
+                    "RECOVERY: Include all three required parameters: "
+                    '{"path": "file/path.py", "find": "text to find", "replace": "replacement text (or empty string to delete)"}'
+                )
+            if not _has_str_or_empty("replace"):
+                return False, (
+                    "replace_in_file missing required key: replace. "
+                    "RECOVERY: You MUST include the 'replace' parameter even if deleting content. "
+                    'To delete text, use: {"path": "...", "find": "...", "replace": ""}. '
+                    "Empty string is allowed for deletions."
+                )
         elif tool == "rewrite_python_imports":
             if not _has_str("path"):
                 return False, "rewrite_python_imports missing required key: path"

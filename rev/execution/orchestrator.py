@@ -1751,16 +1751,14 @@ class Orchestrator:
             else:
                 work_summary = "No actions taken yet."
                 if completed_tasks_log:
-                    # Provide last 10 tasks for context
-                    work_summary = "Work Completed So Far:\n" + "\n".join(f"- {log}" for log in completed_tasks_log[-10:])
-                    
-                    if hasattr(self, "debug_logger") and self.debug_logger:
-                        self.debug_logger.log("orchestrator", "WORK_SUMMARY_GENERATED", {
-                            "history_count": len(completed_tasks_log),
-                            "summary_length": len(work_summary)
-                        }, "DEBUG")
+                    # Start with high-level statistics for full session context
+                    total_tasks = len(completed_tasks_log)
+                    completed_count = sum(1 for log in completed_tasks_log if log.startswith('[COMPLETED]'))
+                    failed_count = sum(1 for log in completed_tasks_log if log.startswith('[FAILED]'))
 
-                    # Add file read count summary to help LLM understand when to stop reading
+                    work_summary = f"Work Completed So Far ({total_tasks} total tasks: {completed_count} completed, {failed_count} failed):\n"
+
+                    # Add file read/inspection summary FIRST to establish what's been inspected
                     file_read_counts: Dict[str, int] = defaultdict(int)
                     for log_entry in completed_tasks_log:
                         if log_entry.startswith('[COMPLETED]'):
@@ -1773,11 +1771,28 @@ class Orchestrator:
                                     file_read_counts[filename] += 1
 
                     if file_read_counts:
-                        high_read_files = [(f, c) for f, c in file_read_counts.items() if c >= 2]
-                        if high_read_files:
-                            work_summary += "\n\n⚠️ READ LIMIT WARNING: The following files have been read multiple times:\n"
-                            for filename, count in high_read_files:
-                                work_summary += f"  - {filename}: read {count}x (MUST transition to [EDIT] now)\n"
+                        work_summary += "\n📄 Files Already Inspected (DO NOT re-read these files unless absolutely necessary):\n"
+                        for filename, count in sorted(file_read_counts.items(), key=lambda x: (-x[1], x[0])):
+                            marker = "⚠️ STOP READING" if count >= 2 else "✓"
+                            work_summary += f"  {marker} {filename}: read {count}x"
+                            if count >= 2:
+                                work_summary += " - MUST use [EDIT] or [CREATE] now, NOT another [READ]"
+                            work_summary += "\n"
+                        work_summary += "\n"
+
+                    # Then provide last 10 detailed tasks for recent context
+                    if total_tasks > 10:
+                        work_summary += f"Recent Tasks (showing last 10 of {total_tasks}):\n"
+                    else:
+                        work_summary += "All Tasks:\n"
+                    work_summary += "\n".join(f"- {log}" for log in completed_tasks_log[-10:])
+
+                    if hasattr(self, "debug_logger") and self.debug_logger:
+                        self.debug_logger.log("orchestrator", "WORK_SUMMARY_GENERATED", {
+                            "history_count": len(completed_tasks_log),
+                            "summary_length": len(work_summary),
+                            "files_inspected": len(file_read_counts)
+                        }, "DEBUG")
 
                 # Calculate repetitive failure notes for the planner
                 failure_notes = []

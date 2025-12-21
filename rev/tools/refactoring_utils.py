@@ -166,16 +166,23 @@ def split_python_module_classes(
 
         # 4. Create __init__.py with shared code and exports
         init_content = "\n\n".join(filter(None, init_content_parts))
-        
+
+        # Check if __all__ already exists in init_content to avoid duplicates
+        has_all_already = "__all__" in init_content
+
         exports = "\n\n# Auto-generated exports\n"
         all_exports = list(class_nodes.keys()) + list(functions.keys())
         for class_seg in class_segments:
             exports += f"from .{class_seg['name']} import {class_seg['name']}\n"
-        
-        all_section = "\n__all__ = [\n" + "".join(f"    '{name}',\n" for name in sorted(all_exports)) + "]\n"
-        
+
+        # Only add __all__ if it doesn't already exist
+        all_section = ""
+        if not has_all_already:
+            all_section = "\n__all__ = [\n" + "".join(f"    '{name}',\n" for name in sorted(all_exports)) + "]\n"
+
         package_init = target_dir / "__init__.py"
-        package_init.write_text(init_content + exports + all_section, encoding="utf-8")
+        final_content = init_content + exports + all_section
+        package_init.write_text(final_content, encoding="utf-8")
         
         # 5. Handle original source file
         source_moved_to = None
