@@ -239,8 +239,8 @@ def main():
     parser.add_argument(
         "--preflight",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Enable/disable preflight path/action corrections (default: enabled)",
+        default=False,
+        help="Enable/disable preflight path/action corrections (default: DISABLED - marked for removal due to negative value)",
     )
     parser.add_argument(
         "--debug",

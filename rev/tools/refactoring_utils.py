@@ -120,19 +120,39 @@ def split_python_module_classes(
         # 1. Analyze dependencies for all nodes
         imports = {node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))}
         functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
-        
+
+        # Collect ALL top-level names (classes, functions) in the module
         class_nodes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+        all_toplevel_names = set(class_nodes.keys()) | set(functions.keys())
+
         class_dependencies = {
             name: _analyze_node_dependencies(node, set(class_nodes.keys()), set(functions.keys()))
             for name, node in class_nodes.items()
         }
 
-        # 2. Separate shared code (imports, functions) from classes
+        # Extract base classes for each class to handle inheritance
+        class_base_classes = {}
+        for name, node in class_nodes.items():
+            bases = set()
+            for base in node.bases:
+                if isinstance(base, ast.Name):
+                    bases.add(base.id)
+                elif isinstance(base, ast.Attribute):
+                    # Handle cases like Parent.NestedClass
+                    bases.add(ast.get_source_segment(content, base))
+            class_base_classes[name] = bases
+
+        # 2. Separate shared code (ALL non-class top-level code) from classes
+        # This includes: imports, functions, try/except blocks (which may contain base classes like Agent)
         init_content_parts = []
-        for imp in imports:
-            init_content_parts.append(ast.get_source_segment(content, imp))
-        for func_node in functions.values():
-            init_content_parts.append(ast.get_source_segment(content, func_node))
+        for node in tree.body:
+            # Skip class definitions (they get their own files)
+            if isinstance(node, ast.ClassDef):
+                continue
+            # Include everything else: imports, functions, try/except, assignments, etc.
+            segment = ast.get_source_segment(content, node)
+            if segment:
+                init_content_parts.append(segment)
         
         created_files, skipped = [], []
 
@@ -145,20 +165,33 @@ def split_python_module_classes(
                 continue
 
             deps = class_dependencies.get(class_name, set())
-            
+            bases = class_base_classes.get(class_name, set())
+
             file_parts = []
             # Add required imports from the original shared prefix
             for imp in imports:
                  file_parts.append(ast.get_source_segment(content, imp) + "\n")
 
-            # Add imports for parent classes
+            # Add imports for base classes
+            shared_bases = []
+            for base_name in bases:
+                if base_name in class_nodes:
+                    # Base class is another split class - import from its own file
+                    file_parts.append(f"from .{base_name} import {base_name}\n")
+                else:
+                    # Base class not in split classes - assume it's in __init__.py (shared code)
+                    # This handles: nested classes in try/except, helper classes, imported bases
+                    shared_bases.append(base_name)
+
+            # Add imports for dependencies (parent classes from split classes)
             for dep in deps:
-                if dep in class_nodes:  # It's another class in the same module
+                if dep in class_nodes and dep not in bases:  # It's another class in the same module (not already imported as base)
                     file_parts.append(f"from .{dep} import {dep}\n")
 
-            # Add imports for shared functions
-            if any(dep in functions for dep in deps):
-                 file_parts.append(f"from . import {', '.join(sorted([d for d in deps if d in functions]))}\n\n")
+            # Add imports for shared functions and shared base classes
+            shared_imports = sorted(set(shared_bases) | {d for d in deps if d in functions})
+            if shared_imports:
+                 file_parts.append(f"from . import {', '.join(shared_imports)}\n\n")
 
             file_parts.append(seg["source"])
             class_file.write_text("".join(file_parts), encoding="utf-8")

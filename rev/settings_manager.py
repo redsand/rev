@@ -398,12 +398,12 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
     ),
     "preflight_enabled": RuntimeSetting(
         key="preflight_enabled",
-        description="Enable preflight path/action corrections before executing tasks",
+        description="Enable preflight path/action corrections before executing tasks (DISABLED - marked for removal)",
         section="Execution Limits",
         parser=_parse_bool,
-        getter=lambda: getattr(config, "PREFLIGHT_ENABLED", True),
+        getter=lambda: getattr(config, "PREFLIGHT_ENABLED", False),
         setter=lambda value: setattr(config, "PREFLIGHT_ENABLED", value),
-        default=getattr(config, "PREFLIGHT_ENABLED", True),
+        default=getattr(config, "PREFLIGHT_ENABLED", False),
     ),
     "max_planning_iterations": RuntimeSetting(
         key="max_planning_iterations",
