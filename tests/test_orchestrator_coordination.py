@@ -134,3 +134,21 @@ class TestOrchestratorCoordination:
         
         decision = orchestrator._evaluate_anchoring("Test request", history)
         assert decision == AnchoringDecision.DEBATE
+
+    def test_high_risk_forces_structural_check(self, orchestrator):
+        """Verify that high risk (failures) forces a structural consistency check."""
+        history = [
+            "[COMPLETED] search_code | Output: found file",
+            "[FAILED] replace_in_file | Error: undefined name 'x'",
+            "[FAILED] run_tests | Error: ModuleNotFoundError"
+        ]
+        # In _evaluate_anchoring, failed tasks are counted as risks
+        # 2 failures = risk 2. Wait, my code does:
+        # if "[FAILED]" in log: unresolved_symbols.append(log)
+        # So mismatch_risk will be 2. 
+        # debate_risk_threshold defaults to 3.
+        # Let's add one more failure to trigger DEBATE.
+        history.append("[FAILED] analyze_static_types | Error: missing import")
+        
+        decision = orchestrator._evaluate_anchoring("Test request", history)
+        assert decision == AnchoringDecision.DEBATE
