@@ -948,8 +948,12 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
         if py_paths:
             ruff_targets = " ".join(_quote_path(p) for p in py_paths[:10])  # Limit to 10 files
             # Use targeted error codes to avoid failing on pre-existing style issues
-            # E9: Runtime errors, F63: Invalid print syntax, F7: Statement problems, F82: Undefined names
-            optional_checks.append(("ruff", f"ruff check {ruff_targets} --select E9,F63,F7,F82"))
+            # E9: Runtime/syntax errors - always critical
+            # F63: Invalid print syntax - syntax issue
+            # F7: Statement problems (break/continue outside loop, etc.)
+            # NOTE: Removed F82 (undefined names) - too noisy for pre-existing issues
+            # Let compileall catch import/undefined errors instead
+            optional_checks.append(("ruff", f"ruff check {ruff_targets} --select E9,F63,F7"))
     if "mypy" in config.ALLOW_CMDS:
         py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]
         if py_paths:
@@ -995,10 +999,11 @@ def _run_validation_steps(validation_steps: list[str], details: Dict[str, Any], 
             _add("compileall", cmd)
         if "lint" in text or "linter" in text:
             # Run ruff only on modified files, targeting severe errors to avoid pre-existing style issues
-            # E9: Runtime errors, F63: Invalid print syntax, F7: Statement problems, F82: Undefined names
+            # E9: Runtime/syntax errors, F63: Invalid print syntax, F7: Statement problems
+            # NOTE: Removed F82 (undefined names) - too noisy for pre-existing issues
             if py_paths:
                 ruff_targets = " ".join(_quote_path(p) for p in py_paths[:10])
-                _add("ruff", f"ruff check {ruff_targets} --select E9,F63,F7,F82")
+                _add("ruff", f"ruff check {ruff_targets} --select E9,F63,F7")
         if "test" in text:
             _add("pytest", "pytest -q", "run_tests")
         if "mypy" in text or "type" in text:

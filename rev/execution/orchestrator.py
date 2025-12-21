@@ -32,6 +32,7 @@ from rev.execution.executor import execution_mode, concurrent_execution_mode, fi
 from rev.execution.state_manager import StateManager
 from rev.execution.prompt_optimizer import optimize_prompt_if_needed
 from rev.execution.quick_verify import verify_task_execution, VerificationResult
+from rev.execution.anchoring_scorer import AnchoringScorer, AnchoringDecision
 from rev.tools.registry import get_available_tools, get_repo_context
 from rev.debug_logger import DebugLogger
 from rev.config import (
@@ -362,7 +363,11 @@ def _create_syntax_repair_task(failed_task: "Task", verification_result) -> "Tas
         description += f"\n\nError details:\n{error_details}"
 
     description += (
-        "\n\nFocus ONLY on fixing syntax/import errors. "
+        "\n\nIMPORTANT - Error Scope:\n"
+        "- Only fix syntax/import errors in the code YOU modified\n"
+        "- If errors appear in unrelated parts of the file, IGNORE them (they are pre-existing)\n"
+        "- Focus ONLY on making YOUR specific changes syntactically valid\n\n"
+        "Focus ONLY on fixing syntax/import errors in your changes. "
         "Do not make other changes. Ensure all imports are present and all names are defined."
     )
 
@@ -1396,6 +1401,11 @@ class Orchestrator:
             f"Can this task be decomposed into smaller, more specific subtasks that might succeed?\n"
             f"If yes, describe the first subtask that should be attempted next in detail.\n"
             f"If no, just respond with 'CANNOT_DECOMPOSE'.\n\n"
+            "CRITICAL - Error Scope:\n"
+            "- Only fix errors that are DIRECTLY RELATED to your changes\n"
+            "- If validation shows errors in unrelated parts of the file, IGNORE them\n"
+            "- Pre-existing errors in other functions/sections should NOT be fixed by you\n"
+            "- Focus ONLY on making your specific change work correctly\n\n"
             "Important import strategy note (avoid churn):\n"
             "- If a refactor split creates a package (directory with __init__.py exports), update call sites/tests to\n"
             "  import from the package exports (e.g., `from package import ExportedSymbol`).\n"
@@ -1587,6 +1597,67 @@ class Orchestrator:
 
         return task
 
+    def _extract_claims_from_log(self, log_entry: str) -> List[str]:
+        """Extract high-level intent/claims from a task description."""
+        # A claim is essentially what the agent is asserting it will do or find.
+        # For simplicity, we treat the description as a single claim for now.
+        return [log_entry.split('|')[0].strip()]
+
+    def _evaluate_anchoring(self, user_request: str, completed_tasks_log: List[str]) -> AnchoringDecision:
+        """Evaluate the current anchoring score to drive coordination decisions."""
+        if not completed_tasks_log:
+            return AnchoringDecision.RE_SEARCH
+
+        scorer = AnchoringScorer()
+        
+        all_claims = []
+        citations = set()
+        test_outputs = []
+        unresolved_symbols = []
+        missing_files = []
+        total_tools = 0
+
+        for log in completed_tasks_log:
+            # 1. Collect claims
+            all_claims.extend(self._extract_claims_from_log(log))
+            
+            # 2. Extract citations (files mentioned in log or output)
+            file_match = _extract_file_path_from_description(log)
+            if file_match:
+                citations.add(file_match)
+            
+            # 3. Collect test results
+            if "[COMPLETED]" in log and "test" in log.lower():
+                test_outputs.append(log)
+            
+            # 4. Collect errors/mismatches
+            if "[FAILED]" in log:
+                if "missing path" in log.lower() or "not exist" in log.lower():
+                    missing_files.append(log)
+                if "undefined" in log.lower() or "unresolved" in log.lower():
+                    unresolved_symbols.append(log)
+            
+            # 5. Track tool usage
+            if "Output:" in log:
+                total_tools += 1
+
+        metrics = scorer.compute_anchoring_score(
+            claims=all_claims,
+            repo_citations=list(citations),
+            test_outputs=test_outputs,
+            unresolved_symbols=unresolved_symbols,
+            missing_files=missing_files,
+            tools_used_count=total_tools
+        )
+
+        print(f"\n  [UCCT] Anchoring Score: {metrics.raw_score:.2f} | Density: {metrics.evidence_density:.2f} | Risk: {metrics.mismatch_risk}")
+        print(f"  [UCCT] Coordination Decision: {metrics.decision.value}")
+        
+        if hasattr(self, "debug_logger") and self.debug_logger:
+            self.debug_logger.log("orchestrator", "ANCHORING_EVALUATION", metrics.__dict__, "INFO")
+
+        return metrics.decision
+
     def _continuous_sub_agent_execution(self, user_request: str, coding_mode: bool) -> bool:
         """Executes a task by continuously calling a lightweight planner for the next action.
 
@@ -1699,6 +1770,17 @@ class Orchestrator:
                         print(f"  Error: {planner_error}")
                         return False
                     
+                    # UCCT Anchoring check before declaring victory
+                    anchoring_decision = self._evaluate_anchoring(user_request, completed_tasks_log)
+                    if anchoring_decision == AnchoringDecision.RE_SEARCH:
+                        print("\n  [UCCT] Goal may be achieved, but evidence density is low. Forcing one more search.")
+                        forced_next_task = Task(description="Verify the implemented changes by listing the affected files and confirming their content matches the request.", action_type="read")
+                        continue
+                    elif anchoring_decision == AnchoringDecision.DEBATE:
+                        print("\n  [UCCT] High mismatch risk detected. Verifying structural consistency before stopping.")
+                        forced_next_task = Task(description="Run a structural consistency check on the modified modules to ensure no unresolved symbols remain.", action_type="analyze")
+                        continue
+
                     print("\n✅ Planner determined the goal is achieved.")
                     return True
 
