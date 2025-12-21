@@ -826,13 +826,16 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
     read_actions = {"read", "analyze", "review", "research", "investigate"}
 
     # Match path candidates with any common source/config extension.
-    ext = r"(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1)"
+    ext = r"(?:py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1)"
+    # A more robust regex to find path-like strings, including those not perfectly formed.
+    path_pattern = rf'((?:[A-Za-z]:)?[\\/]?[\w\s._-]*[\\/]+[\w\s._-]+\.{ext}\b|[\w._-]+\.{ext}\b)'
+    
+    raw_candidates = re.findall(path_pattern, desc)
+    
+    # Clean up and deduplicate candidates
     candidates = sorted(
         set(
-            re.findall(
-                rf'([A-Za-z]:[\\/][^\s"\'`]+\.{ext}(?:\.bak)?\b|(?:\./)?[A-Za-z0-9_./\\-]+\.{ext}(?:\.bak)?\b)',
-                desc,
-            )
+            p.strip() for p in raw_candidates if p.strip()
         )
     )
     if not candidates:
