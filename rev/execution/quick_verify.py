@@ -156,21 +156,7 @@ class VerificationResult:
 def verify_task_execution(task: Task, context: RevContext) -> VerificationResult:
     """
     Verify that a task actually completed successfully.
-
-    This checks that:
-    1. The task's action was actually performed
-    2. Any files mentioned were actually created/modified
-    3. Imports are valid if this was a refactoring task
-    4. Tests still pass (if applicable)
-
-    Args:
-        task: The task that was supposedly completed
-        context: The execution context
-
-    Returns:
-        VerificationResult indicating if the task truly succeeded
     """
-
     if task.status != TaskStatus.COMPLETED:
         return VerificationResult(
             passed=False,
@@ -179,26 +165,21 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
             should_replan=False
         )
 
+    # Surface tool no-ops clearly (e.g., search with 0 matches) first.
+    # This ensures all actions are checked for functional success.
+    events = getattr(task, "tool_events", None) or []
+    for ev in reversed(list(events)):
+        reason = _extract_tool_noop(str(ev.get("tool") or ""), ev.get("raw_result"))
+        if reason:
+            return VerificationResult(
+                passed=False,
+                message=reason,
+                details={"tool": ev.get("tool"), "artifact_ref": ev.get("artifact_ref")},
+                should_replan=True,
+            )
+
     action_type = task.action_type.lower()
     verification_mode = _get_verification_mode()
-
-    # Surface tool no-ops clearly (e.g., search with 0 matches, replace with 0 lines).
-    # This must happen BEFORE routing to specialized handlers to ensure all tools
-    # are checked for functional success.
-    # We apply this to almost all action types to catch silent functional failures.
-    # Using a broad set of action types to ensure no tool no-op goes undetected.
-    verifiable_actions = {"add", "create", "edit", "refactor", "delete", "rename", "read", "analyze", "research", "investigate", "test", "fix", "general"}
-    if action_type in verifiable_actions:
-        events = getattr(task, "tool_events", None) or []
-        for ev in reversed(list(events)):
-            reason = _extract_tool_noop(str(ev.get("tool") or ""), ev.get("raw_result"))
-            if reason:
-                return VerificationResult(
-                    passed=False,
-                    message=reason,
-                    details={"tool": ev.get("tool"), "artifact_ref": ev.get("artifact_ref")},
-                    should_replan=True,
-                )
 
     # Prevent "looks done vs is done": an edit/refactor task that only read files
     # should not be marked as completed.
