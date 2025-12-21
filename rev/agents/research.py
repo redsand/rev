@@ -82,6 +82,14 @@ CRITICAL RULES:
 3. Your research should be focused and actionable.
 4. Your response MUST be a single, valid JSON object representing the tool call.
 
+CONTEXT AWARENESS (CRITICAL):
+- ALWAYS check your context for information before reading files
+- Validation output, test results, and error messages are often in previous task results
+- NEVER assume file names like "pytest_output.txt" or "validation.log" - these are NOT created by default
+- If you need validation/test output, it's in the tool result JSON from previous tasks, not in a separate file
+- Only use `read_file` for actual source code files explicitly mentioned in task descriptions
+- Before reading ANY file, ask yourself: "Is this information already in my context?"
+
 PATH VALIDATION (CRITICAL):
 - Always check the "Work Completed So Far" and tool outputs in your context.
 - If a previous tool (like `split_python_module_classes`) explicitly states it created a file at a specific path, USE THAT EXACT PATH.

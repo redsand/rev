@@ -25,7 +25,10 @@
       "Bash(grep:*)",
       "Bash(python -m rev:*)",
       "Bash(powershell -Command \"\\(Get-Content ''C:\\\\Users\\\\champ\\\\source\\\\repos\\\\rev\\\\llm_transactions.log''\\).Count\")",
-      "Bash(powershell -Command:*)"
+      "Bash(powershell -Command:*)",
+      "Bash(ls:*)",
+      "Bash(dir:*)",
+      "Bash(findstr:*)"
     ]
   }
 }

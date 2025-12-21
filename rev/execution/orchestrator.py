@@ -1960,26 +1960,69 @@ class Orchestrator:
                 and (next_task.action_type or "").lower() in {"read", "analyze", "research"}
             ):
                 print("  [loop-guard] Repeated READ/ANALYZE detected; checking if goal is achieved.")
+
+                # Track which files are being read repeatedly
+                read_file_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\\\-\.]+\.py)'
+                recent_read_files = []
+                for task in reversed(completed_tasks_log[-5:]):  # Look at last 5 tasks
+                    if (task.action_type or "").lower() in {"read", "analyze", "research"}:
+                        matches = re.findall(read_file_pattern, task.description)
+                        recent_read_files.extend(matches)
+
+                # Check if the same file has been read 3+ times
+                from collections import Counter
+                file_counts = Counter(recent_read_files)
+                most_read_file, read_count = file_counts.most_common(1)[0] if file_counts else (None, 0)
+
+                if read_count >= 3:
+                    print(f"  [loop-guard] File '{most_read_file}' has been read {read_count} times - suggesting alternative approach.")
+                    next_task.action_type = "debug"
+                    next_task.description = (
+                        f"The file {most_read_file} has been read {read_count} times without progress. "
+                        f"Instead of reading it again, use run_python_diagnostic to test the actual runtime behavior. "
+                        f"For example, test module imports, inspect object attributes, or verify auto-registration logic. "
+                        f"This will reveal runtime issues that static code reading cannot detect."
+                    )
+                    print(f"  [loop-guard] Injecting diagnostic suggestion: {next_task.description[:100]}...")
+                    return False  # Continue execution with the diagnostic task
+
                 # Check if the goal appears to be achieved
                 goal_achieved = _check_goal_likely_achieved(user_request, completed_tasks_log)
                 if goal_achieved:
-                    print("  [loop-guard] Goal appears achieved based on completed tasks - forcing completion.")
-                    return True
+                    # Don't force completion without verification - inject verification task instead
+                    print("  [loop-guard] Goal appears achieved - verifying completion before ending execution.")
 
-                # Extract target path from the task description to create a more relevant fallback
-                target_path = _extract_file_path_from_description(next_task.description)
-                if target_path:
-                    parent_dir = str(Path(target_path.replace('\\', '/')).parent)
-                    next_task.description = (
-                        f"List the directory '{parent_dir}' to confirm all expected files exist, "
-                        f"then verify imports work by running a simple test or syntax check."
-                    )
+                    # Check if we've already attempted final verification
+                    loop_guard_verification_attempted = self.context.agent_state.get("loop_guard_verification_attempted", False)
+
+                    if not loop_guard_verification_attempted:
+                        # First time: inject a verification task
+                        self.context.set_agent_state("loop_guard_verification_attempted", True)
+                        next_task.action_type = "read"
+                        next_task.description = (
+                            "Perform final verification: list the target directory to confirm all expected files exist, "
+                            "then run a quick syntax check (python -m compileall) and import test to ensure the refactoring works correctly."
+                        )
+                        print(f"  [loop-guard] Injecting final verification task: {next_task.description[:80]}...")
+                    else:
+                        # Already attempted verification - now we can safely complete
+                        print("  [loop-guard] Verification already attempted - forcing completion.")
+                        return True
                 else:
-                    next_task.description = (
-                        "List the target directory and summarize the current state; "
-                        "verify all expected files exist and imports work correctly."
-                    )
-                print(f"  [loop-guard] Injecting fallback: {next_task.description[:80]}")
+                    # Extract target path from the task description to create a more relevant fallback
+                    target_path = _extract_file_path_from_description(next_task.description)
+                    if target_path:
+                        parent_dir = str(Path(target_path.replace('\\', '/')).parent)
+                        next_task.description = (
+                            f"List the directory '{parent_dir}' to confirm all expected files exist, "
+                            f"then verify imports work by running a simple test or syntax check."
+                        )
+                    else:
+                        next_task.description = (
+                            "List the target directory and summarize the current state; "
+                            "verify all expected files exist and imports work correctly."
+                        )
+                    print(f"  [loop-guard] Injecting fallback: {next_task.description[:80]}")
 
             # Fast-path: don't dispatch a no-op create_directory if it already exists.
             if (next_task.action_type or "").lower() == "create_directory":
@@ -2180,8 +2223,38 @@ class Orchestrator:
 
             action_type = (next_task.action_type or "").lower()
             if next_task.status == TaskStatus.COMPLETED and action_type in {"edit", "add", "refactor", "create_directory"}:
-                self.context.set_agent_state("last_code_change_iteration", iteration)
-                self.context.set_agent_state("tests_blocked_no_changes", False)
+                # Check if this was an actual code change or just a cosmetic/no-op edit
+                # Look at verification details or task result to confirm real changes
+                is_real_change = True
+
+                # Check verification details for evidence of actual changes
+                if hasattr(verification_result, 'details') and isinstance(verification_result.details, dict):
+                    # For edits: check if replace_in_file actually replaced something
+                    # Check tool events from task
+                    events = getattr(next_task, "tool_events", None) or []
+                    for ev in reversed(list(events)):
+                        tool = str(ev.get("tool") or "").lower()
+                        if tool in {"replace_in_file", "write_file", "apply_patch"}:
+                            raw_result = ev.get("raw_result")
+                            if isinstance(raw_result, str):
+                                try:
+                                    import json
+                                    payload = json.loads(raw_result)
+                                    if isinstance(payload, dict):
+                                        # Check if no actual changes were made
+                                        replaced = payload.get("replaced", 1)  # Default to 1 (assume change)
+                                        if replaced == 0:
+                                            is_real_change = False
+                                            print(f"  [!] Edit task completed but made no actual changes (cosmetic only)")
+                                            break
+                                except Exception:
+                                    pass
+
+                if is_real_change:
+                    self.context.set_agent_state("last_code_change_iteration", iteration)
+                    self.context.set_agent_state("tests_blocked_no_changes", False)
+                else:
+                    print(f"  [!] Skipping last_code_change_iteration update - no real changes detected")
 
             # STEP 4: REPORT
             status_tag = f"[{next_task.status.name}]"
