@@ -394,11 +394,14 @@ def validate_context_sufficiency(
 
     total_entities = (len(requested_files) + len(requested_classes) + len(requested_functions))
     if total_entities > 0:
-        entity_match_rate = (
-            (len(requested_files) - len([g for g in gaps if g.gap_type == GapType.MISSING_ENTITY and "File" in g.description])) / len(requested_files) +
-            (len(requested_classes) - len([g for g in gaps if g.gap_type == GapType.MISSING_ENTITY and "Class" in g.description])) / len(requested_classes) +
-            (len(requested_functions) / max(1, len(requested_functions)))
-        ) / 3 if total_entities > 0 else 0.5
+        file_rate = (
+            len(requested_files) - len([g for g in gaps if g.gap_type == GapType.MISSING_ENTITY and "File" in g.description])
+        ) / max(1, len(requested_files))
+        class_rate = (
+            len(requested_classes) - len([g for g in gaps if g.gap_type == GapType.MISSING_ENTITY and "Class" in g.description])
+        ) / max(1, len(requested_classes))
+        func_rate = len(requested_functions) / max(1, len(requested_functions))
+        entity_match_rate = (file_rate + class_rate + func_rate) / 3
     else:
         entity_match_rate = 0.3  # No specific entities mentioned
 

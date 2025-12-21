@@ -18,7 +18,8 @@ from typing import Dict, Any, List, Set, Tuple, Optional
 from collections import defaultdict
 
 from rev import config
-from rev.tools.utils import _run_shell, _safe_path
+from rev.tools.utils import _run_shell, _safe_path, quote_cmd_arg
+from rev.cache import get_ast_cache
 
 
 def analyze_test_coverage(path: str = ".", show_untested: bool = True) -> str:
@@ -100,8 +101,7 @@ def _analyze_python_coverage(path: Path) -> Optional[Dict[str, Any]]:
             tmp_path = tmp_file.name
 
         try:
-            import shlex
-            cmd = f"coverage json -o {shlex.quote(tmp_path)}"
+            cmd = f"coverage json -o {quote_cmd_arg(tmp_path)}"
             proc = _run_shell(cmd, timeout=30)
 
             if proc.returncode != 0:
@@ -429,6 +429,34 @@ def _find_python_symbol_usages(symbol: str) -> List[Dict[str, Any]]:
                             "type": "reference",
                             "context": f"Usage of {symbol}"
                         })
+                    
+                    # Check imports (added)
+                    elif isinstance(node, ast.Import):
+                        for alias in node.names:
+                            if alias.name == symbol or alias.name.split('.')[0] == symbol:
+                                usages.append({
+                                    "file": py_file.relative_to(config.ROOT).as_posix(),
+                                    "line": node.lineno,
+                                    "type": "import",
+                                    "context": f"import {alias.name}"
+                                })
+                    
+                    elif isinstance(node, ast.ImportFrom):
+                        if node.module and (node.module == symbol or node.module.startswith(symbol + '.')):
+                            usages.append({
+                                "file": py_file.relative_to(config.ROOT).as_posix(),
+                                "line": node.lineno,
+                                "type": "import",
+                                "context": f"from {node.module} import ..."
+                            })
+                        for alias in node.names:
+                            if alias.name == symbol:
+                                usages.append({
+                                    "file": py_file.relative_to(config.ROOT).as_posix(),
+                                    "line": node.lineno,
+                                    "type": "import",
+                                    "context": f"from {node.module or ''} import {alias.name}"
+                                })
             except Exception:
                 continue
 
@@ -486,9 +514,8 @@ def _find_symbol_with_grep(symbol: str) -> List[Dict[str, Any]]:
     usages = []
 
     try:
-        import shlex
-        # Use shlex.quote to prevent command injection
-        quoted_symbol = shlex.quote(symbol)
+        # Use quote_cmd_arg to prevent command injection
+        quoted_symbol = quote_cmd_arg(symbol)
         cmd = f"grep -rn '\\b{quoted_symbol}\\b' . --include='*.py' --include='*.ts' --include='*.js' --include='*.tsx' --include='*.jsx' 2>/dev/null | head -50"
         proc = _run_shell(cmd, timeout=30)
 
@@ -590,16 +617,15 @@ def _analyze_file_dependencies(file_path: Path, depth: int) -> Dict[str, Any]:
                 deps["depends_on"].append(match.group(1))
 
         # Find what imports this file (reverse dependencies)
-        file_name = file_path.stem
-        for py_file in config.ROOT.rglob("*.py"):
-            if py_file == file_path:
-                continue
-            try:
-                with open(py_file, 'r', encoding='utf-8') as f:
-                    if file_name in f.read():
-                        deps["used_by"].append(py_file.relative_to(config.ROOT).as_posix())
-            except Exception:
-                continue
+        # Use our improved find_symbol_usages for accurate detection
+        module_path = rel_path.replace('.py', '').replace('/', '.')
+        
+        usages_json = find_symbol_usages(module_path)
+        usages = json.loads(usages_json)
+        
+        for usage in usages.get("usages", []):
+            if usage["file"] != rel_path and usage["file"] not in deps["used_by"]:
+                deps["used_by"].append(usage["file"])
 
         return deps
 

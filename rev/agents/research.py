@@ -1,4 +1,5 @@
 import json
+from typing import Any, Optional
 from rev.agents.base import BaseAgent
 from rev.models.task import Task
 from rev.tools.registry import execute_tool, get_available_tools
@@ -7,6 +8,60 @@ from rev.core.context import RevContext
 from rev.core.tool_call_recovery import recover_tool_call_from_text
 from rev.agents.context_provider import build_context_and_tools
 from rev.agents.subagent_io import build_subagent_output
+
+KEYWORD_SNIPPET_PATTERNS = [
+    "register",
+    "inspect.getmembers",
+    "pkgutil",
+    "importlib",
+    "registry",
+]
+
+
+def _extract_snippet(tool_name: str, tool_args: dict, raw_result: Any) -> str:
+    """Return a relevant snippet for read_file/read_file_lines outputs."""
+    try:
+        text = raw_result if isinstance(raw_result, str) else str(raw_result)
+    except Exception:
+        return str(raw_result)[:500]
+
+    def _keyword_window(txt: str) -> Optional[str]:
+        lines = txt.splitlines()
+        for idx, line in enumerate(lines):
+            if any(k.lower() in line.lower() for k in KEYWORD_SNIPPET_PATTERNS):
+                start = max(0, idx - 2)
+                end = min(len(lines), idx + 3)
+                return "\n".join(lines[start:end])
+        return None
+
+    if tool_name in {"read_file", "read_file_lines"}:
+        if "...[truncated]..." in text or len(text) > 5000:
+            try:
+                path = tool_args.get("path") if isinstance(tool_args, dict) else None
+                include = path if isinstance(path, str) else "**/*"
+                search = execute_tool(
+                    "search_code",
+                    {"pattern": "register|pkgutil|importlib|getmembers|registry", "include": include, "regex": True},
+                )
+                payload = json.loads(search) if isinstance(search, str) else {}
+                matches = payload.get("matches") or []
+                if matches:
+                    m = matches[0]
+                    file = m.get("file")
+                    line = m.get("line")
+                    if file and isinstance(line, int):
+                        window = execute_tool(
+                            "read_file_lines",
+                            {"path": file, "start": max(1, line - 3), "end": line + 3},
+                        )
+                        if isinstance(window, str) and window.strip():
+                            return window
+            except Exception:
+                pass
+        kw = _keyword_window(text)
+        if kw:
+            return kw
+    return text[:500]
 
 RESEARCH_SYSTEM_PROMPT = """You are a specialized Research agent. Your purpose is to investigate codebases, gather context, analyze code structures, and provide insights.
 
@@ -26,6 +81,12 @@ CRITICAL RULES:
    - `check_structural_consistency` to validate schemas/models
 3. Your research should be focused and actionable.
 4. Your response MUST be a single, valid JSON object representing the tool call.
+
+PATH VALIDATION (CRITICAL):
+- Always check the "Work Completed So Far" and tool outputs in your context.
+- If a previous tool (like `split_python_module_classes`) explicitly states it created a file at a specific path, USE THAT EXACT PATH.
+- Do NOT guess paths or assume standard locations if the context provides the actual path.
+- If you are unsure if a file exists at a path mentioned in the task, use `file_exists` or `get_file_info` before attempting a full `read_file`.
 
 RESEARCH STRATEGIES:
 - Code understanding: Read files, analyze structures, find dependencies
@@ -89,7 +150,7 @@ class ResearchAgent(BaseAgent):
         # Get all available tools, focusing on read-only research tools
         all_tools = get_available_tools()
         research_tool_names = [
-            'read_file', 'search_code', 'rag_search', 'list_dir', 'tree_view',
+            'read_file', 'read_file_lines', 'search_code', 'rag_search', 'list_dir', 'tree_view',
             'analyze_code_structures', 'find_symbol_usages', 'analyze_dependencies',
             'analyze_code_context', 'check_structural_consistency', 'get_file_info'
         ]
@@ -145,14 +206,22 @@ class ResearchAgent(BaseAgent):
                             error_type = "invalid_json"
                             error_detail = f"Invalid JSON in tool arguments: {arguments_str[:200]}"
 
+                    # Unwrap nested {"arguments": {...}} payloads when present.
+                    if not error_type and isinstance(arguments, dict) and "arguments" in arguments and not any(
+                        k in arguments for k in ("path", "paths")
+                    ):
+                        inner = arguments.get("arguments")
+                        if isinstance(inner, dict):
+                            arguments = inner
+
                     if not error_type:
-                        print(f"  → ResearchAgent will call tool '{tool_name}' with arguments: {arguments}")
+                        print(f"  -> ResearchAgent will call tool '{tool_name}' with arguments: {arguments}")
                         raw_result = execute_tool(tool_name, arguments)
 
-                        # Store research findings in context for other agents to use
+                        snippet = _extract_snippet(tool_name, arguments, raw_result)
                         context.add_insight("research_agent", f"task_{task.task_id}_result", {
                             "tool": tool_name,
-                            "result": raw_result[:500] if isinstance(raw_result, str) else str(raw_result)[:500]
+                            "result": snippet
                         })
 
                         return build_subagent_output(
@@ -166,7 +235,7 @@ class ResearchAgent(BaseAgent):
 
             # Error handling
             if error_type:
-                if error_type == "text_instead_of_tool_call":
+                if error_type in {"text_instead_of_tool_call", "empty_tool_calls", "missing_tool_calls"}:
                     recovered = recover_tool_call_from_text(
                         response.get("message", {}).get("content", ""),
                         allowed_tools=[t["function"]["name"] for t in get_available_tools()],
@@ -186,9 +255,10 @@ class ResearchAgent(BaseAgent):
                             raw_result = json.dumps(outputs)
                         else:
                             raw_result = execute_tool(recovered.name, recovered.arguments)
+                        snippet = _extract_snippet(recovered.name, recovered.arguments, raw_result)
                         context.add_insight("research_agent", f"task_{task.task_id}_result", {
                             "tool": recovered.name,
-                            "result": raw_result[:500] if isinstance(raw_result, str) else str(raw_result)[:500]
+                            "result": snippet
                         })
                         return build_subagent_output(
                             agent_name="ResearchAgent",
@@ -199,10 +269,10 @@ class ResearchAgent(BaseAgent):
                             task_id=task.task_id,
                         )
 
-                print(f"  ⚠️ ResearchAgent: {error_detail}")
+                print(f"  [WARN] ResearchAgent: {error_detail}")
 
                 if self.should_attempt_recovery(task, context):
-                    print(f"  → Requesting replan (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
+                    print(f"  -> Requesting replan (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
                     self.request_replan(
                         context,
                         reason="Tool call generation failed",
@@ -210,16 +280,16 @@ class ResearchAgent(BaseAgent):
                     )
                     return self.make_recovery_request(error_type, error_detail)
                 else:
-                    print(f"  → Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
+                    print(f"  -> Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
                     context.add_error(f"ResearchAgent: {error_detail} (after {recovery_attempts} recovery attempts)")
                     return self.make_failure_signal(error_type, error_detail)
 
         except Exception as e:
             error_msg = f"Exception in ResearchAgent: {e}"
-            print(f"  ⚠️ {error_msg}")
+            print(f"  [WARN] {error_msg}")
 
             if self.should_attempt_recovery(task, context):
-                print(f"  → Requesting replan due to exception (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
+                print(f"  -> Requesting replan due to exception (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
                 self.request_replan(
                     context,
                     reason="Exception during research",
@@ -227,6 +297,6 @@ class ResearchAgent(BaseAgent):
                 )
                 return self.make_recovery_request("exception", str(e))
             else:
-                print(f"  → Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
+                print(f"  -> Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
                 context.add_error(error_msg)
                 return self.make_failure_signal("exception", error_msg)

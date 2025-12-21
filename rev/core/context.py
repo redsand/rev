@@ -91,7 +91,7 @@ class RevContext:
     and share during an execution run.
     """
 
-    def __init__(self, user_request: str, initial_plan: Optional[ExecutionPlan] = None, auto_approve: bool = True):
+    def __init__(self, user_request: str, initial_plan: Optional[ExecutionPlan] = None, auto_approve: bool = True, resume: bool = False):
         self.run_id: str = str(uuid.uuid4())  # Unique ID for each orchestration run
         self.user_request: str = user_request
         self.plan: Optional[ExecutionPlan] = initial_plan
@@ -106,10 +106,12 @@ class RevContext:
         self.logger = get_logger()
         self.session_id: str = "" # Will be set by StateManager
         self.auto_approve: bool = auto_approve # Whether to auto-approve changes without prompting
+        self.resume: bool = resume # Whether we are resuming a previous session
         # ContextGuard phase support
         self.context_sufficiency: Optional[Any] = None # ContextSufficiency from context_guard phase
         self.clarification_history: List[Dict[str, Any]] = [] # History of user clarifications
         self.purified_context: Optional[Any] = None # FilteredContext from context_guard phase
+        self.work_history: List[str] = [] # History of completed/failed tasks for context and loop detection
 
     def update_plan(self, new_plan: ExecutionPlan):
         """Update the current execution plan."""
@@ -154,6 +156,60 @@ class RevContext:
     def set_agent_state(self, key: str, value: Any):
         """Set agent state value by key."""
         self.agent_state[key] = value
+
+    def save_history(self):
+        """Persist current work history to disk."""
+        try:
+            from rev import config
+            from rev.execution.session import SessionTracker
+            config.SESSIONS_DIR.mkdir(exist_ok=True, parents=True)
+            last_session_path = config.SESSIONS_DIR / "last_session.json"
+            tracker = SessionTracker(session_id="repl_session")
+            tracker.summary.initial_request = self.user_request
+            
+            # Populate tracker from work_history
+            for entry in self.work_history:
+                if entry.startswith("[COMPLETED] "):
+                    tracker.track_task_completed(entry[len("[COMPLETED] "):])
+                elif entry.startswith("[FAILED] "):
+                    # Extract description and error if possible
+                    parts = entry[len("[FAILED] "):].split(" | Reason: ", 1)
+                    desc = parts[0]
+                    err = parts[1] if len(parts) > 1 else "unknown error"
+                    tracker.track_task_failed(desc, err)
+            
+            tracker.save_to_file(last_session_path)
+        except Exception as e:
+            self.logger.log("context", "HISTORY_SAVE_ERROR", {"error": str(e)}, "WARNING")
+
+    def load_history(self) -> List[str]:
+        """Load work history from disk if resume is enabled."""
+        self.work_history = []  # Clear current history first
+        
+        if not self.resume:
+            return []
+            
+        try:
+            from rev import config
+            from rev.execution.session import SessionTracker
+            last_session_path = config.SESSIONS_DIR / "last_session.json"
+            if not last_session_path.exists():
+                return []
+                
+            tracker = SessionTracker.load_from_file(last_session_path)
+            
+            history = []
+            for task in tracker.summary.tasks_completed:
+                history.append(f"[COMPLETED] {task}")
+            for task in tracker.summary.tasks_failed:
+                # Note: original error detail might be lost if not stored perfectly in summary
+                history.append(f"[FAILED] {task}")
+            
+            self.work_history = history
+            return history
+        except Exception as e:
+            self.logger.log("context", "HISTORY_LOAD_ERROR", {"error": str(e)}, "WARNING")
+            return []
 
     def __str__(self):
         return (

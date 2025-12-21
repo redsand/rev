@@ -179,6 +179,23 @@ class ToolExecutorAgent(BaseAgent):
                             )
 
             if error_type:
+                if error_type in {"text_instead_of_tool_call", "empty_tool_calls", "missing_tool_calls"}:
+                    recovered = recover_tool_call_from_text(
+                        response.get("message", {}).get("content", ""),
+                        allowed_tools=[t for t in allowed_tool_names if isinstance(t, str)],
+                    )
+                    if recovered:
+                        print(f"  -> Recovered tool call from text output: {recovered.name}")
+                        raw_result = execute_tool(recovered.name, recovered.arguments)
+                        return build_subagent_output(
+                            agent_name="ToolExecutorAgent",
+                            tool_name=recovered.name,
+                            tool_args=recovered.arguments,
+                            tool_output=raw_result,
+                            context=context,
+                            task_id=task.task_id,
+                        )
+
                 print(f"  ?? ToolExecutorAgent: {error_detail}")
                 if self.should_attempt_recovery(task, context):
                     self.request_replan(
@@ -198,4 +215,3 @@ class ToolExecutorAgent(BaseAgent):
                 return self.make_recovery_request("exception", str(e))
             context.add_error(error_msg)
             return self.make_failure_signal("exception", error_msg)
-

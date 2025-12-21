@@ -537,7 +537,11 @@ def _replace_in_file_noop_reason(result: str) -> str:
         return ""
     replaced = data.get("replaced")
     if isinstance(replaced, int) and replaced == 0:
-        return "replace_in_file made no changes (replaced=0); likely `find` did not match the file"
+        return (
+            "replace_in_file made no changes (replaced=0); likely `find` did not match the file. "
+            "RECOVERY: Ensure you're not escaping content incorrectly and check whitespace, indentation, and context. "
+            "Use read_file tool to verify the actual file content before retrying."
+        )
     return ""
 
 

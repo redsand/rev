@@ -53,9 +53,9 @@ def analyze_dependencies(language: str = "auto") -> str:
 
     try:
         if language == "auto":
-            for lang, config in lang_config.items():
-                if (config.ROOT / config["file"]).exists() or (
-                    config.get("alt_file") and (config.ROOT / config["alt_file"]).exists()
+            for lang, cfg in lang_config.items():
+                if (config.ROOT / cfg["file"]).exists() or (
+                    cfg.get("alt_file") and (config.ROOT / cfg["alt_file"]).exists()
                 ):
                     language = lang
                     break
@@ -150,9 +150,9 @@ def check_dependency_updates(language: str = "auto") -> str:
 
     try:
         if language == "auto":
-            for lang, config in lang_config.items():
-                if (config.ROOT / config["file"]).exists() or (
-                    config.get("alt_file") and (config.ROOT / config["alt_file"]).exists()
+            for lang, cfg in lang_config.items():
+                if (config.ROOT / cfg["file"]).exists() or (
+                    cfg.get("alt_file") and (config.ROOT / cfg["alt_file"]).exists()
                 ):
                     language = lang
                     break
@@ -204,9 +204,9 @@ def check_dependency_vulnerabilities(language: str = "auto") -> str:
 
     try:
         if language == "auto":
-            for lang, config in lang_config.items():
-                if (config.ROOT / config["file"]).exists() or (
-                    config.get("alt_file") and (config.ROOT / config["alt_file"]).exists()
+            for lang, cfg in lang_config.items():
+                if (config.ROOT / cfg["file"]).exists() or (
+                    cfg.get("alt_file") and (config.ROOT / cfg["alt_file"]).exists()
                 ):
                     language = lang
                     break
@@ -224,9 +224,18 @@ def check_dependency_vulnerabilities(language: str = "auto") -> str:
             return json.dumps({"error": f"{tool_name} not available", "install": f"pip install {tool_name}" if language == "python" else ""})
 
         if language == "python":
-            findings = json.loads(proc.stdout) if proc.stdout else []
+            try:
+                findings = json.loads(proc.stdout) if proc.stdout else []
+            except json.JSONDecodeError:
+                findings = []
+                
+            if not isinstance(findings, list):
+                findings = []
+                
             issues = []
             for f in findings:
+                if not isinstance(f, dict):
+                    continue
                 dep = f.get("dependency", {})
                 for vuln in f.get("vulns", []):
                     issues.append({
@@ -245,17 +254,37 @@ def check_dependency_vulnerabilities(language: str = "auto") -> str:
             }, indent=2)
 
         if language == "javascript":
-            audit = json.loads(proc.stdout) if proc.stdout else {}
+            try:
+                audit = json.loads(proc.stdout) if proc.stdout else {}
+            except json.JSONDecodeError:
+                audit = {}
+            
+            if not isinstance(audit, dict):
+                audit = {}
+                
             issues = []
-            for advisory in audit.get("advisories", {}).values():
-                issues.append({
-                    "package": advisory.get("module_name"),
-                    "version": advisory.get("findings", [{}])[0].get("version"),
-                    "severity": advisory.get("severity"),
-                    "cves": advisory.get("cves"),
-                    "fixed_version": advisory.get("patched_versions"),
-                    "description": advisory.get("title", "")
-                })
+            advisories = audit.get("advisories")
+            if isinstance(advisories, dict):
+                for advisory in advisories.values():
+                    issues.append({
+                        "package": advisory.get("module_name"),
+                        "version": advisory.get("findings", [{}])[0].get("version"),
+                        "severity": advisory.get("severity"),
+                        "cves": advisory.get("cves"),
+                        "fixed_version": advisory.get("patched_versions"),
+                        "description": advisory.get("title", "")
+                    })
+            elif isinstance(audit.get("metadata"), dict):
+                # Handle newer npm audit format (v7+)
+                for vuln in audit.get("vulnerabilities", {}).values():
+                    issues.append({
+                        "package": vuln.get("name"),
+                        "version": vuln.get("range"),
+                        "severity": vuln.get("severity"),
+                        "cves": [], # v7+ format differs
+                        "fixed_version": None,
+                        "description": f"Vulnerability in {vuln.get('name')}"
+                    })
             return json.dumps({
                 "language": "javascript",
                 "issues": issues,
@@ -263,10 +292,16 @@ def check_dependency_vulnerabilities(language: str = "auto") -> str:
                 "count": len(issues)
             }, indent=2)
 
-        return json.dumps({"error": f"Language '{language}' not supported"})
+        return json.dumps({
+            "language": language,
+            "error": f"Language '{language}' not supported"
+        })
 
     except Exception as e:
-        return json.dumps({"error": f"Dependency vulnerability scan failed: {type(e).__name__}: {e}"})
+        return json.dumps({
+            "language": language,
+            "error": f"Dependency vulnerability scan failed: {type(e).__name__}: {e}"
+        })
 
 
 def _group_versions(items: List[Dict[str, Any]], name_key: str, current_key: str, latest_key: str) -> Dict[str, List[Dict[str, Any]]]:

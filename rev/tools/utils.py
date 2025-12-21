@@ -68,6 +68,17 @@ def _run_shell(cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:
     )
 
 
+def quote_cmd_arg(arg: str) -> str:
+    """Quote a command line argument for the current platform's default shell.
+
+    On POSIX systems, this uses shlex.quote. On Windows (where shell=True uses cmd.exe),
+    this uses subprocess.list2cmdline which provides compatible quoting for cmd.exe.
+    """
+    if os.name == 'nt':
+        return subprocess.list2cmdline([str(arg)])
+    return shlex.quote(str(arg))
+
+
 def install_package(package: str) -> str:
     """Install a Python package.
 
@@ -78,7 +89,7 @@ def install_package(package: str) -> str:
         JSON string with installation result
     """
     try:
-        result = _run_shell(f"pip install {shlex.quote(package)}", timeout=300)
+        result = _run_shell(f"pip install {quote_cmd_arg(package)}", timeout=300)
         return json.dumps({
             "installed": package,
             "returncode": result.returncode,

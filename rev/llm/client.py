@@ -497,13 +497,19 @@ def ollama_chat(
     llm_cache = get_llm_cache() or LLMResponseCache()
     tools_provided = tools is not None and supports_tools
 
+    debug_logger = get_logger()
+    if getattr(config, "LLM_TRANSACTION_LOG_ENABLED", False):
+        try:
+            debug_logger.log_llm_transcript(model=model_name, messages=messages, response={"pending": True}, tools=tools)
+        except Exception:
+            pass
+
     # Check cache first (include model in cache key)
     cached_response = llm_cache.get_response(messages, tools if tools_provided else None, model_name)
     if cached_response is not None:
         if OLLAMA_DEBUG:
             print("[DEBUG] Using cached LLM response")
         cached_response.setdefault("usage", _token_usage_tracker.snapshot())
-        debug_logger = get_logger()
         debug_logger.log_llm_response(model_name, cached_response, cached=True)
         return cached_response
 
@@ -524,6 +530,14 @@ def ollama_chat(
         model_name=model_name,
         supports_tools=supports_tools,
     )
+
+    # Persist full transcript (raw response) when tracing is enabled
+    if getattr(config, "LLM_TRANSACTION_LOG_ENABLED", False):
+        try:
+            debug_logger.log_llm_transcript(model=model_name, messages=messages, response=response, tools=tools)
+        except Exception:
+            pass
+
     response = _sanitize_response_content(response)
 
     # Track token usage if successful

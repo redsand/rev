@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Dict, Any, TYPE_CHECKING
 
@@ -147,10 +148,14 @@ _SNAPSHOT_PATH = Path(__file__).with_name("_tool_registry_snapshot.json")
 
 # Tools that should have timeout protection
 _TIMEOUT_PROTECTED_TOOLS = {
+    "read_file",
+    "list_dir",
+    "search_code",
+    "write_file",
+    "replace_in_file",
     "run_cmd",
     "run_tests",
     "execute_python",
-    "search_code",
     "rag_search",
     "web_fetch",
     "ssh_exec",
@@ -363,11 +368,15 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         "scan_security_issues": lambda args: scan_security_issues(args.get("paths"), args.get("severity_threshold", "MEDIUM")),
         "detect_secrets": lambda args: detect_secrets(args.get("path", ".")),
         "check_license_compliance": lambda args: check_license_compliance(args.get("path", ".")),
-        "split_python_module_classes": lambda args: split_python_module_classes(
-            args["source_path"],
-            args.get("target_directory"),
-            args.get("overwrite", False),
-            args.get("delete_source", True),
+        "split_python_module_classes": lambda args: (
+            split_python_module_classes(
+                args["source_path"],
+                args.get("target_directory"),
+                args.get("overwrite", False),
+                args.get("delete_source", True),
+            )
+            if "source_path" in args
+            else json.dumps({"error": "Missing required argument 'source_path' for split_python_module_classes"})
         ),
         "run_property_tests": lambda args: run_property_tests(args.get("test_paths"), args.get("max_examples", 200)),
         "generate_property_tests": lambda args: generate_property_tests(args.get("targets", []), args.get("max_examples", 200)),
@@ -576,6 +585,11 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
     Optimized for O(1) lookup using dictionary dispatch instead of O(n) elif chain.
     Tools in the timeout-protected list will be executed with automatic retry on timeout.
     """
+    try:
+        args = maybe_fix_tool_paths(args)
+    except Exception:
+        pass
+
     # Compatibility shim: normalize common alternate argument names that some models emit
     # (e.g. "file_path" vs the canonical "path") so tools don't KeyError.
     if isinstance(args, dict):
@@ -588,16 +602,31 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
         ):
             args = args["arguments"]
 
-        tool = (name or "").lower()
-        normalized_args = dict(args)
+        # 1. Kebab-to-snake conversion (e.g. "file-path" -> "file_path")
+        normalized_args = {str(k).replace("-", "_"): v for k, v in args.items()}
 
+        tool = (name or "").lower()
+
+        # 2. Global common aliases
+        if "file_path" in normalized_args and "path" not in normalized_args:
+            normalized_args["path"] = normalized_args["file_path"]
+        if "filepath" in normalized_args and "path" not in normalized_args:
+            normalized_args["path"] = normalized_args["filepath"]
+
+        # 3. Tool-specific mapping
         if tool in {"read_file", "get_file_info", "delete_file", "file_exists"}:
-            if "path" not in normalized_args and isinstance(normalized_args.get("file_path"), str):
-                normalized_args["path"] = normalized_args["file_path"]
+            if "path" not in normalized_args:
+                for alt in ("file", "src", "source", "module"):
+                    if isinstance(normalized_args.get(alt), str):
+                        normalized_args["path"] = normalized_args[alt]
+                        break
 
         if tool in {"write_file", "append_to_file"}:
-            if "path" not in normalized_args and isinstance(normalized_args.get("file_path"), str):
-                normalized_args["path"] = normalized_args["file_path"]
+            if "path" not in normalized_args:
+                for alt in ("file", "dst", "destination", "target"):
+                    if isinstance(normalized_args.get(alt), str):
+                        normalized_args["path"] = normalized_args[alt]
+                        break
             if tool == "write_file" and "content" not in normalized_args:
                 for alt in ("text", "contents", "new_content"):
                     if isinstance(normalized_args.get(alt), str):
@@ -612,8 +641,11 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
                         break
 
         if tool == "replace_in_file":
-            if "path" not in normalized_args and isinstance(normalized_args.get("file_path"), str):
-                normalized_args["path"] = normalized_args["file_path"]
+            if "path" not in normalized_args:
+                for alt in ("file", "target"):
+                    if isinstance(normalized_args.get(alt), str):
+                        normalized_args["path"] = normalized_args[alt]
+                        break
             if "find" not in normalized_args and isinstance(normalized_args.get("old_string"), str):
                 normalized_args["find"] = normalized_args["old_string"]
             if "replace" not in normalized_args and isinstance(normalized_args.get("new_string"), str):
@@ -627,15 +659,27 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
                         break
 
         if tool == "split_python_module_classes":
-            if "source_path" not in normalized_args and isinstance(normalized_args.get("module_path"), str):
-                normalized_args["source_path"] = normalized_args["module_path"]
-            if "target_directory" not in normalized_args and isinstance(normalized_args.get("output_dir"), str):
-                normalized_args["target_directory"] = normalized_args["output_dir"]
+            if "source_path" not in normalized_args:
+                for alt in ("module_path", "module", "path", "source", "file"):
+                    if isinstance(normalized_args.get(alt), str):
+                        normalized_args["source_path"] = normalized_args[alt]
+                        break
+            if "target_directory" not in normalized_args:
+                for alt in ("output_dir", "target_dir", "directory", "dest", "target", "folder"):
+                    if isinstance(normalized_args.get(alt), str):
+                        normalized_args["target_directory"] = normalized_args[alt]
+                        break
             if "delete_source" not in normalized_args:
                 # Default to True to align with "convert module to package" semantics.
                 normalized_args["delete_source"] = True
 
         args = normalized_args
+
+    # Log the FINAL tool call being dispatched (after normalization)
+    get_logger().log_transaction_event("TOOL_DISPATCH", {
+        "tool": name,
+        "arguments": args
+    })
 
     friendly_desc = _get_friendly_description(name, args)
     print(f"  → {friendly_desc}")
@@ -651,17 +695,30 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
 
     try:
         # Check if it's an MCP tool (special handling for lazy imports)
+        start_time = time.time()
         if name.startswith("mcp_"):
             result = _handle_mcp_tool(name, args)
-            debug_logger.log_tool_execution(name, args, result)
+            duration = (time.time() - start_time) * 1000
+            debug_logger.log_tool_execution(name, args, result, duration_ms=duration)
+            debug_logger.log_transaction_event("TOOL_RESULT", {
+                "tool": name,
+                "arguments": args,
+                "result": result,
+                "duration_ms": duration
+            })
             return result
 
         # O(1) dictionary lookup
         handler = _TOOL_DISPATCH.get(name)
         if handler is None:
-            error_result = json.dumps({"error": f"Unknown tool: {name}"})
-            debug_logger.log_tool_execution(name, args, error=f"Unknown tool: {name}")
-            return error_result
+            error_msg = f"Unknown tool: {name}"
+            debug_logger.log_tool_execution(name, args, error=error_msg)
+            debug_logger.log_transaction_event("TOOL_ERROR", {
+                "tool": name,
+                "arguments": args,
+                "error": error_msg
+            })
+            return json.dumps({"error": error_msg})
 
         # Execute with timeout protection if applicable
         if name in _TIMEOUT_PROTECTED_TOOLS:
@@ -673,22 +730,46 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
                         f"{name}({', '.join(f'{k}={v!r}' for k, v in list(args.items())[:2])})",
                         args
                     )
-                    debug_logger.log_tool_execution(name, args, result)
+                    duration = (time.time() - start_time) * 1000
+                    debug_logger.log_tool_execution(name, args, result, duration_ms=duration)
+                    debug_logger.log_transaction_event("TOOL_RESULT", {
+                        "tool": name,
+                        "arguments": args,
+                        "result": result,
+                        "duration_ms": duration
+                    })
                     return result
                 except Exception as e:
                     # Timeout or max retries exceeded
                     error_msg = f"{type(e).__name__}: {e}"
                     debug_logger.log_tool_execution(name, args, error=error_msg)
+                    debug_logger.log_transaction_event("TOOL_ERROR", {
+                        "tool": name,
+                        "arguments": args,
+                        "error": error_msg
+                    })
                     return json.dumps({"error": error_msg})
 
         # Execute the tool handler without timeout protection
         result = handler(args)
-        debug_logger.log_tool_execution(name, args, result)
+        duration = (time.time() - start_time) * 1000
+        debug_logger.log_tool_execution(name, args, result, duration_ms=duration)
+        debug_logger.log_transaction_event("TOOL_RESULT", {
+            "tool": name,
+            "arguments": args,
+            "result": result,
+            "duration_ms": duration
+        })
         return result
 
     except Exception as e:
         error_msg = f"{type(e).__name__}: {e}"
         debug_logger.log_tool_execution(name, args, error=error_msg)
+        debug_logger.log_transaction_event("TOOL_ERROR", {
+            "tool": name,
+            "arguments": args,
+            "error": error_msg
+        })
         return json.dumps({"error": error_msg})
 
 

@@ -159,8 +159,8 @@ class Workspace:
         raw = _clean_path_input(path)
 
         # Guard against LLM "nesting" mistake: prefixing workspace-relative path
-        # with the workspace folder name (e.g., in `C:\repo\redtrade` emitting
-        # `redtrade/lib/...` which creates `<ROOT>/redtrade/lib`).
+        # with the workspace folder name (e.g., in `C:\repo\project` emitting
+        # `project/src/...` which creates `<ROOT>/project/src`).
         try:
             raw_norm = raw.replace("\\", "/")
             if not Path(raw).is_absolute():
@@ -224,22 +224,19 @@ class Workspace:
 def _dedupe_redundant_prefix_path(abs_path: Path, root: Path) -> Optional[Path]:
     """
     Collapse accidental repeated leading segments like
-    '<root>/lib/analysts/lib/analysts/__init__.py' into the shortest suffix.
+    '<root>/src/module/src/module/__init__.py' into the shortest suffix.
     This prevents agents from drifting into nested duplicates when they keep
     appending the same subpath.
     """
-    try:
-        rel_parts = abs_path.relative_to(root).parts
-        prefix_parts = abs_path.parts[: len(abs_path.parts) - len(rel_parts)]
-    except Exception:
-        rel_parts = abs_path.parts
-        prefix_parts = abs_path.parts[:0]
+    rel_parts = list(abs_path.relative_to(root).parts)
+    prefix_parts = abs_path.parts[: len(abs_path.parts) - len(rel_parts)]
 
-    # Need at least X/Y/X/Y to consider it duplicated
+    # Need at least X/Y/X/Y (4 segments) to consider it a duplicated prefix.
+    # A single repeat like lib/lib (2 segments) is too risky to auto-dedupe.
     if len(rel_parts) < 4:
         return None
 
-    parts = list(rel_parts)
+    parts = rel_parts
     changed = False
     while len(parts) >= 4:
         reduced = False
@@ -263,6 +260,43 @@ def _dedupe_redundant_prefix_path(abs_path: Path, root: Path) -> Optional[Path]:
         dedup_abs = root / dedup_rel
 
     return dedup_abs.resolve(strict=False)
+
+
+def maybe_fix_tool_paths(args: dict) -> dict:
+    """
+    Best-effort fix for common path drift (e.g., duplicated prefixes like src/module/src/module).
+    Returns a new args dict with normalized paths; non-path entries unchanged.
+    """
+    if not isinstance(args, dict):
+        return args
+
+    keys = {"path", "file", "file_path", "directory", "dir"}
+    list_keys = {"paths", "files"}
+
+    def _fix_one(val: str) -> str:
+        try:
+            ws = get_workspace()
+            norm = normalize_path(val)
+            p = Path(norm.replace("/", os.sep))
+            if not p.is_absolute():
+                p = ws.root / p
+            dedup = _dedupe_redundant_prefix_path(p, ws.root)
+            target = dedup or p
+            try:
+                rel = target.relative_to(ws.root).as_posix()
+                return rel
+            except Exception:
+                return str(target).replace("\\", "/")
+        except Exception:
+            return val
+
+    fixed = dict(args)
+    for k, v in list(args.items()):
+        if k in keys and isinstance(v, str):
+            fixed[k] = _fix_one(v)
+        if k in list_keys and isinstance(v, list):
+            fixed[k] = [_fix_one(x) if isinstance(x, str) else x for x in v]
+    return fixed
 
 
 # ---------------------------------------------------------------------------
@@ -341,7 +375,7 @@ def reset_workspace() -> None:
 
 
 def _clean_path_input(path: Union[str, Path]) -> str:
-    """Clean incoming path input by stripping quotes and whitespace.
+    """Clean incoming path input by stripping quotes, whitespace, and trailing slashes.
 
     Args:
         path: Raw path string or Path object.
@@ -357,6 +391,11 @@ def _clean_path_input(path: Union[str, Path]) -> str:
         raw.startswith("'") and raw.endswith("'")
     ):
         raw = raw[1:-1].strip()
+    
+    # Remove trailing slashes to avoid issues on Windows directory resolution
+    if len(raw) > 1:
+        raw = raw.rstrip("/\\")
+        
     if not raw:
         raise WorkspacePathError("Empty path")
     return raw

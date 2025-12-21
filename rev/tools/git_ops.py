@@ -19,6 +19,7 @@ _LARGE_PATCH_HINT_THRESHOLD = 120_000
 
 from rev import config
 from rev.debug_logger import prune_old_logs
+from rev.tools.utils import quote_cmd_arg
 
 
 # ========== Helper Function ==========
@@ -244,7 +245,7 @@ def git_diff(pathspec: str = ".", staged: bool = False, context: int = 3) -> str
         args.insert(1, "--staged")
     if pathspec:
         args.append(pathspec)
-    proc = _run_shell(" ".join(shlex.quote(a) for a in args))
+    proc = _run_shell(" ".join(quote_cmd_arg(a) for a in args))
     return json.dumps({"rc": proc.returncode, "diff": proc.stdout[-120000:], "stderr": proc.stderr[-4000:]})
 
 
@@ -387,7 +388,7 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
         strategies = [
             ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", tfp], False),
             ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", "--3way", tfp], True),
-            ("patch", f"patch --batch --forward --dry-run -p1 < {shlex.quote(tfp)}", False),
+            ("patch", f"patch --batch --forward --dry-run -p1 < {quote_cmd_arg(tfp)}", False),
         ]
 
         check_proc: Optional[subprocess.CompletedProcess] = None
@@ -396,7 +397,7 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
 
         for runner, check_args, use_three_way_flag in strategies:
             if runner == "git":
-                check_proc = _run_shell(" ".join(shlex.quote(a) for a in check_args))
+                check_proc = _run_shell(" ".join(quote_cmd_arg(a) for a in check_args))
             else:
                 check_proc = _run_shell(check_args)
 
@@ -411,7 +412,7 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
         else:
             reverse_proc = _run_shell(
                 " ".join(
-                    shlex.quote(a)
+                    quote_cmd_arg(a)
                     for a in ["git", "apply", "--check", "--reverse", "--inaccurate-eof", tfp]
                 )
             )
@@ -440,9 +441,9 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
             if use_three_way:
                 apply_args.append("--3way")
             apply_args.append(tfp)
-            apply_proc = _run_shell(" ".join(shlex.quote(a) for a in apply_args))
+            apply_proc = _run_shell(" ".join(quote_cmd_arg(a) for a in apply_args))
         else:
-            apply_proc = _run_shell(f"patch --batch --forward -p1 < {shlex.quote(tfp)}")
+            apply_proc = _run_shell(f"patch --batch --forward -p1 < {quote_cmd_arg(tfp)}")
 
         if apply_proc.returncode == 0:
             post_status = _working_tree_snapshot()
@@ -497,7 +498,7 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
 def git_add(files: str = ".") -> str:
     """Add files to git staging area."""
     try:
-        result = _run_shell(f"git add {shlex.quote(files)}")
+        result = _run_shell(f"git add {quote_cmd_arg(files)}")
         success = result.returncode == 0
         if not success:
             return json.dumps({
@@ -527,12 +528,12 @@ def git_commit(message: str, add_files: bool = False, files: str = ".") -> str:
     try:
         # Optionally add files first
         if add_files:
-            add_result = _run_shell(f"git add {shlex.quote(files)}")
+            add_result = _run_shell(f"git add {quote_cmd_arg(files)}")
             if add_result.returncode != 0:
                 return json.dumps({"success": False, "error": f"git add failed: {add_result.stderr}"})
 
         # Commit
-        commit_result = _run_shell(f"git commit -m {shlex.quote(message)}")
+        commit_result = _run_shell(f"git commit -m {quote_cmd_arg(message)}")
         if commit_result.returncode != 0:
             return json.dumps({"success": False, "error": f"git commit failed: {commit_result.stderr}"})
 
@@ -591,7 +592,7 @@ def git_branch(action: str = "list", branch_name: str = None) -> str:
                 "returncode": result.returncode
             })
         elif action == "create" and branch_name:
-            result = _run_shell(f"git branch {shlex.quote(branch_name)}")
+            result = _run_shell(f"git branch {quote_cmd_arg(branch_name)}")
             return json.dumps({
                 "action": "create",
                 "branch": branch_name,
@@ -599,7 +600,7 @@ def git_branch(action: str = "list", branch_name: str = None) -> str:
                 "output": result.stdout
             })
         elif action == "switch" and branch_name:
-            result = _run_shell(f"git checkout {shlex.quote(branch_name)}")
+            result = _run_shell(f"git checkout {quote_cmd_arg(branch_name)}")
             return json.dumps({
                 "action": "switch",
                 "branch": branch_name,

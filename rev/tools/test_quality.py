@@ -4,7 +4,6 @@
 
 import json
 import re
-import shlex
 import tempfile
 import importlib
 import inspect
@@ -13,7 +12,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
 from rev import config
-from rev.tools.utils import _run_shell, _safe_path
+from rev.tools.utils import _run_shell, _safe_path, quote_cmd_arg
 
 
 def _resolve_paths(paths: Optional[List[str]]) -> Tuple[List[Path], List[str]]:
@@ -39,7 +38,7 @@ def run_property_tests(test_paths: Optional[List[str]] = None, max_examples: int
             return json.dumps({"error": "No valid test paths", "missing_paths": missing})
 
         cmd = f"pytest -q --maxfail=50 --disable-warnings --hypothesis-max-examples={max_examples} " + " ".join(
-            shlex.quote(str(p)) for p in resolved_paths
+            quote_cmd_arg(str(p)) for p in resolved_paths
         )
         proc = _run_shell(cmd, timeout=900)
 
@@ -107,7 +106,7 @@ def check_contracts(paths: Optional[List[str]] = None, timeout_seconds: int = 60
             return json.dumps({"error": "No valid paths to check", "missing_paths": missing})
 
         cmd = " ".join(["crosshair", "check", f"--per_path_timeout={timeout_seconds}"] + [
-            shlex.quote(str(p)) for p in resolved_paths
+            quote_cmd_arg(str(p)) for p in resolved_paths
         ])
         proc = _run_shell(cmd, timeout=timeout_seconds + 30)
 
@@ -184,7 +183,7 @@ def compare_behavior_with_baseline(baseline_ref: str = "origin/main", test_selec
     """Run tests on baseline ref vs current and diff results."""
     try:
         temp_dir = Path(tempfile.mkdtemp(prefix="rev_baseline_"))
-        worktree_cmd = f"git worktree add --detach {shlex.quote(str(temp_dir))} {shlex.quote(baseline_ref)}"
+        worktree_cmd = f"git worktree add --detach {quote_cmd_arg(str(temp_dir))} {quote_cmd_arg(baseline_ref)}"
         add_proc = _run_shell(worktree_cmd, timeout=120)
         if add_proc.returncode != 0:
             return json.dumps({"error": "Failed to create baseline worktree", "details": add_proc.stderr})
@@ -202,7 +201,7 @@ def compare_behavior_with_baseline(baseline_ref: str = "origin/main", test_selec
 
         deltas = _diff_summaries(baseline_summary, current_summary)
 
-        _run_shell(f"git worktree remove {shlex.quote(str(temp_dir))} --force", timeout=60)
+        _run_shell(f"git worktree remove {quote_cmd_arg(str(temp_dir))} --force", timeout=60)
 
         return json.dumps({
             "deltas": deltas,
@@ -414,8 +413,8 @@ def bisect_test_failure(test_command: str, good_ref: Optional[str] = None, bad_r
         script = Path(tempfile.mkdtemp(prefix="rev_bisect_")) / "run_test.sh"
         script.write_text(f"#!/bin/sh\n{test_command}\n", encoding="utf-8")
 
-        _run_shell(f"git bisect start {shlex.quote(bad_ref)} {shlex.quote(good_ref)}", timeout=60)
-        result = _run_shell(f"git bisect run sh {shlex.quote(str(script))}", timeout=1800)
+        _run_shell(f"git bisect start {quote_cmd_arg(bad_ref)} {quote_cmd_arg(good_ref)}", timeout=60)
+        result = _run_shell(f"git bisect run sh {quote_cmd_arg(str(script))}", timeout=1800)
         log = result.stdout + "\n" + (result.stderr or "")
         culprit = None
         for line in log.splitlines():
@@ -454,7 +453,7 @@ def generate_repro_case(context: str, target_path: str = "tests/regressions/test
             """
         )
         target.write_text(test_code, encoding="utf-8")
-        proc = _run_shell(f"pytest -q {shlex.quote(str(target))}", timeout=300)
+        proc = _run_shell(f"pytest -q {quote_cmd_arg(str(target))}", timeout=300)
         return json.dumps({
             "test_path": target.relative_to(config.ROOT).as_posix(),
             "run_output": (proc.stdout + proc.stderr)[:4000],

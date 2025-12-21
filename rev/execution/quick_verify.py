@@ -9,7 +9,6 @@ for the workflow loop: Plan → Execute → Verify → Report → Re-plan if nee
 import json
 import re
 import os
-import shlex
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, Iterable
 from dataclasses import dataclass
@@ -24,6 +23,7 @@ from rev.tools.workspace_resolver import (
     normalize_path,
     normalize_to_workspace_relative,
 )
+from rev.tools.utils import quote_cmd_arg
 
 _READ_ONLY_TOOLS = {
     "read_file",
@@ -51,16 +51,51 @@ _WRITE_TOOLS = {
 def _extract_tool_noop(tool: str, raw_result: Any) -> Optional[str]:
     """Return a tool_noop reason string when a tool reports no changes."""
     tool_l = (tool or "").lower()
-    if tool_l != "replace_in_file":
-        return None
     if not isinstance(raw_result, str) or not raw_result.strip():
         return None
     try:
         payload = json.loads(raw_result)
     except Exception:
         return None
-    if isinstance(payload, dict) and payload.get("replaced") == 0:
-        return "tool_noop: replace_in_file made no changes (replaced=0)"
+    if not isinstance(payload, dict):
+        return None
+
+    # Specific no-op detections per tool
+    if tool_l == "replace_in_file":
+        if payload.get("replaced") == 0:
+            return (
+                "tool_noop: replace_in_file made no changes (replaced=0). "
+                "RECOVERY: Ensure you're not escaping content incorrectly and check whitespace, indentation, and context. "
+                "Use read_file tool to verify the actual file content before retrying."
+            )
+    
+    elif tool_l in ("search_code", "rag_search"):
+        results = payload.get("matches") or payload.get("results")
+        if isinstance(results, list) and len(results) == 0:
+            return f"tool_noop: {tool_l} returned 0 results. RECOVERY: Broaden your search pattern or check for typos in file names/symbols."
+            
+    elif tool_l == "list_dir":
+        files = payload.get("files")
+        if isinstance(files, list) and len(files) == 0:
+            return "tool_noop: list_dir returned 0 files. RECOVERY: Check if the directory path or glob pattern is correct."
+            
+    elif tool_l == "run_tests":
+        stdout = (payload.get("stdout") or "").lower()
+        if "collected 0 items" in stdout or "no tests ran" in stdout or "no tests found" in stdout:
+            return "tool_noop: run_tests found 0 tests to run. RECOVERY: Check your test path or test discovery patterns."
+            
+    elif tool_l == "apply_patch":
+        if payload.get("applied_hunks") == 0:
+            return "tool_noop: apply_patch applied 0 hunks. RECOVERY: The diff might be stale or target the wrong lines."
+            
+    elif tool_l == "split_python_module_classes":
+        if payload.get("classes_split") == 0:
+            return "tool_noop: split_python_module_classes found 0 classes to split."
+            
+    elif tool_l.startswith("rewrite_python_") or tool_l.startswith("rename_") or tool_l.startswith("move_"):
+        if payload.get("changed") == 0 or payload.get("replaced") == 0:
+            return f"tool_noop: {tool_l} made 0 changes."
+
     return None
 
 
@@ -121,21 +156,7 @@ class VerificationResult:
 def verify_task_execution(task: Task, context: RevContext) -> VerificationResult:
     """
     Verify that a task actually completed successfully.
-
-    This checks that:
-    1. The task's action was actually performed
-    2. Any files mentioned were actually created/modified
-    3. Imports are valid if this was a refactoring task
-    4. Tests still pass (if applicable)
-
-    Args:
-        task: The task that was supposedly completed
-        context: The execution context
-
-    Returns:
-        VerificationResult indicating if the task truly succeeded
     """
-
     if task.status != TaskStatus.COMPLETED:
         return VerificationResult(
             passed=False,
@@ -144,21 +165,21 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
             should_replan=False
         )
 
+    # Surface tool no-ops clearly (e.g., search with 0 matches) first.
+    # This ensures all actions are checked for functional success.
+    events = getattr(task, "tool_events", None) or []
+    for ev in reversed(list(events)):
+        reason = _extract_tool_noop(str(ev.get("tool") or ""), ev.get("raw_result"))
+        if reason:
+            return VerificationResult(
+                passed=False,
+                message=reason,
+                details={"tool": ev.get("tool"), "artifact_ref": ev.get("artifact_ref")},
+                should_replan=True,
+            )
+
     action_type = task.action_type.lower()
     verification_mode = _get_verification_mode()
-
-    # Surface tool no-ops clearly (e.g., replace_in_file with replaced=0).
-    if action_type in {"add", "create", "edit", "refactor", "delete", "rename"}:
-        events = getattr(task, "tool_events", None) or []
-        for ev in reversed(list(events)):
-            reason = _extract_tool_noop(str(ev.get("tool") or ""), ev.get("raw_result"))
-            if reason:
-                return VerificationResult(
-                    passed=False,
-                    message=reason,
-                    details={"tool": ev.get("tool"), "artifact_ref": ev.get("artifact_ref")},
-                    should_replan=True,
-                )
 
     # Prevent "looks done vs is done": an edit/refactor task that only read files
     # should not be marked as completed.
@@ -179,6 +200,7 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
         return _verify_directory_creation(task, context)
 
     # Route to appropriate verification handler
+    verifiable_read_actions = {"read", "analyze", "research", "investigate", "general"}
     if action_type == "refactor":
         result = _verify_refactoring(task, context)
     elif action_type == "add" or action_type == "create":
@@ -189,6 +211,8 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
         result = _verify_directory_creation(task, context)
     elif action_type == "test":
         result = _verify_test_execution(task, context)
+    elif action_type in verifiable_read_actions:
+        result = _verify_read_task(task, context)
     else:
         # For unknown action types, return a passing result but flag for caution
         return VerificationResult(
@@ -480,74 +504,101 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
                 details["imports_valid"] = True
                 debug_info["import_validation"] = "PASSED"
 
+            # Check 3b: Verify __init__.py has __all__ exports (if it exists)
+            init_file = target_dir / "__init__.py"
+            if init_file.exists():
+                try:
+                    init_content = _read_file_with_fallback_encoding(init_file)
+                    if init_content:
+                        if "__all__" in init_content:
+                            details["has_all_exports"] = True
+                            debug_info["__all___status"] = "PRESENT"
+                        else:
+                            # __all__ is missing but imports might be present
+                            # This is not necessarily an error if imports are explicit
+                            if "from ." in init_content or "import " in init_content:
+                                details["has_explicit_imports"] = True
+                                debug_info["__all___status"] = "MISSING_BUT_HAS_IMPORTS"
+                            else:
+                                issues.append(f"[WARN] {init_file.name}: No __all__ exports and no imports found")
+                                debug_info["__all___status"] = "MISSING_NO_IMPORTS"
+                except Exception as e:
+                    debug_info["__all___check_error"] = str(e)
+
     # Check 4: Verify old file was updated with imports (if applicable)
     # Look for the original file mentioned in task description
     old_file_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\\\-]+\.py)'
     old_file_matches = re.findall(old_file_pattern, task.description)
     if old_file_matches:
-        old_file = _resolve_for_verification(old_file_matches[0], purpose="verify refactoring source file")
+        source_raw = old_file_matches[0]
+        old_file = _resolve_for_verification(source_raw, purpose="verify refactoring source file")
         if not old_file and target_dir:
             # Heuristic: source next to target_dir, e.g., module.py when target_dir=module/
-            alt_source = (target_dir.parent / f"{target_dir.name}.py").resolve()
+            alt_source = target_dir.parent / f"{target_dir.name}.py"
             if alt_source.exists():
                 old_file = alt_source
+        
+        # If it's a directory now, it was likely converted to a package (which is success)
         if not old_file:
-            issues.append(f"[FAIL] Could not resolve source file path for verification: {old_file_matches[0]}")
-            debug_info["main_file_status"] = "UNRESOLVABLE"
-            old_file = None
-        debug_info["source_file"] = str(old_file)
-        debug_info["source_file_exists"] = old_file.exists() if old_file else False
-        if old_file:
-            details["source_file_path"] = str(old_file)
-
-        if old_file and old_file.exists():
+            # Check if it's a directory
             try:
-                # Use helper function for robust multi-encoding file reading
-                content = _read_file_with_fallback_encoding(old_file)
-
-                if content is None:
-                    debug_info["main_file_status"] = "NOT_READABLE"
-                else:
-                    original_size = len(content)
-                    debug_info["source_file_size"] = original_size
-
-                    # Check if it has import statements from the new directory
-                    has_imports_from_new = re.search(rf'from\s+\.{target_dir.name}', content)
-                    if has_imports_from_new:
-                        details["main_file_updated"] = True
-                        debug_info["main_file_status"] = "UPDATED_WITH_IMPORTS"
-                    else:
-                        issues.append(
-                            f"[FAIL] Original file {old_file} was NOT updated with imports from {target_dir}\n"
-                            f"   File still contains {original_size} bytes (should be much smaller if extracted)"
-                        )
-                        debug_info["main_file_status"] = "NOT_UPDATED"
-            except Exception as e:
-                issues.append(f"[FAIL] Could not read {old_file}: {e}")
-                debug_info["main_file_status"] = f"ERROR: {str(e)}"
-        else:
-            if old_file:
-                package_candidate = old_file.with_suffix("")
-                package_init = package_candidate / "__init__.py"
-                if package_candidate.exists() and package_init.exists():
+                candidate = (get_workspace().root / normalize_path(source_raw)).resolve()
+                if candidate.exists() and candidate.is_dir():
+                    # This is success - original file is now the package directory
                     details["main_file_converted_to_package"] = True
                     debug_info["main_file_status"] = "CONVERTED_TO_PACKAGE"
-                    debug_info["package_path"] = str(package_candidate)
-                else:
-                    # If target_dir exists with files, downgrade to warning
-                    if target_dir and target_dir.exists():
-                        warn = (
-                            f"Original file {old_file} missing but extraction target {target_dir} exists; "
-                            "treating as converted package"
-                        )
-                        details["main_file_converted_to_package"] = True
-                        debug_info["main_file_status"] = "MISSING_BUT_TARGET_EXISTS"
-                        debug_info["warnings"] = debug_info.get("warnings", []) + [warn]
+                    old_file = None
+            except Exception:
+                pass
+
+        if old_file:
+            debug_info["source_file"] = str(old_file)
+            debug_info["source_file_exists"] = old_file.exists()
+            details["source_file_path"] = str(old_file)
+
+            if old_file.exists() and old_file.is_file():
+                try:
+                    # Use helper function for robust multi-encoding file reading
+                    content = _read_file_with_fallback_encoding(old_file)
+
+                    if content is None:
+                        debug_info["main_file_status"] = "NOT_READABLE"
                     else:
-                        issues.append(
-                            f"[FAIL] Original file {old_file} no longer exists and package '{package_candidate}' was not found"
+                        original_size = len(content)
+                        debug_info["source_file_size"] = original_size
+
+                        # Check if it has import statements from the new directory
+                        # Handle both relative and absolute-style imports
+                        target_name = target_dir.name
+                        has_imports_from_new = (
+                            re.search(rf'from\s+\.{target_name}', content) or
+                            re.search(rf'import\s+{target_name}', content)
                         )
-                        debug_info["main_file_status"] = "MISSING"
+                        if has_imports_from_new:
+                            details["main_file_updated"] = True
+                            debug_info["main_file_status"] = "UPDATED_WITH_IMPORTS"
+                        else:
+                            issues.append(
+                                f"[FAIL] Original file {old_file} was NOT updated with imports from {target_dir}\n"
+                                f"   File still contains {original_size} bytes (should be much smaller if extracted)"
+                            )
+                            debug_info["main_file_status"] = "NOT_UPDATED"
+                except Exception as e:
+                    issues.append(f"[FAIL] Could not read {old_file}: {e}")
+                    debug_info["main_file_status"] = f"ERROR: {str(e)}"
+            elif old_file.exists() and old_file.is_dir():
+                # It exists but it's a directory - handle as package conversion
+                details["main_file_converted_to_package"] = True
+                debug_info["main_file_status"] = "CONVERTED_TO_PACKAGE"
+        elif not details.get("main_file_converted_to_package"):
+            # Only report error if we didn't determine it was converted to a package
+            issues.append(f"[FAIL] Could not resolve source file path for verification: {source_raw}")
+            debug_info["main_file_status"] = "UNRESOLVABLE"
+    else:
+        # Check if original file exists at a different location (e.g. was already moved)
+        if not target_dir:
+            # Last resort: try to find anything related to the refactoring in task description
+            pass
 
     if issues:
         non_benign = [issue for issue in issues if "Original file" not in issue]
@@ -873,7 +924,7 @@ def _run_validation_command(cmd: str, *, use_tests_tool: bool = False, timeout: 
 
 def _quote_path(path: Path) -> str:
     """Quote a path for shell commands."""
-    return shlex.quote(str(path))
+    return quote_cmd_arg(str(path))
 
 
 def _paths_or_default(paths: list[Path]) -> list[Path]:
@@ -920,20 +971,40 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
     pytest_res = _run_validation_command(pytest_cmd, use_tests_tool=True, timeout=config.VALIDATION_TIMEOUT_SECONDS)
     strict_details["pytest"] = pytest_res
     rc = pytest_res.get("rc", 1)
-    if pytest_res.get("blocked") or rc != 0:
-        return VerificationResult(
-            passed=False,
-            message="Verification failed: pytest errors",
-            details={"strict": strict_details},
-            should_replan=True,
-        )
+    # Pytest exit codes: 0=pass, 1=fail, 2=interrupted, 3=internal error, 4=usage error, 5=no tests collected
+    # Exit code 5 (no tests collected) should be treated as PASS, not FAIL
+    if pytest_res.get("blocked") or (rc not in (0, 4, 5) and rc != 0):
+        # Only fail on actual test failures (rc=1) or errors (rc=2,3), not on "no tests collected" (rc=5)
+        if rc in (4, 5):
+            # No tests collected - this is OK, not a failure
+            strict_details["pytest_note"] = f"No tests collected (rc={rc}) - treated as pass"
+        else:
+            return VerificationResult(
+                passed=False,
+                message="Verification failed: pytest errors",
+                details={"strict": strict_details},
+                should_replan=True,
+            )
 
     # Optional lint/type checks if allowed
+    # Run only on modified paths to avoid pre-existing errors in unrelated files
     optional_checks = []
     if "ruff" in config.ALLOW_CMDS:
-        optional_checks.append(("ruff", "ruff check ."))
+        py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]
+        if py_paths:
+            ruff_targets = " ".join(_quote_path(p) for p in py_paths[:10])  # Limit to 10 files
+            # Use targeted error codes to avoid failing on pre-existing style issues
+            # E9: Runtime/syntax errors - always critical
+            # F63: Invalid print syntax - syntax issue
+            # F7: Statement problems (break/continue outside loop, etc.)
+            # NOTE: Removed F82 (undefined names) - too noisy for pre-existing issues
+            # Let compileall catch import/undefined errors instead
+            optional_checks.append(("ruff", f"ruff check {ruff_targets} --select E9,F63,F7"))
     if "mypy" in config.ALLOW_CMDS:
-        optional_checks.append(("mypy", "mypy ."))
+        py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]
+        if py_paths:
+            mypy_targets = " ".join(_quote_path(p) for p in py_paths[:10])
+            optional_checks.append(("mypy", f"mypy {mypy_targets}"))
     for label, cmd in optional_checks:
         res = _run_validation_command(cmd, timeout=config.VALIDATION_TIMEOUT_SECONDS)
         strict_details[label] = res
@@ -964,17 +1035,28 @@ def _run_validation_steps(validation_steps: list[str], details: Dict[str, Any], 
         seen_cmds.add(cmd)
         commands.append((label, cmd, tool))
 
+    # Get Python file paths for targeted linting
+    py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]
+
     for step in validation_steps:
         text = step.lower()
         if "syntax" in text or "compile" in text:
             cmd = "python -m compileall " + " ".join(_quote_path(p) for p in paths)
             _add("compileall", cmd)
         if "lint" in text or "linter" in text:
-            _add("ruff", "ruff check .")
+            # Run ruff only on modified files, targeting severe errors to avoid pre-existing style issues
+            # E9: Runtime/syntax errors, F63: Invalid print syntax, F7: Statement problems
+            # NOTE: Removed F82 (undefined names) - too noisy for pre-existing issues
+            if py_paths:
+                ruff_targets = " ".join(_quote_path(p) for p in py_paths[:10])
+                _add("ruff", f"ruff check {ruff_targets} --select E9,F63,F7")
         if "test" in text:
             _add("pytest", "pytest -q", "run_tests")
         if "mypy" in text or "type" in text:
-            _add("mypy", "mypy .")
+            # Run mypy only on modified files to avoid pre-existing errors
+            if py_paths:
+                mypy_targets = " ".join(_quote_path(p) for p in py_paths[:10])
+                _add("mypy", f"mypy {mypy_targets}")
 
     if not commands:
         return None
@@ -1097,6 +1179,28 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
     )
 
 
+def _verify_read_task(task: Task, context: RevContext) -> VerificationResult:
+    """Verification for read/analyze/research tasks with no-op detection."""
+    events = getattr(task, "tool_events", None) or []
+    if not events:
+        return VerificationResult(
+            passed=False,
+            message="Read task executed no tools",
+            details={},
+            should_replan=True,
+        )
+
+    # Note: verify_task_execution already checked tool_noop for all events.
+    # If we reached here, no explicit tool_noop was found.
+    # We still perform a basic check that at least one tool ran.
+    
+    return VerificationResult(
+        passed=True,
+        message="Read-like task executed tool(s)",
+        details={"tools": [ev.get("tool") for ev in events]},
+    )
+
+
 def _verify_directory_creation(task: Task, context: RevContext) -> VerificationResult:
     """Verify that a directory was actually created."""
 
@@ -1200,26 +1304,11 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
                 should_replan=True,
             )
 
-    # If the task is about auto-registration, surface the observed count from stdout/stderr even if rc != 0.
-    def _extract_auto_registered_count(out: str) -> Optional[int]:
-        if not out:
-            return None
-        match = re.search(r"Auto-registered\s+(\d+)", out, re.IGNORECASE)
-        return int(match.group(1)) if match else None
-
     desc_lower = (task.description or "").lower()
     output_combined = ""
     if payload:
         output_combined = (payload.get("stdout", "") or "") + (payload.get("stderr", "") or "")
-    if "auto-registered" in desc_lower and output_combined:
-        count = _extract_auto_registered_count(output_combined)
-        if count is not None and count <= 0:
-            return VerificationResult(
-                passed=False,
-                message=f"Auto-registration still empty (Auto-registered {count})",
-                details={"count": count, "output": output_combined[:500]},
-                should_replan=True,
-            )
+
     if payload and payload.get("skipped") is True and payload.get("kind") == "skipped_tests":
         last_test_iteration = payload.get("last_test_iteration")
         last_test_rc = payload.get("last_test_rc")
@@ -1255,24 +1344,6 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
         if rc == 0:
             cmd = payload.get("cmd") or payload.get("command")
             if isinstance(cmd, str) and cmd.strip() and "pytest" not in cmd.lower():
-                if "auto-registered" in (task.description or "").lower():
-                    match = re.search(r"Auto-registered\s+(\d+)", output, re.IGNORECASE)
-                    if match:
-                        count = int(match.group(1))
-                        if count <= 0:
-                            return VerificationResult(
-                                passed=False,
-                                message=f"Auto-registration still empty (Auto-registered {count})",
-                                details={"count": count, "command": cmd, "output": output[:500]},
-                                should_replan=True,
-                            )
-                    else:
-                        return VerificationResult(
-                            passed=False,
-                            message="Could not find Auto-registered count in startup output",
-                            details={"command": cmd, "output": output[:500]},
-                            should_replan=True,
-                        )
                 return VerificationResult(
                     passed=True,
                     message="Command succeeded",

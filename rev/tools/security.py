@@ -3,12 +3,11 @@
 """Security scanning and analysis utilities."""
 
 import json
-import shlex
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 from rev import config
-from rev.tools.utils import _run_shell, _safe_path
+from rev.tools.utils import _run_shell, _safe_path, quote_cmd_arg
 
 
 def scan_security_issues(
@@ -50,7 +49,7 @@ def scan_security_issues(
         bandit_cmd_parts = ["bandit", "-f", "json"]
         if any(p.is_dir() for p in resolved_paths):
             bandit_cmd_parts.append("-r")
-        bandit_cmd_parts.extend(shlex.quote(str(p)) for p in resolved_paths)
+        bandit_cmd_parts.extend(quote_cmd_arg(str(p)) for p in resolved_paths)
         bandit_proc = _run_shell(" ".join(bandit_cmd_parts), timeout=180)
 
         if bandit_proc.returncode != 127:
@@ -74,7 +73,7 @@ def scan_security_issues(
 
         # Ruff security rules
         ruff_cmd_parts = ["ruff", "check", "--select", "S", "--output-format", "json"]
-        ruff_cmd_parts.extend(shlex.quote(str(p)) for p in resolved_paths)
+        ruff_cmd_parts.extend(quote_cmd_arg(str(p)) for p in resolved_paths)
         ruff_proc = _run_shell(" ".join(ruff_cmd_parts), timeout=180)
 
         if ruff_proc.returncode != 127:
@@ -102,7 +101,7 @@ def scan_security_issues(
 
         # Semgrep auto config (multi-language)
         semgrep_cmd_parts = ["semgrep", "--config=auto", "--json"]
-        semgrep_cmd_parts.extend(shlex.quote(str(p)) for p in resolved_paths)
+        semgrep_cmd_parts.extend(quote_cmd_arg(str(p)) for p in resolved_paths)
         semgrep_proc = _run_shell(" ".join(semgrep_cmd_parts), timeout=180)
 
         if semgrep_proc.returncode != 127:
@@ -145,7 +144,11 @@ def scan_security_issues(
             "missing_paths": missing
         }
 
-        return json.dumps({"issues": issues, "summary": summary}, indent=2)
+        return json.dumps({
+            "scanned": str(target_paths[0]) if target_paths else ".",
+            "issues": issues,
+            "summary": summary
+        }, indent=2)
 
     except Exception as e:
         return json.dumps({"error": f"Security issue scan failed: {type(e).__name__}: {e}"})
@@ -166,7 +169,7 @@ def detect_secrets(path: str = ".") -> str:
             return json.dumps({"error": f"Path not found: {path}"})
 
         # Try detect-secrets tool
-        cmd = f"detect-secrets scan {shlex.quote(str(scan_path))}"
+        cmd = f"detect-secrets scan {quote_cmd_arg(str(scan_path))}"
         proc = _run_shell(cmd, timeout=60)
 
         if proc.returncode == 127:
@@ -188,7 +191,7 @@ def detect_secrets(path: str = ".") -> str:
                 by_file[file_path] = len(secrets)
 
             return json.dumps({
-                "scanned": scan_path.relative_to(config.ROOT).as_posix(),
+                "scanned": str(scan_path),
                 "tool": "detect-secrets",
                 "secrets_found": total_secrets,
                 "files_with_secrets": len(results),
@@ -196,7 +199,7 @@ def detect_secrets(path: str = ".") -> str:
             })
         except Exception:
             return json.dumps({
-                "scanned": scan_path.relative_to(config.ROOT).as_posix(),
+                "scanned": str(scan_path),
                 "message": "No secrets detected or scan completed successfully"
             })
 
@@ -219,9 +222,9 @@ def check_license_compliance(path: str = ".") -> str:
     }
 
     try:
-        for lang, config in lang_config.items():
-            if (config.ROOT / config["file"]).exists():
-                proc = _run_shell(config["command"], timeout=60)
+        for lang, cfg in lang_config.items():
+            if (config.ROOT / cfg["file"]).exists():
+                proc = _run_shell(cfg["command"], timeout=60)
                 if proc.returncode != 127:
                     continue
 

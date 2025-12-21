@@ -65,7 +65,7 @@ If the user asks to port/implement code, but the specific source files are NOT i
 DO NOT guess or hallucinate class names.
 DO NOT create [ADD] or [EDIT] tasks yet.
 Create a "Discovery Plan" using [EXEC] tasks to find the files.
-Task 1: [EXEC] cmd="dir /b /s ..\external-repo" (Windows) or "find ../external-repo" (Linux)
+Task 1: [EXEC] cmd="dir /b /s ..\\external-repo" (Windows) or "find ../external-repo" (Linux)
 Task 2: [EXEC] cmd="grep -r 'class' ../external-repo"
 
 IF YOU DO NOT KNOW THE SPECIFIC NAMES of the classes, functions, or features to implement:
@@ -203,11 +203,11 @@ EXAMPLE for "implement features from another repository/framework" (WITH SPECIFI
   {"description": "Review existing codebase structure in src/ to identify integration points", "action_type": "review", "complexity": "low"},
   {"description": "Scan ../external-repo to list all candidate classes/functions available", "action_type": "review", "complexity": "low"},
   {"description": "Compare external implementations with existing ones to identify non-duplicates", "action_type": "review", "complexity": "low"},
-  {"description": "Port 'MovingAverageCrossover' implementation from ../external-repo/strategies.py", "action_type": "add", "complexity": "medium"},
-  {"description": "Port 'BollingerBand' implementation from ../external-repo/indicators.py", "action_type": "add", "complexity": "medium"},
-  {"description": "Port 'Macd' implementation from ../external-repo/indicators.py", "action_type": "add", "complexity": "medium"},
+  {"description": "Port 'DataProcessor' implementation from ../external-repo/processing.py", "action_type": "add", "complexity": "medium"},
+  {"description": "Port 'CacheManager' implementation from ../external-repo/cache.py", "action_type": "add", "complexity": "medium"},
+  {"description": "Port 'Logger' implementation from ../external-repo/logging.py", "action_type": "add", "complexity": "medium"},
   {"description": "Register new components in app configuration", "action_type": "edit", "complexity": "low"},
-  {"description": "Write unit tests for MovingAverageCrossover, BollingerBand, Macd", "action_type": "add", "complexity": "medium"},
+  {"description": "Write unit tests for DataProcessor, CacheManager, Logger", "action_type": "add", "complexity": "medium"},
   {"description": "Run pytest tests/ to validate integration", "action_type": "test", "complexity": "low"}
 ]
 
@@ -221,7 +221,7 @@ You MUST output PURE JSON and NOTHING ELSE.
 Output format (strict): return ONLY a JSON array of objects with keys "description", "action_type", "complexity".."""
 
 
-TOOL_RESULT_CHAR_LIMIT = 6000
+TOOL_RESULT_CHAR_LIMIT = 12000  # Increased to prevent truncation of important code context
 
 
 def _truncate_tool_content(content: str, limit: int = TOOL_RESULT_CHAR_LIMIT) -> str:
@@ -1554,9 +1554,9 @@ Return ONLY a JSON object, no other text:
 }}
 
 EXAMPLES:
-{{"action_type": "add", "description": "Create src/components/breakout.py with Breakout component"}}
-{{"action_type": "edit", "description": "Update src/__init__.py to export new components"}}
-{{"action_type": "test", "description": "Run pytest to verify refactoring is successful"}}
+{{"action_type": "add", "description": "Create src/auth/auth_validator.py with AuthValidator class"}}
+{{"action_type": "edit", "description": "Update src/registry.py to include new services"}}
+{{"action_type": "test", "description": "Run pytest tests/auth to verify changes"}}
 {{"action_type": "review", "description": "GOAL_ACHIEVED"}}
 
 Available tools: {tools_description}

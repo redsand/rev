@@ -11,7 +11,7 @@ import os
 import json
 import time
 import traceback
-from typing import Dict, Any, List, Optional, Literal
+from typing import Dict, Any, List, Optional, Literal, Tuple
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections import defaultdict
@@ -32,6 +32,7 @@ from rev.execution.executor import execution_mode, concurrent_execution_mode, fi
 from rev.execution.state_manager import StateManager
 from rev.execution.prompt_optimizer import optimize_prompt_if_needed
 from rev.execution.quick_verify import verify_task_execution, VerificationResult
+from rev.execution.anchoring_scorer import AnchoringScorer, AnchoringDecision
 from rev.tools.registry import get_available_tools, get_repo_context
 from rev.debug_logger import DebugLogger
 from rev.config import (
@@ -48,6 +49,7 @@ from rev.config import (
 )
 from rev.llm.client import get_token_usage, ollama_chat
 from rev.core.context import RevContext, ResourceBudget
+from rev.execution.session import SessionTracker
 from rev.core.shared_enums import AgentPhase
 from rev.core.agent_registry import AgentRegistry
 from rev.cache import clear_analysis_caches
@@ -58,6 +60,424 @@ from rev.tools.workspace_resolver import resolve_workspace_path
 from rev.core.text_tool_shim import maybe_execute_tool_call_from_text
 from rev.agents.subagent_io import build_subagent_output
 from rev.execution.action_normalizer import normalize_action_type
+from difflib import SequenceMatcher
+
+
+def _format_verification_feedback(result: VerificationResult) -> str:
+    """Format verification result for LLM feedback."""
+    feedback = result.message or "Verification failed"
+    
+    details = result.details or {}
+    
+    # Extract validation command outputs if present (from quick_verify.py)
+    validation = details.get("validation") or details.get("strict")
+    if isinstance(validation, dict):
+        for label, res in validation.items():
+            if not isinstance(res, dict):
+                continue
+            rc = res.get("rc")
+            if rc is not None and rc != 0:
+                stdout = (res.get("stdout") or "").strip()
+                stderr = (res.get("stderr") or "").strip()
+                feedback += f"\n\n--- {label} failure (exit code: {rc}) ---"
+                if stderr:
+                    # Take last 20 lines of stderr for context
+                    stderr_lines = stderr.splitlines()
+                    feedback += "\nstderr:\n" + "\n".join(stderr_lines[-20:])
+                elif stdout:
+                    # Take last 20 lines of stdout
+                    stdout_lines = stdout.splitlines()
+                    feedback += "\nstdout:\n" + "\n".join(stdout_lines[-20:])
+    
+    # Extract debug info if present
+    if "debug" in details:
+        feedback += f"\n\nDebug Info:\n{json.dumps(details['debug'], indent=2)}"
+        
+    return feedback
+
+
+def _extract_file_path_from_description(desc: str) -> Optional[str]:
+    """Extract a file path from a task description for read tracking.
+
+    Returns the first path-like string found, or None.
+    """
+    if not desc:
+        return None
+
+    # Match common path patterns
+    # Support most common source, config, and data extensions
+    ext = r"(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1)"
+    patterns = [
+        rf'`([^`]+\.{ext})`',  # backticked paths
+        rf'"([^"]+\.{ext})"',  # quoted paths
+        rf'\b([A-Za-z]:\\[^\s]+\.{ext})\b',  # Windows absolute
+        rf'\b(/[^\s]+\.{ext})\b',  # Unix absolute
+        rf'\b([\w./\\-]+\.{ext})\b',  # relative paths
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, desc, re.IGNORECASE)
+        if match:
+            return match.group(1)
+
+    return None
+
+
+def _extract_line_range_from_description(desc: str) -> Optional[str]:
+    """Extract a line range from a task description (e.g., 'lines 95-150').
+
+    Returns the line range string or None.
+    """
+    if not desc:
+        return None
+
+    patterns = [
+        r'lines?\s+(\d+)\s*[-–to]+\s*(\d+)',  # "lines 95-150" or "line 95 to 150"
+        r'lines?\s+(\d+)',  # "line 95" (single line)
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, desc, re.IGNORECASE)
+        if match:
+            return match.group(0)
+
+    return None
+
+
+def _compute_task_similarity(desc1: str, desc2: str) -> float:
+    """Compute semantic similarity between two task descriptions.
+
+    Uses SequenceMatcher ratio plus keyword overlap.
+    Returns a score between 0.0 and 1.0.
+    """
+    if not desc1 or not desc2:
+        return 0.0
+
+    # Normalize descriptions
+    d1 = desc1.strip().lower()
+    d2 = desc2.strip().lower()
+
+    # Direct sequence matching
+    seq_ratio = SequenceMatcher(None, d1, d2).ratio()
+
+    # Check for same file path
+    file1 = _extract_file_path_from_description(desc1)
+    file2 = _extract_file_path_from_description(desc2)
+    same_file = 0.0
+    if file1 and file2:
+        # Normalize paths
+        f1 = file1.replace('\\', '/').lower()
+        f2 = file2.replace('\\', '/').lower()
+        if f1 == f2 or f1.endswith(f2) or f2.endswith(f1):
+            same_file = 0.3  # Bonus for same file
+
+    # Check for same line range
+    lines1 = _extract_line_range_from_description(desc1)
+    lines2 = _extract_line_range_from_description(desc2)
+    same_lines = 0.0
+    if lines1 and lines2 and lines1.lower() == lines2.lower():
+        same_lines = 0.2  # Bonus for same line range
+
+    # Keywords that suggest similar intent
+    intent_keywords = [
+        'inspect', 'examine', 'read', 'analyze', 'review', 'check', 'look', 'find',
+        'identify', 'understand', 'investigate', 'explore', 'verbatim', 'exact'
+    ]
+
+    kw1 = set(word for word in d1.split() if word in intent_keywords)
+    kw2 = set(word for word in d2.split() if word in intent_keywords)
+
+    keyword_overlap = 0.0
+    if kw1 and kw2:
+        overlap = len(kw1 & kw2) / max(len(kw1 | kw2), 1)
+        keyword_overlap = overlap * 0.2  # Up to 0.2 bonus
+
+    # Combine scores, capped at 1.0
+    return min(1.0, seq_ratio + same_file + same_lines + keyword_overlap)
+
+
+def _is_semantically_duplicate_task(
+    new_desc: str,
+    new_action: str,
+    completed_tasks: List[str],
+    threshold: float = 0.7
+) -> bool:
+    """Check if a new task is semantically similar to already-completed tasks.
+
+    Args:
+        new_desc: Description of the new task
+        new_action: Action type of the new task
+        completed_tasks: List of completed task log entries
+        threshold: Similarity threshold (0.7 = 70% similar)
+
+    Returns:
+        True if the task is considered a duplicate
+    """
+    if not completed_tasks:
+        return False
+
+    new_action_lower = (new_action or '').lower()
+
+    # Only check for duplication on read-like actions
+    if new_action_lower not in {'read', 'analyze', 'research', 'investigate', 'review'}:
+        return False
+
+    similar_count = 0
+    for log_entry in completed_tasks:
+        # Parse the log entry to extract action type and description
+        # Format: [STATUS] description | Output: ...
+        match = re.match(r'\[(\w+)\]\s*(.+?)(?:\s*\|.*)?$', log_entry)
+        if not match:
+            continue
+
+        status = match.group(1).upper()
+        desc = match.group(2).strip()
+
+        # Only compare with completed read-like tasks
+        if status != 'COMPLETED':
+            continue
+
+        # Check for read-like keywords in the description
+        desc_lower = desc.lower()
+        is_read_like = any(kw in desc_lower for kw in ['read', 'inspect', 'examine', 'analyze'])
+        if not is_read_like:
+            continue
+
+        similarity = _compute_task_similarity(new_desc, desc)
+        if similarity >= threshold:
+            similar_count += 1
+
+    # If we found 2+ similar completed tasks, this is a duplicate
+    return similar_count >= 2
+
+
+def _count_file_reads(file_path: str, completed_tasks: List[str]) -> int:
+    """Count how many times a file has been read in completed tasks.
+
+    Args:
+        file_path: The file path to check
+        completed_tasks: List of completed task log entries
+
+    Returns:
+        Number of times this file was read
+    """
+    if not file_path or not completed_tasks:
+        return 0
+
+    # Normalize the target path
+    target = file_path.replace('\\', '/').lower()
+    count = 0
+
+    for log_entry in completed_tasks:
+        # Only count completed read-like tasks
+        if not log_entry.startswith('[COMPLETED]'):
+            continue
+
+        desc_lower = log_entry.lower()
+        if not any(kw in desc_lower for kw in ['read', 'inspect', 'examine', 'analyze']):
+            continue
+
+        # Extract file path from the log entry
+        entry_file = _extract_file_path_from_description(log_entry)
+        if entry_file:
+            entry_normalized = entry_file.replace('\\', '/').lower()
+            if target == entry_normalized or target.endswith(entry_normalized) or entry_normalized.endswith(target):
+                count += 1
+
+    return count
+
+
+def _check_syntax_error_in_verification(verification_result) -> bool:
+    """Check if a verification failure is due to syntax errors.
+
+    Returns True if the failure is caused by syntax errors (F821, E999, etc.)
+    that would leave the code in a broken state.
+    """
+    if not verification_result or not hasattr(verification_result, 'details'):
+        return False
+
+    details_str = str(verification_result.details).lower()
+    message_str = str(verification_result.message).lower()
+
+    # Check for syntax error indicators
+    syntax_indicators = [
+        'f821',  # Undefined name
+        'e999',  # SyntaxError
+        'undefined name',
+        'syntaxerror',
+        'name error',
+        'compilation failed',
+        'import error',
+        'module not found',
+    ]
+
+    combined = f"{details_str} {message_str}"
+    return any(indicator in combined for indicator in syntax_indicators)
+
+
+def _create_syntax_repair_task(failed_task: "Task", verification_result) -> "Task":
+    """Create a focused syntax repair task for the LLM.
+
+    Args:
+        failed_task: The task that failed with syntax errors
+        verification_result: The verification result containing error details
+
+    Returns:
+        A new Task focused on fixing the syntax errors
+    """
+    from rev.models.task import Task
+
+    # Extract file paths from failed task
+    affected_files = set()
+    if hasattr(failed_task, 'tool_events') and failed_task.tool_events:
+        for event in failed_task.tool_events:
+            args = event.get('args', {})
+            if isinstance(args, dict):
+                for key in ['path', 'file_path', 'target', 'source']:
+                    if key in args and isinstance(args[key], str):
+                        affected_files.add(args[key])
+
+    files_str = ', '.join(affected_files) if affected_files else "the modified file(s)"
+
+    # Extract specific error details from verification result
+    error_details = ""
+    if hasattr(verification_result, 'details') and verification_result.details:
+        details = verification_result.details
+        if isinstance(details, dict):
+            # Look for ruff or compileall output
+            for key in ['ruff', 'compileall', 'strict']:
+                if key in details:
+                    val = details[key]
+                    if isinstance(val, dict) and 'stdout' in val:
+                        error_details = val['stdout'][:500]  # Limit to 500 chars
+                        break
+
+    # Create focused repair task description
+    description = (
+        f"Fix the syntax errors in {files_str}. "
+        f"CRITICAL: The code currently has undefined names or syntax errors that prevent it from running. "
+        f"You MUST fix ALL syntax errors - missing imports, undefined variables, etc. "
+    )
+
+    if error_details:
+        description += f"\n\nError details:\n{error_details}"
+
+    description += (
+        "\n\nIMPORTANT - Error Scope:\n"
+        "- Only fix syntax/import errors in the code YOU modified\n"
+        "- If errors appear in unrelated parts of the file, IGNORE them (they are pre-existing)\n"
+        "- Focus ONLY on making YOUR specific changes syntactically valid\n\n"
+        "Focus ONLY on fixing syntax/import errors in your changes. "
+        "Do not make other changes. Ensure all imports are present and all names are defined."
+    )
+
+    return Task(
+        description=description,
+        action_type="fix"
+    )
+
+
+def _attempt_git_revert_for_syntax_errors(task: "Task") -> list[str]:
+    """Attempt to revert files affected by a task using git checkout.
+
+    Returns list of successfully reverted file paths, or empty list if revert failed.
+    """
+    from rev.tools.registry import execute_tool
+
+    # Extract file paths from task events
+    files_to_revert = set()
+    if hasattr(task, 'tool_events') and task.tool_events:
+        for event in task.tool_events:
+            # Check for file paths in tool arguments
+            args = event.get('args', {})
+            if isinstance(args, dict):
+                for key in ['path', 'file_path', 'target', 'source']:
+                    if key in args and isinstance(args[key], str):
+                        files_to_revert.add(args[key])
+
+    if not files_to_revert:
+        return []
+
+    reverted = []
+    for file_path in files_to_revert:
+        try:
+            # Use git checkout to revert the file
+            result = execute_tool("run_cmd", {
+                "cmd": f"git checkout HEAD -- {file_path}",
+                "timeout": 10
+            })
+            if result and "error" not in str(result).lower():
+                reverted.append(file_path)
+        except Exception:
+            # Revert failed for this file, continue with others
+            pass
+
+    return reverted
+
+
+def _check_goal_likely_achieved(user_request: str, completed_tasks_log: List[str]) -> bool:
+    """Check if the original goal appears to have been achieved based on completed tasks.
+
+    Looks for evidence of successful tool executions that match the user request intent.
+    Returns True if goal appears achieved, False otherwise.
+    """
+    if not completed_tasks_log:
+        return False
+
+    request_lower = user_request.lower()
+
+    # Key patterns that indicate goal-completing tool executions
+    goal_indicators = []
+
+    # For splitting/breaking out files
+    if any(kw in request_lower for kw in ['split', 'break out', 'separate', 'extract']):
+        goal_indicators.extend([
+            'split_python_module_classes',
+            '"classes_split"',
+            '"created_files"',
+            'classes_split',
+        ])
+
+    # For refactoring
+    if 'refactor' in request_lower:
+        goal_indicators.extend([
+            'refactor',
+            'write_file',
+            'replace_in_file',
+        ])
+
+    # For creating directories/packages
+    if any(kw in request_lower for kw in ['package', 'directory', 'create']):
+        goal_indicators.extend([
+            'create_directory',
+            '__init__.py',
+            'package_init',
+        ])
+
+    if not goal_indicators:
+        # Can't determine goal type, don't force completion
+        return False
+
+    # Check completed tasks for evidence of goal achievement
+    completed_count = 0
+    goal_evidence = 0
+
+    for log_entry in completed_tasks_log:
+        if not log_entry.startswith('[COMPLETED]'):
+            continue
+        completed_count += 1
+
+        log_lower = log_entry.lower()
+        for indicator in goal_indicators:
+            if indicator.lower() in log_lower:
+                goal_evidence += 1
+                break
+
+    # If we have completed tasks with goal evidence, assume goal is achieved
+    # Require at least one completed task with goal evidence
+    return goal_evidence >= 1 and completed_count >= 1
+
+
 from rev.tools.workspace_resolver import normalize_path, normalize_to_workspace_relative, WorkspacePathError
 
 
@@ -157,15 +577,22 @@ def _choose_best_path_match(*, original: str, matches: List[str]) -> Optional[st
     def _score(rel_posix: str) -> tuple[int, int]:
         p = rel_posix.lower()
         score = 0
+        
         # Prefer typical source roots.
-        if "/lib/" in f"/{p}/":
-            score += 10
-        if "/src/" in f"/{p}/":
-            score += 8
-        if "/app/" in f"/{p}/":
-            score += 6
-        if "/tests/" in f"/{p}/":
-            score -= 5
+        # Use dynamic discovery to identify common source patterns.
+        source_roots = ["/src/", "/lib/", "/app/", "/core/", "/pkg/"]
+        test_roots = ["/tests/", "/test/", "/spec/"]
+        
+        for root in source_roots:
+            if root in f"/{p}/":
+                score += 8
+                break
+        
+        for root in test_roots:
+            if root in f"/{p}/":
+                score -= 5
+                break
+                
         # Prefer matches that end with the original (e.g., missing prefix).
         if original_lower and p.endswith(original_lower):
             score += 3
@@ -207,6 +634,13 @@ def _choose_best_path_match_with_context(*, original: str, matches: List[str], d
             part_l = str(part).lower()
             if part_l and part_l != "." and part_l in desc:
                 score += 2
+
+        # Penalize obviously duplicated segment paths.
+        parts = Path(p).parts
+        for i in range(1, len(parts)):
+            if parts[:i] == parts[i : 2 * i] and len(parts) >= 2 * i + 1:
+                score -= 25
+                break
 
         depth = p.count("/")
         return (score, depth, len(p))
@@ -308,31 +742,41 @@ def _order_available_actions(actions: List[str]) -> List[str]:
 
 
 def _is_goal_achieved_response(response: Optional[str]) -> bool:
-    """Detect when the planner says the goal is already achieved."""
+    """Detect when the planner says the goal is already achieved.
+    
+    Strictly matches 'GOAL_ACHIEVED' or clear variations like 'Goal achieved'
+    while avoiding false positives on rambling text.
+    """
     if not response:
         return False
+    # Remove brackets, underscores, and extra whitespace
     normalized = re.sub(r"[\[\]_\s]+", " ", response).strip().lower()
     if not normalized:
         return False
-    if normalized == "goal":
+    
+    # Precise matches only
+    if normalized in {"goal achieved", "goal completed", "work complete", "task achieved"}:
         return True
+        
+    # Allow slightly longer but still very clear success statements
     if normalized.startswith("goal "):
-        return "achieved" in normalized or "complete" in normalized or "done" in normalized
+        # Must be exactly 'goal achieved', 'goal is achieved', etc.
+        return bool(re.match(r"^goal (is )?(achieved|completed|done|finished)$", normalized))
+        
     return normalized == "goal achieved"
 
 
 def _dedupe_redundant_prefix_path(norm_path: str, project_root: Path) -> Optional[str]:
     """
     Collapse accidental repeated leading segments like
-    'lib/analysts/lib/analysts/__init__.py' into the shortest suffix that
-    already exists. This prevents recursive path drift when planners keep
-    appending the same subpath.
+    'src/module/src/module/__init__.py' into the shortest suffix.
+    This prevents recursive path drift when planners keep appending the same subpath.
     """
     if not norm_path:
         return None
 
     parts = list(Path(norm_path.replace("/", os.sep)).parts)
-    # Need at least X/Y/X/Y to consider it a duplicated prefix.
+    # Need at least X/Y/X/Y (4 segments) to consider it a duplicated prefix.
     if len(parts) < 4:
         return None
 
@@ -341,7 +785,7 @@ def _dedupe_redundant_prefix_path(norm_path: str, project_root: Path) -> Optiona
         reduced = False
         for prefix_len in range(1, len(parts) // 2 + 1):
             prefix = parts[:prefix_len]
-            if parts[prefix_len: 2 * prefix_len] == prefix:
+            if parts[prefix_len : 2 * prefix_len] == prefix:
                 parts = parts[prefix_len:]
                 changed = True
                 reduced = True
@@ -381,14 +825,17 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
     action = (task.action_type or "").strip().lower()
     read_actions = {"read", "analyze", "review", "research", "investigate"}
 
-    # Focus on Python path mistakes first.
-    # Keep this regex intentionally simple to avoid escaping bugs.
+    # Match path candidates with any common source/config extension.
+    ext = r"(?:py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1)"
+    # A more robust regex to find path-like strings, including those not perfectly formed.
+    path_pattern = rf'((?:[A-Za-z]:)?[\\/]?[\w\s._-]*[\\/]+[\w\s._-]+\.{ext}\b|[\w._-]+\.{ext}\b)'
+    
+    raw_candidates = re.findall(path_pattern, desc)
+    
+    # Clean up and deduplicate candidates
     candidates = sorted(
         set(
-            re.findall(
-                r'([A-Za-z]:[\\/][^\s"\'`]+\.py(?:\.bak)?\b|(?:\./)?[A-Za-z0-9_./\\-]+\.py(?:\.bak)?\b)',
-                desc,
-            )
+            p.strip() for p in raw_candidates if p.strip()
         )
     )
     if not candidates:
@@ -446,6 +893,22 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
         if basename.lower().endswith(".py.bak"):
             basenames.append(basename[: -len(".bak")])
 
+        # Check if a .py file was split into a package (directory with __init__.py)
+        # e.g., src/module.py -> src/module/__init__.py
+        package_init_match: Optional[str] = None
+        if basename.lower().endswith(".py") and not basename.lower().endswith(".py.bak"):
+            # Look for a package directory with the same name (without .py extension)
+            parent_dir = Path(normalized.replace("/", os.sep)).parent
+            package_name = basename[:-3]  # Remove .py
+            package_dir = parent_dir / package_name if str(parent_dir) != "." else Path(package_name)
+            package_init = package_dir / "__init__.py"
+            package_init_abs = (project_root / package_init).resolve(strict=False)
+            if package_init_abs.exists():
+                try:
+                    package_init_match = normalize_to_workspace_relative(package_init_abs, workspace_root=project_root)
+                except Exception:
+                    package_init_match = str(package_init).replace("\\", "/")
+
         matches: List[str] = []
         for bn in basenames:
             matches.extend(_find_workspace_matches_by_basename(root=project_root, basename=bn))
@@ -453,9 +916,27 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
         primary_matches = [m for m in matches if not m.endswith(".bak")]
         backup_matches = [m for m in matches if m.endswith(".bak")]
 
+        # Prefer package __init__.py over backup when a file was split into a package
+        if package_init_match and not primary_matches:
+            chosen = package_init_match
+            messages.append(f"resolved missing path to package '{chosen}' (file was split into package)")
+            if raw in desc:
+                desc = desc.replace(raw, chosen)
+            existing_any += 1
+            continue
+
         # Prefer real sources over backups; avoid auto-operating on backups for mutating actions.
         preferred_pool = primary_matches if primary_matches else matches
         chosen = _choose_best_path_match_with_context(original=normalized, matches=preferred_pool, description=desc)
+
+        # If the planner only emitted a bare filename (e.g., "__init__.py") and
+        # there are multiple matches in the workspace, avoid "helpfully" picking
+        # one and accidentally duplicating a path (src/module/src/module/...).
+        if not ("/" in normalized or "\\" in normalized) and len(preferred_pool) > 1 and not chosen:
+            missing_unresolved.append(
+                f"ambiguous missing path '{raw}' (multiple candidates for bare filename)"
+            )
+            continue
 
         if not chosen and backup_matches and not primary_matches and action not in read_actions:
             missing_unresolved.append(
@@ -468,19 +949,64 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
                     f"missing path '{raw}' (only backup found: {chosen}; restore original before mutating)"
                 )
                 continue
-            # Replace occurrences of the raw token as well as its normalized variant.
-            if raw in desc:
-                desc = desc.replace(raw, chosen)
-            if normalized in desc:
-                desc = desc.replace(normalized, chosen)
-            messages.append(f"corrected missing path '{raw}' -> '{chosen}'")
-            existing_any += 1
-            continue
+
+            # If the resolved path already appears in the description, avoid
+            # duplicating segments like "src/module/src/module/__init__.py".
+            if chosen in desc:
+                messages.append(
+                    f"resolved missing path to '{chosen}' (already present; left unchanged)"
+                )
+                existing_any += 1
+                continue
+
+            # Check if replacing 'raw' with 'chosen' would create a redundant path.
+            # e.g. if desc contains 'src/module.py' and we replace 'module.py' with 'src/module.py'
+            # we get 'src/src/module.py'.
+            if f"/{raw}" in desc.replace("\\", "/") or f"\\{raw}" in desc:
+                # If it's already prefixed by something, check if that prefix matches the 'chosen' path's head.
+                # If it does, we should just consider it resolved and not replace.
+                if chosen in desc.replace("\\", "/").replace("//", "/"):
+                     messages.append(
+                        f"resolved missing path to '{chosen}' (already present as suffix; left unchanged)"
+                    )
+                     existing_any += 1
+                     continue
+
+            # Use regex with word boundaries to avoid replacing partial segments of other paths.
+            # We escape regex special characters in the raw/normalized strings.
+            replaced = False
+            for target in sorted({raw, normalized}, key=len, reverse=True):
+                if target in desc:
+                    pattern = r'(?<![A-Za-z0-9_./\\])' + re.escape(target) + r'(?![A-Za-z0-9_./\\])'
+                    new_desc, count = re.subn(pattern, chosen.replace('\\', '\\\\'), desc)
+                    if count > 0:
+                        desc = new_desc
+                        replaced = True
+            
+            if replaced:
+                messages.append(f"resolved missing path to '{chosen}' (requested '{raw}')")
+                existing_any += 1
+                continue
 
         if matches:
             missing_unresolved.append(f"ambiguous missing path '{raw}' (matches={matches[:5]})")
         else:
             missing_unresolved.append(f"missing path '{raw}' (no matches found)")
+
+    # Final cleanup pass to dedupe any paths that were constructed during replacement.
+    final_candidates = sorted(
+        set(
+            re.findall(
+                r'([A-Za-z]:[\\/][^\s"\'`]+\.py(?:\.bak)?\b|(?:\./)?[A-Za-z0-9_./\\-]+\.py(?:\.bak)?\b)',
+                desc,
+            )
+        )
+    )
+    for cand in final_candidates:
+        deduped = _dedupe_redundant_prefix_path(cand, project_root=project_root)
+        if deduped and deduped != cand:
+            desc = desc.replace(cand, deduped)
+            messages.append(f"cleaned up duplicated path segment in '{cand}' -> '{deduped}'")
 
     task.description = desc
 
@@ -501,6 +1027,35 @@ def _preflight_correct_task_paths(*, task: Task, project_root: Path) -> tuple[bo
     # Otherwise, allow execution to proceed (best-effort). Avoid spamming logs.
     messages.append("ignored missing output path(s); at least one input path exists")
     return True, messages
+
+
+def _generate_path_hints(completed_tasks_log: List[str]) -> str:
+    """Extract important paths from recent tool outputs to help the planner."""
+    if not completed_tasks_log:
+        return ""
+    
+    hints = []
+    # Look for paths in the last 5 tasks
+    for log in completed_tasks_log[-5:]:
+        # Extract paths mentioned in "Output:" segments
+        if "Output:" in log:
+            output_part = log.split("Output:", 1)[1]
+            # Match likely file paths (with common extensions) or directory-looking paths
+            # 1. Paths with extensions (py, json, etc)
+            # 2. Paths ending in / or \
+            # 3. Quoted strings that look like relative paths
+            matches = re.findall(r'([A-Za-z0-9_./\\-]+\.(?:py|json|md|txt|csv|bak|log)\b)|([A-Za-z0-9_./\\-]+[/\\])|(?:"|\')(\./[A-Za-z0-9_./\\-]+)(?:"|\')', output_part)
+            for m_tuple in matches:
+                # findall with multiple groups returns tuples
+                for m in m_tuple:
+                    if m and ("/" in m or "\\" in m):
+                        hints.append(m.strip('"\''))
+                    
+    if not hints:
+        return ""
+        
+    unique_hints = sorted(set(hints))
+    return "\nPATH HINTS (use these exact paths if relevant):\n" + "\n".join(f"- {h}" for h in unique_hints) + "\n"
 
 
 @dataclass
@@ -653,11 +1208,11 @@ class Orchestrator:
             "has_examples_dir": os.path.isdir(self.project_root / "examples"),
         }
 
-    def execute(self, user_request: str) -> OrchestratorResult:
+    def execute(self, user_request: str, resume: bool = False) -> OrchestratorResult:
         """Execute a task through the full agent pipeline."""
         aggregate_errors: List[str] = []
         last_result: Optional[OrchestratorResult] = None
-        self.context = RevContext(user_request=user_request)
+        self.context = RevContext(user_request=user_request, resume=resume)
         ensure_project_memory_file()
         # Keep repo_context minimal; sub-agents will retrieve focused context via ContextBuilder.
         self.context.repo_context = ""
@@ -736,6 +1291,11 @@ class Orchestrator:
                 self._execute_heavy_path(user_request, coding_mode, result)
         
         except KeyboardInterrupt:
+            if self.context:
+                try:
+                    self.context.save_history()
+                except Exception:
+                    pass
             if self.context.plan and self.context.state_manager:
                 try:
                     self.context.state_manager.on_interrupt(token_usage=get_token_usage())
@@ -844,6 +1404,11 @@ class Orchestrator:
             f"Can this task be decomposed into smaller, more specific subtasks that might succeed?\n"
             f"If yes, describe the first subtask that should be attempted next in detail.\n"
             f"If no, just respond with 'CANNOT_DECOMPOSE'.\n\n"
+            "CRITICAL - Error Scope:\n"
+            "- Only fix errors that are DIRECTLY RELATED to your changes\n"
+            "- If validation shows errors in unrelated parts of the file, IGNORE them\n"
+            "- Pre-existing errors in other functions/sections should NOT be fixed by you\n"
+            "- Focus ONLY on making your specific change work correctly\n\n"
             "Important import strategy note (avoid churn):\n"
             "- If a refactor split creates a package (directory with __init__.py exports), update call sites/tests to\n"
             "  import from the package exports (e.g., `from package import ExportedSymbol`).\n"
@@ -870,6 +1435,16 @@ class Orchestrator:
                 available_actions=AgentRegistry.get_registered_action_types(),
             )
             description = match.group(2).strip()
+
+            # Clean up malformed LLM output that contains multiple actions concatenated
+            if '[' in description:
+                bracket_idx = description.find('[')
+                if bracket_idx > 0:
+                    description = description[:bracket_idx].strip()
+
+            # Clean up trailing brackets
+            description = re.sub(r'\]$', '', description).strip()
+
             print(f"\n  [DECOMPOSITION] LLM suggested decomposition:")
             print(f"    Action: {action_type}")
             print(f"    Task: {description}")
@@ -882,7 +1457,7 @@ class Orchestrator:
                 action_type="refactor"
             )
 
-    def _determine_next_action(self, user_request: str, work_summary: str, coding_mode: bool) -> Optional[Task]:
+    def _determine_next_action(self, user_request: str, work_summary: str, coding_mode: bool, iteration: int = 1, failure_notes: str = "", path_hints: str = "", agent_notes: str = "") -> Optional[Task]:
         """A truly lightweight planner that makes a direct LLM call."""
         available_actions = _order_available_actions(AgentRegistry.get_registered_action_types())
 
@@ -896,10 +1471,21 @@ class Orchestrator:
                     "Do NOT propose another [TEST] until a code-changing step (e.g. [EDIT]/[REFACTOR]) is completed.\n\n"
                 )
         
+        history_note = ""
+        if iteration == 1 and work_summary != "No actions taken yet.":
+            history_note = (
+                "Important: You are resuming a previous session. Do NOT declare GOAL_ACHIEVED on your very first turn. "
+                "Instead, perform a [READ] or [ANALYZE] step to verify that the work from the previous session is still correct and consistent with the current filesystem state.\n\n"
+            )
+
         prompt = (
             f"Original Request: {user_request}\n\n"
             f"{work_summary}\n\n"
+            f"{path_hints}\n"
+            f"{agent_notes}\n"
+            f"{failure_notes}\n"
             f"{blocked_note}"
+            f"{history_note}"
             "Based on the work completed, what is the single next most important action to take? "
             "If a previous action failed, propose a different action to achieve the goal.\n"
             "\n"
@@ -912,16 +1498,24 @@ class Orchestrator:
             "\n"
              "Constraints to avoid duplicating work:\n"
              "- Do not propose repeating a step that is already complete (e.g., do not re-create a directory that exists).\n"
+             "- CRITICAL: If you have already completed 2+ READ/ANALYZE steps on the same file, you MUST now use [EDIT] to make changes. Do NOT propose another read.\n"
+             "- If the same file/lines have been inspected multiple times, transition to [EDIT] immediately.\n"
              "- If you are going to use `split_python_module_classes`, do not hand-author the package `__init__.py` first; let the tool generate it.\n"
              "- After `split_python_module_classes` runs, treat the directory as the source of truth; prefer editing the package files rather than the original monolithic module.\n"
              "- If a source file was split into a package (directory with __init__.py) and the original single-file path no longer exists, do NOT propose edits to that missing file; operate on the package files that actually exist.\n"
              "- If the code was split into a package with __init__.py exports, prefer package-export imports at call sites.\n"
              "- Avoid replacing `from pkg import *` with dozens of per-module imports; only import names actually used.\n"
              "- Prefer `from package import ExportedSymbol` over `from package.module import ExportedSymbol` when the package exports it.\n"
+             "- CRITICAL: ONLY declare GOAL_ACHIEVED if you have verified that the current filesystem state matches all parts of the request. If history shows work but you haven't inspected it in this run, VERIFY IT FIRST.\n"
              f"You MUST choose one of the following action types: {available_actions}\n"
-             "Your response should be a single line in the format: [ACTION_TYPE] description of the action.\n"
-             "Example: [EDIT] refactor the authentication middleware to use the new session manager.\n"
-             "If the goal has been achieved, respond with only the text 'GOAL_ACHIEVED'."
+             "\n"
+             "RESPONSE FORMAT (CRITICAL - follow exactly):\n"
+             "- Respond with EXACTLY ONE action on a SINGLE LINE\n"
+             "- Format: [ACTION_TYPE] brief description of what to do\n"
+             "- Do NOT output multiple actions or a plan - only the SINGLE NEXT step\n"
+             "- Do NOT chain actions like '[READ] file [ANALYZE] content' - pick ONE\n"
+             "- Example: [EDIT] refactor the authentication middleware to use the new session manager\n"
+             "- If the goal has been achieved, respond with only: GOAL_ACHIEVED"
         )
         
         response_data = ollama_chat([{"role": "user", "content": prompt}])
@@ -934,27 +1528,191 @@ class Orchestrator:
             return None
 
         response_content = response_data.get("message", {}).get("content", "")
+        if hasattr(self, "debug_logger") and self.debug_logger:
+            self.debug_logger.log("orchestrator", "PLANNER_RESPONSE_RAW", {
+                "content": response_content
+            }, "DEBUG")
+
         if _is_goal_achieved_response(response_content):
+            print(f"  [i] Goal achieved detected in response: \"{response_content.strip()}\"")
+            if hasattr(self, "debug_logger") and self.debug_logger:
+                self.debug_logger.log("orchestrator", "GOAL_ACHIEVED_DETECTED", {
+                    "raw_content": response_content
+                }, "INFO")
             return None
+        
         if not response_content or response_content.strip().upper() == "GOAL_ACHIEVED":
+            print(f"  [i] Empty response or explicit GOAL_ACHIEVED detected.")
+            if hasattr(self, "debug_logger") and self.debug_logger:
+                self.debug_logger.log("orchestrator", "EMPTY_OR_GOAL_ACHIEVED_RAW", {
+                    "content": response_content
+                }, "INFO")
             return None
         
         match = re.match(r"[\s]*\[(.*?)\]\s*(.*)", response_content.strip())
         if not match:
+            print(f"  [!] No action brackets found. Raw response: \"{response_content.strip()}\"")
+            if hasattr(self, "debug_logger") and self.debug_logger:
+                self.debug_logger.log("orchestrator", "NO_BRACKET_MATCH", {
+                    "content": response_content
+                }, "DEBUG")
             return Task(description=response_content.strip(), action_type="general")
-        
+
+        action_raw = match.group(1)
         action_type = normalize_action_type(
-            match.group(1),
+            action_raw,
             available_actions=available_actions,
         )
         description = match.group(2).strip()
-        return Task(description=description, action_type=action_type)
+
+        if hasattr(self, "debug_logger") and self.debug_logger:
+            self.debug_logger.log("orchestrator", "PARSED_ACTION_TYPE", {
+                "raw": action_raw,
+                "normalized": action_type
+            }, "DEBUG")
+
+        # Clean up malformed LLM output that contains multiple actions concatenated
+        # e.g. "Open file.[READ] another[ANALYZE] more" -> "Open file."
+        if '[' in description:
+            # Truncate at the first bracket (likely another action type)
+            bracket_idx = description.find('[')
+            if bracket_idx > 0:
+                description = description[:bracket_idx].strip()
+
+        # Also clean up trailing brackets like "src/module]"
+        description = re.sub(r'\]$', '', description).strip()
+
+        task = Task(description=description, action_type=action_type)
+        if hasattr(self, "debug_logger") and self.debug_logger:
+            # Log to standard debug log
+            self.debug_logger.log("orchestrator", "TASK_DETERMINED", {
+                "action_type": task.action_type,
+                "description": task.description,
+                "raw_response": response_content
+            }, "DEBUG")
+            
+            # Log to transaction log for centralized review
+            self.debug_logger.log_transaction_event("ORCHESTRATOR_DECISION", {
+                "action_type": task.action_type,
+                "description": task.description,
+                "raw_response": response_content
+            })
+
+        return task
+
+    def _extract_claims_from_log(self, log_entry: str) -> List[str]:
+        """Extract high-level intent/claims from a task description."""
+        # A claim is essentially what the agent is asserting it will do or find.
+        # For simplicity, we treat the description as a single claim for now.
+        return [log_entry.split('|')[0].strip()]
+
+    def _evaluate_anchoring(self, user_request: str, completed_tasks_log: List[str]) -> AnchoringDecision:
+        """Evaluate the current anchoring score to drive coordination decisions."""
+        if not completed_tasks_log:
+            return AnchoringDecision.RE_SEARCH
+
+        scorer = AnchoringScorer()
+        
+        all_claims = []
+        citations = set()
+        test_outputs = []
+        unresolved_symbols = []
+        missing_files = []
+        total_tools = 0
+
+        for log in completed_tasks_log:
+            # 1. Collect claims
+            all_claims.extend(self._extract_claims_from_log(log))
+            
+            # 2. Extract citations (files mentioned in log or output)
+            file_match = _extract_file_path_from_description(log)
+            if file_match:
+                citations.add(file_match)
+            
+            # 3. Collect test results
+            if "[COMPLETED]" in log and "test" in log.lower():
+                test_outputs.append(log)
+            
+            # 4. Collect errors/mismatches
+            if "[FAILED]" in log:
+                # Every failed task is a risk
+                unresolved_symbols.append(log)
+                if "missing path" in log.lower() or "not exist" in log.lower():
+                    missing_files.append(log)
+                if "undefined" in log.lower() or "unresolved" in log.lower():
+                    # already added to unresolved_symbols, but can add specifically if needed
+                    pass
+            
+            # 5. Track tool usage
+            if "Output:" in log:
+                total_tools += 1
+
+        metrics = scorer.compute_anchoring_score(
+            claims=all_claims,
+            repo_citations=list(citations),
+            test_outputs=test_outputs,
+            unresolved_symbols=unresolved_symbols,
+            missing_files=missing_files,
+            tools_used_count=total_tools
+        )
+
+        print(f"\n  [UCCT] Anchoring Score: {metrics.raw_score:.2f} | Density: {metrics.evidence_density:.2f} | Risk: {metrics.mismatch_risk}")
+        print(f"  [UCCT] Coordination Decision: {metrics.decision.value}")
+        
+        if hasattr(self, "debug_logger") and self.debug_logger:
+            self.debug_logger.log("orchestrator", "ANCHORING_EVALUATION", metrics.__dict__, "INFO")
+
+        return metrics.decision
+
+    def _is_completion_grounded(self, completed_tasks_log: List[str]) -> Tuple[bool, str]:
+        """Verify that the completion is grounded in concrete artifacts/evidence."""
+        if not completed_tasks_log:
+            return False, "No work history to verify."
+
+        # A completion must reference:
+        # 1. File diffs/writes
+        # 2. Test output/artifact IDs
+        # 3. Search results
+        # 4. Runtime checks
+        
+        evidence_found = {
+            "files": False,
+            "tests": False,
+            "search": False,
+            "runtime": False
+        }
+
+        for log in completed_tasks_log:
+            log_l = log.lower()
+            # 1. File diffs/writes
+            if any(k in log_l for k in ["wrote", "replaced", "created file", "modified", "diff", "write_file", "replace_in_file", "apply_patch"]):
+                evidence_found["files"] = True
+            # 2. Test outputs
+            if any(k in log_l for k in ["passed", "failed", "test suite", "pytest", "run_tests", "run_cmd"]):
+                evidence_found["tests"] = True
+            # 3. Search results
+            if any(k in log_l for k in ["found", "matches", "listing", "search", "read file", "list_dir", "read_file", "search_code", "rag_search"]):
+                evidence_found["search"] = True
+            # 4. Runtime checks
+            if any(k in log_l for k in ["runtime", "log", "executed", "status", "exit code", "analyze_runtime_logs"]):
+                evidence_found["runtime"] = True
+
+        # Require at least Search (knowing what's there) AND either File/Test/Runtime (doing something)
+        has_research = evidence_found["search"]
+        has_action = evidence_found["files"] or evidence_found["tests"] or evidence_found["runtime"]
+        
+        if not has_research:
+            return False, "Completion rejected: No research/search evidence found. Agent acted without reading."
+        if not has_action:
+            return False, "Completion rejected: No concrete action (file edit, test run, or runtime check) verified."
+            
+        return True, "Completion grounded in artifacts."
 
     def _continuous_sub_agent_execution(self, user_request: str, coding_mode: bool) -> bool:
         """Executes a task by continuously calling a lightweight planner for the next action.
 
         Implements the proper workflow:
-        1. Plan next action
+        1. Plan next action (unless forced_next_task is set)
         2. Execute action
         3. VERIFY execution actually succeeded
         4. Report results
@@ -964,12 +1722,17 @@ class Orchestrator:
         print("CONTINUOUS SUB-AGENT MODE (REPL-Style with Verification)")
         print("=" * 60)
 
-        completed_tasks_log: List[str] = []
+        # Persistence: load previous work history
+        completed_tasks_log = self.context.load_history()
+        if completed_tasks_log:
+            print(f"  ✓ Loaded {len(completed_tasks_log)} tasks from history")
+
         iteration = 0
         action_counts: Dict[str, int] = defaultdict(int)
         failure_counts: Dict[str, int] = defaultdict(int)
         last_task_signature: Optional[str] = None
         repeat_same_action: int = 0
+        forced_next_task: Optional[Task] = None
 
         while True:
             iteration += 1
@@ -981,76 +1744,186 @@ class Orchestrator:
                 self.context.add_error(f"Resource budget exceeded at step {iteration}")
                 return False
 
-            work_summary = "No actions taken yet."
-            if completed_tasks_log:
-                work_summary = "Work Completed So Far:\n" + "\n".join(f"- {log}" for log in completed_tasks_log[-5:])
+            if forced_next_task:
+                next_task = forced_next_task
+                forced_next_task = None
+                print(f"  -> Using injected task: [{next_task.action_type.upper()}] {next_task.description[:80]}")
+            else:
+                work_summary = "No actions taken yet."
+                if completed_tasks_log:
+                    # Start with high-level statistics for full session context
+                    total_tasks = len(completed_tasks_log)
+                    completed_count = sum(1 for log in completed_tasks_log if log.startswith('[COMPLETED]'))
+                    failed_count = sum(1 for log in completed_tasks_log if log.startswith('[FAILED]'))
 
-            next_task = self._determine_next_action(user_request, work_summary, coding_mode)
+                    work_summary = f"Work Completed So Far ({total_tasks} total tasks: {completed_count} completed, {failed_count} failed):\n"
 
-            if not next_task:
-                planner_error = self.context.get_agent_state("planner_error") if self.context else None
-                if isinstance(planner_error, str) and planner_error.strip():
-                    self.context.set_agent_state("no_retry", True)
-                    print("\n❌ Planner failed to produce a next action (LLM error).")
-                    print(f"  Error: {planner_error}")
-                    return False
-                print("\n✅ Planner determined the goal is achieved.")
-                return True
+                    # Add file read/inspection summary FIRST to establish what's been inspected
+                    file_read_counts: Dict[str, int] = defaultdict(int)
+                    for log_entry in completed_tasks_log:
+                        if log_entry.startswith('[COMPLETED]'):
+                            desc_lower = log_entry.lower()
+                            if any(kw in desc_lower for kw in ['read', 'inspect', 'examine', 'analyze']):
+                                file_path = _extract_file_path_from_description(log_entry)
+                                if file_path:
+                                    # Normalize to filename only for summary
+                                    filename = file_path.replace('\\', '/').split('/')[-1]
+                                    file_read_counts[filename] += 1
 
-            next_task.task_id = iteration
-            try:
-                # Ensure validation_steps are always present so quick_verify can enforce them.
-                next_task.validation_steps = ExecutionPlan().generate_validation_steps(next_task)
-            except Exception:
-                pass
-            ok, sem_msgs = _preflight_correct_action_semantics(next_task)
-            for msg in sem_msgs:
-                print(f"  [preflight] {msg}")
-            if not ok:
-                self.context.add_error("Preflight failed: " + "; ".join(sem_msgs))
-                completed_tasks_log.append(f"[FAILED] Preflight: {'; '.join(sem_msgs)}")
-                if any("conflicts with write intent" in msg for msg in sem_msgs):
-                    self.context.add_agent_request(
-                        "REPLAN_REQUEST",
-                        {
-                            "agent": "Orchestrator",
-                            "reason": "preflight read/write mismatch",
-                            "detailed_reason": sem_msgs[0],
-                        },
-                    )
-                sig = f"action_semantics::{(next_task.action_type or '').strip().lower()}::{';'.join(sem_msgs).strip().lower()}"
-                failure_counts[sig] += 1
-                if failure_counts[sig] >= 3:
-                    self.context.set_agent_state("no_retry", True)
-                    self.context.add_error("Circuit breaker: repeating preflight action semantics failure")
-                    print("\n" + "=" * 70)
-                    print("CIRCUIT BREAKER - PREFLIGHT FAILURE")
-                    print("=" * 70)
-                    print(f"Repeated preflight failure {failure_counts[sig]}x: {'; '.join(sem_msgs)}")
-                    print("Blocking issue: planner is not producing an executable action; refusing to loop.\n")
-                    return False
-                continue
-            ok, preflight_msgs = _preflight_correct_task_paths(task=next_task, project_root=self.project_root)
-            for msg in preflight_msgs:
-                print(f"  [preflight] {msg}")
-            if not ok:
-                # Do not execute with missing/ambiguous paths; feed this back into planning.
-                self.context.add_error("Preflight failed: " + "; ".join(preflight_msgs))
-                completed_tasks_log.append(f"[FAILED] Preflight: {'; '.join(preflight_msgs)}")
-                key_msg = preflight_msgs[0] if preflight_msgs else "unknown"
-                sig = f"paths::{(next_task.action_type or '').strip().lower()}::{key_msg.strip().lower()}"
-                failure_counts[sig] += 1
-                if failure_counts[sig] >= 3:
-                    self.context.set_agent_state("no_retry", True)
-                    self.context.add_error("Circuit breaker: repeating preflight path failure")
-                    print("\n" + "=" * 70)
-                    print("CIRCUIT BREAKER - PREFLIGHT FAILURE")
-                    print("=" * 70)
-                    print(f"Repeated preflight failure {failure_counts[sig]}x: {key_msg}")
-                    print("Blocking issue: planner is not producing an executable action; refusing to loop.\n")
-                    return False
-                continue
-            print(f"  â†' Next action: [{next_task.action_type.upper()}] {next_task.description[:80]}")
+                    if file_read_counts:
+                        work_summary += "\n📄 Files Already Inspected (DO NOT re-read these files unless absolutely necessary):\n"
+                        for filename, count in sorted(file_read_counts.items(), key=lambda x: (-x[1], x[0])):
+                            marker = "⚠️ STOP READING" if count >= 2 else "✓"
+                            work_summary += f"  {marker} {filename}: read {count}x"
+                            if count >= 2:
+                                work_summary += " - MUST use [EDIT] or [CREATE] now, NOT another [READ]"
+                            work_summary += "\n"
+                        work_summary += "\n"
+
+                    # Then provide last 10 detailed tasks for recent context
+                    if total_tasks > 10:
+                        work_summary += f"Recent Tasks (showing last 10 of {total_tasks}):\n"
+                    else:
+                        work_summary += "All Tasks:\n"
+                    work_summary += "\n".join(f"- {log}" for log in completed_tasks_log[-10:])
+
+                    if hasattr(self, "debug_logger") and self.debug_logger:
+                        self.debug_logger.log("orchestrator", "WORK_SUMMARY_GENERATED", {
+                            "history_count": len(completed_tasks_log),
+                            "summary_length": len(work_summary),
+                            "files_inspected": len(file_read_counts)
+                        }, "DEBUG")
+
+                # Calculate repetitive failure notes for the planner
+                failure_notes = []
+                if action_counts:
+                    for sig, count in action_counts.items():
+                        if count >= 2:
+                            failure_notes.append(f"⚠️ REPETITION WARNING: You have already proposed the action '[{sig}]' {count} times. It is not making forward progress or is failing verification. DO NOT REPEAT IT. Try a different strategy, such as reading the file again to check for subtle syntax errors or using a different tool.")
+                
+                failure_notes_str = "\n".join(failure_notes)
+                path_hints = _generate_path_hints(completed_tasks_log)
+
+                # Collect and format pending agent requests (recovery instructions)
+                agent_notes = ""
+                if self.context and self.context.agent_requests:
+                    notes = []
+                    for req in self.context.agent_requests:
+                        details = req.get("details", {})
+                        reason = details.get("reason", "unknown")
+                        detailed = details.get("detailed_reason", "")
+                        agent = details.get("agent", "Agent")
+                        note = f"⚠️ {agent} REQUEST: {reason}"
+                        if detailed:
+                            note += f"\n  Instruction: {detailed}"
+                        notes.append(note)
+                    agent_notes = "\n".join(notes)
+                    # Clear requests after collecting them for the prompt
+                    self.context.agent_requests = []
+
+                next_task = self._determine_next_action(
+                    user_request, work_summary, coding_mode, 
+                    iteration=iteration, failure_notes=failure_notes_str,
+                    path_hints=path_hints, agent_notes=agent_notes
+                )
+
+                if not next_task:
+                    planner_error = self.context.get_agent_state("planner_error") if self.context else None
+                    if isinstance(planner_error, str) and planner_error.strip():
+                        self.context.set_agent_state("no_retry", True)
+                        print("\n❌ Planner failed to produce a next action (LLM error).")
+                        print(f"  Error: {planner_error}")
+                        return False
+                    
+                    # UCCT Anchoring check before declaring victory
+                    anchoring_decision = self._evaluate_anchoring(user_request, completed_tasks_log)
+                    if anchoring_decision == AnchoringDecision.RE_SEARCH:
+                        print("\n  [UCCT] Goal may be achieved, but evidence density is low. Forcing one more search.")
+                        forced_next_task = Task(description="Verify the implemented changes by listing the affected files and confirming their content matches the request.", action_type="read")
+                        continue
+                    elif anchoring_decision == AnchoringDecision.DEBATE:
+                        print("\n  [UCCT] High mismatch risk detected. Verifying structural consistency before stopping.")
+                        forced_next_task = Task(description="Run a structural consistency check on the modified modules to ensure no unresolved symbols remain.", action_type="analyze")
+                        continue
+
+                    # Grounded Completion Check (Bait Density)
+                    is_grounded, grounding_msg = self._is_completion_grounded(completed_tasks_log)
+                    if not is_grounded:
+                        print(f"\n  [UCCT] {grounding_msg} Forcing verification.")
+                        forced_next_task = Task(description="Provide concrete evidence of the work completed by running tests and inspecting the modified files.", action_type="test")
+                        continue
+
+                    print("\n✅ Planner determined the goal is achieved.")
+                    return True
+
+                next_task.task_id = iteration
+                try:
+                    # Ensure validation_steps are always present so quick_verify can enforce them.
+                    next_task.validation_steps = ExecutionPlan().generate_validation_steps(next_task)
+                except Exception:
+                    pass
+
+                print(f"  -> Next action: [{next_task.action_type.upper()}] {next_task.description[:80]}")
+
+            if config.PREFLIGHT_ENABLED:
+                ok, sem_msgs = _preflight_correct_action_semantics(next_task)
+                for msg in sem_msgs:
+                    print(f"  [preflight] {msg}")
+                if not ok:
+                    self.context.add_error("Preflight failed: " + "; ".join(sem_msgs))
+                    completed_tasks_log.append(f"[FAILED] Preflight: {'; '.join(sem_msgs)}")
+                    if any("conflicts with write intent" in msg for msg in sem_msgs):
+                        self.context.add_agent_request(
+                            "REPLAN_REQUEST",
+                            {
+                                "agent": "Orchestrator",
+                                "reason": "preflight read/write mismatch",
+                                "detailed_reason": sem_msgs[0],
+                            },
+                        )
+                    sig = f"action_semantics::{(next_task.action_type or '').strip().lower()}::{';'.join(sem_msgs).strip().lower()}"
+                    failure_counts[sig] += 1
+                    if failure_counts[sig] >= 3:
+                        self.context.set_agent_state("no_retry", True)
+                        self.context.add_error("Circuit breaker: repeating preflight action semantics failure")
+                        print("\n" + "=" * 70)
+                        print("CIRCUIT BREAKER - PREFLIGHT FAILURE")
+                        print("=" * 70)
+                        print(f"Repeated preflight failure {failure_counts[sig]}x: {'; '.join(sem_msgs)}")
+                        print("Blocking issue: planner is not producing an executable action; refusing to loop.\n")
+                        return False
+                    continue
+                ok, preflight_msgs = _preflight_correct_task_paths(task=next_task, project_root=self.project_root)
+                for msg in preflight_msgs:
+                    print(f"  [preflight] {msg}")
+                if not ok:
+                    # Do not execute with missing/ambiguous paths; feed this back into planning.
+                    self.context.add_error("Preflight failed: " + "; ".join(preflight_msgs))
+                    completed_tasks_log.append(f"[FAILED] Preflight: {'; '.join(preflight_msgs)}")
+                    key_msg = preflight_msgs[0] if preflight_msgs else "unknown"
+                    sig = f"paths::{(next_task.action_type or '').strip().lower()}::{key_msg.strip().lower()}"
+                    failure_counts[sig] += 1
+                    if failure_counts[sig] >= 3:
+                        self.context.set_agent_state("no_retry", True)
+                        self.context.add_error("Circuit breaker: repeating preflight path failure")
+                        print("\n" + "=" * 70)
+                        print("CIRCUIT BREAKER - PREFLIGHT FAILURE")
+                        print("=" * 70)
+                        print(f"Repeated preflight failure {failure_counts[sig]}x: {key_msg}")
+                        print("Blocking issue: planner is not producing an executable action; refusing to loop.\n")
+                        return False
+                    continue
+
+            # SEMANTIC DEDUPLICATION: Warn if this is a semantically duplicate read task
+            action_type_lower = (next_task.action_type or '').lower()
+            if action_type_lower in {'read', 'analyze', 'research', 'investigate', 'review'}:
+                if _is_semantically_duplicate_task(
+                    next_task.description,
+                    next_task.action_type,
+                    completed_tasks_log,
+                    threshold=0.65  # 65% similarity threshold
+                ):
+                    print("  [semantic-dedup] Warning: similar read already completed.")
 
             self.context.plan = ExecutionPlan(tasks=[next_task])
 
@@ -1058,6 +1931,20 @@ class Orchestrator:
             action_sig = f"{(next_task.action_type or '').strip().lower()}::{next_task.description.strip().lower()}"
             action_counts[action_sig] += 1
             if action_counts[action_sig] >= 3:
+                # Before failing, check if the goal was actually achieved
+                action_lower = (next_task.action_type or "").lower()
+                is_read_action = action_lower in {"read", "analyze", "research", "investigate", "review"}
+
+                if is_read_action:
+                    goal_achieved = _check_goal_likely_achieved(user_request, completed_tasks_log)
+                    if goal_achieved:
+                        print("\n" + "=" * 70)
+                        print("CIRCUIT BREAKER - GOAL ACHIEVED")
+                        print("=" * 70)
+                        print(f"Repeated verification action {action_counts[action_sig]}x, but goal appears achieved.")
+                        print("Forcing successful completion.\n")
+                        return True
+
                 self.context.set_agent_state("no_retry", True)
                 self.context.add_error(f"Circuit breaker: repeating action '{next_task.action_type}'")
                 print("\n" + "=" * 70)
@@ -1067,6 +1954,32 @@ class Orchestrator:
                 print("Blocking issue: planner is not making forward progress; refusing to repeat the same step.")
                 print("Next step: run with `--debug` and share the last verification failure + tool args.\n")
                 return False
+            if (
+                config.LOOP_GUARD_ENABLED
+                and action_counts[action_sig] == 2
+                and (next_task.action_type or "").lower() in {"read", "analyze", "research"}
+            ):
+                print("  [loop-guard] Repeated READ/ANALYZE detected; checking if goal is achieved.")
+                # Check if the goal appears to be achieved
+                goal_achieved = _check_goal_likely_achieved(user_request, completed_tasks_log)
+                if goal_achieved:
+                    print("  [loop-guard] Goal appears achieved based on completed tasks - forcing completion.")
+                    return True
+
+                # Extract target path from the task description to create a more relevant fallback
+                target_path = _extract_file_path_from_description(next_task.description)
+                if target_path:
+                    parent_dir = str(Path(target_path.replace('\\', '/')).parent)
+                    next_task.description = (
+                        f"List the directory '{parent_dir}' to confirm all expected files exist, "
+                        f"then verify imports work by running a simple test or syntax check."
+                    )
+                else:
+                    next_task.description = (
+                        "List the target directory and summarize the current state; "
+                        "verify all expected files exist and imports work correctly."
+                    )
+                print(f"  [loop-guard] Injecting fallback: {next_task.description[:80]}")
 
             # Fast-path: don't dispatch a no-op create_directory if it already exists.
             if (next_task.action_type or "").lower() == "create_directory":
@@ -1106,6 +2019,7 @@ class Orchestrator:
                             )
                             log_entry = f"[COMPLETED] (skipped) {next_task.description}"
                             completed_tasks_log.append(log_entry)
+                            self.context.work_history = completed_tasks_log
                             print(f"  ✓ {log_entry}")
                             continue
                 except Exception:
@@ -1118,7 +2032,18 @@ class Orchestrator:
             verification_result = None
             if execution_success:
                 # Only verify actions we have a handler for; otherwise skip verification noise.
-                verifiable_actions = {"refactor", "add", "create", "edit", "create_directory", "test"}
+                verifiable_actions = {
+                    "refactor",
+                    "add",
+                    "create",
+                    "edit",
+                    "create_directory",
+                    "test",
+                    "read",
+                    "analyze",
+                    "research",
+                    "investigate",
+                }
                 action_type = (next_task.action_type or "").lower()
                 if action_type in verifiable_actions:
                     print(f"  -> Verifying execution...")
@@ -1149,7 +2074,7 @@ class Orchestrator:
                 if not verification_result.passed:
                     # Verification failed - mark task as failed and mark for re-planning
                     next_task.status = TaskStatus.FAILED
-                    next_task.error = verification_result.message
+                    next_task.error = _format_verification_feedback(verification_result)
                     execution_success = False
                     print(f"  [!] Verification failed, marking for re-planning")
 
@@ -1160,7 +2085,63 @@ class Orchestrator:
                     first_line = verification_result.message.splitlines()[0].strip() if verification_result.message else ""
                     failure_sig = f"{(next_task.action_type or '').lower()}::{first_line}"
                     failure_counts[failure_sig] += 1
+
+                    # Track syntax repair attempts separately
+                    syntax_repair_key = f"syntax_repair::{failure_sig}"
+                    syntax_repair_attempts = self.context.agent_state.get(syntax_repair_key, 0)
+
                     if failure_counts[failure_sig] >= 3:
+                        # SYNTAX RECOVERY: Check if this is a syntax error
+                        is_syntax_error = _check_syntax_error_in_verification(verification_result)
+
+                        if is_syntax_error and syntax_repair_attempts < 5:
+                            # Enter syntax repair mode - give LLM focused attempts to fix
+                            print("\n" + "=" * 70)
+                            print("SYNTAX ERROR RECOVERY MODE")
+                            print("=" * 70)
+                            print(f"Syntax errors detected after {failure_counts[failure_sig]} general attempts.")
+                            print(f"Entering focused syntax repair mode (attempt {syntax_repair_attempts + 1}/5)")
+                            print("=" * 70 + "\n")
+
+                            # Increment syntax repair counter
+                            self.context.set_agent_state(syntax_repair_key, syntax_repair_attempts + 1)
+
+                            # Create a focused syntax repair task
+                            syntax_repair_task = _create_syntax_repair_task(next_task, verification_result)
+
+                            # Reset general failure count to allow more attempts
+                            failure_counts[failure_sig] = 0
+
+                            # Replace the failed task with the repair task
+                            forced_next_task = syntax_repair_task
+                            iteration -= 1  # Don't count this as a regular iteration
+
+                        elif is_syntax_error and syntax_repair_attempts >= 5:
+                            # Exhausted syntax repair attempts - try auto-revert as last resort
+                            print("\n" + "=" * 70)
+                            print("SYNTAX REPAIR EXHAUSTED - ATTEMPTING AUTO-REVERT")
+                            print("=" * 70)
+                            print(f"Failed to fix syntax after {syntax_repair_attempts} focused repair attempts.")
+                            print("Attempting to revert files to restore working state...")
+                            print("=" * 70 + "\n")
+
+                            reverted_files = _attempt_git_revert_for_syntax_errors(next_task)
+                            if reverted_files:
+                                print("\n" + "=" * 70)
+                                print("SYNTAX ERROR RECOVERY - AUTO REVERT SUCCESSFUL")
+                                print("=" * 70)
+                                print(f"Auto-reverted files to restore working state: {', '.join(reverted_files)}")
+                                print("Code restored to working state. Goal NOT achieved - manual fix required.\n")
+                                # Clear syntax repair counter
+                                self.context.set_agent_state(syntax_repair_key, 0)
+                                return False  # Stop execution, but code is in working state
+                            else:
+                                print("\n" + "=" * 70)
+                                print("SYNTAX ERROR RECOVERY - AUTO-REVERT FAILED")
+                                print("=" * 70)
+                                print(f"Auto-revert failed. Manual intervention required.\n")
+
+                        # Non-syntax errors or revert failed - use original circuit breaker
                         self.context.set_agent_state("no_retry", True)
                         self.context.add_error("Circuit breaker: repeating verification failure")
                         print("\n" + "=" * 70)
@@ -1178,7 +2159,7 @@ class Orchestrator:
                         decomposed_task = self._decompose_extraction_task(next_task)
                         if decomposed_task:
                             print(f"  [RETRY] Using decomposed task for next iteration")
-                            next_task = decomposed_task
+                            forced_next_task = decomposed_task
                             iteration -= 1  # Don't count failed task as an iteration
                 else:
                     # If we've just verified a successful test and no code has changed since,
@@ -1203,13 +2184,46 @@ class Orchestrator:
                 self.context.set_agent_state("tests_blocked_no_changes", False)
 
             # STEP 4: REPORT
-            log_entry = f"[{next_task.status.name}] {next_task.description}"
-            if next_task.status == TaskStatus.FAILED:
-                log_entry += f" | Reason: {next_task.error}"
+            status_tag = f"[{next_task.status.name}]"
+            log_entry = f"{status_tag} {next_task.description}"
+            
+            error_detail = ""
+            if next_task.status == TaskStatus.FAILED and next_task.error:
+                error_detail = str(next_task.error)
+            
+            # Add a summary of the tool output to the log
+            output_detail = ""
+            if hasattr(next_task, 'tool_events') and next_task.tool_events:
+                # Summarize the result of the last tool event
+                event = next_task.tool_events[-1]
+                tool_output = event.get('raw_result')
+                if isinstance(tool_output, str):
+                    summary = tool_output.strip()
+                    # If the error is already in the summary, don't repeat it
+                    if error_detail and error_detail in summary:
+                        output_detail = summary
+                        error_detail = ""
+                    else:
+                        output_detail = summary
+                    
+                    if len(output_detail) > 300:
+                        output_detail = output_detail[:300] + '...'
+
+            if error_detail:
+                log_entry += f" | Reason: {error_detail}"
+            if output_detail:
+                log_entry += f" | Output: {output_detail}"
+            
             if verification_result and not verification_result.passed:
-                log_entry += f" | Verification: {verification_result.message}"
+                # Only add verification message if it's not redundant with error/output
+                v_msg = verification_result.message
+                if v_msg and v_msg not in log_entry:
+                    log_entry += f" | Verification: {v_msg}"
 
             completed_tasks_log.append(log_entry)
+            self.context.work_history = completed_tasks_log  # Sync to context for logging/visibility
+            self.context.save_history()
+
             try:
                 recent = self.context.agent_state.get("recent_tasks", [])
                 if not isinstance(recent, list):
@@ -1366,6 +2380,21 @@ class Orchestrator:
                 _append_task_tool_event(task, result)
             except Exception:
                 pass
+            # If sub-agent reported tool error, fail the task and replan.
+            try:
+                if isinstance(result, str):
+                    parsed = json.loads(result)
+                    ev = None
+                    if isinstance(parsed, dict):
+                        ev_list = parsed.get("evidence") or []
+                        if isinstance(ev_list, list) and ev_list:
+                            ev = ev_list[0]
+                    if ev and ev.get("result") == "error":
+                        task.status = TaskStatus.FAILED
+                        task.error = ev.get("summary") or "tool error"
+                        return False
+            except Exception:
+                pass
             if isinstance(result, str) and (result.startswith("[RECOVERY_REQUESTED]") or result.startswith("[FINAL_FAILURE]") or result.startswith("[USER_REJECTED]")):
                 if result.startswith("[RECOVERY_REQUESTED]"):
                     task.status = TaskStatus.FAILED
@@ -1398,10 +2427,39 @@ class Orchestrator:
             print(f"\n🔥 Emitting run metrics...")
     
     def _display_summary(self, result: OrchestratorResult):
-        if config.EXECUTION_MODE != 'sub-agent':
-            print("\n" + "=" * 60)
-            print("ORCHESTRATOR - EXECUTION SUMMARY")
-            print("=" * 60)
+        """Display a final execution summary."""
+        if config.EXECUTION_MODE == 'sub-agent':
+            # Sub-agent mode has its own summary logic or is more streamlined
+            return
+
+        print("\n" + "=" * 60)
+        print("ORCHESTRATOR - EXECUTION SUMMARY")
+        print("=" * 60)
+        
+        status = "SUCCESS" if result.success else "FAILED"
+        print(f"Status: {status}")
+        print(f"Phase Reached: {result.phase_reached.value}")
+        print(f"Time Taken: {result.execution_time:.2f} seconds")
+        
+        # Display UCCT Anchoring metrics if available in insights
+        if "anchoring_evaluation" in self.context.agent_insights:
+            metrics = self.context.agent_insights["anchoring_evaluation"]
+            print("\n📊 Measurable Coordination (UCCT):")
+            print(f"   Anchoring Score: {metrics.get('raw_score', 0):.2f}")
+            print(f"   Evidence Density: {metrics.get('evidence_density', 0):.2f}")
+            print(f"   Mismatch Risk: {metrics.get('mismatch_risk', 0)}")
+            print(f"   Anchor Budget (k): {metrics.get('anchor_budget', 0)}")
+            print(f"   Decision: {metrics.get('decision', 'N/A')}")
+
+        if result.plan:
+            print(f"\nTasks: {result.plan.get_summary()}")
+            
+        if result.errors:
+            print("\nErrors:")
+            for err in result.errors:
+                print(f"  - {err}")
+        
+        print("=" * 60)
 
 def run_orchestrated(
     user_request: str,
@@ -1425,6 +2483,7 @@ def run_orchestrated(
     enable_context_guard: bool = True,
     context_guard_interactive: bool = True,
     context_guard_threshold: float = 0.3,
+    resume: bool = False,
 ) -> OrchestratorResult:
     config_obj = OrchestratorConfig(
         enable_learning=enable_learning,
@@ -1449,5 +2508,5 @@ def run_orchestrated(
     )
 
     orchestrator = Orchestrator(project_root, config_obj)
-    return orchestrator.execute(user_request)
+    return orchestrator.execute(user_request, resume=resume)
 

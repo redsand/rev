@@ -13,6 +13,75 @@ from pathlib import Path
 from rev.core.tool_call_recovery import recover_tool_call_from_text
 from rev.agents.context_provider import build_context_and_tools
 from rev.agents.subagent_io import build_subagent_output
+from rev.tools.registry import execute_tool as execute_registry_tool
+
+
+def _extract_target_files_from_description(description: str) -> list[str]:
+    """Extract file paths mentioned in a task description.
+
+    Returns a list of potential file paths found in the description.
+    """
+    if not description:
+        return []
+
+    paths = []
+
+    # Match backticked paths like `src/module/__init__.py`
+    backtick_pattern = r'`([^`]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1))`'
+    for match in re.finditer(backtick_pattern, description, re.IGNORECASE):
+        paths.append(match.group(1))
+
+    # Match quoted paths like "src/module/__init__.py"
+    quote_pattern = r'"([^"]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1))"'
+    for match in re.finditer(quote_pattern, description, re.IGNORECASE):
+        if match.group(1) not in paths:
+            paths.append(match.group(1))
+
+    # Match bare paths like src/module/__init__.py or main.py
+    bare_pattern = r'\b([\w./\\-]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1))\b'
+    for match in re.finditer(bare_pattern, description, re.IGNORECASE):
+        candidate = match.group(1)
+        # Filter out common false positives
+        # We allow root files (no slash) if they have a recognized extension, 
+        # but avoid simple things like ".py" or just "a.py" unless it's likely a real path
+        if candidate not in paths and not candidate.startswith('.'):
+            # Include if it has a slash OR if it's a multi-character name with extension
+            if '/' in candidate or '\\' in candidate or len(candidate.split('.')[0]) > 1:
+                paths.append(candidate)
+
+    return paths
+
+
+def _read_file_content_for_edit(file_path: str, max_lines: int = 500) -> str | None:
+    """Read file content to include in edit context.
+
+    Returns the file content or None if the file cannot be read.
+    """
+    try:
+        result = execute_registry_tool("read_file", {"path": file_path})
+        if isinstance(result, str):
+            # Check for error in result
+            try:
+                result_json = json.loads(result)
+                if isinstance(result_json, dict) and "error" in result_json:
+                    return None
+                # Return the content from the read_file result
+                if isinstance(result_json, dict) and "content" in result_json:
+                    content = result_json["content"]
+                    # Limit to max_lines
+                    lines = content.split('\n')
+                    if len(lines) > max_lines:
+                        return '\n'.join(lines[:max_lines]) + f"\n... (truncated, {len(lines) - max_lines} more lines)"
+                    return content
+            except json.JSONDecodeError:
+                # Result is plain text content
+                lines = result.split('\n')
+                if len(lines) > max_lines:
+                    return '\n'.join(lines[:max_lines]) + f"\n... (truncated, {len(lines) - max_lines} more lines)"
+                return result
+    except Exception:
+        pass
+    return None
 
 CODE_WRITER_SYSTEM_PROMPT = """You are a specialized Code Writer agent. Your sole purpose is to execute a single coding task by calling the ONLY available tool for this specific task.
 
@@ -51,11 +120,13 @@ CRITICAL RULES FOR CODE EXTRACTION:
     - Proper error handling and validation
     - Docstrings explaining non-obvious logic
 
-IMPORT STRATEGY (IMPORTANT):
-- When updating imports after a refactor/split into a package (a directory with `__init__.py`), prefer importing from the
-  package exports (the `__init__.py`) instead of importing from each individual module file.
-- Do NOT replace `from pkg import *` with dozens of explicit imports. Only import the names actually used in the file,
-  or import from the package namespace if it already re-exports them.
+IMPORT STRATEGY (CRITICAL):
+- If you have just split a module into a package (a directory with `__init__.py` exporting symbols), STOP and THINK.
+- Existing imports like `import package` or `from package import Symbol` are often STILL VALID because the `__init__.py` exports them.
+- Do NOT replace a single valid import with dozens of individual module imports (e.g., `from package.module1 import ...`, `from package.module2 import ...`). This causes massive churn and linter errors.
+- ONLY update an import if it is actually broken (e.g., `ModuleNotFoundError`).
+- Prefer package-level imports: `from package import Symbol` is better than `from package.module import Symbol`.
+- Never use `from module import *` in new code.
 
 AST-AWARE EDITS (IMPORTANT):
 - For Python import path migrations, prefer `rewrite_python_imports` over brittle string replacement.
@@ -203,7 +274,11 @@ class CodeWriterAgent(BaseAgent):
         if tool == "replace_in_file":
             replaced = payload.get("replaced")
             if isinstance(replaced, int) and replaced == 0:
-                return True, "replace_in_file made no changes (replaced=0); likely `find` did not match the file"
+                return True, (
+                    "replace_in_file made no changes (replaced=0); likely `find` did not match the file. "
+                    "RECOVERY: Ensure you're not escaping content incorrectly and check whitespace, indentation, and context. "
+                    "Use read_file tool to verify the actual file content before retrying."
+                )
         if tool == "rewrite_python_imports":
             changed = payload.get("changed")
             if isinstance(changed, int) and changed == 0:
@@ -229,10 +304,26 @@ class CodeWriterAgent(BaseAgent):
         def _has_str(key: str) -> bool:
             return isinstance(arguments.get(key), str) and arguments.get(key).strip() != ""
 
+        def _has_str_or_empty(key: str) -> bool:
+            """Check if key exists and is a string (can be empty)."""
+            return isinstance(arguments.get(key), str)
+
         if tool == "replace_in_file":
-            missing = [k for k in ("path", "find", "replace") if not _has_str(k)]
-            if missing:
-                return False, f"replace_in_file missing required keys: {', '.join(missing)}"
+            # Special handling: 'replace' can be empty string (for deletions), but must exist
+            if not _has_str("path") or not _has_str("find"):
+                missing = [k for k in ("path", "find") if not _has_str(k)]
+                return False, (
+                    f"replace_in_file missing required keys: {', '.join(missing)}. "
+                    "RECOVERY: Include all three required parameters: "
+                    '{"path": "file/path.py", "find": "text to find", "replace": "replacement text (or empty string to delete)"}'
+                )
+            if not _has_str_or_empty("replace"):
+                return False, (
+                    "replace_in_file missing required key: replace. "
+                    "RECOVERY: You MUST include the 'replace' parameter even if deleting content. "
+                    'To delete text, use: {"path": "...", "find": "...", "replace": ""}. '
+                    "Empty string is allowed for deletions."
+                )
         elif tool == "rewrite_python_imports":
             if not _has_str("path"):
                 return False, "rewrite_python_imports missing required key: path"
@@ -349,7 +440,7 @@ class CodeWriterAgent(BaseAgent):
             # Statistics
             old_lines = len(old_string.splitlines())
             new_lines = len(new_string.splitlines())
-            print(f"\n{self._COLOR_CYAN}Changes:{self._COLOR_RESET} {old_lines} → {new_lines} lines")
+            print(f"\n{self._COLOR_CYAN}Changes:{self._COLOR_RESET} {old_lines} -> {new_lines} lines")
 
         elif tool_name == "rewrite_python_imports":
             file_path = arguments.get("path", "unknown")
@@ -388,6 +479,20 @@ class CodeWriterAgent(BaseAgent):
             dir_path = arguments.get("path", "unknown")
             print(f"\nDirectory: {dir_path}")
             print(f"Action: {self._COLOR_GREEN}CREATE DIRECTORY{self._COLOR_RESET}")
+
+        elif tool_name == "move_file":
+            src = arguments.get("src", "unknown")
+            dest = arguments.get("dest", "unknown")
+            print(f"\nSource: {src}")
+            print(f"Destination: {dest}")
+            print(f"Action: {self._COLOR_GREEN}MOVE/RENAME{self._COLOR_RESET}")
+
+        elif tool_name == "copy_file":
+            src = arguments.get("src", "unknown")
+            dest = arguments.get("dest", "unknown")
+            print(f"\nSource: {src}")
+            print(f"Destination: {dest}")
+            print(f"Action: {self._COLOR_GREEN}COPY{self._COLOR_RESET}")
 
         print(f"\n{'='*70}")
 
@@ -460,21 +565,28 @@ class CodeWriterAgent(BaseAgent):
                 'move_imported_symbols',
                 'rewrite_python_function_parameters',
                 'replace_in_file',
+                'apply_patch',
+                'write_file',
+                'copy_file',
+                'move_file',
             ]
         elif task.action_type == "refactor":
             # Refactoring may need to create or modify files
             tool_names = [
                 'write_file',
+                'apply_patch',
                 'rewrite_python_imports',
                 'rewrite_python_keyword_args',
                 'rename_imported_symbols',
                 'move_imported_symbols',
                 'rewrite_python_function_parameters',
                 'replace_in_file',
+                'copy_file',
+                'move_file',
             ]
         else:
             # Unknown action types get all tools (fallback)
-            tool_names = ['write_file', 'replace_in_file', 'create_directory']
+            tool_names = ['write_file', 'replace_in_file', 'create_directory', 'copy_file', 'move_file']
 
         available_tools = [tool for tool in all_tools if tool['function']['name'] in tool_names]
         rendered_context, selected_tools, _bundle = build_context_and_tools(
@@ -499,9 +611,25 @@ class CodeWriterAgent(BaseAgent):
 - Do NOT use "pass" statements or TODO comments in new code
 - Document any assumptions or changes from original implementation"""
 
+        # For edit/refactor tasks, read target files and include their content
+        # This ensures the LLM has the exact file content for replace_in_file
+        file_content_section = ""
+        if task.action_type in ("edit", "refactor"):
+            target_files = _extract_target_files_from_description(task.description)
+            if target_files:
+                file_contents = []
+                for file_path in target_files[:3]:  # Limit to 3 files to avoid context overflow
+                    content = _read_file_content_for_edit(file_path)
+                    if content:
+                        file_contents.append(f"=== ACTUAL FILE CONTENT: {file_path} ===\n{content}\n=== END OF {file_path} ===")
+                        print(f"  -> Including actual content of {file_path} for edit context")
+                if file_contents:
+                    file_content_section = "\n\nIMPORTANT - ACTUAL FILE CONTENT TO EDIT:\n" + "\n\n".join(file_contents)
+                    file_content_section += "\n\nCRITICAL: When using replace_in_file, the 'find' parameter MUST be an EXACT substring from the ACTUAL FILE CONTENT above. Do NOT guess or fabricate the content."
+
         messages = [
             {"role": "system", "content": CODE_WRITER_SYSTEM_PROMPT},
-            {"role": "user", "content": f"{task_guidance}\n\nSelected Context:\n{rendered_context}"}
+            {"role": "user", "content": f"{task_guidance}\n\nSelected Context:\n{rendered_context}{file_content_section}"}
         ]
 
         try:
@@ -545,19 +673,19 @@ class CodeWriterAgent(BaseAgent):
                             error_detail = f"Invalid JSON in tool arguments: {arguments_str[:200]}"
 
                     if not error_type:
-                        print(f"  → CodeWriterAgent will call tool '{tool_name}'")
+                        print(f"  -> CodeWriterAgent will call tool '{tool_name}'")
 
-                        # Display change preview for write, replace, and create_directory operations
-                        if tool_name in ["write_file", "replace_in_file", "create_directory"]:
+                        # Display change preview for file modifying operations
+                        if tool_name in ["write_file", "replace_in_file", "create_directory", "move_file", "copy_file"]:
                             self._display_change_preview(tool_name, arguments)
 
                             # Validate import targets before proceeding
-                            file_path = arguments.get("path", "unknown")
+                            file_path = arguments.get("path") or arguments.get("dest") or "unknown"
                             if tool_name == "write_file":
                                 content = arguments.get("content", "")
                                 is_valid, warning_msg = self._validate_import_targets(file_path, content)
                                 if not is_valid:
-                                    print(f"\n  ⚠️  Import validation warning:")
+                                    print(f"\n  [WARN]  Import validation warning:")
                                     print(f"  {warning_msg}")
                                     print(f"  Note: This file has imports that may not exist. Proceed with caution.")
 
@@ -621,7 +749,7 @@ class CodeWriterAgent(BaseAgent):
 
             # If we reach here, there was an error
             if error_type:
-                if error_type == "text_instead_of_tool_call":
+                if error_type in {"text_instead_of_tool_call", "empty_tool_calls", "missing_tool_calls"}:
                     recovered = recover_tool_call_from_text(
                         response.get("message", {}).get("content", ""),
                         allowed_tools=[t["function"]["name"] for t in available_tools],
@@ -631,10 +759,10 @@ class CodeWriterAgent(BaseAgent):
                         arguments = recovered.arguments
                         print(f"  -> Recovered tool call from text output: {tool_name}")
 
-                        if tool_name in ["write_file", "replace_in_file", "create_directory"]:
+                        if tool_name in ["write_file", "replace_in_file", "create_directory", "move_file", "copy_file"]:
                             self._display_change_preview(tool_name, arguments)
 
-                            file_path = arguments.get("path", "unknown")
+                            file_path = arguments.get("path") or arguments.get("dest") or "unknown"
                             if tool_name == "write_file":
                                 content = arguments.get("content", "")
                                 is_valid, warning_msg = self._validate_import_targets(file_path, content)
@@ -699,11 +827,11 @@ class CodeWriterAgent(BaseAgent):
                             task_id=task.task_id,
                         )
 
-                print(f"  ⚠️ CodeWriterAgent: {error_detail}")
+                print(f"  [WARN] CodeWriterAgent: {error_detail}")
 
                 # Check if we should attempt recovery
                 if self.should_attempt_recovery(task, context):
-                    print(f"  → Requesting replan (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
+                    print(f"  -> Requesting replan (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
                     self.request_replan(
                         context,
                         reason="Tool call generation failed",
@@ -711,17 +839,17 @@ class CodeWriterAgent(BaseAgent):
                     )
                     return self.make_recovery_request(error_type, error_detail)
                 else:
-                    print(f"  → Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
+                    print(f"  -> Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
                     context.add_error(f"CodeWriterAgent: {error_detail} (after {recovery_attempts} recovery attempts)")
                     return self.make_failure_signal(error_type, error_detail)
 
         except Exception as e:
             error_msg = f"Exception in CodeWriterAgent: {e}"
-            print(f"  ⚠️ {error_msg}")
+            print(f"  [WARN] {error_msg}")
 
             # Request recovery for exceptions
             if self.should_attempt_recovery(task, context):
-                print(f"  → Requesting replan due to exception (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
+                print(f"  -> Requesting replan due to exception (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
                 self.request_replan(
                     context,
                     reason="Exception during code writing",
@@ -729,6 +857,6 @@ class CodeWriterAgent(BaseAgent):
                 )
                 return self.make_recovery_request("exception", str(e))
             else:
-                print(f"  → Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
+                print(f"  -> Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
                 context.add_error(error_msg)
                 return self.make_failure_signal("exception", error_msg)

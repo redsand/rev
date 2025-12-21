@@ -91,6 +91,17 @@ class DebugLogger:
         """
         if cls._instance is None:
             cls._instance = cls(enabled, log_dir)
+        
+        if getattr(config, "LLM_TRANSACTION_LOG_ENABLED", False):
+            path_val = getattr(config, "LLM_TRANSACTION_LOG_PATH", "")
+            if path_val:
+                log_path = Path(path_val)
+                if log_path.exists():
+                    last_log_path = log_path.with_suffix(log_path.suffix + '.last')
+                    if last_log_path.exists():
+                        last_log_path.unlink()
+                    log_path.rename(last_log_path)
+                    
         return cls._instance
 
     @classmethod
@@ -239,7 +250,142 @@ class DebugLogger:
 
         self.log("llm", "LLM_RESPONSE", data, "DEBUG")
 
-    def log_tool_execution(self, tool_name: str, arguments: dict, result: Any = None, error: Optional[str] = None):
+    def log_llm_transcript(self, *, model: str, messages: Any, response: Any, tools: Any = None):
+        """Persist full LLM request/response (no truncation) when tracing is enabled.
+
+        Includes additional system state for easier debugging.
+        Also writes a summary to the run log for unified review.
+        """
+        if not getattr(config, "LLM_TRANSACTION_LOG_ENABLED", False):
+            return
+        try:
+            # Write summary to run log first (for unified review)
+            from rev.run_log import write_run_log_line
+            timestamp = datetime.utcnow().isoformat()
+
+            # Extract summary info
+            msg_count = len(messages) if isinstance(messages, list) else 0
+            last_msg = messages[-1] if isinstance(messages, list) and messages else {}
+            last_role = last_msg.get("role", "?") if isinstance(last_msg, dict) else "?"
+            last_content_preview = str(last_msg.get("content", ""))[:100] if isinstance(last_msg, dict) else ""
+
+            has_response = response and not (isinstance(response, dict) and response.get("pending"))
+            response_preview = ""
+            if has_response:
+                if isinstance(response, dict):
+                    resp_msg = response.get("message", {})
+                    if isinstance(resp_msg, dict):
+                        response_preview = str(resp_msg.get("content", ""))[:100]
+
+            write_run_log_line("\n" + "=" * 80)
+            write_run_log_line(f"LLM TRANSCRIPT [{timestamp}Z]")
+            write_run_log_line("=" * 80)
+            write_run_log_line(f"Model: {model}")
+            write_run_log_line(f"Messages: {msg_count} (last: {last_role})")
+            if last_content_preview:
+                write_run_log_line(f"Last message preview: {last_content_preview}...")
+            if has_response and response_preview:
+                write_run_log_line(f"Response preview: {response_preview}...")
+            elif not has_response:
+                write_run_log_line("Response: <pending>")
+            write_run_log_line("=" * 80 + "\n")
+            # Gather extra context for debugging
+            extra_context = {
+                "cwd": os.getcwd(),
+                "platform": sys.platform,
+                "python_version": sys.version,
+            }
+            
+            # Filtered environment variables (no secrets)
+            try:
+                secret_keywords = {'key', 'token', 'secret', 'password', 'auth', 'credential', 'cert'}
+                extra_context["env"] = {
+                    k: v for k, v in os.environ.items() 
+                    if not any(kw in k.lower() for kw in secret_keywords)
+                }
+            except Exception:
+                pass
+            
+            # Simple file listing of root
+            try:
+                extra_context["files_root"] = os.listdir(".")[:50]
+            except Exception:
+                pass
+                
+            # Available tools
+            try:
+                from rev.tools.registry import get_available_tools
+                extra_context["available_tools"] = [t.get("function", {}).get("name") for t in get_available_tools() if isinstance(t, dict)]
+            except Exception:
+                pass
+                
+            # Git status (to see actual file changes)
+            try:
+                import subprocess
+                extra_context["git_status"] = subprocess.check_output(["git", "status", "--short"], timeout=5).decode("utf-8")
+            except Exception:
+                pass
+
+            payload = {
+                "model": model,
+                "messages": messages,
+                "tools": tools,
+                "response": response,
+                "system_state": extra_context
+            }
+            content = json.dumps(payload, ensure_ascii=False, indent=2)
+            path_val = getattr(config, "LLM_TRANSACTION_LOG_PATH", "")
+            if not path_val:
+                return
+            path = Path(path_val)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as f:
+                f.write(f"==== LLM TRANSCRIPT {datetime.utcnow().isoformat()}Z ====\n")
+                f.write(content)
+                f.write("\n\n")
+                f.flush()
+        except Exception:
+            # Best-effort tracing; never crash caller
+            pass
+
+    def log_transaction_event(self, event_type: str, data: Dict[str, Any]):
+        """Log a non-LLM event (like a tool result or orchestrator decision) to the transaction log.
+
+        Also writes a summary to the run log for unified review.
+        """
+        if not getattr(config, "LLM_TRANSACTION_LOG_ENABLED", False):
+            return
+        try:
+            # Write summary to run log first (for unified review)
+            from rev.run_log import write_run_log_line
+            timestamp = datetime.utcnow().isoformat() + "Z"
+
+            # For orchestrator decisions, include action details
+            if event_type == "ORCHESTRATOR_DECISION":
+                action_type = data.get("action_type", "?")
+                description = data.get("description", "")[:100]
+                write_run_log_line(f"[ORCHESTRATOR] {action_type.upper()}: {description}...")
+
+            payload = {
+                "event_type": event_type,
+                "timestamp": timestamp,
+                "data": data
+            }
+            content = json.dumps(payload, ensure_ascii=False, indent=2)
+            path_val = getattr(config, "LLM_TRANSACTION_LOG_PATH", "")
+            if not path_val:
+                return
+            path = Path(path_val)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as f:
+                f.write(f"==== TRANSACTION EVENT {event_type} ====\n")
+                f.write(content)
+                f.write("\n\n")
+                f.flush()
+        except Exception:
+            pass
+
+    def log_tool_execution(self, tool_name: str, arguments: dict, result: Any = None, error: Optional[str] = None, duration_ms: float = 0.0):
         """Log a tool execution.
 
         Args:
@@ -247,6 +393,7 @@ class DebugLogger:
             arguments: Tool arguments
             result: Tool execution result
             error: Error message if execution failed
+            duration_ms: How long the tool took to run
         """
         if not self._enabled:
             return
@@ -254,6 +401,7 @@ class DebugLogger:
         data = {
             "tool": tool_name,
             "arguments": {k: str(v)[:200] for k, v in arguments.items()},
+            "duration_ms": round(duration_ms, 2)
         }
 
         if error:
