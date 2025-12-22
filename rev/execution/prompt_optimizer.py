@@ -27,9 +27,23 @@ def should_optimize_prompt(user_request: str) -> bool:
     - Vague language ("improve", "fix", "enhance" without specifics)
     - Asks for multiple unrelated things
     - Could be misunderstood
+
+    Returns False if request indicates working with existing code:
+    - Contains "continue", "review", "examine", "analyze existing"
     """
     request_lower = user_request.lower()
     word_count = len(user_request.split())
+
+    # Keywords that indicate working with existing code - DO NOT optimize these
+    existing_work_keywords = [
+        "continue", "resume", "keep going", "keep working",
+        "review", "examine", "analyze", "check", "look at", "inspect",
+        "current", "existing", "what's there", "what is there"
+    ]
+
+    # If user wants to work with existing code, don't optimize
+    if any(kw in request_lower for kw in existing_work_keywords):
+        return False
 
     # Too vague indicators
     vague_keywords = [

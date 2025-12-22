@@ -1754,6 +1754,31 @@ class Orchestrator:
             iteration += 1
             self.context.set_agent_state("current_iteration", iteration)
             self.context.resource_budget.update_step()
+
+            # MANDATORY: Force initial workspace examination on first iteration
+            if iteration == 1 and forced_next_task is None:
+                # Check if workspace has already been examined
+                workspace_examination_ops = ["tree_view", "list_dir", "git_status", "git_diff", "read_file", "inspect", "examine"]
+                has_examined = any(
+                    any(op in str(log_entry).lower() for op in workspace_examination_ops)
+                    for log_entry in completed_tasks_log
+                )
+
+                if not has_examined:
+                    # Force initial research task before any action
+                    forced_next_task = Task(
+                        description="Examine current workspace state using tree_view and git_status to understand what already exists",
+                        action_type="read"
+                    )
+                    forced_next_task.task_id = 0
+                    print("\n" + "="*70)
+                    print("  🔍 MANDATORY INITIAL WORKSPACE EXAMINATION")
+                    print("="*70)
+                    print("  The agent must first understand what exists in the workspace")
+                    print("  before planning any actions. This prevents blindly creating")
+                    print("  directories or files that may already exist.")
+                    print("="*70 + "\n")
+
             if self.context.resource_budget.is_exceeded() and not budget_warning_shown:
                 exceeded = self.context.resource_budget.get_exceeded_resources()
                 exceeded_str = ", ".join(exceeded)
