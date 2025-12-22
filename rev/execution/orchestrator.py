@@ -1584,11 +1584,12 @@ class Orchestrator:
 
         # Clean up malformed LLM output that contains multiple actions concatenated
         # e.g. "Open file.[READ] another[ANALYZE] more" -> "Open file."
-        if '[' in description:
-            # Truncate at the first bracket (likely another action type)
-            bracket_idx = description.find('[')
-            if bracket_idx > 0:
-                description = description[:bracket_idx].strip()
+        # Use regex to find potential start of next action tag (e.g. [READ], [EDIT], etc.)
+        # We look for [UPPERCASE_ACTION] to distinguish from filename patterns like [id]
+        action_pattern = r'\[\s*(?:' + '|'.join(re.escape(a.upper()) for a in available_actions) + r')\s*\]'
+        match_next = re.search(action_pattern, description)
+        if match_next:
+            description = description[:match_next.start()].strip()
 
         # Also clean up trailing brackets like "src/module]"
         description = re.sub(r'\]$', '', description).strip()
