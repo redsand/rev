@@ -1508,6 +1508,7 @@ class Orchestrator:
             "- If unsure whether a path exists, choose [READ] first to locate the correct file path(s).\n"
             "\n"
              "Constraints to avoid duplicating work:\n"
+             "- CRITICAL: Check the file tree in the history. If the project is already organized into subdirectories, USE THEM. Do NOT create duplicate files or project roots in the top-level directory.\n"
              "- Do not propose repeating a step that is already complete (e.g., do not re-create a directory that exists).\n"
              "- CRITICAL: If you have already completed 2+ READ/ANALYZE steps on the same file, you MUST now use [EDIT] to make changes. Do NOT propose another read.\n"
              "- If the same file/lines have been inspected multiple times, transition to [EDIT] immediately.\n"
