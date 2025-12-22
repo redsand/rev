@@ -6,6 +6,7 @@ A **robust, pattern-based autonomous development system** powered by [Ollama](ht
 
 Rev isn't just another AI coding assistant — it's a **complete agentic development system** with specialized agents for different tasks:
 
+- **🧪 Test-Driven Development (TDD) Core** — Tests are written BEFORE implementation code; follows Red-Green-Refactor cycle for all features
 - **🤖 Specialized Sub-Agent Architecture** — Dedicated agents for code writing, refactoring, testing, debugging, documentation, research, and analysis
 - **✅ Workflow Verification Loop** — Plan → Execute → **Verify** → Report → Re-plan (ensures tasks actually complete)
 - **💬 Interactive REPL Mode** — Session-persistent development with real-time guidance and context retention across multiple prompts
@@ -84,6 +85,42 @@ rev "Implement authentication system"
 - **Clarity Check** — Validates request is clear enough
 - **Gap Detection** — Identifies missing information before wasting tokens
 - **Hallucination Prevention** — Won't generate fake code for "missing" patterns
+
+### 🧪 Test-Driven Development (TDD) Core
+**REV follows TDD as a fundamental practice** for all development work:
+
+```bash
+# REV automatically enforces TDD workflow:
+rev "Add user authentication feature"
+
+# Internally:
+# 1. PLAN: Review existing tests → Write new tests → Implement feature → Run tests
+# 2. RED: Creates failing tests that specify desired behavior
+# 3. GREEN: Implements minimal code to make tests pass
+# 4. REFACTOR: Improves code while keeping tests green
+```
+
+**Why TDD is Core to REV:**
+- **Tests First** — All plans ensure test tasks come BEFORE implementation tasks
+- **Red-Green-Refactor** — Follows the proven TDD cycle for every feature
+- **Bug Reproduction** — Bug fixes start with a test that reproduces the issue
+- **Verified Quality** — Code is only accepted when tests pass
+- **Living Documentation** — Tests serve as executable specifications
+
+**TDD in Planning:**
+```
+# BAD (without TDD):
+Task 1: Implement authentication
+Task 2: Add tests
+
+# GOOD (with TDD):
+Task 1: Review existing test patterns
+Task 2: Write test for authentication in tests/test_auth.py
+Task 3: Run test to verify it fails (RED)
+Task 4: Implement authentication to make test pass (GREEN)
+Task 5: Run test to verify it passes
+Task 6: Refactor if needed while keeping tests green
+```
 
 ---
 

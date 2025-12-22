@@ -12,6 +12,7 @@ from typing import Dict, Any, TYPE_CHECKING
 
 from rev import config
 from rev.debug_logger import get_logger
+from rev.tools.permissions import get_permission_manager
 
 if TYPE_CHECKING:  # pragma: no cover - used only for type hints
     from rev.execution.timeout_manager import TimeoutManager, TimeoutConfig
@@ -583,11 +584,19 @@ def _format_description(name: str, args: Dict[str, Any]) -> str:
     return descriptions.get(name, f"{name}({', '.join(f'{k}={v!r}' for k, v in args.items())})")
 
 
-def execute_tool(name: str, args: Dict[str, Any]) -> str:
+def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -> str:
     """Execute a tool and return result.
 
     Optimized for O(1) lookup using dictionary dispatch instead of O(n) elif chain.
     Tools in the timeout-protected list will be executed with automatic retry on timeout.
+
+    Args:
+        name: Tool name to execute
+        args: Tool arguments
+        agent_name: Name of the agent requesting tool execution (for permission checking)
+
+    Returns:
+        Tool execution result as JSON string
     """
     try:
         args = maybe_fix_tool_paths(args)
@@ -679,10 +688,42 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
 
         args = normalized_args
 
+    # CHECK PERMISSIONS before execution
+    # Only enforce permissions if tool_policy.yaml exists
+    policy_path = Path.cwd() / "tool_policy.yaml"
+    if policy_path.exists():
+        try:
+            permission_mgr = get_permission_manager(policy_path)
+            perm_result = permission_mgr.check_permission(agent_name, name, args)
+
+            if not perm_result.allowed:
+                error_msg = f"Permission denied: {agent_name} cannot use {name}. Reason: {perm_result.reason}"
+                permission_mgr.log_denial(agent_name, name, args, perm_result.reason)
+
+                # Log the denial
+                logger.warning(f"[PERMISSION DENIED] {error_msg}")
+                get_logger().log_transaction_event("PERMISSION_DENIED", {
+                    "agent": agent_name,
+                    "tool": name,
+                    "arguments": args,
+                    "reason": perm_result.reason
+                })
+
+                return json.dumps({"error": error_msg, "permission_denied": True})
+
+            # Log successful permission check for high/critical risk tools
+            if perm_result.risk_level and perm_result.risk_level.value in ["high", "critical"]:
+                logger.info(f"[PERMISSION GRANTED] {agent_name} executing {perm_result.risk_level.value} risk tool: {name}")
+
+        except Exception as perm_error:
+            # If permission checking fails, log but don't block execution
+            logger.error(f"Permission check failed for {name}: {perm_error}. Allowing by default.")
+
     # Log the FINAL tool call being dispatched (after normalization)
     get_logger().log_transaction_event("TOOL_DISPATCH", {
         "tool": name,
-        "arguments": args
+        "arguments": args,
+        "agent": agent_name
     })
 
     friendly_desc = _get_friendly_description(name, args)

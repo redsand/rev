@@ -5,6 +5,16 @@ This module provides orchestration capabilities that coordinate all agents,
 manage workflow, resolve conflicts, and make meta-decisions.
 
 Implements Resource-Aware Optimization pattern to track and enforce budgets.
+
+CORE PRINCIPLE - TEST-DRIVEN DEVELOPMENT (TDD):
+REV follows TDD as a fundamental practice. All feature development and bug fixes
+should follow the Red-Green-Refactor cycle:
+1. RED: Write a failing test that specifies desired behavior
+2. GREEN: Implement minimal code to make the test pass
+3. REFACTOR: Improve code while keeping tests green
+
+The orchestrator ensures that test tasks precede implementation tasks in plans,
+and that validation is performed after each implementation step.
 """
 
 import os
@@ -1727,6 +1737,9 @@ class Orchestrator:
         if completed_tasks_log:
             print(f"  ✓ Loaded {len(completed_tasks_log)} tasks from history")
 
+        # Track completed Task objects (separate from string-based logs)
+        completed_tasks: List[Task] = []
+
         iteration = 0
         action_counts: Dict[str, int] = defaultdict(int)
         failure_counts: Dict[str, int] = defaultdict(int)
@@ -1964,9 +1977,9 @@ class Orchestrator:
                 # Track which files are being read repeatedly
                 read_file_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\\\-\.]+\.py)'
                 recent_read_files = []
-                for task in reversed(completed_tasks_log[-5:]):  # Look at last 5 tasks
+                for task in reversed(completed_tasks[-5:]):  # Look at last 5 completed Task objects
                     if (task.action_type or "").lower() in {"read", "analyze", "research"}:
-                        matches = re.findall(read_file_pattern, task.description)
+                        matches = re.findall(read_file_pattern, task.description or "")
                         recent_read_files.extend(matches)
 
                 # Check if the same file has been read 3+ times
@@ -2294,6 +2307,7 @@ class Orchestrator:
                     log_entry += f" | Verification: {v_msg}"
 
             completed_tasks_log.append(log_entry)
+            completed_tasks.append(next_task)  # Track actual Task object
             self.context.work_history = completed_tasks_log  # Sync to context for logging/visibility
             self.context.save_history()
 

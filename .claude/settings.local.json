@@ -28,7 +28,10 @@
       "Bash(powershell -Command:*)",
       "Bash(ls:*)",
       "Bash(dir:*)",
-      "Bash(findstr:*)"
+      "Bash(findstr:*)",
+      "Bash(timeout /t 15)",
+      "Bash(touch:*)",
+      "Bash(cat:*)"
     ]
   }
 }

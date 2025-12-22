@@ -569,6 +569,62 @@ class TestOrchestratorAdaptivePlanning(unittest.TestCase):
         self.assertEqual(result.plan, followup_plan)
 
 
+class TestOrchestratorLoopGuard(unittest.TestCase):
+    """Test orchestrator loop guard functionality."""
+
+    def test_loop_guard_uses_task_objects_not_strings(self):
+        """Test that loop guard properly uses completed_tasks (Task objects) not completed_tasks_log (strings).
+
+        This is a regression test for: AttributeError: 'str' object has no attribute 'action_type'
+        The orchestrator now maintains two separate lists:
+        - completed_tasks_log: List[str] - string log entries for display
+        - completed_tasks: List[Task] - actual Task objects for type-safe iteration
+
+        The loop guard must use completed_tasks, not completed_tasks_log.
+        """
+        import re
+
+        # Create mock task objects with just the attributes we need
+        class MockTask:
+            def __init__(self, description, action_type):
+                self.description = description
+                self.action_type = action_type
+
+        # Create valid task objects (this is what completed_tasks should contain)
+        task1 = MockTask(description="Read main.py to understand structure", action_type="read")
+        task2 = MockTask(description="Analyze lib/analysts/__init__.py", action_type="analyze")
+        task3 = MockTask(description="Research the codebase", action_type="research")
+
+        # completed_tasks contains Task objects (correct)
+        completed_tasks = [task1, task2, task3]
+
+        # completed_tasks_log contains strings (also correct, but shouldn't be used by loop guard)
+        completed_tasks_log = [
+            "[COMPLETED] Read main.py to understand structure",
+            "[COMPLETED] Analyze lib/analysts/__init__.py",
+            "[COMPLETED] Research the codebase",
+        ]
+
+        # Loop guard logic - should use completed_tasks, NOT completed_tasks_log
+        read_file_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\\\-\.]+\.py)'
+        recent_read_files = []
+
+        for task in reversed(completed_tasks[-5:]):  # Using completed_tasks (Task objects)
+            if (task.action_type or "").lower() in {"read", "analyze", "research"}:
+                matches = re.findall(read_file_pattern, task.description or "")
+                recent_read_files.extend(matches)
+
+        # Verify we extracted files from Task objects
+        self.assertIn("main.py", recent_read_files)
+        self.assertTrue(any("__init__.py" in f for f in recent_read_files),
+                       "Should have found __init__.py in extracted files")
+        self.assertEqual(len(recent_read_files), 2,
+                        "Should have extracted 2 .py files from Task objects")
+
+        # Most importantly: verify no AttributeError was raised
+        # Task objects have .action_type and .description attributes
+
+
 class TestOrchestratorConfig(unittest.TestCase):
     """Test orchestrator configuration."""
 

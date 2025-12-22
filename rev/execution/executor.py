@@ -720,7 +720,7 @@ def _augment_search_results(
                 snippets.append({"file": path, "note": budget_msg})
                 continue
 
-            content = execute_tool("read_file", {"path": path})
+            content = execute_tool("read_file", {"path": path}, agent_name="executor")
             if session_tracker:
                 session_tracker.track_tool_call("read_file", {"path": path})
             if _has_error_result(content):
@@ -830,7 +830,7 @@ def _apply_patch_fallback(
         return False
 
     try:
-        result = execute_tool("apply_patch", {"patch": patch_text, "dry_run": False})
+        result = execute_tool("apply_patch", {"patch": patch_text, "dry_run": False}, agent_name="executor")
         if session_tracker:
             session_tracker.track_tool_call("apply_patch", {"patch": "[text-fallback]"})
         if _has_error_result(result):
@@ -884,7 +884,7 @@ def _apply_text_fallbacks(
                         )
                     return False
 
-            result = execute_tool(recovered.name, recovered.arguments)
+            result = execute_tool(recovered.name, recovered.arguments, agent_name="executor")
             if session_tracker:
                 session_tracker.track_tool_call(recovered.name, recovered.arguments)
             messages.append({
@@ -945,7 +945,7 @@ def _apply_text_fallbacks(
     if file_payload:
         path, body = file_payload
         try:
-            result = execute_tool("write_file", {"path": path, "content": body})
+            result = execute_tool("write_file", {"path": path, "content": body}, agent_name="executor")
             if exec_context:
                 exec_context.invalidate_code(path)
                 exec_context.set_code(path, body)
@@ -1655,7 +1655,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                         if cached_content is not None:
                             result = cached_content
                         else:
-                            result = execute_tool(tool_name, tool_args)
+                            result = execute_tool(tool_name, tool_args, agent_name="executor")
                             if not _has_error_result(result):
                                 exec_context.set_code(path, result)
                                 exec_context.add_snippet(path, 1, None, result)
@@ -1664,7 +1664,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                         if cached_search is not None:
                             result = cached_search
                         else:
-                            result = execute_tool(tool_name, tool_args)
+                            result = execute_tool(tool_name, tool_args, agent_name="executor")
                             if not _has_error_result(result):
                                 exec_context.set_search(_make_search_cache_key(tool_args), result)
 
@@ -1680,16 +1680,16 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                             )
                     elif tool_name == "write_file":
                         path = tool_args.get("path")
-                        result = execute_tool(tool_name, tool_args)
+                        result = execute_tool(tool_name, tool_args, agent_name="executor")
                         if not _has_error_result(result):
                             exec_context.invalidate_code(path)
                             exec_context.set_code(path, tool_args.get("content", ""))
                     elif tool_name == "apply_patch":
-                        result = execute_tool(tool_name, tool_args)
+                        result = execute_tool(tool_name, tool_args, agent_name="executor")
                         if not _has_error_result(result):
                             exec_context.clear_code_cache()
                     else:
-                        result = execute_tool(tool_name, tool_args)
+                        result = execute_tool(tool_name, tool_args, agent_name="executor")
                         # Edit safety: treat no-ops as failures for mutating tasks,
                         # so the model can't "complete" without actually changing anything.
                         if current_task and (current_task.action_type or "").lower() in {"edit", "refactor"}:
@@ -2228,7 +2228,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                     if cached_content is not None:
                         result = cached_content
                     else:
-                        result = execute_tool(tool_name, tool_args)
+                        result = execute_tool(tool_name, tool_args, agent_name="executor")
                         if not _has_error_result(result):
                             exec_context.set_code(path, result)
                             exec_context.add_snippet(path, 1, None, result)
@@ -2238,7 +2238,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                     if cached_search is not None:
                         result = cached_search
                     else:
-                        result = execute_tool(tool_name, tool_args)
+                        result = execute_tool(tool_name, tool_args, agent_name="executor")
                         if not _has_error_result(result):
                             exec_context.set_search(cache_key, result)
 
@@ -2254,16 +2254,16 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                         )
                 elif tool_name == "write_file":
                     path = tool_args.get("path")
-                    result = execute_tool(tool_name, tool_args)
+                    result = execute_tool(tool_name, tool_args, agent_name="executor")
                     if not _has_error_result(result):
                         exec_context.invalidate_code(path)
                         exec_context.set_code(path, tool_args.get("content", ""))
                 elif tool_name == "apply_patch":
-                    result = execute_tool(tool_name, tool_args)
+                    result = execute_tool(tool_name, tool_args, agent_name="executor")
                     if not _has_error_result(result):
                         exec_context.clear_code_cache()
                 else:
-                    result = execute_tool(tool_name, tool_args)
+                    result = execute_tool(tool_name, tool_args, agent_name="executor")
 
                 # Inject review feedback into conversation (if any concerns/warnings)
                 if enable_action_review and action_review:
@@ -2488,7 +2488,7 @@ Please analyze these validation failures and fix them. Complete each fix and rep
                         continue
 
                 # Execute the fix
-                result = execute_tool(tool_name, tool_args)
+                result = execute_tool(tool_name, tool_args, agent_name="executor")
 
                 # Add result to conversation
                 messages.append({
@@ -2847,20 +2847,20 @@ Action type: {current_task.action_type}
                             if cached is not None:
                                 result = cached
                             else:
-                                result = execute_tool(tool_name, tool_args)
+                                result = execute_tool(tool_name, tool_args, agent_name="executor")
                                 if not _has_error_result(result):
                                     exec_context.set_code(path, result)
                         elif tool_name == "write_file":
                             path = tool_args.get("path")
-                            result = execute_tool(tool_name, tool_args)
+                            result = execute_tool(tool_name, tool_args, agent_name="executor")
                             if not _has_error_result(result):
                                 exec_context.invalidate_code(path)
                         elif tool_name == "apply_patch":
-                            result = execute_tool(tool_name, tool_args)
+                            result = execute_tool(tool_name, tool_args, agent_name="executor")
                             if not _has_error_result(result):
                                 exec_context.clear_code_cache()
                         else:
-                            result = execute_tool(tool_name, tool_args)
+                            result = execute_tool(tool_name, tool_args, agent_name="executor")
 
                         print(" done")
                         session_tracker.track_tool_call(tool_name, tool_args)

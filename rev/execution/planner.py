@@ -32,6 +32,21 @@ Priorities:
 2) Make tasks executable: small, concrete, ordered, and test-aware.
 3) Limit exploration: gather only essential context, then generate the plan.
 
+TEST-DRIVEN DEVELOPMENT (TDD) CORE PRINCIPLE:
+REV follows TDD as a fundamental practice for all feature development and bug fixes.
+- TESTS MUST BE WRITTEN BEFORE IMPLEMENTATION CODE
+- For new features: create test tasks BEFORE implementation tasks
+- For bug fixes: create failing test that reproduces the bug, THEN fix the bug
+- Test tasks should be specific: "Write test for X in tests/test_y.py" not "add tests"
+- Implementation tasks should reference their corresponding tests
+
+TDD TASK ORDERING:
+1. Review/research existing tests and patterns
+2. Write tests for new functionality (action_type="add" for test files)
+3. Implement the functionality to make tests pass (action_type="edit" or "add")
+4. Run tests to verify (action_type="test")
+5. Refactor if needed while keeping tests green
+
 CRITICAL REQUIREMENT:
 - You MUST generate AT LEAST 2 distinct tasks
 - NEVER collapse everything into a single task
@@ -135,6 +150,21 @@ In addition to the general planning rules above, you MUST:
    - Add at least one task to RUN the relevant test command.
 3. Prefer many small, atomic tasks over a few large ones.
 
+TEST-DRIVEN DEVELOPMENT (TDD) MANDATORY WORKFLOW:
+For any new feature or bug fix, your plan MUST follow this order:
+1. [REVIEW] Examine existing tests to understand test patterns
+2. [ADD] Write test file(s) that specify expected behavior (tests will fail initially)
+3. [TEST] Run the new tests to verify they fail for the right reasons
+4. [ADD/EDIT] Implement the functionality to make tests pass
+5. [TEST] Run tests again to verify they now pass
+6. [EDIT] Refactor if needed (optional, only if tests stay green)
+
+CRITICAL TDD RULES:
+- Test tasks MUST come BEFORE their corresponding implementation tasks
+- Implementation tasks MUST reference which tests they satisfy
+- NEVER skip the "write test first" step for new functionality
+- Bug fixes MUST start with a test that reproduces the bug
+
 Use these action_type values:
 - "review": analyzing existing code or architecture
 - "edit": modifying existing code
@@ -147,7 +177,7 @@ When possible, include hints in the description about:
 - which test file or directory is affected
 - which test command should be used (e.g. "pytest tests/api", "npm test").
 
-Your goal is to produce a PLAN that explicitly couples code changes with tests and docs.
+Your goal is to produce a PLAN that explicitly couples code changes with tests and docs, following TDD principles.
 """
 
 
@@ -193,10 +223,12 @@ Rules:
 - For porting/integration work: first IDENTIFY specific items, then implement one at a time, then add tests.
 - Avoid a single subtask that covers the entire original task.
 
-MINIMUM BREAKDOWN PATTERN:
-1. Review/research task (understand existing code/patterns, IDENTIFY specific items)
-2. One or more implementation tasks (each doing ONE specific thing WITH NAMED TARGET)
-3. Testing/validation task
+MINIMUM BREAKDOWN PATTERN (TDD):
+1. Review/research task (understand existing code/patterns, IDENTIFY specific items, review existing tests)
+2. Write test task (create tests that specify expected behavior)
+3. Run test task (verify tests fail for the right reasons)
+4. One or more implementation tasks (each doing ONE specific thing WITH NAMED TARGET to make tests pass)
+5. Testing/validation task (verify tests now pass)
 
 EXAMPLE for "implement features from another repository/framework" (WITH SPECIFIC NAMES):
 [
@@ -312,7 +344,7 @@ def _execute_tool_calls(tool_calls: List[Dict], verbose: bool = True) -> List[Di
 
         try:
             # Execute the tool
-            result = execute_tool(tool_name, arguments)
+            result = execute_tool(tool_name, arguments, agent_name="planner")
             result = _truncate_tool_content(result)
             tool_results.append({
                 "role": "tool",
