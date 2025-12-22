@@ -1,0 +1,19 @@
+name: "Simple Bug Fix"
+description: "Fix a straightforward typo in Python code"
+user_request: "Fix the bug in the greet function - it should return the greeting instead of printing it"
+
+initial_files:
+  greet.py: |
+    def greet(name):
+        """Return a greeting message."""
+        print(f"Hello, {name}!")  # Bug: should return, not print
+
+success_criteria:
+  - "greet.py contains 'return' statement"
+  - "greet.py does not contain 'print'"
+  - "Function returns string"
+
+expected_files:
+  - "greet.py"
+
+timeout_seconds: 120

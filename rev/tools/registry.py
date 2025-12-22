@@ -13,6 +13,7 @@ from typing import Dict, Any, TYPE_CHECKING
 from rev import config
 from rev.debug_logger import get_logger
 from rev.tools.permissions import get_permission_manager
+from rev.workspace import get_workspace
 
 if TYPE_CHECKING:  # pragma: no cover - used only for type hints
     from rev.execution.timeout_manager import TimeoutManager, TimeoutConfig
@@ -311,6 +312,7 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         "file_exists": lambda args: file_exists(args["path"]),
         "read_file_lines": lambda args: read_file_lines(args["path"], args.get("start", 1), args.get("end")),
         "tree_view": lambda args: tree_view(args.get("path", "."), args.get("max_depth", 3), args.get("max_files", 100)),
+        "set_workdir": lambda args: get_workspace().set_working_dir(args["path"]),
 
         # Code operations
         "remove_unused_imports": lambda args: remove_unused_imports(args["file_path"], args.get("language", "python")),
@@ -488,6 +490,7 @@ def _format_description(name: str, args: Dict[str, Any]) -> str:
         "file_exists": f"Checking file exists: {args.get('path', '')}",
         "read_file_lines": f"Reading lines from file: {args.get('path', '')}",
         "tree_view": f"Displaying tree view: {args.get('path', '.')}",
+        "set_workdir": f"Setting working directory to: {args.get('path', '')}",
 
         # Code operations
         "remove_unused_imports": f"Removing unused imports in: {args.get('file_path', '')}",
@@ -1191,6 +1194,20 @@ def get_available_tools() -> list:
                         "max_depth": {"type": "integer", "description": "Maximum depth to traverse", "default": 3},
                         "max_files": {"type": "integer", "description": "Maximum files to show", "default": 100}
                     }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "set_workdir",
+                "description": "Set the current working directory for relative path resolution. All subsequent relative paths will be resolved against this directory. Use this when focusing on a specific subdirectory of the project.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to the directory to focus on (relative or absolute)"}
+                    },
+                    "required": ["path"]
                 }
             }
         },
@@ -2143,7 +2160,7 @@ def get_available_tools() -> list:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "source_path": {"type": "string", "description": "Path to the module to split (e.g., src/module.py)"},
+                        "source_path": {"type": "string", "description": "Path to the module to split (e.g., path/to/large_file.py)"},
                         "target_directory": {"type": "string", "description": "Directory/package for extracted classes", "default": None},
                         "overwrite": {"type": "boolean", "description": "Overwrite files if they already exist", "default": False},
                         "delete_source": {"type": "boolean", "description": "Move the original source module aside (.bak). Default: False (leave original file for LLM to handle - delete, update with imports, or keep for backwards compatibility)", "default": False}

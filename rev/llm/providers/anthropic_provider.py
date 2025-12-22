@@ -4,7 +4,7 @@ import os
 from typing import Any, Callable, Dict, List, Optional
 
 from rev.debug_logger import get_logger
-from .base import LLMProvider
+from .base import LLMProvider, ErrorClass, ProviderError, RetryConfig
 
 
 class AnthropicProvider(LLMProvider):
@@ -319,3 +319,149 @@ class AnthropicProvider(LLMProvider):
             "claude-3-sonnet-20240229",
             "claude-3-haiku-20240307",
         ]
+
+    def count_tokens(self, messages: List[Dict[str, Any]]) -> int:
+        """Count tokens for messages using character-based estimation.
+
+        Anthropic's actual token counting would require their tokenizer.
+        This is a fallback estimation: ~4 characters per token.
+        """
+        total_chars = 0
+        for message in messages:
+            # Count content
+            content = message.get("content", "")
+            if isinstance(content, str):
+                total_chars += len(content)
+            elif isinstance(content, list):
+                # Handle structured content (Anthropic uses lists for complex content)
+                for item in content:
+                    if isinstance(item, dict):
+                        # Could be text block, tool use, or tool result
+                        total_chars += len(str(item))
+                    else:
+                        total_chars += len(str(item))
+
+            # Count role overhead (~4 tokens per message)
+            total_chars += 16
+
+            # Count tool calls if present
+            if "tool_calls" in message:
+                total_chars += len(str(message["tool_calls"]))
+
+        # Estimate: 1 token ≈ 4 characters
+        return max(1, total_chars // 4)
+
+    def classify_error(self, error: Exception) -> ProviderError:
+        """Classify an error into standard ErrorClass."""
+        error_str = str(error).lower()
+        error_type = type(error).__name__
+
+        # Check for timeout errors
+        if "timeout" in error_str or "timed out" in error_str:
+            return ProviderError(
+                error_class=ErrorClass.TIMEOUT,
+                message=str(error),
+                retryable=True,
+                original_error=error
+            )
+
+        # Check for connection/network errors
+        if any(keyword in error_str for keyword in ["connection", "network", "unreachable", "refused"]):
+            return ProviderError(
+                error_class=ErrorClass.NETWORK_ERROR,
+                message=str(error),
+                retryable=True,
+                original_error=error
+            )
+
+        # Check for rate limit errors (Anthropic uses 429)
+        if "rate" in error_str and "limit" in error_str or "429" in error_str or "too many requests" in error_str:
+            # Try to extract retry-after from Anthropic response
+            retry_after = None
+            if "retry" in error_str:
+                try:
+                    import re
+                    # Anthropic returns retry-after in seconds
+                    match = re.search(r"retry[_-]?after[:\s]+(\d+)", error_str)
+                    if match:
+                        retry_after = float(match.group(1))
+                except:
+                    pass
+
+            return ProviderError(
+                error_class=ErrorClass.RATE_LIMIT,
+                message=str(error),
+                retryable=True,
+                retry_after=retry_after,
+                original_error=error
+            )
+
+        # Check for authentication errors
+        if any(keyword in error_str for keyword in ["auth", "unauthorized", "401", "api key", "invalid_api_key", "authentication_error"]):
+            return ProviderError(
+                error_class=ErrorClass.AUTH_ERROR,
+                message=str(error),
+                retryable=False,
+                original_error=error
+            )
+
+        # Check for model not found errors
+        if "404" in error_str or "model not found" in error_str or "does not exist" in error_str or "not_found_error" in error_str:
+            return ProviderError(
+                error_class=ErrorClass.MODEL_NOT_FOUND,
+                message=str(error),
+                retryable=False,
+                original_error=error
+            )
+
+        # Check for invalid request errors
+        if "400" in error_str or "invalid" in error_str or "bad request" in error_str or "invalid_request_error" in error_str:
+            return ProviderError(
+                error_class=ErrorClass.INVALID_REQUEST,
+                message=str(error),
+                retryable=False,
+                original_error=error
+            )
+
+        # Check for context length errors (Anthropic has max_tokens limits)
+        if any(keyword in error_str for keyword in [
+            "context", "too long", "maximum", "max_tokens", "token limit", "prompt is too long"
+        ]):
+            return ProviderError(
+                error_class=ErrorClass.CONTEXT_LENGTH_EXCEEDED,
+                message=str(error),
+                retryable=False,
+                original_error=error
+            )
+
+        # Check for server errors (5xx)
+        if any(keyword in error_str for keyword in ["500", "502", "503", "504", "server error", "internal server", "overloaded_error"]):
+            return ProviderError(
+                error_class=ErrorClass.SERVER_ERROR,
+                message=str(error),
+                retryable=True,
+                original_error=error
+            )
+
+        # Default: unknown error
+        return ProviderError(
+            error_class=ErrorClass.UNKNOWN,
+            message=str(error),
+            retryable=False,
+            original_error=error
+        )
+
+    def get_retry_config(self) -> RetryConfig:
+        """Get retry configuration for Anthropic."""
+        return RetryConfig(
+            max_retries=int(os.getenv("ANTHROPIC_MAX_RETRIES", "3")),
+            base_backoff=float(os.getenv("ANTHROPIC_BASE_BACKOFF", "1.0")),
+            max_backoff=float(os.getenv("ANTHROPIC_MAX_BACKOFF", "60.0")),
+            exponential=True,
+            retry_on=[
+                ErrorClass.RATE_LIMIT,
+                ErrorClass.TIMEOUT,
+                ErrorClass.SERVER_ERROR,
+                ErrorClass.NETWORK_ERROR,
+            ]
+        )

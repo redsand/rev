@@ -728,6 +728,7 @@ def _order_available_actions(actions: List[str]) -> List[str]:
         "review": 2,
         "research": 3,
         "investigate": 3,
+        "set_workdir": 4,
         # Then mutating actions
         "create_directory": 10,
         "add": 11,
@@ -1583,11 +1584,12 @@ class Orchestrator:
 
         # Clean up malformed LLM output that contains multiple actions concatenated
         # e.g. "Open file.[READ] another[ANALYZE] more" -> "Open file."
-        if '[' in description:
-            # Truncate at the first bracket (likely another action type)
-            bracket_idx = description.find('[')
-            if bracket_idx > 0:
-                description = description[:bracket_idx].strip()
+        # Use regex to find potential start of next action tag (e.g. [READ], [EDIT], etc.)
+        # We look for [UPPERCASE_ACTION] to distinguish from filename patterns like [id]
+        action_pattern = r'\[\s*(?:' + '|'.join(re.escape(a.upper()) for a in available_actions) + r')\s*\]'
+        match_next = re.search(action_pattern, description)
+        if match_next:
+            description = description[:match_next.start()].strip()
 
         # Also clean up trailing brackets like "src/module]"
         description = re.sub(r'\]$', '', description).strip()
@@ -1746,16 +1748,52 @@ class Orchestrator:
         last_task_signature: Optional[str] = None
         repeat_same_action: int = 0
         forced_next_task: Optional[Task] = None
+        budget_warning_shown: bool = False
 
         while True:
             iteration += 1
             self.context.set_agent_state("current_iteration", iteration)
             self.context.resource_budget.update_step()
-            if self.context.resource_budget.is_exceeded():
-                print(f"\n⚠️ Resource budget exceeded at step {iteration}")
-                self.context.set_agent_state("no_retry", True)
-                self.context.add_error(f"Resource budget exceeded at step {iteration}")
-                return False
+
+            # MANDATORY: Force initial workspace examination on first iteration
+            if iteration == 1 and forced_next_task is None:
+                # Check if workspace has already been examined
+                workspace_examination_ops = ["tree_view", "list_dir", "git_status", "git_diff", "read_file", "inspect", "examine"]
+                has_examined = any(
+                    any(op in str(log_entry).lower() for op in workspace_examination_ops)
+                    for log_entry in completed_tasks_log
+                )
+
+                if not has_examined:
+                    # Force initial research task before any action
+                    forced_next_task = Task(
+                        description="Examine current workspace state using tree_view and git_status to understand what already exists",
+                        action_type="read"
+                    )
+                    forced_next_task.task_id = 0
+                    print("\n" + "="*70)
+                    print("  🔍 MANDATORY INITIAL WORKSPACE EXAMINATION")
+                    print("="*70)
+                    print("  The agent must first understand what exists in the workspace")
+                    print("  before planning any actions. This prevents blindly creating")
+                    print("  directories or files that may already exist.")
+                    print("="*70 + "\n")
+
+            if self.context.resource_budget.is_exceeded() and not budget_warning_shown:
+                exceeded = self.context.resource_budget.get_exceeded_resources()
+                exceeded_str = ", ".join(exceeded)
+                print(f"\n⚠️ Resource budget exceeded at step {iteration}: {exceeded_str}")
+                print(f"   Usage: {self.context.resource_budget.get_usage_summary()}")
+                print(f"   To increase limits, set environment variables:")
+                print(f"   - REV_MAX_STEPS (current: {self.context.resource_budget.max_steps})")
+                print(f"   - REV_MAX_TOKENS (current: {self.context.resource_budget.max_tokens:,})")
+                print(f"   - REV_MAX_SECONDS (current: {self.context.resource_budget.max_seconds:.0f})")
+                print(f"   Continuing anyway...")
+                budget_warning_shown = True
+                # Don't halt - just warn and continue
+                # self.context.set_agent_state("no_retry", True)
+                # self.context.add_error(f"Resource budget exceeded: {exceeded_str}")
+                # return False
 
             if forced_next_task:
                 next_task = forced_next_task

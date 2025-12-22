@@ -1,0 +1,41 @@
+name: "Refactor Complex Function"
+description: "Refactor a complex function to improve readability"
+user_request: "Refactor the process_data function to be more modular - extract validation, transformation, and saving into separate functions"
+
+initial_files:
+  data_processor.py: |
+    """Data processing module."""
+
+    def process_data(data):
+        """Process and save data."""
+        # Validation
+        if not data:
+            raise ValueError("Data cannot be empty")
+        if not isinstance(data, list):
+            raise TypeError("Data must be a list")
+
+        # Transformation
+        processed = []
+        for item in data:
+            if isinstance(item, str):
+                processed.append(item.upper())
+            elif isinstance(item, int):
+                processed.append(item * 2)
+
+        # Saving
+        with open("output.txt", "w") as f:
+            for item in processed:
+                f.write(str(item) + "\n")
+
+        return processed
+
+success_criteria:
+  - "data_processor.py contains 'def validate_data'"
+  - "data_processor.py contains 'def transform_data'"
+  - "data_processor.py contains 'def save_data'"
+  - "Original process_data function still works"
+
+expected_files:
+  - "data_processor.py"
+
+timeout_seconds: 300

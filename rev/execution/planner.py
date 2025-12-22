@@ -58,6 +58,7 @@ CRITICAL RULE: DO NOT Hallucinate File Paths or Class Names
   * The repository context provided to you
   * Research findings from your tool calls
   * The current conversation
+- SCOPED WORKING DIRECTORY: If the project has subdirectories (e.g. `apps/server`, `client/`), use the `set_workdir` tool to focus relative path resolution on that directory. This prevents path drift and ensures relative paths like `package.json` resolve correctly.
 - If you suspect a file/class exists but do NOT see it in the provided context, you CANNOT create an [ADD] or [EDIT] task for it.
 - Instead, you MUST create a [REVIEW] or discovery task first: "Scan [directory] for '[pattern]' to identify specific items."
 
@@ -301,7 +302,7 @@ def _format_available_tools(tools: List[Dict[str, Any]]) -> str:
                 category = "MCP Servers"
             elif any(keyword in name for keyword in ["search", "grep", "find", "list", "tree"]):
                 category = "Code Search"
-            elif any(keyword in name for keyword in ["read", "write", "file"]):
+            elif any(keyword in name for keyword in ["read", "write", "file", "workdir"]):
                 category = "File Operations"
             else:
                 category = "General Tools"
@@ -947,6 +948,92 @@ def _extract_concrete_references(user_request: str) -> Dict[str, Any]:
     return references
 
 
+def _enhance_repo_context(context_json: str) -> str:
+    """Parse and enhance repository context for better readability in planner prompts.
+
+    Takes the JSON context from get_repo_context() and formats it into a clear,
+    human-readable format that highlights the current workspace state.
+
+    Args:
+        context_json: JSON string from get_repo_context()
+
+    Returns:
+        Enhanced, formatted context string with warnings and structure
+    """
+    try:
+        context = json.loads(context_json)
+    except (json.JSONDecodeError, TypeError):
+        # If parsing fails, return the raw context
+        return f"Repository Context (raw):\n{context_json}"
+
+    enhanced = []
+
+    # Git Status Section
+    status = context.get("status", "").strip()
+    if status:
+        enhanced.append("📋 GIT STATUS (Modified/Untracked Files):")
+        enhanced.append("```")
+        for line in status.split('\n'):
+            if line.strip():
+                enhanced.append(f"  {line}")
+        enhanced.append("```")
+        enhanced.append("⚠️ WARNING: Files shown above already exist and may be modified!")
+        enhanced.append("")
+    else:
+        enhanced.append("📋 GIT STATUS: No modified or untracked files (clean working directory)")
+        enhanced.append("")
+
+    # Recent Commits Section
+    log = context.get("log", "").strip()
+    if log:
+        enhanced.append("📜 RECENT COMMITS:")
+        enhanced.append("```")
+        for line in log.split('\n')[:5]:  # Show last 5 commits
+            if line.strip():
+                enhanced.append(f"  {line}")
+        enhanced.append("```")
+        enhanced.append("")
+
+    # File Structure Section
+    file_structure = context.get("file_structure", [])
+    if file_structure:
+        enhanced.append("📁 EXISTING FILE STRUCTURE:")
+        enhanced.append("```")
+        for item in file_structure[:30]:  # Show first 30 items
+            indent = "  " * item.get("depth", 0)
+            name = item.get("name", "")
+            item_type = item.get("type", "")
+            if item_type == "dir":
+                enhanced.append(f"{indent}📂 {name}/")
+            else:
+                enhanced.append(f"{indent}📄 {name}")
+        if len(file_structure) > 30:
+            enhanced.append(f"  ... and {len(file_structure) - 30} more items")
+        enhanced.append("```")
+        enhanced.append("")
+
+    # Top-level directories
+    top_level = context.get("top_level", [])
+    if top_level and not file_structure:  # Only show if file_structure isn't shown
+        enhanced.append("📂 TOP-LEVEL ITEMS:")
+        dirs = [item["name"] for item in top_level if item.get("type") == "dir"]
+        files = [item["name"] for item in top_level if item.get("type") == "file"]
+        if dirs:
+            enhanced.append(f"  Directories: {', '.join(dirs)}")
+        if files:
+            enhanced.append(f"  Files: {', '.join(files)}")
+        enhanced.append("")
+
+    # Error handling
+    if "error" in context:
+        enhanced.append(f"⚠️ Context Error: {context['error']}")
+        if "note" in context:
+            enhanced.append(f"   Note: {context['note']}")
+        enhanced.append("")
+
+    return '\n'.join(enhanced)
+
+
 def planning_mode(
     user_request: str,
     enable_advanced_analysis: bool = True,
@@ -985,7 +1072,10 @@ def planning_mode(
     # Get system and repository context
     print("→ Analyzing system and repository...")
     sys_info = get_system_info_cached()
-    context = get_repo_context()
+    context_raw = get_repo_context()
+
+    # Parse and enhance the context for better readability
+    context_enhanced = _enhance_repo_context(context_raw)
 
     ensure_escape_is_cleared("Planning interrupted")
 
@@ -1043,8 +1133,13 @@ Platform: {sys_info['platform']}
 Architecture: {sys_info['architecture']}
 Shell Type: {sys_info['shell_type']}
 
-Repository context:
-{context}
+CURRENT WORKSPACE STATE:
+{context_enhanced}
+
+⚠️ CRITICAL: You MUST examine the workspace state above before planning any actions.
+- DO NOT create directories or files that already exist
+- DO NOT assume an empty workspace - check what's already there
+- If files are modified, consider reviewing them first
 
 User request:
 {user_request}
@@ -1528,7 +1623,7 @@ def determine_next_action(
     """
 
     # Valid action types that the system supports
-    VALID_ACTION_TYPES = ["edit", "add", "delete", "rename", "test", "review", "create_directory", "general"]
+    VALID_ACTION_TYPES = ["edit", "add", "delete", "rename", "test", "review", "create_directory", "general", "set_workdir"]
 
     model_name = config.PLANNING_MODEL
     tools = get_available_tools()
@@ -1561,7 +1656,7 @@ Based on the current progress and remaining tasks, what is the SINGLE NEXT ACTIO
    - AND user's original request is 100% satisfied
    - Answer: {{"action_type": "review", "description": "GOAL_ACHIEVED"}}
    - If ANY remaining tasks exist, do NOT say goal achieved
-3. action_type MUST be EXACTLY one of: edit, add, delete, rename, test, review, create_directory, general
+3. action_type MUST be EXACTLY one of: edit, add, delete, rename, test, review, create_directory, general, set_workdir
 4. NO OTHER action types are allowed
 5. Be specific about files, classes, and functions
 6. DO NOT suggest repeating completed work
@@ -1576,17 +1671,19 @@ VALID ACTION TYPES (pick exactly ONE):
 - "test" = run tests or validation
 - "review" = analyze or review code
 - "create_directory" = create a directory
+- "set_workdir" = set scoped working directory for subprojects
 - "general" = other general task
 
 RESPONSE FORMAT (STRICT):
 Return ONLY a JSON object, no other text:
 {{
-  "action_type": "edit|add|delete|rename|test|review|general",
+  "action_type": "edit|add|delete|rename|test|review|general|set_workdir",
   "description": "Specific description of the single action to take next"
 }}
 
 EXAMPLES:
 {{"action_type": "add", "description": "Create src/auth/auth_validator.py with AuthValidator class"}}
+{{"action_type": "set_workdir", "description": "Set working directory to apps/server to focus on backend implementation"}}
 {{"action_type": "edit", "description": "Update src/registry.py to include new services"}}
 {{"action_type": "test", "description": "Run pytest tests/auth to verify changes"}}
 {{"action_type": "review", "description": "GOAL_ACHIEVED"}}

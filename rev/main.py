@@ -305,6 +305,10 @@ def main():
         _log(f"⚠️ Parallel execution is disabled. Forcing --parallel=1 (requested {args.parallel}).")
         args.parallel = 1
 
+    # Enable LLM transaction logging if debug mode is requested
+    if args.debug:
+        config.LLM_TRANSACTION_LOG_ENABLED = True
+
     # Initialize debug logging if requested
     debug_logger = DebugLogger.initialize(enabled=args.debug)
     if args.debug:

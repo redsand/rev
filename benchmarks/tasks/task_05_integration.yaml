@@ -1,0 +1,46 @@
+name: "Module Integration"
+description: "Integrate two modules and add connecting functionality"
+user_request: "Create a new module 'user_service.py' that integrates auth.py and database.py to provide user registration and login functionality"
+
+initial_files:
+  auth.py: |
+    """Authentication utilities."""
+    import hashlib
+
+    def hash_password(password):
+        """Hash a password."""
+        return hashlib.sha256(password.encode()).hexdigest()
+
+    def verify_password(password, hashed):
+        """Verify a password against hash."""
+        return hash_password(password) == hashed
+
+  database.py: |
+    """Simple database operations."""
+
+    class Database:
+        def __init__(self):
+            self.users = {}
+
+        def save_user(self, username, data):
+            """Save user data."""
+            self.users[username] = data
+
+        def get_user(self, username):
+            """Get user data."""
+            return self.users.get(username)
+
+success_criteria:
+  - "user_service.py exists"
+  - "user_service.py imports from auth"
+  - "user_service.py imports from database"
+  - "user_service.py contains register_user function"
+  - "user_service.py contains login_user function"
+  - "Functions use hash_password for security"
+
+expected_files:
+  - "auth.py"
+  - "database.py"
+  - "user_service.py"
+
+timeout_seconds: 300

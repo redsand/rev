@@ -12,12 +12,15 @@ import math
 import time
 import hashlib
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional, Set, Tuple
 from collections import Counter
 
 from rev import config
 from rev.retrieval.base import BaseCodeRetriever, CodeChunk
 from rev.config import EXCLUDE_DIRS
+from rev.retrieval.symbol_index import SymbolIndexer
+from rev.retrieval.import_graph import ImportGraph
+from rev.retrieval.code_queries import CodeQueryEngine
 
 
 class SimpleCodeRetriever(BaseCodeRetriever):
@@ -27,12 +30,13 @@ class SimpleCodeRetriever(BaseCodeRetriever):
     by relevance to a natural language query.
     """
 
-    def __init__(self, root: Path = None, chunk_size: int = 50):
+    def __init__(self, root: Path = None, chunk_size: int = 50, enable_code_aware: bool = True):
         """Initialize the simple retriever.
 
         Args:
             root: Root directory of the codebase
             chunk_size: Number of lines per chunk
+            enable_code_aware: Enable code-aware features (symbol indexing, import graph)
         """
         super().__init__(root)
         self.chunk_size = chunk_size
@@ -40,6 +44,17 @@ class SimpleCodeRetriever(BaseCodeRetriever):
         self.term_document_freq: Dict[str, int] = {}  # IDF calculation
         self.total_documents = 0
         self.cache_version = 1
+
+        # Code-aware components
+        self.enable_code_aware = enable_code_aware
+        self.symbol_index: Optional[SymbolIndexer] = None
+        self.import_graph: Optional[ImportGraph] = None
+        self.query_engine: Optional[CodeQueryEngine] = None
+
+        if enable_code_aware and root:
+            self.symbol_index = SymbolIndexer(root)
+            self.import_graph = ImportGraph(root)
+            self.query_engine = CodeQueryEngine(self.symbol_index, self.import_graph)
 
     def _cache_path(self) -> Path:
         """Location for persisted index cache."""
@@ -139,9 +154,28 @@ class SimpleCodeRetriever(BaseCodeRetriever):
 
         # Build IDF index
         self._build_idf_index()
+
+        # Build code-aware indices if enabled
+        if self.enable_code_aware:
+            try:
+                print("    Building symbol index...")
+                self.symbol_index.build_index()
+
+                print("    Building import graph...")
+                self.import_graph.build_graph()
+
+                # Update query engine
+                self.query_engine = CodeQueryEngine(self.symbol_index, self.import_graph)
+            except Exception as e:
+                print(f"    Warning: Code-aware indexing failed: {e}")
+                self.enable_code_aware = False
+
         self.index_built = True
         duration = time.perf_counter() - start
         print(f"    Built RAG index with {len(self.chunks)} chunks in {duration:.2f}s")
+        if self.enable_code_aware:
+            stats = self.symbol_index.get_stats() if self.symbol_index else {}
+            print(f"    Indexed {stats.get('total_symbols', 0)} symbols across {stats.get('files', 0)} files")
         self._save_cache(cache_path)
 
     def _index_file(self, file_path: Path) -> None:
@@ -283,6 +317,12 @@ class SimpleCodeRetriever(BaseCodeRetriever):
     def query(self, question: str, k: int = 10, filters: Optional[Dict[str, Any]] = None) -> List[CodeChunk]:
         """Query for relevant code chunks.
 
+        Supports both semantic search and structure-aware queries:
+        - "find callers: function_name" - Find all call sites
+        - "find implementers: BaseClass" - Find all subclasses
+        - "find usages: symbol_name" - Find all symbol references
+        - Regular queries use TF-IDF semantic search
+
         Args:
             question: Natural language question or search query
             k: Number of top results to return
@@ -294,6 +334,16 @@ class SimpleCodeRetriever(BaseCodeRetriever):
         if not self.index_built:
             raise RuntimeError("Index not built. Call build_index() first.")
 
+        # Check for structure-aware queries
+        if self.enable_code_aware and self.query_engine:
+            if question.lower().startswith("find callers:"):
+                return self._handle_find_callers(question, k)
+            elif question.lower().startswith("find implementers:"):
+                return self._handle_find_implementers(question, k)
+            elif question.lower().startswith("find usages:"):
+                return self._handle_find_usages(question, k)
+
+        # Fall back to semantic search
         # Tokenize query
         query_terms = self._tokenize(question)
 
@@ -323,6 +373,54 @@ class SimpleCodeRetriever(BaseCodeRetriever):
 
         # Return top-k
         return scored_chunks[:k]
+
+    def _handle_find_callers(self, question: str, k: int) -> List[CodeChunk]:
+        """Handle 'find callers:' query."""
+        function_name = question.split(":", 1)[1].strip()
+        locations = self.query_engine.find_callers(function_name)
+        return self._locations_to_chunks(locations, k)
+
+    def _handle_find_implementers(self, question: str, k: int) -> List[CodeChunk]:
+        """Handle 'find implementers:' query."""
+        base_class = question.split(":", 1)[1].strip()
+        symbols = self.query_engine.find_implementers(base_class)
+        return self._symbols_to_chunks(symbols, k)
+
+    def _handle_find_usages(self, question: str, k: int) -> List[CodeChunk]:
+        """Handle 'find usages:' query."""
+        symbol_name = question.split(":", 1)[1].strip()
+        locations = self.query_engine.find_usages(symbol_name)
+        return self._locations_to_chunks(locations, k)
+
+    def _locations_to_chunks(self, locations: List[Tuple[Path, int]], k: int) -> List[CodeChunk]:
+        """Convert (file, line) locations to code chunks."""
+        chunks = []
+
+        for file_path, line_num in locations[:k]:
+            # Find chunk containing this line
+            relative_path = str(file_path.relative_to(self.root))
+            for chunk in self.chunks:
+                if chunk.path == relative_path and chunk.start_line <= line_num <= chunk.end_line:
+                    chunk.score = 1.0  # All equally relevant
+                    chunks.append(chunk)
+                    break
+
+        return chunks[:k]
+
+    def _symbols_to_chunks(self, symbols, k: int) -> List[CodeChunk]:
+        """Convert Symbol objects to code chunks."""
+        chunks = []
+
+        for symbol in symbols[:k]:
+            # Find chunk containing this symbol
+            relative_path = str(symbol.file_path.relative_to(self.root))
+            for chunk in self.chunks:
+                if chunk.path == relative_path and chunk.start_line <= symbol.line_number <= chunk.end_line:
+                    chunk.score = 1.0
+                    chunks.append(chunk)
+                    break
+
+        return chunks[:k]
 
     def get_index_stats(self) -> Dict[str, Any]:
         """Get statistics about the current index."""

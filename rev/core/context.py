@@ -49,6 +49,18 @@ class ResourceBudget:
             self.seconds_used >= self.max_seconds
         )
 
+    def get_exceeded_resources(self) -> List[str]:
+        """Get list of resources that have exceeded their budgets."""
+        self.update_time()
+        exceeded = []
+        if self.steps_used >= self.max_steps:
+            exceeded.append(f"steps ({self.steps_used}/{self.max_steps})")
+        if self.tokens_used >= self.max_tokens:
+            exceeded.append(f"tokens ({self.tokens_used:,}/{self.max_tokens:,})")
+        if self.seconds_used >= self.max_seconds:
+            exceeded.append(f"time ({self.seconds_used:.1f}s/{self.max_seconds:.0f}s)")
+        return exceeded
+
     def get_remaining(self) -> Dict[str, float]:
         """Get remaining budget percentages."""
         self.update_time()

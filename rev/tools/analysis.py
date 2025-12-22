@@ -753,7 +753,14 @@ def analyze_code_structures(path: str = ".") -> str:
 
         total_files = sum(len(files) for files in structure_files.values())
         if total_files == 0:
-            return json.dumps({"error": "No structure files found"})
+            # Don't error, just return empty results so the agent can proceed
+            return json.dumps({
+                "files_analyzed": {k: 0 for k in structure_files},
+                "summary": {
+                    "total_files": 0,
+                    "note": "No structure files found (e.g. Prisma, SQL, TS interfaces)"
+                }
+            }, indent=2)
 
         results: Dict[str, Any] = {
             "files_analyzed": {k: len(v) for k, v in structure_files.items() if v},

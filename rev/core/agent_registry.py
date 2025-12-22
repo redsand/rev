@@ -63,6 +63,7 @@ AgentRegistry.register_agent("investigate", ResearchAgent)
 AgentRegistry.register_agent("analyze", AnalysisAgent)
 AgentRegistry.register_agent("review", AnalysisAgent)
 AgentRegistry.register_agent("read", ResearchAgent)
+AgentRegistry.register_agent("set_workdir", ResearchAgent)
 
 # Advanced agents
 AgentRegistry.register_agent("create_tool", ToolCreationAgent)
