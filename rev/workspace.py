@@ -53,6 +53,7 @@ class Workspace:
     root: Path
     allow_external_paths: bool = False
     additional_roots: List[Path] = field(default_factory=list)
+    current_working_dir: Path = field(init=False)
 
     # Derived paths (computed in __post_init__)
     rev_dir: Path = field(init=False)
@@ -73,6 +74,7 @@ class Workspace:
         """Compute derived paths from root."""
         # Ensure root is resolved
         object.__setattr__(self, "root", self.root.expanduser().resolve())
+        object.__setattr__(self, "current_working_dir", self.root)
 
         # Auto-register additional roots from environment (REV_ADDITIONAL_ROOTS)
         # Accept a pathsep-separated list of directories.
@@ -107,6 +109,25 @@ class Workspace:
     def get_allowed_roots(self) -> List[Path]:
         """Return the primary root plus any additional allowed roots."""
         return [self.root, *self.additional_roots]
+
+    def set_working_dir(self, path: Union[str, Path]) -> str:
+        """Set the scoped working directory for relative path resolution.
+
+        Args:
+            path: Path to the new working directory (relative or absolute).
+
+        Returns:
+            A message confirming the new working directory.
+
+        Raises:
+            WorkspacePathError: If the path is outside allowed roots.
+        """
+        resolved = self.resolve_path(path, purpose="set_workdir")
+        if not resolved.abs_path.is_dir():
+            raise WorkspacePathError(f"Working directory must be an existing directory: {path}")
+        
+        object.__setattr__(self, "current_working_dir", resolved.abs_path)
+        return f"Working directory set to: {resolved.rel_path if resolved.rel_path != '.' else '(root)'}"
 
     def register_additional_root(self, path: Path) -> None:
         """Register an additional root directory that tools may access.
@@ -176,7 +197,7 @@ class Workspace:
         is_absolute_input = candidate.is_absolute()
 
         if not is_absolute_input:
-            candidate = self.root / candidate
+            candidate = self.current_working_dir / candidate
 
         # strict=False: allow resolving paths that don't exist yet (create/write flows).
         abs_path = candidate.resolve(strict=False)

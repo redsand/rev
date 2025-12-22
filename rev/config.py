@@ -193,6 +193,9 @@ def _get_primary_provider_and_model():
 
 _PRIMARY_PROVIDER, _DEFAULT_MODEL = _get_primary_provider_and_model()
 
+# Track if the provider was explicitly set via environment variable
+LLM_PROVIDER_IS_EXPLICIT = os.getenv("REV_LLM_PROVIDER") is not None
+
 # Debug: Log provider and model selection
 if os.getenv("OLLAMA_DEBUG"):
     print(f"[DEBUG] Config initialized: PRIMARY_PROVIDER={_PRIMARY_PROVIDER}, DEFAULT_MODEL={_DEFAULT_MODEL}")

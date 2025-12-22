@@ -728,6 +728,7 @@ def _order_available_actions(actions: List[str]) -> List[str]:
         "review": 2,
         "research": 3,
         "investigate": 3,
+        "set_workdir": 4,
         # Then mutating actions
         "create_directory": 10,
         "add": 11,

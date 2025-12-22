@@ -48,10 +48,12 @@ def get_provider(provider_name: Optional[str] = None, force_new: bool = False) -
     elif provider_name == "gemini":
         provider = GeminiProvider()
     else:
-        raise ValueError(
-            f"Unknown provider: {provider_name}. "
-            f"Valid providers: ollama, openai, anthropic, gemini"
-        )
+        # Default to Ollama for all other provider names instead of raising ValueError.
+        # This allows for custom provider names (e.g. local proxies) to work
+        # automatically with the Ollama implementation.
+        if os.getenv("OLLAMA_DEBUG"):
+            print(f"[DEBUG] Unknown provider '{provider_name}', falling back to ollama")
+        provider = OllamaProvider()
 
     # Cache the provider
     _provider_cache[provider_name] = provider

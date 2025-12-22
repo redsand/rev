@@ -232,7 +232,7 @@ class OllamaProvider(LLMProvider):
         url = f"{self.base_url}/api/chat"
         is_cloud_model = model_name.endswith("-cloud")
 
-        if is_cloud_model and (OLLAMA_DEBUG or not hasattr(self, '_cloud_model_notified')):
+        if is_cloud_model and OLLAMA_DEBUG and not hasattr(self, '_cloud_model_notified'):
             print(f"ℹ️  Using cloud model: {model_name} (proxied through local Ollama)")
             self._cloud_model_notified = True
 

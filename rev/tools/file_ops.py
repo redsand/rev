@@ -69,13 +69,16 @@ def _should_skip(path: pathlib.Path) -> bool:
     return any(part in EXCLUDE_DIRS for part in path.parts)
 
 
-def _iter_files(include_glob: str) -> List[pathlib.Path]:
-    """Iterate files matching glob pattern."""
+def _iter_files(include_glob: str, include_dirs: bool = False) -> List[pathlib.Path]:
+    """Iterate files (and optionally directories) matching glob pattern."""
     files: List[pathlib.Path] = []
 
     for base in _allowed_roots():
         all_paths = [pathlib.Path(p) for p in glob.glob(str(base / include_glob), recursive=True)]
-        files.extend(p for p in all_paths if p.is_file())
+        if include_dirs:
+            files.extend(p for p in all_paths if p.exists())
+        else:
+            files.extend(p for p in all_paths if p.is_file())
 
     return [p for p in files if not _should_skip(p)]
 
@@ -323,7 +326,7 @@ def list_dir(pattern: str = "**/*") -> str:
         if p and not re.search(r"[*?\[\]]", p):
             p = p.rstrip("/\\")
             pattern = f"{p}/**/*" if p else "**/*"
-    files = _iter_files(pattern)
+    files = _iter_files(pattern, include_dirs=True)
     rels = sorted(_rel_to_root(p).replace("\\", "/") for p in files)[:LIST_LIMIT]
     return json.dumps({"count": len(rels), "files": rels})
 
@@ -338,7 +341,7 @@ def search_code(pattern: str, include: str = "**/*", regex: bool = True,
         return json.dumps({"error": f"Invalid regex: {e}"})
 
     matches = []
-    for p in _iter_files(include):
+    for p in _iter_files(include, include_dirs=False):
         rel = _rel_to_root(p).replace("\\", "/")
         if p.stat().st_size > MAX_FILE_BYTES or not _is_text_file(p):
             continue

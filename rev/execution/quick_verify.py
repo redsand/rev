@@ -74,11 +74,6 @@ def _extract_tool_noop(tool: str, raw_result: Any) -> Optional[str]:
         if isinstance(results, list) and len(results) == 0:
             return f"tool_noop: {tool_l} returned 0 results. RECOVERY: Broaden your search pattern or check for typos in file names/symbols."
             
-    elif tool_l == "list_dir":
-        files = payload.get("files")
-        if isinstance(files, list) and len(files) == 0:
-            return "tool_noop: list_dir returned 0 files. RECOVERY: Check if the directory path or glob pattern is correct."
-            
     elif tool_l == "run_tests":
         stdout = (payload.get("stdout") or "").lower()
         if "collected 0 items" in stdout or "no tests ran" in stdout or "no tests found" in stdout:
@@ -200,7 +195,7 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
         return _verify_directory_creation(task, context)
 
     # Route to appropriate verification handler
-    verifiable_read_actions = {"read", "analyze", "research", "investigate", "general"}
+    verifiable_read_actions = {"read", "analyze", "research", "investigate", "general", "verify"}
     if action_type == "refactor":
         result = _verify_refactoring(task, context)
     elif action_type == "add" or action_type == "create":

@@ -525,7 +525,17 @@ def ollama_chat(
 
     # Get the appropriate provider for the model
     try:
-        provider = get_provider_for_model(model_name)
+        # If the primary provider is ollama, we route everything to it to avoid
+        # warnings about missing API keys for auto-detected cloud models.
+        # If it's a known cloud provider (configured via keys or env), we allow auto-detection
+        # to proceed unless it detects ollama (the fallback).
+        override_provider = None
+        if config.LLM_PROVIDER == "ollama":
+            override_provider = "ollama"
+        elif config.LLM_PROVIDER not in {"gemini", "openai", "anthropic"}:
+            override_provider = config.LLM_PROVIDER
+
+        provider = get_provider_for_model(model_name, override_provider=override_provider)
         # DEBUG: Log provider selection
         if OLLAMA_DEBUG:
             print(f"[DEBUG] ollama_chat: model={model_name}, provider={provider.__class__.__name__}")
@@ -598,7 +608,15 @@ def ollama_chat_stream(
 
     # Get the appropriate provider for the model
     try:
-        provider = get_provider_for_model(model_name)
+        # If the primary provider is ollama, we route everything to it to avoid
+        # warnings about missing API keys for auto-detected cloud models.
+        override_provider = None
+        if config.LLM_PROVIDER == "ollama":
+            override_provider = "ollama"
+        elif config.LLM_PROVIDER not in {"gemini", "openai", "anthropic"}:
+            override_provider = config.LLM_PROVIDER
+
+        provider = get_provider_for_model(model_name, override_provider=override_provider)
     except ValueError as e:
         return {"error": f"Provider error: {e}"}
 

@@ -58,6 +58,7 @@ CRITICAL RULE: DO NOT Hallucinate File Paths or Class Names
   * The repository context provided to you
   * Research findings from your tool calls
   * The current conversation
+- SCOPED WORKING DIRECTORY: If the project has subdirectories (e.g. `apps/server`, `client/`), use the `set_workdir` tool to focus relative path resolution on that directory. This prevents path drift and ensures relative paths like `package.json` resolve correctly.
 - If you suspect a file/class exists but do NOT see it in the provided context, you CANNOT create an [ADD] or [EDIT] task for it.
 - Instead, you MUST create a [REVIEW] or discovery task first: "Scan [directory] for '[pattern]' to identify specific items."
 
@@ -301,7 +302,7 @@ def _format_available_tools(tools: List[Dict[str, Any]]) -> str:
                 category = "MCP Servers"
             elif any(keyword in name for keyword in ["search", "grep", "find", "list", "tree"]):
                 category = "Code Search"
-            elif any(keyword in name for keyword in ["read", "write", "file"]):
+            elif any(keyword in name for keyword in ["read", "write", "file", "workdir"]):
                 category = "File Operations"
             else:
                 category = "General Tools"
@@ -1528,7 +1529,7 @@ def determine_next_action(
     """
 
     # Valid action types that the system supports
-    VALID_ACTION_TYPES = ["edit", "add", "delete", "rename", "test", "review", "create_directory", "general"]
+    VALID_ACTION_TYPES = ["edit", "add", "delete", "rename", "test", "review", "create_directory", "general", "set_workdir"]
 
     model_name = config.PLANNING_MODEL
     tools = get_available_tools()
@@ -1561,7 +1562,7 @@ Based on the current progress and remaining tasks, what is the SINGLE NEXT ACTIO
    - AND user's original request is 100% satisfied
    - Answer: {{"action_type": "review", "description": "GOAL_ACHIEVED"}}
    - If ANY remaining tasks exist, do NOT say goal achieved
-3. action_type MUST be EXACTLY one of: edit, add, delete, rename, test, review, create_directory, general
+3. action_type MUST be EXACTLY one of: edit, add, delete, rename, test, review, create_directory, general, set_workdir
 4. NO OTHER action types are allowed
 5. Be specific about files, classes, and functions
 6. DO NOT suggest repeating completed work
@@ -1576,17 +1577,19 @@ VALID ACTION TYPES (pick exactly ONE):
 - "test" = run tests or validation
 - "review" = analyze or review code
 - "create_directory" = create a directory
+- "set_workdir" = set scoped working directory for subprojects
 - "general" = other general task
 
 RESPONSE FORMAT (STRICT):
 Return ONLY a JSON object, no other text:
 {{
-  "action_type": "edit|add|delete|rename|test|review|general",
+  "action_type": "edit|add|delete|rename|test|review|general|set_workdir",
   "description": "Specific description of the single action to take next"
 }}
 
 EXAMPLES:
 {{"action_type": "add", "description": "Create src/auth/auth_validator.py with AuthValidator class"}}
+{{"action_type": "set_workdir", "description": "Set working directory to apps/server to focus on backend implementation"}}
 {{"action_type": "edit", "description": "Update src/registry.py to include new services"}}
 {{"action_type": "test", "description": "Run pytest tests/auth to verify changes"}}
 {{"action_type": "review", "description": "GOAL_ACHIEVED"}}
