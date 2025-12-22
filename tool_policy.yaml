@@ -27,6 +27,7 @@ agent_roles:
       - git_log
       - git_diff
       - rag_search
+      - set_workdir
       - analyze_*  # All analysis tools (wildcard)
       - find_*     # All find/search tools (wildcard)
       - get_*      # All getter tools (wildcard)
@@ -202,6 +203,7 @@ tool_risk_levels:
   web_fetch: low
   get_system_info: low
   get_cache_stats: low
+  set_workdir: low
 
   # LOW RISK - Analysis operations (read-only)
   analyze_ast_patterns: low
