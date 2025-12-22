@@ -13,6 +13,7 @@ from typing import Dict, Any, TYPE_CHECKING
 from rev import config
 from rev.debug_logger import get_logger
 from rev.tools.permissions import get_permission_manager
+from rev.workspace import get_workspace
 
 if TYPE_CHECKING:  # pragma: no cover - used only for type hints
     from rev.execution.timeout_manager import TimeoutManager, TimeoutConfig

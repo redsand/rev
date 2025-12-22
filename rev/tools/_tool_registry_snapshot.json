@@ -78,6 +78,7 @@
     "scan_dependencies_vulnerabilities",
     "scan_security_issues",
     "search_code",
+    "set_workdir",
     "simplify_conditionals",
     "split_python_module_classes",
     "ssh_connect",
