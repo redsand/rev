@@ -110,23 +110,25 @@ def _call_with_auto_thinking(
     tools: Optional[List[Dict[str, Any]]],
     model_name: str,
     supports_tools: bool,
+    **kwargs,
 ) -> Dict[str, Any]:
     """Call provider.chat with thinking enabled on first attempt, disable on failure."""
     if getattr(config, "LLM_THINKING_MODE", "auto") == "off":
-        return provider.chat(messages=messages, tools=tools, model=model_name, supports_tools=supports_tools)
+        return provider.chat(messages=messages, tools=tools, model=model_name, supports_tools=supports_tools, **kwargs)
     if not _provider_can_try_thinking(provider):
-        return provider.chat(messages=messages, tools=tools, model=model_name, supports_tools=supports_tools)
+        return provider.chat(messages=messages, tools=tools, model=model_name, supports_tools=supports_tools, **kwargs)
 
     key = _thinking_cache_key(provider, model_name)
     state = _THINKING_SUPPORT.get(key)
     thinking_kwargs = {"thinking": {"type": "enabled"}}
+    thinking_kwargs.update(kwargs)  # Merge kwargs with thinking args
 
     # Known supported
     if state is True:
         return provider.chat(messages=messages, tools=tools, model=model_name, supports_tools=supports_tools, **thinking_kwargs)
     # Known unsupported
     if state is False:
-        return provider.chat(messages=messages, tools=tools, model=model_name, supports_tools=supports_tools)
+        return provider.chat(messages=messages, tools=tools, model=model_name, supports_tools=supports_tools, **kwargs)
 
     # Unknown: try thinking once, then retry without on failure.
     response = provider.chat(messages=messages, tools=tools, model=model_name, supports_tools=supports_tools, **thinking_kwargs)
@@ -134,7 +136,7 @@ def _call_with_auto_thinking(
         _THINKING_SUPPORT[key] = True
         return response
 
-    fallback = provider.chat(messages=messages, tools=tools, model=model_name, supports_tools=supports_tools)
+    fallback = provider.chat(messages=messages, tools=tools, model=model_name, supports_tools=supports_tools, **kwargs)
     if isinstance(fallback, dict) and "error" not in fallback:
         _THINKING_SUPPORT[key] = False
         return fallback
@@ -153,6 +155,7 @@ def _call_stream_with_auto_thinking(
     on_chunk: Optional[callable],
     check_interrupt: Optional[callable],
     check_user_messages: Optional[callable],
+    **kwargs,
 ) -> Dict[str, Any]:
     if getattr(config, "LLM_THINKING_MODE", "auto") == "off":
         return provider.chat_stream(
@@ -163,6 +166,7 @@ def _call_stream_with_auto_thinking(
             on_chunk=on_chunk,
             check_interrupt=check_interrupt,
             check_user_messages=check_user_messages,
+            **kwargs,
         )
     if not _provider_can_try_thinking(provider):
         return provider.chat_stream(
@@ -173,11 +177,13 @@ def _call_stream_with_auto_thinking(
             on_chunk=on_chunk,
             check_interrupt=check_interrupt,
             check_user_messages=check_user_messages,
+            **kwargs,
         )
 
     key = _thinking_cache_key(provider, model_name)
     state = _THINKING_SUPPORT.get(key)
     thinking_kwargs = {"thinking": {"type": "enabled"}}
+    thinking_kwargs.update(kwargs)
 
     if state is True:
         return provider.chat_stream(
@@ -199,6 +205,7 @@ def _call_stream_with_auto_thinking(
             on_chunk=on_chunk,
             check_interrupt=check_interrupt,
             check_user_messages=check_user_messages,
+            **kwargs,
         )
 
     response = provider.chat_stream(
@@ -223,6 +230,7 @@ def _call_stream_with_auto_thinking(
         on_chunk=on_chunk,
         check_interrupt=check_interrupt,
         check_user_messages=check_user_messages,
+        **kwargs,
     )
     if isinstance(fallback, dict) and "error" not in fallback:
         _THINKING_SUPPORT[key] = False
@@ -470,6 +478,7 @@ def ollama_chat(
     tools: List[Dict] = None,
     model: Optional[str] = None,
     supports_tools: Optional[bool] = None,
+    **kwargs
 ) -> Dict[str, Any]:
     """Send chat request to LLM using the appropriate provider.
 
@@ -486,6 +495,7 @@ def ollama_chat(
         tools: Optional list of tool definitions in OpenAI format
         model: Model name (provider will be auto-detected from name)
         supports_tools: Whether the model supports tool calling
+        **kwargs: Additional arguments to pass to the provider (e.g. temperature)
 
     Returns:
         Dict with 'message' and 'usage' keys, or 'error' key if failed
@@ -529,6 +539,7 @@ def ollama_chat(
         tools=tools,
         model_name=model_name,
         supports_tools=supports_tools,
+        **kwargs
     )
 
     # Persist full transcript (raw response) when tracing is enabled
@@ -561,6 +572,7 @@ def ollama_chat_stream(
     on_chunk: Optional[callable] = None,
     check_interrupt: Optional[callable] = None,
     check_user_messages: Optional[callable] = None,
+    **kwargs
 ) -> Dict[str, Any]:
     """Stream chat responses from LLM with real-time output.
 
@@ -576,6 +588,7 @@ def ollama_chat_stream(
         on_chunk: Callback called with each text chunk as it arrives
         check_interrupt: Callback to check if execution should be interrupted
         check_user_messages: Callback to check for and inject user messages
+        **kwargs: Additional arguments to pass to the provider (e.g. temperature)
 
     Returns:
         Complete response dict (same format as ollama_chat)
@@ -598,6 +611,7 @@ def ollama_chat_stream(
         on_chunk=on_chunk,
         check_interrupt=check_interrupt,
         check_user_messages=check_user_messages,
+        **kwargs
     )
     response = _sanitize_response_content(response)
 
