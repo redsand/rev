@@ -1748,16 +1748,27 @@ class Orchestrator:
         last_task_signature: Optional[str] = None
         repeat_same_action: int = 0
         forced_next_task: Optional[Task] = None
+        budget_warning_shown: bool = False
 
         while True:
             iteration += 1
             self.context.set_agent_state("current_iteration", iteration)
             self.context.resource_budget.update_step()
-            if self.context.resource_budget.is_exceeded():
-                print(f"\n⚠️ Resource budget exceeded at step {iteration}")
-                self.context.set_agent_state("no_retry", True)
-                self.context.add_error(f"Resource budget exceeded at step {iteration}")
-                return False
+            if self.context.resource_budget.is_exceeded() and not budget_warning_shown:
+                exceeded = self.context.resource_budget.get_exceeded_resources()
+                exceeded_str = ", ".join(exceeded)
+                print(f"\n⚠️ Resource budget exceeded at step {iteration}: {exceeded_str}")
+                print(f"   Usage: {self.context.resource_budget.get_usage_summary()}")
+                print(f"   To increase limits, set environment variables:")
+                print(f"   - REV_MAX_STEPS (current: {self.context.resource_budget.max_steps})")
+                print(f"   - REV_MAX_TOKENS (current: {self.context.resource_budget.max_tokens:,})")
+                print(f"   - REV_MAX_SECONDS (current: {self.context.resource_budget.max_seconds:.0f})")
+                print(f"   Continuing anyway...")
+                budget_warning_shown = True
+                # Don't halt - just warn and continue
+                # self.context.set_agent_state("no_retry", True)
+                # self.context.add_error(f"Resource budget exceeded: {exceeded_str}")
+                # return False
 
             if forced_next_task:
                 next_task = forced_next_task

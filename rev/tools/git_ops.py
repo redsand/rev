@@ -123,14 +123,38 @@ def _run_shell_streamed(
 
 
 def _working_tree_snapshot() -> str:
+
+
     """Return a lightweight snapshot of working tree changes.
 
+
+
+
+
     We use ``git status --porcelain`` so we can detect when an apply operation
+
+
     reports success but does not actually modify the tree (for example, when an
+
+
     empty or already-applied patch slips through).
+
+
     """
 
+
+    if not is_git_repo():
+
+
+        return ""
+
+
+
+
+
     proc = _run_shell("git status --porcelain")
+
+
     return proc.stdout
 
 
@@ -236,10 +260,24 @@ def _normalize_patch_text(patch: str) -> str:
     return normalized
 
 
+def is_git_repo() -> bool:
+    """Check if the current directory is a git repository."""
+    # Check for .git directory or file (worktree) first to avoid running subprocess unnecessarily
+    if (config.ROOT / ".git").exists():
+        return True
+        
+    # Fallback to git command for nested repos or complex setups
+    proc = _run_shell("git rev-parse --is-inside-work-tree")
+    return proc.returncode == 0
+
+
 # ========== Core Git Operations ==========
 
 def git_diff(pathspec: str = ".", staged: bool = False, context: int = 3) -> str:
     """Get git diff for pathspec."""
+    if not is_git_repo():
+        return json.dumps({"rc": 1, "diff": "", "stderr": "Not a git repository"})
+
     args = ["git", "diff", f"-U{context}"]
     if staged:
         args.insert(1, "--staged")
@@ -390,6 +428,10 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
             ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", "--3way", tfp], True),
             ("patch", f"patch --batch --forward --dry-run -p1 < {quote_cmd_arg(tfp)}", False),
         ]
+        
+        if not is_git_repo():
+            # Skip git strategies if not a repo to avoid 'fatal: not a git repository'
+            strategies = [s for s in strategies if s[0] != "git"]
 
         check_proc: Optional[subprocess.CompletedProcess] = None
         use_three_way = False
@@ -410,15 +452,22 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
                 apply_mode = runner
                 break
         else:
-            reverse_proc = _run_shell(
-                " ".join(
-                    quote_cmd_arg(a)
-                    for a in ["git", "apply", "--check", "--reverse", "--inaccurate-eof", tfp]
+            if is_git_repo():
+                reverse_proc = _run_shell(
+                    " ".join(
+                        quote_cmd_arg(a)
+                        for a in ["git", "apply", "--check", "--reverse", "--inaccurate-eof", tfp]
+                    )
                 )
-            )
-            reverse_output = (reverse_proc.stdout + reverse_proc.stderr).lower()
-            if reverse_proc.returncode == 0 or "reversed" in reverse_output:
-                return _result(reverse_proc, success=True, already_applied=True, phase="check")
+                reverse_output = (reverse_proc.stdout + reverse_proc.stderr).lower()
+                if reverse_proc.returncode == 0 or "reversed" in reverse_output:
+                    return _result(reverse_proc, success=True, already_applied=True, phase="check")
+            else:
+                # If not a git repo, we don't have a check_proc yet if we only had one strategy and it failed?
+                # Actually, if is_git_repo is False, strategies list has only "patch".
+                # If patch strategy failed, we are here.
+                # check_proc would be the patch command's process.
+                pass
 
             if _allow_chunking and not dry_run and len(chunked_parts) > 1:
                 chunk_result = _apply_patch_in_chunks(chunked_parts, dry_run=dry_run)
@@ -497,6 +546,9 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
 
 def git_add(files: str = ".") -> str:
     """Add files to git staging area."""
+    if not is_git_repo():
+        return json.dumps({"success": False, "error": "Not a git repository"})
+
     try:
         result = _run_shell(f"git add {quote_cmd_arg(files)}")
         success = result.returncode == 0
@@ -525,6 +577,9 @@ def git_commit(message: str, add_files: bool = False, files: str = ".") -> str:
         add_files: Whether to add files before committing (default: False)
         files: Files to add if add_files is True (default: ".")
     """
+    if not is_git_repo():
+        return json.dumps({"success": False, "error": "Not a git repository"})
+
     try:
         # Optionally add files first
         if add_files:
@@ -549,6 +604,9 @@ def git_commit(message: str, add_files: bool = False, files: str = ".") -> str:
 
 def git_status() -> str:
     """Get git status."""
+    if not is_git_repo():
+        return json.dumps({"status": "", "returncode": 1, "error": "Not a git repository"})
+
     try:
         result = _run_shell("git status")
         return json.dumps({
@@ -561,6 +619,9 @@ def git_status() -> str:
 
 def git_log(count: int = 10, oneline: bool = False) -> str:
     """Get git log."""
+    if not is_git_repo():
+        return json.dumps({"log": "", "returncode": 1, "error": "Not a git repository"})
+
     try:
         cmd = f"git log -n {int(count)}"
         if oneline:
@@ -576,6 +637,9 @@ def git_log(count: int = 10, oneline: bool = False) -> str:
 
 def git_branch(action: str = "list", branch_name: str = None) -> str:
     """Git branch operations (list, create, switch, current)."""
+    if not is_git_repo():
+        return json.dumps({"error": "Not a git repository"})
+
     try:
         if action == "list":
             result = _run_shell("git branch -a")
@@ -734,18 +798,25 @@ def get_repo_context(commits: int = 6) -> str:
             return cached_context
 
     # Generate context
-    st = _run_shell("git status -s")
-    lg = _run_shell(f"git log -n {int(commits)} --oneline")
+    if is_git_repo():
+        st = _run_shell("git status -s")
+        lg = _run_shell(f"git log -n {int(commits)} --oneline")
 
-    # If git commands failed (e.g., low memory / paging file error), surface a minimal context and skip crashing.
-    if st.returncode != 0 or lg.returncode != 0:
-        error_msg = st.stderr or lg.stderr or "git commands failed"
-        return json.dumps({
-            "status": st.stdout,
-            "log": lg.stdout,
-            "error": error_msg,
-            "note": "git status/log unavailable (likely low memory); continuing with partial context",
-        })
+        # If git commands failed (e.g., low memory / paging file error), surface a minimal context and skip crashing.
+        if st.returncode != 0 or lg.returncode != 0:
+            error_msg = st.stderr or lg.stderr or "git commands failed"
+            return json.dumps({
+                "status": st.stdout,
+                "log": lg.stdout,
+                "error": error_msg,
+                "note": "git status/log unavailable (likely low memory); continuing with partial context",
+            })
+        
+        status_out = st.stdout
+        log_out = lg.stdout
+    else:
+        status_out = ""
+        log_out = ""
 
     from rev.config import EXCLUDE_DIRS
     top = []
@@ -758,8 +829,8 @@ def get_repo_context(commits: int = 6) -> str:
     file_structure = _get_detailed_file_structure(max_depth=2, max_files=100)
 
     context = json.dumps({
-        "status": st.stdout,
-        "log": lg.stdout,
+        "status": status_out,
+        "log": log_out,
         "top_level": top[:100],
         "file_structure": file_structure[:50],  # Include key files and directories
         "file_structure_note": "Key files in repository for reference when writing code"

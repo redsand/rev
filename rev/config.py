@@ -143,7 +143,7 @@ def get_allowed_roots() -> List[pathlib.Path]:
 # Initialize derived paths at import time (before Workspace is available).
 _recompute_derived_paths()
 DEFAULT_OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "devstral-2:123b-cloud")  # default model
+DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemini-3-flash-preview:cloud")  # default model
 
 # Determine default provider based on configured credentials
 # Priority: explicit REV_LLM_PROVIDER > Gemini > Anthropic > OpenAI > Ollama
@@ -166,7 +166,7 @@ def _get_primary_provider_and_model():
         explicit_provider = explicit_provider.lower()
         # Map provider to its default model
         provider_models = {
-            "gemini": os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp"),
+            "gemini": os.getenv("GEMINI_MODEL", "gemini-3-flash-preview"),
             "anthropic": os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"),
             "openai": os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview"),
             "ollama": DEFAULT_OLLAMA_MODEL,
@@ -176,7 +176,7 @@ def _get_primary_provider_and_model():
     # Check Gemini credentials (highest priority when present)
     gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
     if gemini_key:
-        return "gemini", os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
+        return "gemini", os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 
     # Check Anthropic credentials
     anthropic_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
@@ -301,7 +301,7 @@ ANTHROPIC_MAX_TOKENS = int(os.getenv("ANTHROPIC_MAX_TOKENS", "8192"))
 
 # Google Gemini Configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 GEMINI_TEMPERATURE = float(os.getenv("GEMINI_TEMPERATURE", "0.1"))
 GEMINI_TOP_P = float(os.getenv("GEMINI_TOP_P", "0.9"))
 GEMINI_TOP_K = int(os.getenv("GEMINI_TOP_K", "40"))

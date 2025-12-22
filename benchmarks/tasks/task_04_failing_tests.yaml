@@ -1,0 +1,43 @@
+name: "Debug and Fix Failing Tests"
+description: "Debug and fix code to make failing tests pass"
+user_request: "The tests are failing. Debug and fix the calculator.py code to make all tests pass."
+
+initial_files:
+  calculator.py: |
+    """Simple calculator."""
+
+    def divide(a, b):
+        """Divide two numbers."""
+        return a / b  # Bug: doesn't handle division by zero
+
+    def multiply(a, b):
+        """Multiply two numbers."""
+        return a + b  # Bug: should be * not +
+
+  test_calculator.py: |
+    """Tests for calculator."""
+    import pytest
+    from calculator import divide, multiply
+
+    def test_divide():
+        assert divide(10, 2) == 5
+        assert divide(9, 3) == 3
+
+    def test_divide_by_zero():
+        with pytest.raises(ZeroDivisionError):
+            divide(5, 0)
+
+    def test_multiply():
+        assert multiply(3, 4) == 12
+        assert multiply(2, 5) == 10
+
+success_criteria:
+  - "All tests pass"
+  - "calculator.py handles division by zero"
+  - "calculator.py multiply uses * operator"
+
+expected_files:
+  - "calculator.py"
+  - "test_calculator.py"
+
+timeout_seconds: 300

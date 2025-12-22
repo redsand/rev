@@ -1,0 +1,32 @@
+name: "Add New Feature with Tests"
+description: "Add a new function with comprehensive tests"
+user_request: "Add a 'calculate_average' function to math_utils.py that takes a list of numbers and returns their average. Include tests in test_math_utils.py."
+
+initial_files:
+  math_utils.py: |
+    """Math utility functions."""
+
+    def add(a, b):
+        """Add two numbers."""
+        return a + b
+
+  test_math_utils.py: |
+    """Tests for math utilities."""
+    import pytest
+    from math_utils import add
+
+    def test_add():
+        assert add(2, 3) == 5
+        assert add(-1, 1) == 0
+
+success_criteria:
+  - "math_utils.py contains 'def calculate_average'"
+  - "test_math_utils.py contains 'test_calculate_average'"
+  - "Tests pass"
+  - "Function handles empty list"
+
+expected_files:
+  - "math_utils.py"
+  - "test_math_utils.py"
+
+timeout_seconds: 300

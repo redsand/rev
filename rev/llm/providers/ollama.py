@@ -12,7 +12,7 @@ import requests
 from rev import config
 from rev.cache import LLMResponseCache, get_llm_cache
 from rev.debug_logger import get_logger
-from .base import LLMProvider
+from .base import LLMProvider, ErrorClass, ProviderError, RetryConfig
 
 
 # Debug mode
@@ -230,7 +230,7 @@ class OllamaProvider(LLMProvider):
 
         # Build request
         url = f"{self.base_url}/api/chat"
-        is_cloud_model = model_name.endswith("-cloud")
+        is_cloud_model = model_name.endswith("-cloud") or model_name.endswith(":cloud")
 
         if is_cloud_model and OLLAMA_DEBUG and not hasattr(self, '_cloud_model_notified'):
             print(f"ℹ️  Using cloud model: {model_name} (proxied through local Ollama)")
@@ -449,6 +449,11 @@ class OllamaProvider(LLMProvider):
         tools_provided = tools is not None and supports_tools
 
         url = f"{self.base_url}/api/chat"
+        is_cloud_model = model_name.endswith("-cloud") or model_name.endswith(":cloud")
+
+        if is_cloud_model and OLLAMA_DEBUG and not hasattr(self, '_cloud_model_notified'):
+            print(f"ℹ️  Using cloud model: {model_name} (proxied through local Ollama)")
+            self._cloud_model_notified = True
 
         # Extract options from kwargs or use defaults
         options = {
@@ -616,6 +621,127 @@ class OllamaProvider(LLMProvider):
             return [model["name"] for model in data.get("models", [])]
         except Exception:
             return []
+
+    def count_tokens(self, messages: List[Dict[str, Any]]) -> int:
+        """Count tokens for messages using character-based estimation.
+
+        Args:
+            messages: List of message dicts
+
+        Returns:
+            Estimated token count
+        """
+        total_tokens = 0
+        for message in messages:
+            total_tokens += _estimate_message_tokens(message)
+        return total_tokens
+
+    def classify_error(self, error: Exception) -> ProviderError:
+        """Classify an error into standard ErrorClass.
+
+        Args:
+            error: The exception that occurred
+
+        Returns:
+            ProviderError with classification
+        """
+        error_str = str(error).lower()
+        error_type = type(error).__name__.lower()
+
+        # Check for specific error types
+        if isinstance(error, requests.exceptions.Timeout) or "timeout" in error_str:
+            return ProviderError(
+                error_class=ErrorClass.TIMEOUT,
+                message=str(error),
+                retryable=True,
+                original_error=error
+            )
+
+        if isinstance(error, requests.exceptions.ConnectionError) or "connection" in error_str:
+            return ProviderError(
+                error_class=ErrorClass.NETWORK_ERROR,
+                message=str(error),
+                retryable=True,
+                original_error=error
+            )
+
+        if "rate limit" in error_str or "too many requests" in error_str or "429" in error_str:
+            return ProviderError(
+                error_class=ErrorClass.RATE_LIMIT,
+                message=str(error),
+                retryable=True,
+                retry_after=60.0,  # Default 60s for rate limits
+                original_error=error
+            )
+
+        if "401" in error_str or "unauthorized" in error_str or "authentication" in error_str:
+            return ProviderError(
+                error_class=ErrorClass.AUTH_ERROR,
+                message=str(error),
+                retryable=False,
+                original_error=error
+            )
+
+        if "404" in error_str or "not found" in error_str:
+            return ProviderError(
+                error_class=ErrorClass.MODEL_NOT_FOUND,
+                message=str(error),
+                retryable=False,
+                original_error=error
+            )
+
+        if "400" in error_str or "invalid" in error_str or "bad request" in error_str:
+            return ProviderError(
+                error_class=ErrorClass.INVALID_REQUEST,
+                message=str(error),
+                retryable=False,
+                original_error=error
+            )
+
+        if "context length" in error_str or "too long" in error_str:
+            return ProviderError(
+                error_class=ErrorClass.CONTEXT_LENGTH_EXCEEDED,
+                message=str(error),
+                retryable=False,
+                original_error=error
+            )
+
+        if any(code in error_str for code in ["500", "502", "503", "504"]) or "server error" in error_str:
+            return ProviderError(
+                error_class=ErrorClass.SERVER_ERROR,
+                message=str(error),
+                retryable=True,
+                original_error=error
+            )
+
+        # Default: unknown error
+        return ProviderError(
+            error_class=ErrorClass.UNKNOWN,
+            message=str(error),
+            retryable=False,
+            original_error=error
+        )
+
+    def get_retry_config(self) -> RetryConfig:
+        """Get retry configuration for Ollama.
+
+        Returns:
+            RetryConfig with Ollama-specific settings
+        """
+        max_retries, _, backoff, max_backoff, _ = self._get_retry_config()
+
+        return RetryConfig(
+            max_retries=max_retries if max_retries > 0 else 3,  # Default to 3 if infinite
+            base_backoff=backoff,
+            max_backoff=max_backoff,
+            exponential=True,
+            retry_on=[
+                ErrorClass.RATE_LIMIT,
+                ErrorClass.TIMEOUT,
+                ErrorClass.SERVER_ERROR,
+                ErrorClass.NETWORK_ERROR,
+            ]
+        )
 
     def _get_retry_config(self):
         """Get retry/backoff configuration from environment variables."""
