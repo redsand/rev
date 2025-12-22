@@ -986,17 +986,20 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
         return None
 
     strict_details: Dict[str, Any] = {}
-    compile_targets = _paths_or_default(paths)
-    compile_cmd = "python -m compileall " + " ".join(_quote_path(p) for p in compile_targets)
-    compile_res = _run_validation_command(compile_cmd, timeout=max(config.VALIDATION_TIMEOUT_SECONDS, 180))
-    strict_details["compileall"] = compile_res
-    if compile_res.get("blocked") or compile_res.get("rc", 1) != 0:
-        return VerificationResult(
-            passed=False,
-            message="Verification failed: compileall errors",
-            details={"strict": strict_details},
-            should_replan=True,
-        )
+    # Filter for Python files or directories for compileall
+    compile_targets = [p for p in _paths_or_default(paths) if p.is_dir() or p.suffix == '.py']
+    
+    if compile_targets:
+        compile_cmd = "python -m compileall " + " ".join(_quote_path(p) for p in compile_targets)
+        compile_res = _run_validation_command(compile_cmd, timeout=max(config.VALIDATION_TIMEOUT_SECONDS, 180))
+        strict_details["compileall"] = compile_res
+        if compile_res.get("blocked") or compile_res.get("rc", 1) != 0:
+            return VerificationResult(
+                passed=False,
+                message="Verification failed: compileall errors",
+                details={"strict": strict_details},
+                should_replan=True,
+            )
 
     if mode == "fast":
         return strict_details
@@ -1084,8 +1087,11 @@ def _run_validation_steps(validation_steps: list[str], details: Dict[str, Any], 
     for step in validation_steps:
         text = step.lower()
         if "syntax" in text or "compile" in text:
-            cmd = "python -m compileall " + " ".join(_quote_path(p) for p in paths)
-            _add("compileall", cmd)
+            # Filter for Python files or directories
+            compile_targets = [p for p in paths if p.is_dir() or p.suffix == '.py']
+            if compile_targets:
+                cmd = "python -m compileall " + " ".join(_quote_path(p) for p in compile_targets)
+                _add("compileall", cmd)
         if "lint" in text or "linter" in text:
             # Run ruff only on modified files, targeting severe errors to avoid pre-existing style issues
             # E9: Runtime/syntax errors, F63: Invalid print syntax, F7: Statement problems
