@@ -236,16 +236,19 @@ class OllamaProvider(LLMProvider):
             print(f"ℹ️  Using cloud model: {model_name} (proxied through local Ollama)")
             self._cloud_model_notified = True
 
+        # Extract options from kwargs or use defaults
+        options = {
+            "temperature": kwargs.get("temperature", config.OLLAMA_TEMPERATURE),
+            "num_ctx": kwargs.get("num_ctx", config.OLLAMA_NUM_CTX),
+            "top_p": kwargs.get("top_p", config.OLLAMA_TOP_P),
+            "top_k": kwargs.get("top_k", config.OLLAMA_TOP_K),
+        }
+
         payload = {
             "model": model_name,
             "messages": messages,
             "stream": False,
-            "options": {
-                "temperature": config.OLLAMA_TEMPERATURE,
-                "num_ctx": config.OLLAMA_NUM_CTX,
-                "top_p": config.OLLAMA_TOP_P,
-                "top_k": config.OLLAMA_TOP_K,
-            }
+            "options": options
         }
 
         if tools_provided:
@@ -284,8 +287,8 @@ class OllamaProvider(LLMProvider):
                         "model": model_name,
                         "messages": messages,
                         "stream": False,
-                        "temperature": config.OLLAMA_TEMPERATURE,
-                        "top_p": config.OLLAMA_TOP_P,
+                        "temperature": options.get("temperature", config.OLLAMA_TEMPERATURE),
+                        "top_p": options.get("top_p", config.OLLAMA_TOP_P),
                     }
                     try:
                         v1_resp = _make_request_interruptible(v1_url, v1_payload, timeout)
@@ -447,16 +450,19 @@ class OllamaProvider(LLMProvider):
 
         url = f"{self.base_url}/api/chat"
 
+        # Extract options from kwargs or use defaults
+        options = {
+            "temperature": kwargs.get("temperature", config.OLLAMA_TEMPERATURE),
+            "num_ctx": kwargs.get("num_ctx", config.OLLAMA_NUM_CTX),
+            "top_p": kwargs.get("top_p", config.OLLAMA_TOP_P),
+            "top_k": kwargs.get("top_k", config.OLLAMA_TOP_K),
+        }
+
         payload = {
             "model": model_name,
             "messages": messages,
             "stream": True,
-            "options": {
-                "temperature": config.OLLAMA_TEMPERATURE,
-                "num_ctx": config.OLLAMA_NUM_CTX,
-                "top_p": config.OLLAMA_TOP_P,
-                "top_k": config.OLLAMA_TOP_K,
-            }
+            "options": options
         }
 
         if tools_provided:

@@ -87,6 +87,12 @@ CODE_WRITER_SYSTEM_PROMPT = """You are a specialized Code Writer agent. Your sol
 
 You will be given a task description, action_type, and repository context. Analyze them carefully.
 
+TEST-DRIVEN DEVELOPMENT (TDD) AWARENESS:
+- If implementing new functionality, tests should already exist (created in prior tasks)
+- Your implementation should make existing tests pass, not create new features without tests
+- Reference the test file in your implementation to ensure you're satisfying test requirements
+- If you're writing a test file, be specific about expected behavior before implementation exists
+
 CRITICAL RULES FOR IMPLEMENTATION QUALITY:
 1.  You MUST respond with a single tool call in JSON format. Do NOT provide any other text, explanations, or markdown.
 2.  Use ONLY the tool(s) provided for this task's action_type. Other tools are NOT available:
@@ -708,7 +714,7 @@ class CodeWriterAgent(BaseAgent):
                             return self.make_failure_signal("invalid_tool_args", arg_msg)
 
                         print(f"  ⏳ Applying {tool_name} to {arguments.get('path', 'file')}...")
-                        raw_result = execute_tool(tool_name, arguments)
+                        raw_result = execute_tool(tool_name, arguments, agent_name="code_writer")
                         has_error, error_msg = self._tool_result_has_error(raw_result)
                         if has_error:
                             print(f"  ✗ Tool reported error: {error_msg}")
@@ -726,10 +732,34 @@ class CodeWriterAgent(BaseAgent):
                             print(f"  ? Tool made no changes: {noop_msg}")
                             if self.should_attempt_recovery(task, context):
                                 if tool_name == "replace_in_file":
-                                    noop_msg = (
-                                        f"{noop_msg}. Read the file and emit an explicit apply_patch/write_file "
-                                        f"with the exact original snippet and full replacement content."
-                                    )
+                                    # Track consecutive replace_in_file failures to escalate recovery suggestions
+                                    consecutive_replace_failures = context.agent_state.get("consecutive_replace_failures", 0)
+                                    consecutive_replace_failures += 1
+                                    context.set_agent_state("consecutive_replace_failures", consecutive_replace_failures)
+
+                                    # Escalate suggestions based on failure count
+                                    if consecutive_replace_failures == 1:
+                                        # First failure: suggest re-reading and trying again
+                                        noop_msg = (
+                                            f"{noop_msg}. RECOVERY STEP 1: Use read_file to verify the exact file content "
+                                            f"(pay attention to whitespace and indentation), then retry with the correct find string."
+                                        )
+                                    elif consecutive_replace_failures == 2:
+                                        # Second failure: suggest apply_patch
+                                        noop_msg = (
+                                            f"{noop_msg}. RECOVERY STEP 2: The find string still doesn't match. "
+                                            f"Use apply_patch instead of replace_in_file, providing the exact original "
+                                            f"content and full replacement. Or use write_file to completely replace the file."
+                                        )
+                                    else:
+                                        # Third+ failure: suggest asking user or using different approach
+                                        noop_msg = (
+                                            f"{noop_msg}. RECOVERY STEP 3: Multiple edit attempts have failed. "
+                                            f"Consider: (1) Use run_python_diagnostic to verify the issue still exists, "
+                                            f"(2) Ask the user for clarification on what needs to change, or "
+                                            f"(3) Use a completely different approach to solve the problem."
+                                        )
+
                                 self.request_replan(
                                     context,
                                     reason="Tool made no changes",
@@ -737,6 +767,11 @@ class CodeWriterAgent(BaseAgent):
                                 )
                                 return self.make_recovery_request("tool_noop", noop_msg)
                             return self.make_failure_signal("tool_noop", noop_msg)
+
+                        # Successful tool execution - reset consecutive failure counters
+                        if tool_name == "replace_in_file":
+                            context.set_agent_state("consecutive_replace_failures", 0)
+
                         print(f"  ✓ Successfully applied {tool_name}")
                         return build_subagent_output(
                             agent_name="CodeWriterAgent",
@@ -788,7 +823,7 @@ class CodeWriterAgent(BaseAgent):
                             return self.make_failure_signal("invalid_tool_args", arg_msg)
 
                         print(f"  Applying {tool_name} to {arguments.get('path', 'file')}...")
-                        raw_result = execute_tool(tool_name, arguments)
+                        raw_result = execute_tool(tool_name, arguments, agent_name="code_writer")
                         has_error, error_msg = self._tool_result_has_error(raw_result)
                         if has_error:
                             print(f"  Tool reported error: {error_msg}")
@@ -806,10 +841,34 @@ class CodeWriterAgent(BaseAgent):
                             print(f"  Tool made no changes: {noop_msg}")
                             if self.should_attempt_recovery(task, context):
                                 if tool_name == "replace_in_file":
-                                    noop_msg = (
-                                        f"{noop_msg}. Read the file and emit an explicit apply_patch/write_file "
-                                        f"with the exact original snippet and full replacement content."
-                                    )
+                                    # Track consecutive replace_in_file failures to escalate recovery suggestions
+                                    consecutive_replace_failures = context.agent_state.get("consecutive_replace_failures", 0)
+                                    consecutive_replace_failures += 1
+                                    context.set_agent_state("consecutive_replace_failures", consecutive_replace_failures)
+
+                                    # Escalate suggestions based on failure count
+                                    if consecutive_replace_failures == 1:
+                                        # First failure: suggest re-reading and trying again
+                                        noop_msg = (
+                                            f"{noop_msg}. RECOVERY STEP 1: Use read_file to verify the exact file content "
+                                            f"(pay attention to whitespace and indentation), then retry with the correct find string."
+                                        )
+                                    elif consecutive_replace_failures == 2:
+                                        # Second failure: suggest apply_patch
+                                        noop_msg = (
+                                            f"{noop_msg}. RECOVERY STEP 2: The find string still doesn't match. "
+                                            f"Use apply_patch instead of replace_in_file, providing the exact original "
+                                            f"content and full replacement. Or use write_file to completely replace the file."
+                                        )
+                                    else:
+                                        # Third+ failure: suggest asking user or using different approach
+                                        noop_msg = (
+                                            f"{noop_msg}. RECOVERY STEP 3: Multiple edit attempts have failed. "
+                                            f"Consider: (1) Use run_python_diagnostic to verify the issue still exists, "
+                                            f"(2) Ask the user for clarification on what needs to change, or "
+                                            f"(3) Use a completely different approach to solve the problem."
+                                        )
+
                                 self.request_replan(
                                     context,
                                     reason="Tool made no changes",
@@ -817,6 +876,11 @@ class CodeWriterAgent(BaseAgent):
                                 )
                                 return self.make_recovery_request("tool_noop", noop_msg)
                             return self.make_failure_signal("tool_noop", noop_msg)
+
+                        # Successful tool execution - reset consecutive failure counters
+                        if tool_name == "replace_in_file":
+                            context.set_agent_state("consecutive_replace_failures", 0)
+
                         print(f"  Successfully applied {tool_name}")
                         return build_subagent_output(
                             agent_name="CodeWriterAgent",

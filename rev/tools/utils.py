@@ -176,6 +176,141 @@ def execute_python(code: str) -> str:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
 
+def run_python_diagnostic(script: str, description: str = "") -> str:
+    """Run a Python script for runtime diagnostics in the workspace context.
+
+    Unlike execute_python (which runs in a restricted sandbox), this runs Python
+    code in the actual workspace directory with full import capabilities. This is
+    essential for diagnosing module import issues, testing auto-registration logic,
+    and inspecting actual Python runtime behavior.
+
+    SECURITY: Only use with trusted diagnostic code. This runs with full Python access.
+
+    Args:
+        script: Python code to execute (can include imports from workspace)
+        description: Optional description of what this diagnostic tests
+
+    Returns:
+        JSON string with stdout, stderr, and exit code
+
+    Example:
+        script = '''
+import lib.analysts as am
+from lib.analysts import BreakoutAnalyst
+print(f"Module: {am.__name__}")
+print(f"Class module: {BreakoutAnalyst.__module__}")
+        '''
+        result = run_python_diagnostic(script, "Test module names")
+    """
+    import subprocess
+    import tempfile
+    from pathlib import Path
+    from rev import config
+
+    try:
+        # Create a temporary Python script file
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
+            f.write(script)
+            script_path = f.name
+
+        try:
+            # Run the script from the workspace directory
+            result = subprocess.run(
+                ['python', script_path],
+                cwd=str(config.ROOT),
+                capture_output=True,
+                text=True,
+                timeout=30,  # 30 second timeout for diagnostic scripts
+            )
+
+            return json.dumps({
+                "description": description,
+                "rc": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "success": result.returncode == 0,
+            })
+        finally:
+            # Clean up temp file
+            try:
+                Path(script_path).unlink()
+            except Exception:
+                pass
+
+    except subprocess.TimeoutExpired:
+        return json.dumps({
+            "description": description,
+            "error": "Diagnostic script timed out after 30 seconds",
+            "timeout": True,
+        })
+    except Exception as e:
+        return json.dumps({
+            "description": description,
+            "error": f"{type(e).__name__}: {e}",
+        })
+
+
+def inspect_module_hierarchy(module_path: str) -> str:
+    """Inspect a Python module's hierarchy and class/function module names.
+
+    This diagnostic tool helps debug import and auto-registration issues by
+    revealing the actual module names of classes after import. Essential for
+    diagnosing issues where module.__name__ doesn't match class.__module__
+    (e.g., when a file becomes a package).
+
+    Args:
+        module_path: Python import path (e.g., "lib.analysts")
+
+    Returns:
+        JSON string with module hierarchy info
+
+    Example:
+        result = inspect_module_hierarchy("lib.analysts")
+        # Shows: module.__name__, all classes and their __module__ attributes
+    """
+    script = f'''
+import sys
+import inspect
+import json
+
+try:
+    # Import the module
+    module = __import__("{module_path}", fromlist=[""])
+
+    result = {{
+        "module_path": "{module_path}",
+        "module_name": module.__name__,
+        "module_file": getattr(module, "__file__", None),
+        "is_package": hasattr(module, "__path__"),
+        "classes": {{}},
+        "functions": {{}},
+    }}
+
+    # Inspect all classes
+    for name, obj in inspect.getmembers(module, inspect.isclass):
+        result["classes"][name] = {{
+            "module": obj.__module__,
+            "matches_parent": obj.__module__ == module.__name__,
+            "starts_with_parent": obj.__module__.startswith(module.__name__),
+        }}
+
+    # Inspect all functions
+    for name, obj in inspect.getmembers(module, inspect.isfunction):
+        result["functions"][name] = {{
+            "module": obj.__module__,
+        }}
+
+    print(json.dumps(result, indent=2))
+
+except ImportError as e:
+    print(json.dumps({{"error": f"ImportError: {{e}}"}}, indent=2))
+except Exception as e:
+    print(json.dumps({{"error": f"{{type(e).__name__}}: {{e}}"}}, indent=2))
+'''
+
+    return run_python_diagnostic(script, f"Inspect module hierarchy: {module_path}")
+
+
 def get_system_info() -> str:
     """Get system information (OS, version, architecture, shell type).
 

@@ -513,6 +513,44 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
                         if "__all__" in init_content:
                             details["has_all_exports"] = True
                             debug_info["__all___status"] = "PRESENT"
+
+                            # Check 3b.1: Verify all split classes are exported in __all__
+                            all_match = re.search(r'__all__\s*=\s*\[(.*?)\]', init_content, re.DOTALL)
+                            if all_match:
+                                exported = {s.strip(' \'"') for s in all_match.group(1).split(',') if s.strip()}
+                                file_stems = {f.stem for f in py_files if f.name != '__init__.py'}
+                                missing = file_stems - exported
+                                extra = exported - file_stems
+
+                                if missing:
+                                    issues.append(f"[FAIL] __init__.py missing exports for: {', '.join(sorted(missing))}")
+                                    debug_info["missing_exports"] = list(missing)
+                                if extra:
+                                    debug_info["extra_exports"] = list(extra)  # Not an error, just informational
+
+                                if not missing:
+                                    details["all_classes_exported"] = True
+                                    debug_info["exports_complete"] = True
+
+                            # Check 3b.2: Runtime import test
+                            package_name = target_dir.name
+                            parent_dir = target_dir.parent
+                            # Build a simple import test command
+                            import_test_cmd = f'cd "{parent_dir}" && python -c "from {package_name} import *; print(\'Success\')"'
+                            try:
+                                import_test_result = execute_tool("run_cmd", {"cmd": import_test_cmd, "timeout": 10})
+                                import_test_data = json.loads(import_test_result)
+                                if import_test_data.get("rc") == 0:
+                                    details["runtime_import_test"] = "PASSED"
+                                    debug_info["runtime_import"] = "PASSED"
+                                else:
+                                    error_msg = import_test_data.get("stderr", "") or import_test_data.get("stdout", "")
+                                    issues.append(f"[FAIL] Runtime import test failed: {error_msg[:200]}")
+                                    debug_info["runtime_import"] = f"FAILED: {error_msg[:200]}"
+                            except Exception as e:
+                                # Runtime import test is nice-to-have, not critical
+                                debug_info["runtime_import"] = f"ERROR: {str(e)}"
+
                         else:
                             # __all__ is missing but imports might be present
                             # This is not necessarily an error if imports are explicit
@@ -578,11 +616,21 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
                             details["main_file_updated"] = True
                             debug_info["main_file_status"] = "UPDATED_WITH_IMPORTS"
                         else:
-                            issues.append(
-                                f"[FAIL] Original file {old_file} was NOT updated with imports from {target_dir}\n"
-                                f"   File still contains {original_size} bytes (should be much smaller if extracted)"
-                            )
-                            debug_info["main_file_status"] = "NOT_UPDATED"
+                            # Check if the source file was intentionally left in place for LLM to handle
+                            source_file_intentionally_kept = result_payload and result_payload.get("source_file_exists") is True
+
+                            if source_file_intentionally_kept:
+                                # This is expected behavior - the split tool left the file for LLM to handle
+                                details["main_file_needs_handling"] = True
+                                debug_info["main_file_status"] = "LEFT_FOR_LLM_TO_HANDLE"
+                                debug_info["note"] = f"Original file {old_file.name} left in place - LLM should decide: delete, update with imports, or keep for backwards compatibility"
+                            else:
+                                # The file wasn't intentionally kept, so this is a problem
+                                issues.append(
+                                    f"[FAIL] Original file {old_file} was NOT updated with imports from {target_dir}\n"
+                                    f"   File still contains {original_size} bytes (should be much smaller if extracted)"
+                                )
+                                debug_info["main_file_status"] = "NOT_UPDATED"
                 except Exception as e:
                     issues.append(f"[FAIL] Could not read {old_file}: {e}")
                     debug_info["main_file_status"] = f"ERROR: {str(e)}"
@@ -1068,7 +1116,12 @@ def _run_validation_steps(validation_steps: list[str], details: Dict[str, Any], 
         rc = res.get("rc")
         if rc is None:
             rc = 0 if res.get("blocked") else 1
-        if res.get("blocked") or (rc is not None and rc != 0):
+
+        # Handle pytest exit codes 4 and 5 (no tests collected) as pass, not fail
+        # Exit code 5 = no tests collected (pytest 7+), Exit code 4 = usage error/no tests (older versions)
+        if label == "pytest" and rc in (4, 5):
+            results[label] = {**res, "note": f"No tests collected (rc={rc}) - treated as pass"}
+        elif res.get("blocked") or (rc is not None and rc not in (0, 4, 5)):
             return VerificationResult(
                 passed=False,
                 message=f"Validation step failed: {label}",

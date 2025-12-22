@@ -12,6 +12,7 @@ from typing import Dict, Any, TYPE_CHECKING
 
 from rev import config
 from rev.debug_logger import get_logger
+from rev.tools.permissions import get_permission_manager
 
 if TYPE_CHECKING:  # pragma: no cover - used only for type hints
     from rev.execution.timeout_manager import TimeoutManager, TimeoutConfig
@@ -37,7 +38,7 @@ from rev.tools.ssh_ops import (
     ssh_connect, ssh_exec, ssh_copy_to, ssh_copy_from, ssh_disconnect, ssh_list_connections
 )
 from rev.tools.utils import (
-    install_package, web_fetch, execute_python, get_system_info
+    install_package, web_fetch, execute_python, get_system_info, run_python_diagnostic, inspect_module_hierarchy
 )
 from rev.tools.analysis import (
     analyze_ast_patterns, run_pylint, run_mypy, run_radon_complexity,
@@ -339,6 +340,8 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         "install_package": lambda args: install_package(args["package"]),
         "web_fetch": lambda args: web_fetch(args["url"]),
         "execute_python": lambda args: execute_python(args["code"]),
+        "run_python_diagnostic": lambda args: run_python_diagnostic(args["script"], args.get("description", "")),
+        "inspect_module_hierarchy": lambda args: inspect_module_hierarchy(args["module_path"]),
         "get_system_info": lambda args: get_system_info(),
 
         # SSH operations
@@ -373,7 +376,7 @@ def _build_tool_dispatch() -> Dict[str, callable]:
                 args["source_path"],
                 args.get("target_directory"),
                 args.get("overwrite", False),
-                args.get("delete_source", True),
+                args.get("delete_source", False),
             )
             if "source_path" in args
             else json.dumps({"error": "Missing required argument 'source_path' for split_python_module_classes"})
@@ -514,6 +517,8 @@ def _format_description(name: str, args: Dict[str, Any]) -> str:
         "install_package": f"Installing package: {args.get('package', '')}",
         "web_fetch": f"Fetching URL: {args.get('url', '')}",
         "execute_python": "Executing Python code",
+        "run_python_diagnostic": f"Running Python diagnostic: {args.get('description', 'runtime test')}",
+        "inspect_module_hierarchy": f"Inspecting module hierarchy: {args.get('module_path', '')}",
         "get_system_info": "Getting system information",
 
         # SSH operations
@@ -579,11 +584,19 @@ def _format_description(name: str, args: Dict[str, Any]) -> str:
     return descriptions.get(name, f"{name}({', '.join(f'{k}={v!r}' for k, v in args.items())})")
 
 
-def execute_tool(name: str, args: Dict[str, Any]) -> str:
+def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -> str:
     """Execute a tool and return result.
 
     Optimized for O(1) lookup using dictionary dispatch instead of O(n) elif chain.
     Tools in the timeout-protected list will be executed with automatic retry on timeout.
+
+    Args:
+        name: Tool name to execute
+        args: Tool arguments
+        agent_name: Name of the agent requesting tool execution (for permission checking)
+
+    Returns:
+        Tool execution result as JSON string
     """
     try:
         args = maybe_fix_tool_paths(args)
@@ -670,15 +683,47 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
                         normalized_args["target_directory"] = normalized_args[alt]
                         break
             if "delete_source" not in normalized_args:
-                # Default to True to align with "convert module to package" semantics.
-                normalized_args["delete_source"] = True
+                # Default to False - let LLM handle the original source file
+                normalized_args["delete_source"] = False
 
         args = normalized_args
+
+    # CHECK PERMISSIONS before execution
+    # Only enforce permissions if tool_policy.yaml exists
+    policy_path = Path.cwd() / "tool_policy.yaml"
+    if policy_path.exists():
+        try:
+            permission_mgr = get_permission_manager(policy_path)
+            perm_result = permission_mgr.check_permission(agent_name, name, args)
+
+            if not perm_result.allowed:
+                error_msg = f"Permission denied: {agent_name} cannot use {name}. Reason: {perm_result.reason}"
+                permission_mgr.log_denial(agent_name, name, args, perm_result.reason)
+
+                # Log the denial
+                logger.warning(f"[PERMISSION DENIED] {error_msg}")
+                get_logger().log_transaction_event("PERMISSION_DENIED", {
+                    "agent": agent_name,
+                    "tool": name,
+                    "arguments": args,
+                    "reason": perm_result.reason
+                })
+
+                return json.dumps({"error": error_msg, "permission_denied": True})
+
+            # Log successful permission check for high/critical risk tools
+            if perm_result.risk_level and perm_result.risk_level.value in ["high", "critical"]:
+                logger.info(f"[PERMISSION GRANTED] {agent_name} executing {perm_result.risk_level.value} risk tool: {name}")
+
+        except Exception as perm_error:
+            # If permission checking fails, log but don't block execution
+            logger.error(f"Permission check failed for {name}: {perm_error}. Allowing by default.")
 
     # Log the FINAL tool call being dispatched (after normalization)
     get_logger().log_transaction_event("TOOL_DISPATCH", {
         "tool": name,
-        "arguments": args
+        "arguments": args,
+        "agent": agent_name
     })
 
     friendly_desc = _get_friendly_description(name, args)
@@ -1459,6 +1504,35 @@ def get_available_tools() -> list:
         {
             "type": "function",
             "function": {
+                "name": "run_python_diagnostic",
+                "description": "Run a Python diagnostic script in the workspace context with full import access. Use this to test actual runtime behavior like module imports, auto-registration logic, or inspect object attributes. Runs from workspace directory so workspace imports work. Returns stdout, stderr, and exit code.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "script": {"type": "string", "description": "Python code to execute (can import from workspace modules)"},
+                        "description": {"type": "string", "description": "Optional description of what this diagnostic tests (e.g. 'Test module name matching')", "default": ""}
+                    },
+                    "required": ["script"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "inspect_module_hierarchy",
+                "description": "Inspect a Python module's hierarchy to debug import and auto-registration issues. Returns module.__name__, is_package status, and for each class shows its __module__ attribute and whether it matches the parent module name. Essential for diagnosing issues where module name doesn't match class module (e.g., when a file becomes a package).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "module_path": {"type": "string", "description": "Python import path to inspect (e.g., 'lib.analysts')"}
+                    },
+                    "required": ["module_path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "get_system_info",
                 "description": "Get system information (OS, platform, architecture)",
                 "parameters": {
@@ -2072,7 +2146,7 @@ def get_available_tools() -> list:
                         "source_path": {"type": "string", "description": "Path to the module to split (e.g., src/module.py)"},
                         "target_directory": {"type": "string", "description": "Directory/package for extracted classes", "default": None},
                         "overwrite": {"type": "boolean", "description": "Overwrite files if they already exist", "default": False},
-                        "delete_source": {"type": "boolean", "description": "Move the original source module aside (.bak) so the package becomes the import target", "default": True}
+                        "delete_source": {"type": "boolean", "description": "Move the original source module aside (.bak). Default: False (leave original file for LLM to handle - delete, update with imports, or keep for backwards compatibility)", "default": False}
                     },
                     "required": ["source_path"]
                 }

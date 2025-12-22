@@ -92,12 +92,21 @@ def split_python_module_classes(
     source_path: str,
     target_directory: Optional[str] = None,
     overwrite: bool = False,
-    delete_source: bool = True,
+    delete_source: bool = False,
 ) -> str:
     """Split each top-level class in a Python module into individual files.
 
     This dependency-aware implementation correctly handles imports, parent classes,
     and shared helper functions to produce a valid Python package.
+
+    Args:
+        source_path: Path to the Python module to split
+        target_directory: Directory where split files will be created (defaults to source_path without extension)
+        overwrite: Whether to overwrite existing files
+        delete_source: Whether to rename original file to .bak (default: False - let LLM handle the original file)
+
+    Note: By default, the original source file is left in place so the LLM can decide
+    what to do with it (delete, update with imports, or keep for backwards compatibility).
     """
     try:
         source_file = _safe_path(source_path)
@@ -219,10 +228,14 @@ def split_python_module_classes(
         
         # 5. Handle original source file
         source_moved_to = None
+        source_file_exists = source_file.exists()
+        original_source_path = source_file.relative_to(config.ROOT).as_posix()
+
         if delete_source:
             backup = _compute_backup_path(source_file)
             source_file.rename(backup)
             source_moved_to = backup.relative_to(config.ROOT).as_posix()
+            source_file_exists = False
 
         return json.dumps(
             {
@@ -230,7 +243,11 @@ def split_python_module_classes(
                 "created_files": created_files,
                 "skipped": skipped,
                 "package_dir": target_dir.relative_to(config.ROOT).as_posix(),
+                "package_init": package_init.relative_to(config.ROOT).as_posix(),
+                "source_file_path": original_source_path,
+                "source_file_exists": source_file_exists,
                 "source_moved_to": source_moved_to,
+                "message": "Original source file left in place for LLM to handle" if source_file_exists else f"Original source file moved to {source_moved_to}",
             },
             indent=2,
         )
@@ -270,9 +287,47 @@ def _analyze_node_dependencies(node: ast.AST, local_classes: Set[str], local_fun
 
 
 def _rewrite_package_imports(package_module: str, target_dir: Path) -> List[str]:
-    """Rewrite import statements to use consolidated package exports."""
-    # This function needs to be adapted to the new dependency-aware logic
-    # For now, we will assume the new structure is handled correctly
+    """Rewrite import statements to use consolidated package exports.
+
+    IMPORTANT: When a module file (e.g., lib/analysts.py) is split into a package
+    (e.g., lib/analysts/ with __init__.py), existing import statements usually
+    continue to work WITHOUT modification:
+
+    - 'import lib.analysts' → Works (imports __init__.py)
+    - 'import lib.analysts as x' → Works (imports __init__.py as x)
+    - 'from lib.analysts import SomeClass' → Works (if __init__.py exports it via __all__)
+
+    The only imports that need updating are those that try to access the old
+    file as a submodule:
+    - 'from lib.analysts.analysts import X' → BROKEN (analysts.py no longer exists)
+
+    This function is intentionally minimal because in most cases, no import
+    rewriting is needed when __init__.py is properly configured with __all__ exports.
+
+    Args:
+        package_module: The package module name (e.g., 'lib.analysts')
+        target_dir: The directory where the package was created
+
+    Returns:
+        List of files that were updated (usually empty)
+    """
+    # Check if __init__.py exists and exports properly
+    init_file = target_dir / "__init__.py"
+    if not init_file.exists():
+        from rev.debug_logger import log_debug
+        log_debug(f"Package {package_module}: No __init__.py found, imports may be broken")
+        return []
+
+    # Log the valid import patterns for this package
+    from rev.debug_logger import log_debug
+    log_debug(f"Package {package_module} created with __init__.py exports")
+    log_debug(f"Valid import patterns:")
+    log_debug(f"  ✓ import {package_module}")
+    log_debug(f"  ✓ import {package_module} as name")
+    log_debug(f"  ✓ from {package_module} import ClassName")
+    log_debug(f"Existing imports of these patterns do NOT need modification")
+
+    # Return empty list - no files need rewriting in typical case
     return []
 
 

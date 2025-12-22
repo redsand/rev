@@ -1,0 +1,267 @@
+# REV Tool Permission Policy
+#
+# This file defines which tools each agent can access, implementing
+# the principle of least privilege for security and safety.
+#
+# Default policy: deny (agents must be explicitly granted permissions)
+
+default_policy: deny  # "allow" or "deny"
+
+# Agent Roles
+# ------------
+# Define roles for different types of agents with specific tool access
+
+agent_roles:
+  # Planning Agent - Read-only access for understanding codebase
+  planner:
+    description: "Planning agent - read-only access to understand requirements"
+    allowed_tools:
+      - list_dir
+      - tree_view
+      - search_code
+      - read_file
+      - read_file_lines
+      - file_exists
+      - get_file_info
+      - git_status
+      - git_log
+      - git_diff
+      - rag_search
+      - analyze_*  # All analysis tools (wildcard)
+      - find_*     # All find/search tools (wildcard)
+      - get_*      # All getter tools (wildcard)
+    denied_tools:
+      - write_file
+      - append_to_file
+      - delete_file
+      - move_file
+      - copy_file
+      - apply_patch
+      - git_commit
+      - git_push
+      - run_cmd
+      - execute_python
+
+  # Execution Agent - Full access except destructive operations
+  executor:
+    description: "Execution agent - full access except destructive git operations"
+    allowed_tools: "*"  # All tools allowed
+    denied_tools:
+      - "git_push --force"
+      - "git_reset --hard"
+      - "run_cmd: [\"rm -rf\", \"del /f /s /q\", \"format\", \"mkfs\"]"
+    max_calls_per_session:
+      run_cmd: 100
+      write_file: 200
+      delete_file: 50
+
+  # Code Writer - Can write code but limited dangerous operations
+  code_writer:
+    description: "Code writing agent - can modify files but not execute arbitrary commands"
+    allowed_tools:
+      - read_file
+      - write_file
+      - append_to_file
+      - replace_in_file
+      - apply_patch
+      - list_dir
+      - tree_view
+      - search_code
+      - file_exists
+      - get_file_info
+      - git_diff
+      - git_status
+      - git_add
+      - git_commit
+      - run_tests
+      - analyze_*
+      - find_*
+    denied_tools:
+      - delete_file
+      - run_cmd
+      - git_push
+      - execute_python
+    max_calls_per_session:
+      write_file: 150
+      apply_patch: 100
+
+  # Reviewer Agent - Read-only plus analysis tools
+  reviewer:
+    description: "Review agent - read-only plus code analysis"
+    allowed_tools:
+      - read_file
+      - read_file_lines
+      - list_dir
+      - tree_view
+      - search_code
+      - file_exists
+      - get_file_info
+      - git_diff
+      - git_status
+      - git_log
+      - run_pylint
+      - run_mypy
+      - run_radon_complexity
+      - analyze_*
+      - find_*
+      - check_*
+      - scan_*
+      - detect_*
+    denied_tools:
+      - write_file
+      - delete_file
+      - run_cmd
+      - execute_python
+      - git_commit
+      - git_push
+
+  # Test Runner Agent - Can run tests and read files
+  test_runner:
+    description: "Test execution agent - can run tests but not modify code"
+    allowed_tools:
+      - read_file
+      - list_dir
+      - search_code
+      - run_tests
+      - run_cmd  # Limited to test commands
+      - analyze_test_coverage
+      - run_property_tests
+      - check_contracts
+      - detect_flaky_tests
+      - git_status
+      - git_diff
+    denied_tools:
+      - write_file
+      - delete_file
+      - git_commit
+      - git_push
+      - "run_cmd: [\"rm\", \"del\", \"format\"]"  # Prevent dangerous commands
+    max_calls_per_session:
+      run_cmd: 30
+      run_tests: 50
+
+  # Research Agent - Broad read access plus web fetch
+  researcher:
+    description: "Research agent - can read code and fetch web content"
+    allowed_tools:
+      - read_file
+      - list_dir
+      - tree_view
+      - search_code
+      - rag_search
+      - web_fetch
+      - git_status
+      - git_log
+      - git_diff
+      - analyze_*
+      - find_*
+      - get_*
+    denied_tools:
+      - write_file
+      - delete_file
+      - run_cmd
+      - execute_python
+      - git_commit
+      - git_push
+
+  # Default - Minimal safe access for unknown agents
+  default:
+    description: "Default role for unspecified agents - minimal safe access"
+    allowed_tools:
+      - read_file
+      - list_dir
+      - search_code
+      - file_exists
+      - git_status
+    denied_tools:
+      - write_file
+      - delete_file
+      - run_cmd
+      - execute_python
+      - git_commit
+      - git_push
+      - apply_patch
+
+# Tool Risk Levels
+# -----------------
+# Define risk levels for all tools
+
+tool_risk_levels:
+  # LOW RISK - Read operations
+  read_file: low
+  read_file_lines: low
+  list_dir: low
+  tree_view: low
+  search_code: low
+  file_exists: low
+  get_file_info: low
+  git_status: low
+  git_log: low
+  git_diff: low
+  rag_search: low
+  web_fetch: low
+  get_system_info: low
+  get_cache_stats: low
+
+  # LOW RISK - Analysis operations (read-only)
+  analyze_ast_patterns: low
+  analyze_code_context: low
+  analyze_dependencies: low
+  analyze_code_structures: low
+  analyze_static_types: low
+  find_symbol_usages: low
+  find_dead_code: low
+  run_pylint: low
+  run_mypy: low
+  run_radon_complexity: low
+  check_structural_consistency: low
+  scan_security_issues: low
+  detect_secrets: low
+  check_license_compliance: low
+
+  # MEDIUM RISK - Write operations
+  write_file: medium
+  append_to_file: medium
+  replace_in_file: medium
+  create_directory: medium
+  copy_file: medium
+
+  # MEDIUM RISK - Test operations
+  run_tests: medium
+  run_property_tests: medium
+  check_contracts: medium
+  analyze_test_coverage: medium
+
+  # HIGH RISK - Code modification
+  apply_patch: high
+  move_file: high
+  git_add: high
+  git_commit: high
+
+  # HIGH RISK - Execution
+  run_cmd: high
+  execute_python: high
+  install_package: high
+
+  # CRITICAL RISK - Destructive operations
+  delete_file: critical
+  git_push: critical
+  run_all_analysis: critical  # May execute code
+
+# Confirmation Requirements
+# --------------------------
+# Tools that always require user confirmation before execution
+
+require_confirmation:
+  - git_push
+  - delete_file
+  - "run_cmd: [\"rm\", \"del\", \"format\", \"shutdown\", \"reboot\"]"
+  - install_package
+  - update_dependencies
+
+# Notes:
+# - "*" in allowed_tools means all tools are allowed (except explicitly denied)
+# - Patterns like "analyze_*" match any tool starting with "analyze_"
+# - denied_tools can include patterns like "run_cmd: [\"rm -rf\"]" to block specific arguments
+# - max_calls_per_session limits how many times a tool can be called in one session
+# - require_confirmation forces user approval even if tool is allowed

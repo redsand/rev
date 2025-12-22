@@ -226,3 +226,25 @@ def test_retry_forever_does_not_spin_on_non_retryable(mock_sleep, monkeypatch):
     assert "error" in result
     assert mock_post.call_count == 1
     mock_sleep.assert_not_called()
+
+
+@patch("rev.llm.client.requests.post")
+def test_ollama_chat_passes_temperature(mock_post):
+    messages = [{"role": "user", "content": "test temp"}]
+    mock_post.return_value = _make_response(
+        200,
+        payload={"message": {"content": "ok", "tool_calls": []}},
+    )
+
+    cache = client.get_llm_cache()
+    if cache:
+        cache.clear()
+
+    # Pass temperature
+    result = client.ollama_chat(messages, temperature=0.5)
+
+    assert result["message"]["content"] == "ok"
+    assert mock_post.call_count == 1
+
+    payload = mock_post.call_args.kwargs["json"]
+    assert payload["options"]["temperature"] == 0.5
