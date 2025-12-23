@@ -58,6 +58,18 @@ def _stringify_content(content: Any) -> str:
 def _estimate_message_tokens(message: Dict[str, Any]) -> int:
     """Roughly estimate token usage for a single message."""
     text = _stringify_content(message.get("content", ""))
+
+    # Include thinking content if present (common in reasoning models)
+    if "thinking" in message:
+        text += "\n" + str(message["thinking"])
+
+    # Include tool calls if present
+    if "tool_calls" in message:
+        for tool_call in message["tool_calls"]:
+            func = tool_call.get("function", {})
+            text += "\n" + str(func.get("name", ""))
+            text += "\n" + str(func.get("arguments", ""))
+
     return max(0, len(text) // _CHARS_PER_TOKEN_ESTIMATE)
 
 
@@ -359,12 +371,21 @@ class OllamaProvider(LLMProvider):
                 resp.raise_for_status()
                 response = resp.json()
 
-                completion_tokens = _estimate_message_tokens(response.get("message", {}))
-                response["usage"] = {
-                    "prompt": prompt_tokens_estimate,
-                    "completion": completion_tokens,
-                    "total": prompt_tokens_estimate + completion_tokens,
-                }
+                # Use provider usage stats if available (Ollama uses prompt_eval_count/eval_count)
+                if "prompt_eval_count" in response and "eval_count" in response:
+                    response["usage"] = {
+                        "prompt": response["prompt_eval_count"],
+                        "completion": response["eval_count"],
+                        "total": response["prompt_eval_count"] + response["eval_count"],
+                    }
+                elif "usage" not in response:
+                    # Fallback to estimation
+                    completion_tokens = _estimate_message_tokens(response.get("message", {}))
+                    response["usage"] = {
+                        "prompt": prompt_tokens_estimate,
+                        "completion": completion_tokens,
+                        "total": prompt_tokens_estimate + completion_tokens,
+                    }
 
                 debug_logger.log_llm_response(model_name, response, cached=False)
                 llm_cache.set_response(messages, response, tools if tools_provided else None, model_name)

@@ -1508,6 +1508,7 @@ class Orchestrator:
             "- If unsure whether a path exists, choose [READ] first to locate the correct file path(s).\n"
             "\n"
              "Constraints to avoid duplicating work:\n"
+             "- CRITICAL: Check the file tree in the history. If the project is already organized into subdirectories, USE THEM. Do NOT create duplicate files or project roots in the top-level directory.\n"
              "- Do not propose repeating a step that is already complete (e.g., do not re-create a directory that exists).\n"
              "- CRITICAL: If you have already completed 2+ READ/ANALYZE steps on the same file, you MUST now use [EDIT] to make changes. Do NOT propose another read.\n"
              "- If the same file/lines have been inspected multiple times, transition to [EDIT] immediately.\n"
@@ -1754,6 +1755,7 @@ class Orchestrator:
             iteration += 1
             self.context.set_agent_state("current_iteration", iteration)
             self.context.resource_budget.update_step()
+            self.context.resource_budget.tokens_used = get_token_usage().get("total", 0)
 
             # MANDATORY: Force initial workspace examination on first iteration
             if iteration == 1 and forced_next_task is None:
@@ -2357,7 +2359,25 @@ class Orchestrator:
                 self.context.agent_state["recent_tasks"] = recent[-8:]
             except Exception:
                 pass
-            print(f"  {'✓' if next_task.status == TaskStatus.COMPLETED else '✗'} {log_entry}")
+
+            # Filter output from console display unless debug is enabled
+            display_entry = log_entry
+            if not self.debug_logger.enabled and "| Output:" in display_entry:
+                # Split by output marker
+                parts = display_entry.split(" | Output:")
+                base_part = parts[0]
+                
+                # Check if we need to preserve verification part which comes after output
+                verification_part = ""
+                if len(parts) > 1 and " | Verification:" in parts[1]:
+                    # Extract verification part from the second chunk
+                    v_split = parts[1].split(" | Verification:", 1)
+                    if len(v_split) > 1:
+                        verification_part = " | Verification:" + v_split[1]
+                
+                display_entry = base_part + verification_part
+
+            print(f"  {'✓' if next_task.status == TaskStatus.COMPLETED else '✗'} {display_entry}")
 
             self.context.update_repo_context()
             clear_analysis_caches()

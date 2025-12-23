@@ -24,6 +24,7 @@ from rev.tools.workspace_resolver import (
     normalize_to_workspace_relative,
 )
 from rev.tools.utils import quote_cmd_arg
+from rev.llm.client import ollama_chat
 
 _READ_ONLY_TOOLS = {
     "read_file",
@@ -980,88 +981,219 @@ def _paths_or_default(paths: list[Path]) -> list[Path]:
         return [Path(".").resolve()]
 
 
+def _detect_project_type(root: Path) -> str:
+    """Detect the project type (python, vue, node, etc)."""
+    try:
+        if (root / "package.json").exists():
+            content = (root / "package.json").read_text(errors="ignore")
+            if '"vue"' in content: return "vue"
+            if '"react"' in content: return "react"
+            if '"next"' in content: return "nextjs"
+            return "node"
+        if (root / "pyproject.toml").exists() or (root / "requirements.txt").exists() or (root / "setup.py").exists():
+            return "python"
+        # Fallback by file extension in root
+        for f in root.iterdir():
+            if f.suffix == ".py": return "python"
+            if f.suffix in (".js", ".ts"): return "node"
+    except Exception:
+        pass
+    return "unknown"
+
+
 def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode: str) -> Optional[VerificationResult | Dict[str, Any]]:
-    """Run compileall/tests depending on verification mode (fast/strict)."""
+    """Run verification checks depending on verification mode (fast/strict) and project type."""
     if not paths:
         return None
 
     strict_details: Dict[str, Any] = {}
-    compile_targets = _paths_or_default(paths)
-    compile_cmd = "python -m compileall " + " ".join(_quote_path(p) for p in compile_targets)
-    compile_res = _run_validation_command(compile_cmd, timeout=max(config.VALIDATION_TIMEOUT_SECONDS, 180))
-    strict_details["compileall"] = compile_res
-    if compile_res.get("blocked") or compile_res.get("rc", 1) != 0:
-        return VerificationResult(
-            passed=False,
-            message="Verification failed: compileall errors",
-            details={"strict": strict_details},
-            should_replan=True,
-        )
+    project_type = _detect_project_type(config.ROOT)
+    
+    # -------------------------------------------------------------------------
+    # PYTHON VERIFICATION
+    # -------------------------------------------------------------------------
+    if project_type == "python" or any(p.suffix == ".py" for p in paths):
+        # Filter for Python files or directories for compileall
+        compile_targets = [p for p in _paths_or_default(paths) if p.is_dir() or p.suffix == '.py']
+        
+        if compile_targets:
+            compile_cmd = "python -m compileall " + " ".join(_quote_path(p) for p in compile_targets)
+            compile_res = _run_validation_command(compile_cmd, timeout=max(config.VALIDATION_TIMEOUT_SECONDS, 180))
+            strict_details["compileall"] = compile_res
+            if compile_res.get("blocked") or compile_res.get("rc", 1) != 0:
+                return VerificationResult(
+                    passed=False,
+                    message="Verification failed: compileall errors",
+                    details={"strict": strict_details},
+                    should_replan=True,
+                )
 
-    if mode == "fast":
-        return strict_details
+        if mode == "fast":
+            return strict_details
 
-    # Targeted pytest for touched test files/directories
-    test_targets = []
-    for p in paths:
-        parts_lower = {part.lower() for part in p.parts}
-        if "tests" in parts_lower or p.name.startswith("test_") or p.name.endswith("_test.py"):
-            test_targets.append(p)
-    if test_targets:
-        pytest_cmd = "pytest -q " + " ".join(_quote_path(p) for p in test_targets)
-    else:
-        pytest_cmd = "pytest -q"
-    pytest_res = _run_validation_command(pytest_cmd, use_tests_tool=True, timeout=config.VALIDATION_TIMEOUT_SECONDS)
-    strict_details["pytest"] = pytest_res
-    rc = pytest_res.get("rc", 1)
-    # Pytest exit codes: 0=pass, 1=fail, 2=interrupted, 3=internal error, 4=usage error, 5=no tests collected
-    # Exit code 5 (no tests collected) should be treated as PASS, not FAIL
-    if pytest_res.get("blocked") or (rc not in (0, 4, 5) and rc != 0):
-        # Only fail on actual test failures (rc=1) or errors (rc=2,3), not on "no tests collected" (rc=5)
-        if rc in (4, 5):
-            # No tests collected - this is OK, not a failure
-            strict_details["pytest_note"] = f"No tests collected (rc={rc}) - treated as pass"
+        # Targeted pytest for touched test files/directories
+        test_targets = []
+        for p in paths:
+            parts_lower = {part.lower() for part in p.parts}
+            if "tests" in parts_lower or p.name.startswith("test_") or p.name.endswith("_test.py"):
+                test_targets.append(p)
+        if test_targets:
+            pytest_cmd = "pytest -q " + " ".join(_quote_path(p) for p in test_targets)
         else:
-            return VerificationResult(
-                passed=False,
-                message="Verification failed: pytest errors",
-                details={"strict": strict_details},
-                should_replan=True,
-            )
+            pytest_cmd = "pytest -q"
+        pytest_res = _run_validation_command(pytest_cmd, use_tests_tool=True, timeout=config.VALIDATION_TIMEOUT_SECONDS)
+        strict_details["pytest"] = pytest_res
+        rc = pytest_res.get("rc", 1)
+        # Pytest exit codes: 0=pass, 1=fail, 2=interrupted, 3=internal error, 4=usage error, 5=no tests collected
+        if pytest_res.get("blocked") or (rc not in (0, 4, 5) and rc != 0):
+            if rc in (4, 5):
+                strict_details["pytest_note"] = f"No tests collected (rc={rc}) - treated as pass"
+            else:
+                return VerificationResult(
+                    passed=False,
+                    message="Verification failed: pytest errors",
+                    details={"strict": strict_details},
+                    should_replan=True,
+                )
 
-    # Optional lint/type checks if allowed
-    # Run only on modified paths to avoid pre-existing errors in unrelated files
-    optional_checks = []
-    if "ruff" in config.ALLOW_CMDS:
-        py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]
-        if py_paths:
-            ruff_targets = " ".join(_quote_path(p) for p in py_paths[:10])  # Limit to 10 files
-            # Use targeted error codes to avoid failing on pre-existing style issues
-            # E9: Runtime/syntax errors - always critical
-            # F63: Invalid print syntax - syntax issue
-            # F7: Statement problems (break/continue outside loop, etc.)
-            # NOTE: Removed F82 (undefined names) - too noisy for pre-existing issues
-            # Let compileall catch import/undefined errors instead
-            optional_checks.append(("ruff", f"ruff check {ruff_targets} --select E9,F63,F7"))
-    if "mypy" in config.ALLOW_CMDS:
-        py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]
-        if py_paths:
-            mypy_targets = " ".join(_quote_path(p) for p in py_paths[:10])
-            optional_checks.append(("mypy", f"mypy {mypy_targets}"))
-    for label, cmd in optional_checks:
-        res = _run_validation_command(cmd, timeout=config.VALIDATION_TIMEOUT_SECONDS)
-        strict_details[label] = res
-        rc = res.get("rc")
-        if rc is None:
-            rc = 0 if res.get("blocked") else 1
-        # Optional: do not fail on blocked, but fail on non-zero rc when executed
-        if not res.get("blocked") and rc not in (0, None):
-            return VerificationResult(
-                passed=False,
-                message=f"Verification failed: {label} errors",
-                details={"strict": strict_details},
-                should_replan=True,
-            )
+        # Optional lint/type checks if allowed
+        if "ruff" in config.ALLOW_CMDS:
+            py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]
+            if py_paths:
+                ruff_targets = " ".join(_quote_path(p) for p in py_paths[:10])
+                # E9: Runtime/syntax errors, F63: Invalid print syntax, F7: Statement problems
+                optional_checks = [("ruff", f"ruff check {ruff_targets} --select E9,F63,F7")]
+                if "mypy" in config.ALLOW_CMDS:
+                    optional_checks.append(("mypy", f"mypy {ruff_targets}"))
+                
+                for label, cmd in optional_checks:
+                    res = _run_validation_command(cmd, timeout=config.VALIDATION_TIMEOUT_SECONDS)
+                    strict_details[label] = res
+                    rc = res.get("rc")
+                    if rc is None:
+                        rc = 0 if res.get("blocked") else 1
+                    if not res.get("blocked") and rc not in (0, None):
+                        return VerificationResult(
+                            passed=False,
+                            message=f"Verification failed: {label} errors",
+                            details={"strict": strict_details},
+                            should_replan=True,
+                        )
+
+    # -------------------------------------------------------------------------
+    # NODE / VUE / REACT VERIFICATION
+    # -------------------------------------------------------------------------
+    elif project_type in ("vue", "react", "node", "nextjs"):
+        # 1. Syntax check for plain JS files (fast)
+        js_paths = [p for p in paths if p.suffix == '.js' and p.exists()]
+        if js_paths and "node" in config.ALLOW_CMDS:
+            for js_file in js_paths:
+                cmd = f"node --check {quote_cmd_arg(str(js_file))}"
+                res = _run_validation_command(cmd, timeout=30)
+                strict_details[f"syntax_{js_file.name}"] = res
+                if not res.get("blocked") and res.get("rc", 1) != 0:
+                    return VerificationResult(
+                        passed=False,
+                        message=f"Syntax error in {js_file.name}",
+                        details={"strict": strict_details},
+                        should_replan=True
+                    )
+
+        # 2. Vue/TS Type Checking (slower, maybe skip in strict=false?)
+        # In 'fast' mode, we might skip full type checking unless it's a critical file
+        if project_type == "vue" and "npm" in config.ALLOW_CMDS:
+            # Check if we should run vue-tsc
+            # If we touched .vue or .ts files
+            vue_ts_touched = any(p.suffix in ('.vue', '.ts') for p in paths)
+            if vue_ts_touched:
+                # Try running vue-tsc if available in package.json
+                # This is heavy, so only run if we're not in super-fast mode?
+                # For now, let's assume 'fast' mode avoids full project type check.
+                if mode == "strict":
+                    cmd = "npx vue-tsc --noEmit"
+                    res = _run_validation_command(cmd, timeout=120)
+                    strict_details["vue-tsc"] = res
+                    if not res.get("blocked") and res.get("rc", 1) != 0:
+                         return VerificationResult(
+                            passed=False,
+                            message="Vue type check failed",
+                            details={"strict": strict_details},
+                            should_replan=True
+                        )
+
+        # 3. Unit Tests (Vitest/Jest)
+        # Look for test files in the paths
+        test_touched = any("test" in p.name or "spec" in p.name for p in paths)
+        if test_touched or mode == "strict":
+            if "npm" in config.ALLOW_CMDS:
+                # Try to detect test runner
+                test_cmd = "npm test"
+                # Check package.json for specific test scripts
+                try:
+                    pkg_json = json.loads((config.ROOT / "package.json").read_text())
+                    scripts = pkg_json.get("scripts", {})
+                    if "test:unit" in scripts:
+                        test_cmd = "npm run test:unit"
+                    elif "test" in scripts:
+                        test_cmd = "npm test"
+                    else:
+                        test_cmd = None
+                except Exception:
+                    test_cmd = None
+
+                if test_cmd:
+                    # Prevent watch mode which hangs execution
+                    # Try to detect if we need to add flags, or just prepend CI=true (cross-platform way is harder without extra tools)
+                    # We will append -- --run (for vitest) or --watchAll=false (for jest) if we can guess, 
+                    # but setting CI env var is the most robust standard method if the runner supports it.
+                    # rev's run_cmd doesn't easily let us set env vars per call in the string, 
+                    # so we'll try to chain it or assume the tool runner handles environment.
+                    # Ideally, we append flags.
+                    
+                    if "vitest" in test_cmd or "vite" in test_cmd:
+                        test_cmd += " --run"
+                    elif "jest" in test_cmd:
+                        test_cmd += " --watchAll=false"
+                    else:
+                        # Generic fallback: many runners respect --watch=false or --no-watch
+                        # But some might fail if they don't recognize the flag.
+                        # Safest is to try to rely on CI=true in the environment if the tool runner supported it.
+                        # Since we can't easily set env vars in the command string cross-platform without 'cross-env',
+                        # we will try to append '--passWithNoTests' which is common and harmless for jest/vitest,
+                        # and rely on the config.ALLOW_CMDS to hopefully include a non-watch command.
+                        pass
+
+                    # Append file filters if possible? Vitest supports this.
+                    # pytest supports it too.
+                    # npm run test:unit -- <file>
+                    if test_touched:
+                        test_files = [str(p) for p in paths if "test" in p.name or "spec" in p.name]
+                        if test_files:
+                            # Use ' -- ' to pass args to the underlying script
+                            test_cmd += " -- " + " ".join(quote_cmd_arg(f) for f in test_files)
+                    
+                    # Add CI flags to prevent hanging in watch mode
+                    if " -- " not in test_cmd:
+                        test_cmd += " --"
+                    
+                    # Add flags that help both Jest and Vitest avoid watch mode
+                    if "vitest" in test_cmd or "vite" in test_cmd:
+                        test_cmd += " --run"
+                    else:
+                        # Jest / Generic
+                        test_cmd += " --watchAll=false --no-watch"
+
+                    res = _run_validation_command(test_cmd, use_tests_tool=True, timeout=config.VALIDATION_TIMEOUT_SECONDS)
+                    strict_details["npm_test"] = res
+                    # Ignore rc if no tests found?
+                    # Vitest returns 1 if no tests found sometimes?
+                    if not res.get("blocked") and res.get("rc", 1) != 0:
+                         return VerificationResult(
+                            passed=False,
+                            message="Frontend tests failed",
+                            details={"strict": strict_details},
+                            should_replan=True
+                        )
 
     return strict_details
 
@@ -1084,8 +1216,11 @@ def _run_validation_steps(validation_steps: list[str], details: Dict[str, Any], 
     for step in validation_steps:
         text = step.lower()
         if "syntax" in text or "compile" in text:
-            cmd = "python -m compileall " + " ".join(_quote_path(p) for p in paths)
-            _add("compileall", cmd)
+            # Filter for Python files or directories
+            compile_targets = [p for p in paths if p.is_dir() or p.suffix == '.py']
+            if compile_targets:
+                cmd = "python -m compileall " + " ".join(_quote_path(p) for p in compile_targets)
+                _add("compileall", cmd)
         if "lint" in text or "linter" in text:
             # Run ruff only on modified files, targeting severe errors to avoid pre-existing style issues
             # E9: Runtime/syntax errors, F63: Invalid print syntax, F7: Statement problems

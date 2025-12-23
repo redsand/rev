@@ -8,7 +8,7 @@ __pycache__/
 dist/
 build/
 *.egg
-
+tmp_test/
 # Virtual environments
 .venv/
 venv/
