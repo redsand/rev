@@ -89,20 +89,24 @@ class PermissionPolicy:
         self.require_confirmation: List[str] = []
 
     @classmethod
-    def from_yaml(cls, yaml_path: Path) -> "PermissionPolicy":
-        """Load policy from YAML file."""
+    def from_yaml(cls, yaml_path: Path) -> tuple["PermissionPolicy", Optional[Exception]]:
+        """Load policy from YAML file.
+
+        Returns:
+            Tuple of (policy, error). If error is not None, policy loading failed.
+        """
         policy = cls()
 
         if not yaml_path.exists():
             logger.warning(f"Permission policy file not found: {yaml_path}. Using permissive defaults.")
-            return policy
+            return policy, None
 
         try:
             with open(yaml_path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f)
 
             if not data:
-                return policy
+                return policy, None
 
             # Load default policy
             policy.default_policy = data.get("default_policy", "deny")
@@ -140,11 +144,12 @@ class PermissionPolicy:
             # Load confirmation requirements
             policy.require_confirmation = data.get("require_confirmation", [])
 
-            return policy
+            return policy, None
 
         except Exception as e:
+            # REV-011: Return the error so caller can decide whether to fail-open or fail-closed
             logger.error(f"Failed to load permission policy from {yaml_path}: {e}")
-            return policy
+            return policy, e
 
     def get_agent_role(self, agent_name: str) -> Optional[AgentRole]:
         """Get agent role by name, with fallback to 'default' or 'executor'."""
@@ -177,11 +182,15 @@ class PermissionManager:
         if policy_path is None:
             policy_path = Path.cwd() / "tool_policy.yaml"
 
-        self.policy = PermissionPolicy.from_yaml(policy_path)
+        # REV-011: from_yaml now returns (policy, error) tuple
+        self.policy, self.policy_load_error = PermissionPolicy.from_yaml(policy_path)
         self.denial_log: List[PermissionDenial] = []
         self.call_counts: Dict[str, Dict[str, int]] = {}  # agent -> {tool: count}
 
-        logger.info(f"Initialized PermissionManager with policy from {policy_path}")
+        if self.policy_load_error:
+            logger.error(f"Failed to load policy from {policy_path}: {self.policy_load_error}")
+        else:
+            logger.info(f"Initialized PermissionManager with policy from {policy_path}")
 
     def check_permission(self, agent_name: str, tool_name: str, tool_args: Optional[Dict[str, Any]] = None) -> PermissionResult:
         """Check if agent has permission to use tool.
@@ -356,6 +365,7 @@ class PermissionManager:
 
 # Global singleton for easy access
 _GLOBAL_PERMISSION_MANAGER: Optional[PermissionManager] = None
+_GLOBAL_PERMISSION_MANAGER_PATH: Optional[Path] = None
 
 
 def get_permission_manager(policy_path: Optional[Path] = None) -> PermissionManager:
@@ -367,15 +377,21 @@ def get_permission_manager(policy_path: Optional[Path] = None) -> PermissionMana
     Returns:
         The global PermissionManager instance
     """
-    global _GLOBAL_PERMISSION_MANAGER
+    global _GLOBAL_PERMISSION_MANAGER, _GLOBAL_PERMISSION_MANAGER_PATH
 
-    if _GLOBAL_PERMISSION_MANAGER is None:
+    # Recreate manager if path has changed or doesn't exist
+    if policy_path is None:
+        policy_path = Path.cwd() / "tool_policy.yaml"
+
+    if _GLOBAL_PERMISSION_MANAGER is None or _GLOBAL_PERMISSION_MANAGER_PATH != policy_path:
         _GLOBAL_PERMISSION_MANAGER = PermissionManager(policy_path)
+        _GLOBAL_PERMISSION_MANAGER_PATH = policy_path
 
     return _GLOBAL_PERMISSION_MANAGER
 
 
 def reset_permission_manager():
     """Reset the global permission manager (mainly for testing)."""
-    global _GLOBAL_PERMISSION_MANAGER
+    global _GLOBAL_PERMISSION_MANAGER, _GLOBAL_PERMISSION_MANAGER_PATH
     _GLOBAL_PERMISSION_MANAGER = None
+    _GLOBAL_PERMISSION_MANAGER_PATH = None

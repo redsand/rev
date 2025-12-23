@@ -271,22 +271,31 @@ import subprocess
 def _run_shell(cmd, timeout=30):
     """Execute a shell command and return a JSON string.
 
+    DEPRECATED: This function has been replaced with safe command execution.
+    Use rev.tools.command_runner.run_command_safe() for new code.
+
     Captures ``stdout``, ``stderr`` and the return code. On error returns a JSON
     object with an ``error`` key. This matches the legacy interface expected by
     the test suite.
     """
+    from rev.tools.command_runner import run_command_safe
+
     try:
-        completed = subprocess.run(
-            cmd,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        result = run_command_safe(cmd, timeout=timeout, check_interrupt=False)
+
+        # Check if command was blocked
+        if result.get("blocked"):
+            return json.dumps({
+                "error": f"BLOCKED: {result.get('error', 'security violation')}",
+                "rc": -1,
+                "stdout": "",
+                "stderr": ""
+            })
+
         return json.dumps({
-            "rc": completed.returncode,
-            "stdout": completed.stdout,
-            "stderr": completed.stderr,
+            "rc": result.get("rc", -1),
+            "stdout": result.get("stdout", ""),
+            "stderr": result.get("stderr", ""),
         })
     except Exception as exc:
         return json.dumps({"error": str(exc)})

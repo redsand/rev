@@ -19,7 +19,7 @@ class FileContentCache(IntelligentCache):
         super().__init__(name="file_content", ttl=60, **kwargs)
 
     def get_file(self, file_path: pathlib.Path) -> Optional[str]:
-        """Get file content from cache, checking modification time."""
+        """Get file content from cache, checking modification time and hash."""
         if not file_path.exists():
             return None
 
@@ -32,6 +32,23 @@ class FileContentCache(IntelligentCache):
         if cached is not None:
             return cached
 
+        # Fallback: if mtime changed, check hash to avoid redundant reload
+        # This handles cases where mtime is updated but content is identical
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="ignore")
+            content_hash = hashlib.sha256(content.encode()).hexdigest()
+            
+            # Look for existing entry with same hash for this file
+            prefix = f"{file_path}:"
+            with self._lock:
+                for k, entry in self._cache.items():
+                    if k.startswith(prefix) and entry.metadata.get("hash") == content_hash:
+                        # Found match by hash! Update key to current mtime and return.
+                        self.set_file(file_path, content)
+                        return content
+        except Exception:
+            pass
+
         # Invalidate any old versions of this file (thread-safe)
         old_prefix = f"{file_path}:"
         with self._lock:
@@ -42,13 +59,18 @@ class FileContentCache(IntelligentCache):
         return None
 
     def set_file(self, file_path: pathlib.Path, content: str):
-        """Cache file content with modification time."""
+        """Cache file content with modification time and hash."""
         if not file_path.exists():
             return
 
         mtime = file_path.stat().st_mtime
         cache_key = f"{file_path}:{mtime}"
-        self.set(cache_key, content, metadata={"file_path": str(file_path), "mtime": mtime})
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+        self.set(cache_key, content, metadata={
+            "file_path": str(file_path), 
+            "mtime": mtime,
+            "hash": content_hash
+        })
 
     def invalidate_file(self, file_path: pathlib.Path):
         """Invalidate all cache entries for a specific file (all mtimes)."""

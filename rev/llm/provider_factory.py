@@ -6,12 +6,28 @@ from typing import Optional
 from rev.llm.providers.base import LLMProvider
 from rev.llm.providers.ollama import OllamaProvider
 from rev.llm.providers.openai_provider import OpenAIProvider
-from rev.llm.providers.anthropic_provider import AnthropicProvider
-from rev.llm.providers.gemini_provider import GeminiProvider
 
 
 # Cache for provider instances (singleton pattern)
 _provider_cache = {}
+
+
+def _load_anthropic():
+    """Lazily load Anthropic provider to avoid dependency issues."""
+    try:
+        from rev.llm.providers.anthropic_provider import AnthropicProvider
+        return AnthropicProvider
+    except ImportError as e:
+        raise RuntimeError("Anthropic provider requires extras: pip install rev-agentic[anthropic]") from e
+
+
+def _load_gemini():
+    """Lazily load Gemini provider to avoid dependency issues."""
+    try:
+        from rev.llm.providers.gemini_provider import GeminiProvider
+        return GeminiProvider
+    except ImportError as e:
+        raise RuntimeError("Gemini provider requires extras: pip install rev-agentic[gemini]") from e
 
 
 def get_provider(provider_name: Optional[str] = None, force_new: bool = False) -> LLMProvider:
@@ -44,8 +60,10 @@ def get_provider(provider_name: Optional[str] = None, force_new: bool = False) -
     elif provider_name == "openai":
         provider = OpenAIProvider()
     elif provider_name == "anthropic":
+        AnthropicProvider = _load_anthropic()
         provider = AnthropicProvider()
     elif provider_name == "gemini":
+        GeminiProvider = _load_gemini()
         provider = GeminiProvider()
     else:
         # Default to Ollama for all other provider names instead of raising ValueError.

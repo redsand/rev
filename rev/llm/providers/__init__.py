@@ -3,13 +3,10 @@
 from .base import LLMProvider
 from .ollama import OllamaProvider
 from .openai_provider import OpenAIProvider
-from .anthropic_provider import AnthropicProvider
-from .gemini_provider import GeminiProvider
+# Anthropic and Gemini are imported lazily in factory to avoid dependency crashes
 
 __all__ = [
     "LLMProvider",
     "OllamaProvider",
     "OpenAIProvider",
-    "AnthropicProvider",
-    "GeminiProvider",
 ]

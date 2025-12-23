@@ -261,12 +261,14 @@ def _is_semantically_duplicate_task(
     return similar_count >= 2
 
 
-def _count_file_reads(file_path: str, completed_tasks: List[str]) -> int:
+def _count_file_reads(file_path: str, completed_tasks: List) -> int:
     """Count how many times a file has been read in completed tasks.
+
+    P0-1 Fix: Now uses actual tool_events instead of keyword matching in descriptions.
 
     Args:
         file_path: The file path to check
-        completed_tasks: List of completed task log entries
+        completed_tasks: List of completed Task objects or task log entries (backward compatible)
 
     Returns:
         Number of times this file was read
@@ -278,21 +280,54 @@ def _count_file_reads(file_path: str, completed_tasks: List[str]) -> int:
     target = file_path.replace('\\', '/').lower()
     count = 0
 
-    for log_entry in completed_tasks:
-        # Only count completed read-like tasks
-        if not log_entry.startswith('[COMPLETED]'):
-            continue
+    # File reading tools to check for
+    FILE_READING_TOOLS = {'read_file', 'read_file_lines', 'search_code', 'list_dir', 'analyze_code_context'}
 
-        desc_lower = log_entry.lower()
-        if not any(kw in desc_lower for kw in ['read', 'inspect', 'examine', 'analyze']):
-            continue
+    for item in completed_tasks:
+        # NEW: Check if item is a Task object with tool_events
+        if hasattr(item, 'tool_events') and hasattr(item, 'status'):
+            # Only count completed tasks
+            if hasattr(item.status, 'value'):
+                if item.status.value != 'completed':
+                    continue
+            elif str(item.status).lower() != 'completed':
+                continue
 
-        # Extract file path from the log entry
-        entry_file = _extract_file_path_from_description(log_entry)
-        if entry_file:
-            entry_normalized = entry_file.replace('\\', '/').lower()
-            if target == entry_normalized or target.endswith(entry_normalized) or entry_normalized.endswith(target):
-                count += 1
+            # Check tool_events for file reading operations
+            if item.tool_events:
+                for event in item.tool_events:
+                    tool_name = event.get('tool', '').lower()
+                    if tool_name not in FILE_READING_TOOLS:
+                        continue
+
+                    # Extract file path from tool arguments
+                    args = event.get('args', {})
+                    if not isinstance(args, dict):
+                        continue
+
+                    # Check various argument names that contain file paths
+                    event_file = args.get('file_path') or args.get('path') or args.get('pattern')
+                    if event_file:
+                        event_normalized = str(event_file).replace('\\', '/').lower()
+                        if target == event_normalized or target.endswith(event_normalized) or event_normalized.endswith(target):
+                            count += 1
+
+        # BACKWARD COMPATIBLE: Handle string log entries (old format)
+        elif isinstance(item, str):
+            # Only count completed read-like tasks
+            if not item.startswith('[COMPLETED]'):
+                continue
+
+            desc_lower = item.lower()
+            if not any(kw in desc_lower for kw in ['read', 'inspect', 'examine', 'analyze']):
+                continue
+
+            # Extract file path from the log entry
+            entry_file = _extract_file_path_from_description(item)
+            if entry_file:
+                entry_normalized = entry_file.replace('\\', '/').lower()
+                if target == entry_normalized or target.endswith(entry_normalized) or entry_normalized.endswith(target):
+                    count += 1
 
     return count
 
@@ -1157,6 +1192,45 @@ class Orchestrator:
             if config.EXECUTION_MODE != 'sub-agent':
                 print(f"\nðŸ”¸ Entering phase: {new_phase.value}")
 
+    def _transform_redundant_action(self, task: Task, action_sig: str, count: int) -> Task:
+        """Transform a redundant action into one that produces new evidence."""
+        desc = task.description.lower()
+        file_path = _extract_file_path_from_description(task.description)
+        
+        print(f"  ⚠️  Redundant action detected ({count}x): {action_sig}")
+        
+        if task.action_type in {"read", "analyze"} and file_path:
+            # If reading the same file, try searching for usages instead
+            symbol_match = re.search(r'class\s+(\w+)|def\s+(\w+)', desc)
+            symbol = symbol_match.group(1) or symbol_match.group(2) if symbol_match else None
+            
+            if symbol:
+                print(f"  → Transforming to symbol usage search: {symbol}")
+                return Task(
+                    description=f"Find all usages of symbol '{symbol}' in the codebase to understand its context",
+                    action_type="analyze"
+                )
+            else:
+                print(f"  → Transforming to git diff check")
+                return Task(
+                    description=f"Check git diff for {file_path} to see recent changes and identify potential issues",
+                    action_type="analyze"
+                )
+        
+        if task.action_type == "test":
+            print(f"  → Transforming to build/compile check")
+            return Task(
+                description="Run a full build or compilation check to ensure structural integrity",
+                action_type="test"
+            )
+            
+        # Generic transformation: search for related patterns
+        print(f"  → Transforming to generic pattern search")
+        return Task(
+            description=f"Search for patterns related to: {task.description[:50]}",
+            action_type="analyze"
+        )
+
     def _display_prompt_optimization(self, original: str, optimized: str) -> None:
         """Display original vs improved prompts for transparency."""
         original_lines = original.strip().splitlines() or [original]
@@ -1438,34 +1512,41 @@ class Orchestrator:
         if "CANNOT_DECOMPOSE" in response_content.upper():
             return None
 
-        # Try to parse the decomposed task format [ACTION_TYPE] description
-        match = re.match(r"[\s]*\[(.*?)\]\s*(.*)", response_content)
+        # Robust parsing: find the first instance of [ACTION_TYPE] anywhere in the response
+        match = re.search(r"\[([A-Z_]+)\]\s*(.*)", response_content, re.DOTALL)
         if match:
+            action_raw = match.group(1)
+            description = match.group(2).strip()
+            
+            # Clean up: if there's a second action block, stop there
+            next_action_pattern = r'\[[A-Z_]+\]'
+            match_next = re.search(next_action_pattern, description)
+            if match_next:
+                description = description[:match_next.start()].strip()
+
             action_type = normalize_action_type(
-                match.group(1),
+                action_raw,
                 available_actions=AgentRegistry.get_registered_action_types(),
             )
-            description = match.group(2).strip()
 
-            # Clean up malformed LLM output that contains multiple actions concatenated
-            if '[' in description:
-                bracket_idx = description.find('[')
-                if bracket_idx > 0:
-                    description = description[:bracket_idx].strip()
-
-            # Clean up trailing brackets
-            description = re.sub(r'\]$', '', description).strip()
-
-            print(f"\n  [DECOMPOSITION] LLM suggested decomposition:")
+            print(f"\n  [DECOMPOSITION] Parsed suggested subtask:")
             print(f"    Action: {action_type}")
-            print(f"    Task: {description}")
+            print(f"    Task: {description[:100]}...")
             return Task(description=description, action_type=action_type)
         else:
-            # If LLM didn't follow format, create a generic refactor task with its suggestion
-            print(f"\n  [DECOMPOSITION] LLM suggestion: {response_content[:100]}")
+            # Fallback: if no brackets found, try to find keywords or use the first line
+            lines = [l.strip() for l in response_content.splitlines() if l.strip()]
+            first_meaningful = ""
+            for line in lines:
+                if not any(kw in line.lower() for kw in ["yes", "decompose", "fail", "error", "subtask"]):
+                    first_meaningful = line
+                    break
+            
+            desc = first_meaningful or (lines[0] if lines else response_content)
+            print(f"\n  [DECOMPOSITION] Fallback suggestion: {desc[:100]}...")
             return Task(
-                description=response_content,
-                action_type="refactor"
+                description=desc,
+                action_type="edit" # Default to edit for repair
             )
 
     def _determine_next_action(self, user_request: str, work_summary: str, coding_mode: bool, iteration: int = 1, failure_notes: str = "", path_hints: str = "", agent_notes: str = "") -> Optional[Task]:
@@ -1735,6 +1816,9 @@ class Orchestrator:
         print("CONTINUOUS SUB-AGENT MODE (REPL-Style with Verification)")
         print("=" * 60)
 
+        from rev.execution.ledger import get_ledger
+        ledger = get_ledger()
+
         # Persistence: load previous work history
         completed_tasks_log = self.context.load_history()
         if completed_tasks_log:
@@ -1812,16 +1896,7 @@ class Orchestrator:
                     work_summary = f"Work Completed So Far ({total_tasks} total tasks: {completed_count} completed, {failed_count} failed):\n"
 
                     # Add file read/inspection summary FIRST to establish what's been inspected
-                    file_read_counts: Dict[str, int] = defaultdict(int)
-                    for log_entry in completed_tasks_log:
-                        if log_entry.startswith('[COMPLETED]'):
-                            desc_lower = log_entry.lower()
-                            if any(kw in desc_lower for kw in ['read', 'inspect', 'examine', 'analyze']):
-                                file_path = _extract_file_path_from_description(log_entry)
-                                if file_path:
-                                    # Normalize to filename only for summary
-                                    filename = file_path.replace('\\', '/').split('/')[-1]
-                                    file_read_counts[filename] += 1
+                    file_read_counts = ledger.get_files_inspected()
 
                     if file_read_counts:
                         work_summary += "\n📄 Files Already Inspected (DO NOT re-read these files unless absolutely necessary):\n"
@@ -1849,11 +1924,21 @@ class Orchestrator:
 
                 # Calculate repetitive failure notes for the planner
                 failure_notes = []
+
+                # P0-2: Add blocked actions to failure notes
+                if self.context:
+                    blocked_sigs = ledger.get_blocked_action_sigs()
+                    if blocked_sigs:
+                        failure_notes.append("🚫 BLOCKED ACTIONS (DO NOT propose any of these):")
+                        for blocked_sig in blocked_sigs:
+                            failure_notes.append(f"  ❌ BLOCKED: [{blocked_sig}]")
+                        failure_notes.append("")  # Blank line for readability
+
                 if action_counts:
                     for sig, count in action_counts.items():
                         if count >= 2:
                             failure_notes.append(f"⚠️ REPETITION WARNING: You have already proposed the action '[{sig}]' {count} times. It is not making forward progress or is failing verification. DO NOT REPEAT IT. Try a different strategy, such as reading the file again to check for subtle syntax errors or using a different tool.")
-                
+
                 failure_notes_str = "\n".join(failure_notes)
                 path_hints = _generate_path_hints(completed_tasks_log)
 
@@ -1908,6 +1993,11 @@ class Orchestrator:
 
                     print("\n✅ Planner determined the goal is achieved.")
                     return True
+
+                # FORWARD PROGRESS RULE: Check for redundant actions
+                action_sig = f"{next_task.action_type}:{next_task.description}"
+                if action_counts[action_sig] >= 2:
+                    next_task = self._transform_redundant_action(next_task, action_sig, action_counts[action_sig])
 
                 next_task.task_id = iteration
                 try:
@@ -1980,10 +2070,42 @@ class Orchestrator:
 
             self.context.plan = ExecutionPlan(tasks=[next_task])
 
-            # Anti-loop: stop if the planner repeats the same action too many times.
+            # P0-2 & P0-3: Anti-loop with blocked actions and streak-based circuit breaker
             action_sig = f"{(next_task.action_type or '').strip().lower()}::{next_task.description.strip().lower()}"
-            action_counts[action_sig] += 1
-            if action_counts[action_sig] >= 3:
+            action_counts[action_sig] += 1  # Total count (for statistics)
+
+            # P0-3: Track consecutive repetitions (streak-based)
+            if action_sig == last_task_signature:
+                repeat_same_action += 1
+            else:
+                repeat_same_action = 1  # Reset streak
+                last_task_signature = action_sig
+
+            # Get or initialize blocked_action_sigs from context
+            if self.context:
+                blocked_sigs = self.context.get_agent_state("blocked_action_sigs", set())
+                if not isinstance(blocked_sigs, set):
+                    blocked_sigs = set()
+            else:
+                blocked_sigs = set()
+
+            # Check if this action is blocked
+            if action_sig in blocked_sigs:
+                print(f"  [blocked-action] This action is blocked due to previous repetition: {action_sig[:100]}...")
+                # Auto-rewrite to a diagnostic fallback
+                next_task.action_type = "analyze"
+                next_task.description = (
+                    f"BLOCKED: Previous approach failed repeatedly. "
+                    f"Instead, analyze the root cause by running diagnostic tests or examining related code. "
+                    f"Do NOT repeat: [{action_sig[:80]}...]"
+                )
+                print(f"  [blocked-action] Rewriting to: {next_task.description[:100]}...")
+                # Reset streak since we rewrote the task
+                repeat_same_action = 1
+                last_task_signature = f"analyze::{next_task.description.strip().lower()}"
+
+            # P0-3: Circuit breaker based on CONSECUTIVE streak, not total count
+            if repeat_same_action >= 3:
                 # Before failing, check if the goal was actually achieved
                 action_lower = (next_task.action_type or "").lower()
                 is_read_action = action_lower in {"read", "analyze", "research", "investigate", "review"}
@@ -2001,11 +2123,35 @@ class Orchestrator:
                 self.context.set_agent_state("no_retry", True)
                 self.context.add_error(f"Circuit breaker: repeating action '{next_task.action_type}'")
                 print("\n" + "=" * 70)
-                print("CIRCUIT BREAKER - REPEATED ACTION")
+                print("🛑 CIRCUIT BREAKER TRIGGERED: REPEATED ACTION")
                 print("=" * 70)
-                print(f"Repeated action {action_counts[action_sig]}x: [{(next_task.action_type or '').upper()}] {next_task.description}")
+                print(f"Repeated action {repeat_same_action}x consecutively (total {action_counts[action_sig]}x): [{(next_task.action_type or '').upper()}] {next_task.description}")
+                
+                # Enhanced circuit-breaker message
+                recent_ledger_actions = ledger.get_recent_actions(5)
+                last_verification = ledger.get_last_verification_status()
+                blocked_sigs = ledger.get_blocked_action_sigs()
+                
+                print("\n--- DEBUG CONTEXT ---")
+                print(f"Action Signature: {action_sig}")
+                
+                if recent_ledger_actions:
+                    print("\nLast 5 Tool Calls:")
+                    for i, a in enumerate(recent_ledger_actions, 1):
+                        print(f"  {i}. {a['tool']}({json.dumps(a['arguments'])}) -> {a['status']}")
+                
+                if last_verification:
+                    print("\nLast Verification Status:")
+                    print(json.dumps(last_verification, indent=2)[:500])
+                
+                if blocked_sigs:
+                    print("\nBlocked Signatures:")
+                    for sig in blocked_sigs:
+                        print(f"  - {sig}")
+                
+                print("\n---------------------\n")
+                
                 print("Blocking issue: planner is not making forward progress; refusing to repeat the same step.")
-                print("Next step: run with `--debug` and share the last verification failure + tool args.\n")
                 return False
             if (
                 config.LOOP_GUARD_ENABLED
@@ -2014,12 +2160,19 @@ class Orchestrator:
             ):
                 print("  [loop-guard] Repeated READ/ANALYZE detected; checking if goal is achieved.")
 
-                # Track which files are being read repeatedly
-                read_file_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\\\-\.]+\.py)'
+                # P0-2: Block this action from being proposed again
+                blocked_sigs.add(action_sig)
+                if self.context:
+                    self.context.set_agent_state("blocked_action_sigs", blocked_sigs)
+                print(f"  [loop-guard] Blocked action signature: {action_sig[:100]}...")
+
+                # P0-4: Track which files are being read repeatedly (language-agnostic)
+                # Support common file extensions: Python, JS, TS, Vue, JSON, YAML, Markdown, etc.
+                read_file_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\\\-\.]+\.(?:py|js|ts|tsx|jsx|vue|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1))'
                 recent_read_files = []
                 for task in reversed(completed_tasks[-5:]):  # Look at last 5 completed Task objects
                     if (task.action_type or "").lower() in {"read", "analyze", "research"}:
-                        matches = re.findall(read_file_pattern, task.description or "")
+                        matches = re.findall(read_file_pattern, task.description or "", re.IGNORECASE)
                         recent_read_files.extend(matches)
 
                 # Check if the same file has been read 3+ times
@@ -2062,20 +2215,48 @@ class Orchestrator:
                         print("  [loop-guard] Verification already attempted - forcing completion.")
                         return True
                 else:
-                    # Extract target path from the task description to create a more relevant fallback
+                    # P0-5: Replace generic list_dir fallback with targeted, progress-making actions
                     target_path = _extract_file_path_from_description(next_task.description)
                     if target_path:
-                        parent_dir = str(Path(target_path.replace('\\', '/')).parent)
-                        next_task.description = (
-                            f"List the directory '{parent_dir}' to confirm all expected files exist, "
-                            f"then verify imports work by running a simple test or syntax check."
-                        )
+                        # Determine file type to suggest appropriate validation
+                        file_ext = target_path.split('.')[-1].lower() if '.' in target_path else ''
+
+                        if file_ext in ['js', 'ts', 'jsx', 'tsx', 'vue']:
+                            # Frontend file - suggest build/lint
+                            next_task.action_type = "test"
+                            next_task.description = (
+                                f"Instead of re-reading {target_path}, validate it by running: "
+                                f"1) npm run lint (if available) to check syntax, or "
+                                f"2) npm run build to verify it compiles correctly. "
+                                f"This will reveal actual issues rather than just reading the same file again."
+                            )
+                        elif file_ext in ['py']:
+                            # Python file - suggest syntax check or relevant tests
+                            next_task.action_type = "test"
+                            next_task.description = (
+                                f"Instead of re-reading {target_path}, validate it by running: "
+                                f"1) python -m py_compile {target_path} to check syntax, or "
+                                f"2) Run relevant unit tests for this module. "
+                                f"This will reveal actual issues rather than static reading."
+                            )
+                        else:
+                            # Generic file - analyze using cached contents
+                            next_task.action_type = "analyze"
+                            next_task.description = (
+                                f"Instead of re-reading {target_path}, analyze the cached file contents to: "
+                                f"1) Summarize what the file currently contains, "
+                                f"2) Identify what changes are still needed to satisfy acceptance criteria, "
+                                f"3) Determine if the implementation is actually complete or if specific issues remain."
+                            )
                     else:
+                        # No specific file - suggest running tests or verification
+                        next_task.action_type = "test"
                         next_task.description = (
-                            "List the target directory and summarize the current state; "
-                            "verify all expected files exist and imports work correctly."
+                            "Instead of re-reading files, validate the current state by running tests: "
+                            "Use pytest for Python code, npm test for JavaScript, or appropriate linting/build commands. "
+                            "This will reveal actual blocking issues that need to be fixed."
                         )
-                    print(f"  [loop-guard] Injecting fallback: {next_task.description[:80]}")
+                    print(f"  [loop-guard] Injecting targeted fallback: {next_task.description[:100]}...")
 
             # Fast-path: don't dispatch a no-op create_directory if it already exists.
             if (next_task.action_type or "").lower() == "create_directory":

@@ -1077,6 +1077,29 @@ def planning_mode(
     # Parse and enhance the context for better readability
     context_enhanced = _enhance_repo_context(context_raw)
 
+    from rev.execution.ledger import get_ledger
+    ledger = get_ledger()
+    recent_actions = ledger.get_recent_actions(15)
+    files_inspected = ledger.get_files_inspected()
+    blocked_sigs = ledger.get_blocked_action_sigs()
+
+    state_header = "======= EXECUTION STATE DASHBOARD =======\n"
+    if recent_actions:
+        state_header += "RECENT ACTIONS:\n"
+        for i, action in enumerate(recent_actions, 1):
+            state_header += f"  {i}. {action['tool']}({json.dumps(action['arguments'])}) -> {action['status']}\n"
+    
+    if files_inspected:
+        state_header += "\nFILES INSPECTED:\n"
+        for f, count in sorted(files_inspected.items(), key=lambda x: x[1], reverse=True):
+            state_header += f"  - {f} (read {count} times)\n"
+    
+    if blocked_sigs:
+        state_header += "\nBLOCKED ACTIONS (Security/Policy):\n"
+        for sig in blocked_sigs:
+            state_header += f"  - {sig}\n"
+    state_header += "==========================================\n"
+
     ensure_escape_is_cleared("Planning interrupted")
 
     # Format available tools for the planning prompt
@@ -1132,6 +1155,8 @@ OS: {sys_info['os']} {sys_info['os_release']}
 Platform: {sys_info['platform']}
 Architecture: {sys_info['architecture']}
 Shell Type: {sys_info['shell_type']}
+
+{state_header}
 
 CURRENT WORKSPACE STATE:
 {context_enhanced}
@@ -1633,10 +1658,13 @@ def determine_next_action(
     # Separate remaining tasks from completed work for clarity
     remaining_marker = "📝 REMAINING TASKS" if "REMAINING TASKS" in (completed_work or "") else ""
 
+    default_progress = "  (Starting - no tasks completed yet)\n  (All planned tasks are still pending)"
+    progress_text = completed_work if completed_work else default_progress
+
     next_action_prompt = f"""You are helping complete this request: {user_request}
 
 CURRENT PROGRESS:
-{completed_work if completed_work else "  (Starting - no tasks completed yet)\n  (All planned tasks are still pending)"}
+{progress_text}
 
 Current file state:
 {json.dumps(current_file_state, indent=2) if current_file_state else "  (No files changed)"}

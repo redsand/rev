@@ -222,7 +222,7 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
     if result.passed and action_type in {"add", "create", "edit", "refactor"}:
         if task.validation_steps:
             validation_outcome = _run_validation_steps(
-                task.validation_steps, result.details, getattr(task, "tool_events", None)
+                task, result.details, getattr(task, "tool_events", None)
             )
             if isinstance(validation_outcome, VerificationResult):
                 return validation_outcome
@@ -232,7 +232,7 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
             strict_paths = _collect_paths_for_strict_checks(
                 action_type, result.details, getattr(task, "tool_events", None)
             )
-            strict_outcome = _maybe_run_strict_verification(action_type, strict_paths, mode=verification_mode)
+            strict_outcome = _maybe_run_strict_verification(action_type, strict_paths, mode=verification_mode, task=task)
             if isinstance(strict_outcome, VerificationResult):
                 return strict_outcome
             if strict_outcome:
@@ -1001,7 +1001,21 @@ def _detect_project_type(root: Path) -> str:
     return "unknown"
 
 
-def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode: str) -> Optional[VerificationResult | Dict[str, Any]]:
+def _no_tests_expected(task: Optional[Task]) -> bool:
+    """Check if 'no tests expected' is explicitly configured in task description or steps."""
+    if not task:
+        return False
+    description = (task.description or "").lower()
+    if "no tests expected" in description:
+        return True
+    if task.validation_steps:
+        for step in task.validation_steps:
+            if "no tests expected" in step.lower():
+                return True
+    return False
+
+
+def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode: str, task: Optional[Task] = None) -> Optional[VerificationResult | Dict[str, Any]]:
     """Run verification checks depending on verification mode (fast/strict) and project type."""
     if not paths:
         return None
@@ -1009,6 +1023,37 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
     strict_details: Dict[str, Any] = {}
     project_type = _detect_project_type(config.ROOT)
     
+    # Check for per-repo configuration overrides
+    repo_config = getattr(config, "REPO_CONFIG", {})
+    backend_config = repo_config.get("backend", {})
+    frontend_config = repo_config.get("frontend", {})
+    
+    # -------------------------------------------------------------------------
+    # PROJECT-SPECIFIC OVERRIDES
+    # -------------------------------------------------------------------------
+    custom_test_cmd = None
+    custom_build_cmd = None
+    
+    if project_type == "python":
+        custom_test_cmd = backend_config.get("test")
+        custom_build_cmd = backend_config.get("build")
+    elif project_type in ("vue", "react", "node", "nextjs"):
+        custom_test_cmd = frontend_config.get("test")
+        custom_build_cmd = frontend_config.get("build")
+
+    # Run custom build if configured
+    if custom_build_cmd:
+        print(f"  → Running configured build command: {custom_build_cmd}")
+        build_res = _run_validation_command(custom_build_cmd, timeout=config.VALIDATION_TIMEOUT_SECONDS)
+        strict_details["custom_build"] = build_res
+        if build_res.get("rc", 0) != 0:
+            return VerificationResult(
+                passed=False,
+                message=f"Verification failed: build command '{custom_build_cmd}' failed",
+                details={"strict": strict_details},
+                should_replan=True,
+            )
+
     # -------------------------------------------------------------------------
     # PYTHON VERIFICATION
     # -------------------------------------------------------------------------
@@ -1032,22 +1077,34 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
             return strict_details
 
         # Targeted pytest for touched test files/directories
-        test_targets = []
-        for p in paths:
-            parts_lower = {part.lower() for part in p.parts}
-            if "tests" in parts_lower or p.name.startswith("test_") or p.name.endswith("_test.py"):
-                test_targets.append(p)
-        if test_targets:
-            pytest_cmd = "pytest -q " + " ".join(_quote_path(p) for p in test_targets)
+        if custom_test_cmd:
+            pytest_cmd = custom_test_cmd
         else:
-            pytest_cmd = "pytest -q"
+            test_targets = []
+            for p in paths:
+                parts_lower = {part.lower() for part in p.parts}
+                if "tests" in parts_lower or p.name.startswith("test_") or p.name.endswith("_test.py"):
+                    test_targets.append(p)
+            if test_targets:
+                pytest_cmd = "pytest -q " + " ".join(_quote_path(p) for p in test_targets)
+            else:
+                pytest_cmd = "pytest -q"
+        
         pytest_res = _run_validation_command(pytest_cmd, use_tests_tool=True, timeout=config.VALIDATION_TIMEOUT_SECONDS)
         strict_details["pytest"] = pytest_res
         rc = pytest_res.get("rc", 1)
         # Pytest exit codes: 0=pass, 1=fail, 2=interrupted, 3=internal error, 4=usage error, 5=no tests collected
-        if pytest_res.get("blocked") or (rc not in (0, 4, 5) and rc != 0):
-            if rc in (4, 5):
-                strict_details["pytest_note"] = f"No tests collected (rc={rc}) - treated as pass"
+        if pytest_res.get("blocked") or (rc != 0 and rc != 4):
+            if rc == 5:
+                if _no_tests_expected(task):
+                    strict_details["pytest_note"] = "No tests collected (rc=5) - explicitly allowed"
+                else:
+                    return VerificationResult(
+                        passed=False,
+                        message="Verification INCONCLUSIVE: pytest collected 0 tests (rc=5)",
+                        details={"strict": strict_details},
+                        should_replan=True,
+                    )
             else:
                 return VerificationResult(
                     passed=False,
@@ -1055,6 +1112,8 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
                     details={"strict": strict_details},
                     should_replan=True,
                 )
+        elif rc == 4:
+            strict_details["pytest_note"] = "No tests collected (rc=4) - treated as pass"
 
         # Optional lint/type checks if allowed
         if "ruff" in config.ALLOW_CMDS:
@@ -1198,8 +1257,9 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
     return strict_details
 
 
-def _run_validation_steps(validation_steps: list[str], details: Dict[str, Any], tool_events: Optional[Iterable[Dict[str, Any]]]) -> Optional[VerificationResult | Dict[str, Any]]:
+def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Optional[Iterable[Dict[str, Any]]]) -> Optional[VerificationResult | Dict[str, Any]]:
     """Execute declarative validation steps (lint/tests/compile) via tool runner."""
+    validation_steps = task.validation_steps
     commands: list[tuple[str, str, str]] = []
     seen_cmds = set()
     paths = _paths_or_default(_collect_paths_for_strict_checks("", details, tool_events))
@@ -1247,11 +1307,21 @@ def _run_validation_steps(validation_steps: list[str], details: Dict[str, Any], 
         if rc is None:
             rc = 0 if res.get("blocked") else 1
 
-        # Handle pytest exit codes 4 and 5 (no tests collected) as pass, not fail
-        # Exit code 5 = no tests collected (pytest 7+), Exit code 4 = usage error/no tests (older versions)
-        if label == "pytest" and rc in (4, 5):
-            results[label] = {**res, "note": f"No tests collected (rc={rc}) - treated as pass"}
-        elif res.get("blocked") or (rc is not None and rc not in (0, 4, 5)):
+        # Handle pytest exit code 4 (usage error/no tests in older versions) as pass
+        if label == "pytest" and rc == 4:
+            results[label] = {**res, "note": "No tests collected (rc=4) - treated as pass"}
+        # Handle exit code 5 (no tests collected) as INCONCLUSIVE unless explicitly allowed
+        elif label == "pytest" and rc == 5:
+            if _no_tests_expected(task):
+                results[label] = {**res, "note": "No tests collected (rc=5) - explicitly allowed"}
+            else:
+                return VerificationResult(
+                    passed=False,
+                    message="Verification INCONCLUSIVE: pytest collected 0 tests (rc=5)",
+                    details={"validation": results, "failed_step": label},
+                    should_replan=True,
+                )
+        elif res.get("blocked") or (rc is not None and rc not in (0, 4)):
             return VerificationResult(
                 passed=False,
                 message=f"Validation step failed: {label}",
@@ -1537,6 +1607,19 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
                 message="Tests passed",
                 details={"rc": rc, "output": output[:200]}
             )
+        if rc == 5:
+            if _no_tests_expected(task):
+                 return VerificationResult(
+                    passed=True,
+                    message="No tests collected (rc=5) - explicitly allowed",
+                    details={"rc": rc, "output": output[:200]}
+                )
+            return VerificationResult(
+                passed=False,
+                message="Verification INCONCLUSIVE: pytest collected 0 tests (rc=5)",
+                details={"rc": rc, "output": output[:500]},
+                should_replan=True
+            )
         return VerificationResult(
             passed=False,
             message=f"Tests failed (rc={rc})",
@@ -1587,6 +1670,19 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
                 passed=True,
                 message="Tests passed",
                 details={"rc": rc, "output": output[:200]}
+            )
+        if rc == 5:
+            if _no_tests_expected(task):
+                return VerificationResult(
+                    passed=True,
+                    message="No tests collected (rc=5) - explicitly allowed",
+                    details={"rc": rc, "output": output[:200]}
+                )
+            return VerificationResult(
+                passed=False,
+                message="Verification INCONCLUSIVE: pytest collected 0 tests (rc=5)",
+                details={"rc": rc, "output": output[:500]},
+                should_replan=True
             )
         else:
             return VerificationResult(

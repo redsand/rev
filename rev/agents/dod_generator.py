@@ -72,10 +72,14 @@ Generate a Definition of Done with the following:
    - syntax_valid: Files that must have valid syntax
    - runtime_check: Commands that must run successfully
    - imports_work: Modules that must be importable
+   - api_route_check: Verify a route is registered (regex in 'expect')
+   - curl_smoke_test: Verify endpoint reachable via curl
+   - playwright_test: Verify via browser automation
 
 2. ACCEPTANCE CRITERIA - Specific conditions that must be true:
    - Observable facts (e.g., "pytest exit code == 0")
    - Measurable outcomes (e.g., "auto-registration count == 34")
+   - For API work: Endpoint is reachable and returns 200 OK
    - No subjective criteria
 
 3. VALIDATION STAGES - Which verification stages are required:

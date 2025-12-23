@@ -31,7 +31,12 @@
       "Bash(findstr:*)",
       "Bash(timeout /t 15)",
       "Bash(touch:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(python -c \"from rev.tools.command_runner import run_cmd; print\\(run_cmd\\(''git status && echo pwned''\\)\\)\")",
+      "Bash(python -c \"from rev.tools.command_runner import run_cmd; import json; result = json.loads\\(run_cmd\\(''git status''\\)\\); print\\(''RC:'', result.get\\(''rc''\\)\\); print\\(''Blocked:'', result.get\\(''blocked'', False\\)\\)\")",
+      "Bash(python -c \"import tempfile, os; from pathlib import Path; from rev.workspace import init_workspace; from rev.tools.registry import execute_tool; from rev import config; tmp = Path\\(tempfile.mkdtemp\\(\\)\\); init_workspace\\(root=tmp\\); policy = tmp / ''tool_policy.yaml''; policy.write_text\\(''bad: yaml: {{''\\); os.chdir\\(str\\(tmp\\)\\); config.PERMISSIONS_FAIL_OPEN = False; test_file = tmp / ''test.txt''; test_file.write_text\\(''content''\\); result = execute_tool\\(''read_file'', {''file_path'': str\\(test_file\\)}, ''test''\\); print\\(''Result:'', repr\\(result\\)\\)\")",
+      "Bash($env:PYTHONIOENCODING=\"utf-8\")",
+      "Bash(python -c \"import tempfile, os, json; from pathlib import Path; from rev.workspace import init_workspace; from rev.tools.registry import execute_tool; from rev import config; tmp = Path\\(tempfile.mkdtemp\\(\\)\\); init_workspace\\(root=tmp\\); policy = tmp / ''tool_policy.yaml''; policy.write_text\\(''bad: yaml: {{''\\); os.chdir\\(str\\(tmp\\)\\); config.PERMISSIONS_FAIL_OPEN = False; test_file = tmp / ''test.txt''; test_file.write_text\\(''content''\\); result = execute_tool\\(''read_file'', {''file_path'': str\\(test_file\\)}, ''test''\\); print\\(''Result type:'', type\\(result\\)\\); print\\(''Result:'', result\\); parsed = json.loads\\(result\\) if result else None; print\\(''Parsed:'', parsed\\)\")"
     ]
   }
 }

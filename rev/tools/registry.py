@@ -693,10 +693,33 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
 
     # CHECK PERMISSIONS before execution
     # Only enforce permissions if tool_policy.yaml exists
-    policy_path = Path.cwd() / "tool_policy.yaml"
+    # REV-010: Load policy from workspace root, not cwd (handles /set_workdir correctly)
+    policy_path = get_workspace().root / "tool_policy.yaml"
     if policy_path.exists():
         try:
             permission_mgr = get_permission_manager(policy_path)
+
+            # REV-011: Check if policy failed to load (malformed YAML, etc.)
+            if permission_mgr.policy_load_error is not None:
+                perm_error = permission_mgr.policy_load_error
+                logger.error(f"Permission check failed for {name}: {perm_error}.")
+
+                if config.PERMISSIONS_FAIL_OPEN:
+                    # Environment override set - allow execution despite error
+                    logger.warning(f"PERMISSIONS_FAIL_OPEN is set - allowing {name} despite permission check failure (INSECURE)")
+                else:
+                    # Fail closed (secure default) - deny execution on error
+                    error_msg = f"Permission check failed for {name}: {perm_error}. Tool execution BLOCKED (fail-closed for security). Set REV_PERMISSIONS_FAIL_OPEN=true to override."
+                    logger.error(error_msg)
+                    get_logger().log_transaction_event("PERMISSION_CHECK_ERROR", {
+                        "agent": agent_name,
+                        "tool": name,
+                        "arguments": args,
+                        "error": str(perm_error),
+                        "blocked": True
+                    })
+                    return json.dumps({"error": error_msg, "permission_check_failed": True, "blocked": True})
+
             perm_result = permission_mgr.check_permission(agent_name, name, args)
 
             if not perm_result.allowed:
@@ -719,8 +742,25 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
                 logger.info(f"[PERMISSION GRANTED] {agent_name} executing {perm_result.risk_level.value} risk tool: {name}")
 
         except Exception as perm_error:
-            # If permission checking fails, log but don't block execution
-            logger.error(f"Permission check failed for {name}: {perm_error}. Allowing by default.")
+            # REV-011: Fail closed on permission check exceptions (unless explicitly overridden)
+            # If permission checking fails due to malformed policy or other errors, default is to DENY
+            logger.error(f"Permission check failed for {name}: {perm_error}.")
+
+            if config.PERMISSIONS_FAIL_OPEN:
+                # Environment override set - allow execution despite error
+                logger.warning(f"PERMISSIONS_FAIL_OPEN is set - allowing {name} despite permission check failure (INSECURE)")
+            else:
+                # Fail closed (secure default) - deny execution on error
+                error_msg = f"Permission check failed for {name}: {perm_error}. Tool execution BLOCKED (fail-closed for security). Set REV_PERMISSIONS_FAIL_OPEN=true to override."
+                logger.error(error_msg)
+                get_logger().log_transaction_event("PERMISSION_CHECK_ERROR", {
+                    "agent": agent_name,
+                    "tool": name,
+                    "arguments": args,
+                    "error": str(perm_error),
+                    "blocked": True
+                })
+                return json.dumps({"error": error_msg, "permission_check_failed": True, "blocked": True})
 
     # Log the FINAL tool call being dispatched (after normalization)
     get_logger().log_transaction_event("TOOL_DISPATCH", {
@@ -729,8 +769,15 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
         "agent": agent_name
     })
 
+    from rev.execution.ledger import get_ledger
+    ledger = get_ledger()
+
     friendly_desc = _get_friendly_description(name, args)
-    print(f"  → {friendly_desc}")
+    try:
+        print(f"  → {friendly_desc}")
+    except UnicodeEncodeError:
+        # Windows console encoding issue - fallback to ASCII arrow
+        print(f"  -> {friendly_desc}")
 
     # Get debug logger
     debug_logger = get_logger()
@@ -754,6 +801,7 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
                 "result": result,
                 "duration_ms": duration
             })
+            ledger.record(name, args, result, duration, agent_name)
             return result
 
         # O(1) dictionary lookup
@@ -766,6 +814,7 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
                 "arguments": args,
                 "error": error_msg
             })
+            ledger.record(name, args, error_msg, 0, agent_name, status="error")
             return json.dumps({"error": error_msg})
 
         # Execute with timeout protection if applicable
@@ -786,6 +835,7 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
                         "result": result,
                         "duration_ms": duration
                     })
+                    ledger.record(name, args, result, duration, agent_name)
                     return result
                 except Exception as e:
                     # Timeout or max retries exceeded
@@ -796,6 +846,7 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
                         "arguments": args,
                         "error": error_msg
                     })
+                    ledger.record(name, args, error_msg, (time.time() - start_time) * 1000, agent_name, status="error")
                     return json.dumps({"error": error_msg})
 
         # Execute the tool handler without timeout protection
@@ -808,6 +859,7 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
             "result": result,
             "duration_ms": duration
         })
+        ledger.record(name, args, result, duration, agent_name)
         return result
 
     except Exception as e:
@@ -818,6 +870,7 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
             "arguments": args,
             "error": error_msg
         })
+        ledger.record(name, args, error_msg, (time.time() - start_time) * 1000, agent_name, status="error")
         return json.dumps({"error": error_msg})
 
 

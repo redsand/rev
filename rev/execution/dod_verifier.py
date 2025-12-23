@@ -97,6 +97,25 @@ def verify_dod(dod: DefinitionOfDone, task: Task, workspace_root: Path = None) -
     # Overall pass = all deliverables passed AND all criteria met
     all_passed = all(r.passed for r in deliverable_results) and not unmet_criteria
 
+    # ENFORCEMENT: API Work Requirements
+    # If the task looks like API work, require at least one integration check
+    api_keywords = ["api", "route", "endpoint", "controller", "rest", "crud", "auth"]
+    is_api_work = any(kw in task.description.lower() for kw in api_keywords)
+    
+    if is_api_work and all_passed:
+        api_checks = {
+            DeliverableType.API_ROUTE_CHECK,
+            DeliverableType.CURL_SMOKE_TEST,
+            DeliverableType.PLAYWRIGHT_TEST,
+            DeliverableType.TEST_PASS # Generic tests might cover it
+        }
+        has_api_check = any(r.deliverable.type in api_checks and r.passed for r in deliverable_results)
+        
+        if not has_api_check:
+            all_passed = False
+            msg = "API work detected but no integration check (route check, curl, or playwright) was performed or passed."
+            unmet_criteria.append(f"API_GATE: {msg}")
+
     return DoDVerificationResult(
         passed=all_passed,
         dod=dod,
@@ -138,11 +157,139 @@ def _verify_deliverable(
     elif deliverable.type == DeliverableType.IMPORTS_WORK:
         return _verify_imports_work(deliverable, task, workspace_root)
 
+    elif deliverable.type == DeliverableType.API_ROUTE_CHECK:
+        return _verify_api_route_check(deliverable, task, workspace_root)
+
+    elif deliverable.type == DeliverableType.CURL_SMOKE_TEST:
+        return _verify_curl_smoke_test(deliverable, task, workspace_root)
+
+    elif deliverable.type == DeliverableType.PLAYWRIGHT_TEST:
+        return _verify_playwright_test(deliverable, task, workspace_root)
+
     else:
         return DeliverableVerificationResult(
             deliverable=deliverable,
             passed=False,
             message=f"Unknown deliverable type: {deliverable.type}"
+        )
+
+
+def _verify_api_route_check(
+    deliverable: Deliverable,
+    task: Task,
+    workspace_root: Path
+) -> DeliverableVerificationResult:
+    """Verify API route is registered."""
+    if not deliverable.expect:
+        return DeliverableVerificationResult(
+            deliverable=deliverable,
+            passed=False,
+            message="No route pattern specified in 'expect'"
+        )
+
+    # Try to find route registration in modified files
+    found = False
+    if hasattr(task, 'tool_events') and task.tool_events:
+        for event in task.tool_events:
+            args = event.get('args', {})
+            path = args.get('path') or args.get('file_path')
+            if path:
+                p = workspace_root / path
+                if p.exists() and p.is_file():
+                    content = p.read_text(errors='ignore')
+                    if re.search(deliverable.expect, content):
+                        found = True
+                        break
+
+    if found:
+        return DeliverableVerificationResult(
+            deliverable=deliverable,
+            passed=True,
+            message=f"API route registration found: {deliverable.expect}"
+        )
+    else:
+        return DeliverableVerificationResult(
+            deliverable=deliverable,
+            passed=False,
+            message=f"API route registration NOT found: {deliverable.expect}"
+        )
+
+
+def _verify_curl_smoke_test(
+    deliverable: Deliverable,
+    task: Task,
+    workspace_root: Path
+) -> DeliverableVerificationResult:
+    """Verify API endpoint via curl."""
+    if not deliverable.command:
+        return DeliverableVerificationResult(
+            deliverable=deliverable,
+            passed=False,
+            message="No curl command specified"
+        )
+
+    try:
+        # Use run_cmd via tool registry if possible, or subprocess
+        from rev.tools.registry import execute_tool
+        result_json = execute_tool("run_cmd", {"cmd": deliverable.command, "timeout": 30})
+        result = json.loads(result_json)
+
+        if result.get("rc") == 0:
+            return DeliverableVerificationResult(
+                deliverable=deliverable,
+                passed=True,
+                message=f"Curl smoke test passed"
+            )
+        else:
+            return DeliverableVerificationResult(
+                deliverable=deliverable,
+                passed=False,
+                message=f"Curl smoke test failed: {result.get('stderr')}"
+            )
+    except Exception as e:
+        return DeliverableVerificationResult(
+            deliverable=deliverable,
+            passed=False,
+            message=f"Curl smoke test failed: {e}"
+        )
+
+
+def _verify_playwright_test(
+    deliverable: Deliverable,
+    task: Task,
+    workspace_root: Path
+) -> DeliverableVerificationResult:
+    """Verify via Playwright."""
+    cmd = deliverable.command or "npx playwright test"
+    
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            cwd=workspace_root,
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+
+        if result.returncode == 0:
+            return DeliverableVerificationResult(
+                deliverable=deliverable,
+                passed=True,
+                message="Playwright tests passed"
+            )
+        else:
+            return DeliverableVerificationResult(
+                deliverable=deliverable,
+                passed=False,
+                message=f"Playwright tests failed (rc={result.returncode})",
+                details={"stderr": result.stderr}
+            )
+    except Exception as e:
+        return DeliverableVerificationResult(
+            deliverable=deliverable,
+            passed=False,
+            message=f"Playwright execution failed: {e}"
         )
 
 

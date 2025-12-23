@@ -7,6 +7,45 @@ import pathlib
 import platform
 from typing import Dict, Any, Optional, List
 
+# Global repository configuration (loaded from .rev/config.yml or rev.toml)
+REPO_CONFIG: Dict[str, Any] = {}
+
+
+def load_repo_config(root: pathlib.Path) -> None:
+    """Load per-repo configuration from .rev/config.yml or rev.toml."""
+    global REPO_CONFIG
+    
+    # Try .rev/config.yml (YAML)
+    yaml_config = root / ".rev" / "config.yml"
+    if yaml_config.exists():
+        try:
+            import yaml
+            with open(yaml_config, 'r') as f:
+                REPO_CONFIG = yaml.safe_load(f) or {}
+                print(f"[OK] Loaded repo config from {yaml_config}")
+                return
+        except (ImportError, Exception) as e:
+            print(f"⚠️  Warning: Failed to load {yaml_config}: {e}")
+            
+    # Try rev.toml (TOML)
+    toml_config = root / "rev.toml"
+    if toml_config.exists():
+        try:
+            try:
+                import tomllib as toml # Python 3.11+
+                with open(toml_config, 'rb') as f:
+                    REPO_CONFIG = toml.load(f) or {}
+            except ImportError:
+                import toml
+                with open(toml_config, 'r') as f:
+                    REPO_CONFIG = toml.load(f) or {}
+            
+            print(f"[OK] Loaded repo config from {toml_config}")
+            return
+        except (ImportError, Exception) as e:
+            print(f"⚠️  Warning: Failed to load {toml_config}: {e}")
+
+
 # Check for optional dependencies
 try:
     import paramiko
@@ -113,6 +152,9 @@ def set_workspace_root(path: pathlib.Path, allow_external: bool = False) -> None
 
     init_workspace(root=path, allow_external=allow_external)
     _sync_from_workspace()
+    
+    # Load per-repo configuration
+    load_repo_config(path)
 
 
 def register_additional_root(path: pathlib.Path) -> None:
@@ -366,11 +408,6 @@ EXCLUDE_DIRS = {
     ".venv", "venv", "target"
 }
 
-ALLOW_CMDS = {
-    "python", "pip", "pytest", "ruff", "black", "isort", "mypy",
-    "node", "npm", "npx", "pnpm", "prettier", "eslint", "git", "make"
-}
-
 # Resource budgets (for resource-aware optimization pattern)
 MAX_STEPS_PER_RUN = int(os.getenv("REV_MAX_STEPS", "500"))
 # Keep token budget comfortably below the provider cap to avoid hard failures when the heuristic
@@ -411,6 +448,12 @@ WARN_ON_NEW_FILES = os.getenv("REV_WARN_NEW_FILES", "true").lower() == "true"
 REQUIRE_REUSE_JUSTIFICATION = os.getenv("REV_REQUIRE_JUSTIFICATION", "false").lower() == "true"
 MAX_FILES_PER_FEATURE = int(os.getenv("REV_MAX_FILES", "5"))  # Encourage consolidation
 SIMILARITY_THRESHOLD = float(os.getenv("REV_SIMILARITY_THRESHOLD", "0.6"))  # For file name similarity
+
+# Security: Tool Permission Policy (REV-011)
+# PERMISSIONS_FAIL_OPEN: When permission check fails (e.g., malformed policy), should we allow or deny?
+# Default: false (fail closed - deny execution on error for security)
+# Set REV_PERMISSIONS_FAIL_OPEN=true to allow execution when permission checks fail (NOT RECOMMENDED for production)
+PERMISSIONS_FAIL_OPEN = os.getenv("REV_PERMISSIONS_FAIL_OPEN", "false").lower() in ("true", "1", "yes")
 
 # MCP (Model Context Protocol) Configuration
 # PRIVATE_MODE: When enabled, disables all public MCP servers for secure/confidential code work
