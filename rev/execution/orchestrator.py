@@ -1231,6 +1231,13 @@ class Orchestrator:
                     action_type="analyze"
                 )
         
+        if task.action_type == "edit" and file_path:
+            print(f"  → Transforming stuck EDIT to READ for re-synchronization: {file_path}")
+            return Task(
+                description=f"Read the current content of {file_path} to identify why previous edits failed to match. Pay close attention to exact whitespace and indentation.",
+                action_type="read"
+            )
+        
         if task.action_type == "test":
             print(f"  → Transforming to build/compile check")
             return Task(
@@ -1629,6 +1636,18 @@ class Orchestrator:
              "- Avoid replacing `from pkg import *` with dozens of per-module imports; only import names actually used.\n"
              "- Prefer `from package import ExportedSymbol` over `from package.module import ExportedSymbol` when the package exports it.\n"
              "- SECURITY: Always propose security-minded actions. Never store secrets in plain text. Use proper input validation.\n"
+             "\n"
+             "TEST-DRIVEN DEVELOPMENT (TDD) PRINCIPLES (MANDATORY):\n"
+             "- Write tests BEFORE implementation code. This is non-negotiable.\n"
+             "- If the request involves new functionality, your first few actions must be to [ADD] test files and [TEST] them (expecting failure).\n"
+             "- Only after tests are written and verified as failing should you [EDIT] implementation code.\n"
+             "- Use [TEST] frequently to verify progress. If a test fails, your next action should be to [ANALYZE] the failure or [EDIT] the code to fix it.\n"
+             "\n"
+             "FAILURE RECOVERY GUIDANCE:\n"
+             "- If an [EDIT] or [REFACTOR] action failed because a tool (like replace_in_file) made no changes (replaced=0), do NOT repeat the same action.\n"
+             "- Instead, use [READ] to inspect the file again and identify why the match failed (check whitespace, indentation, or if the code has changed).\n"
+             "- If a [TEST] fails, read the test output carefully and use [ANALYZE] or [READ] to find the bug before attempting another [EDIT].\n"
+             "\n"
              "- CRITICAL: ONLY declare GOAL_ACHIEVED if you have verified that the current filesystem state matches all parts of the request. If history shows work but you haven't inspected it in this run, VERIFY IT FIRST.\n"
              f"You MUST choose one of the following action types: {available_actions}\n"
              "\n"
@@ -1825,6 +1844,12 @@ class Orchestrator:
         has_research = evidence_found["search"]
         has_action = evidence_found["files"] or evidence_found["tests"] or evidence_found["runtime"]
         
+        # TDD Check: If the request mentioned "test" or "application", require test evidence
+        request_lower = user_request.lower()
+        needs_tests = any(kw in request_lower for kw in ["test", "verify", "check", "application", "tdd"])
+        if needs_tests and not evidence_found["tests"]:
+            return False, "Completion rejected: The request implies test-driven development, but no test execution evidence was found."
+
         if not has_research:
             return False, "Completion rejected: No research/search evidence found. Agent acted without reading."
         if not has_action:

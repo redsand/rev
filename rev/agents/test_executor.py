@@ -15,8 +15,29 @@ class TestExecutorAgent(BaseAgent):
 
     def _select_command(self, description: str) -> tuple[str, Dict[str, Any]]:
         desc_lower = (description or "").lower()
-
         parts = (description or "").split()
+        
+        # Check for explicit command in description
+        for part in parts:
+            if any(cmd in part.lower() for cmd in ["pytest", "npm", "jest", "vitest", "mocha"]):
+                # If description contains a command-like string, try to use it if it's qualified
+                if "test" in part.lower() or "pytest" in part.lower():
+                    # Check if it's part of a full command like "npm test"
+                    idx = parts.index(part)
+                    if part.lower() == "test" and idx > 0 and parts[idx-1].lower() == "npm":
+                        return "npm test", {"timeout": 600}
+                    if "pytest" in part.lower():
+                        return part, {"timeout": 600}
+
+        # Project type detection
+        from pathlib import Path
+        if Path("package.json").exists():
+            return "npm test", {"timeout": 600}
+        
+        if Path("go.mod").exists():
+            return "go test ./...", {"timeout": 600}
+
+        # Default to pytest for Python
         test_path = None
         for part in parts:
             if "tests/" in part or "tests\\" in part:

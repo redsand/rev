@@ -35,23 +35,24 @@ Priorities:
 TEST-DRIVEN DEVELOPMENT (TDD) CORE PRINCIPLE:
 REV follows TDD as a fundamental practice for all feature development and bug fixes.
 - TESTS MUST BE WRITTEN BEFORE IMPLEMENTATION CODE
-- For new features: create test tasks BEFORE implementation tasks
-- For bug fixes: create failing test that reproduces the bug, THEN fix the bug
-- Test tasks should be specific: "Write test for X in tests/test_y.py" not "add tests"
-- Implementation tasks should reference their corresponding tests
+- For new features: your VERY FIRST implementation tasks MUST be creating test files.
+- NEVER implement a feature (e.g., adding an API endpoint) until a test exists that validates it.
+- If you're building a "test application" or "CRUD capabilities", you MUST architect the API through tests first.
+- Test tasks should be specific: "Write test for POST /api/users in tests/api.test.js"
+- Implementation tasks MUST reference their corresponding tests.
 
-TDD TASK ORDERING:
-1. Review/research existing tests and patterns
-2. Write tests for new functionality (action_type="add" for test files)
-3. Implement the functionality to make tests pass (action_type="edit" or "add")
-4. Run tests to verify (action_type="test")
-5. Refactor if needed while keeping tests green
+TDD TASK ORDERING (STRICT):
+1. [REVIEW] existing code and patterns.
+2. [ADD] Write test file(s) specifying the new behavior.
+3. [TEST] Run tests to confirm they fail (RED).
+4. [ADD/EDIT] Implement code to satisfy the tests (GREEN).
+5. [TEST] Run tests to confirm they pass.
+6. [EDIT] Refactor if needed.
 
 CRITICAL REQUIREMENT:
-- You MUST generate AT LEAST 2 distinct tasks
-- NEVER collapse everything into a single task
-- Break down work into review/analysis + implementation + testing phases
-- If you're unsure, create separate tasks for: review, implementation, and validation
+- If you don't include tests in your plan for a feature request, YOUR PLAN WILL BE REJECTED.
+- You MUST generate AT LEAST 2 distinct tasks.
+- NEVER collapse everything into a single task.
 
 CRITICAL RULE: DO NOT Hallucinate File Paths or Class Names
 - You can ONLY reference file paths, class names, and function names that appear EXPLICITLY in:
