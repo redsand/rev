@@ -112,8 +112,9 @@ class TUI:
     def set_prompt(self, prompt: str) -> None:
         self.prompt = prompt
 
-    def run(self, on_input: Callable[[str], None], *, initial_input: Optional[str] = None) -> None:
+    def run(self, on_input: Callable[[str], None], *, initial_input: Optional[str] = None, on_feedback: Optional[Callable[[str], bool]] = None) -> None:
         """Start the curses UI and dispatch input lines to on_input."""
+        self._on_feedback = on_feedback
 
         def _curses_main(stdscr):
             # Initialize colors
@@ -228,6 +229,10 @@ class TUI:
     # Internal helpers
     def _start_worker(self, on_input: Callable[[str], None], line: str) -> None:
         if self._worker and self._worker.is_alive():
+            if hasattr(self, "_on_feedback") and self._on_feedback:
+                if self._on_feedback(line):
+                    self.log("\x1b[92m[TUI] Feedback sent to active task\x1b[0m")
+                    return
             self.log("\x1b[93m[TUI] Busy (previous command still running)\x1b[0m")
             return
 

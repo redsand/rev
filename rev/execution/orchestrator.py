@@ -73,6 +73,20 @@ from rev.execution.action_normalizer import normalize_action_type
 from rev.terminal.formatting import colorize, Colors, Symbols
 from difflib import SequenceMatcher
 
+# Global reference to the currently active context for real-time feedback
+_active_context: Optional[RevContext] = None
+
+def push_user_feedback(feedback: str) -> bool:
+    """Push user feedback to the currently active orchestrator context.
+    
+    Returns True if feedback was successfully delivered, False otherwise.
+    """
+    global _active_context
+    if _active_context:
+        _active_context.add_user_feedback(feedback)
+        return True
+    return False
+
 
 def _format_verification_feedback(result: VerificationResult) -> str:
     """Format verification result for LLM feedback."""
@@ -1295,42 +1309,47 @@ class Orchestrator:
 
     def execute(self, user_request: str, resume: bool = False) -> OrchestratorResult:
         """Execute a task through the full agent pipeline."""
+        global _active_context
         aggregate_errors: List[str] = []
         last_result: Optional[OrchestratorResult] = None
         self.context = RevContext(user_request=user_request, resume=resume)
+        _active_context = self.context
         ensure_project_memory_file()
         # Keep repo_context minimal; sub-agents will retrieve focused context via ContextBuilder.
         self.context.repo_context = ""
 
-        for attempt in range(self.config.orchestrator_retries + 1):
-            if attempt > 0:
-                print(f"\n\n🔄 Orchestrator retry {attempt}/{self.config.orchestrator_retries}")
-                self.context.plan = None
-                self.context.state_manager = None
-                self.context.errors = []
+        try:
+            for attempt in range(self.config.orchestrator_retries + 1):
+                if attempt > 0:
+                    print(f"\n\n🔄 Orchestrator retry {attempt}/{self.config.orchestrator_retries}")
+                    self.context.plan = None
+                    self.context.state_manager = None
+                    self.context.errors = []
 
-            result = self._run_single_attempt(user_request)
-            aggregate_errors.extend([f"Attempt {attempt + 1}: {err}" for err in self.context.errors])
+                result = self._run_single_attempt(user_request)
+                aggregate_errors.extend([f"Attempt {attempt + 1}: {err}" for err in self.context.errors])
 
-            if result.success or result.no_retry:
-                result.errors = aggregate_errors
-                result.agent_insights = self.context.agent_insights
-                return result
+                if result.success or result.no_retry:
+                    result.errors = aggregate_errors
+                    result.agent_insights = self.context.agent_insights
+                    return result
 
-            last_result = result
-            last_result.errors.extend(self.context.errors)
+                last_result = result
+                last_result.errors.extend(self.context.errors)
 
-        if last_result:
-            last_result.errors = aggregate_errors
-            last_result.agent_insights = self.context.agent_insights
-            return last_result
+            if last_result:
+                last_result.errors = aggregate_errors
+                last_result.agent_insights = self.context.agent_insights
+                return last_result
 
-        return OrchestratorResult(
-            success=False,
-            phase_reached=AgentPhase.FAILED,
-            errors=["Unknown orchestrator failure"],
-            agent_insights=self.context.agent_insights
-        )
+            return OrchestratorResult(
+                success=False,
+                phase_reached=AgentPhase.FAILED,
+                errors=["Unknown orchestrator failure"],
+                agent_insights=self.context.agent_insights
+            )
+        finally:
+            _active_context = None
         
     def _run_single_attempt(self, user_request: str) -> OrchestratorResult:
         """Run a single orchestration attempt."""
@@ -1570,8 +1589,18 @@ class Orchestrator:
                 "Instead, perform a [READ] or [ANALYZE] step to verify that the work from the previous session is still correct and consistent with the current filesystem state.\n\n"
             )
 
+        feedback_note = ""
+        if self.context and self.context.user_feedback:
+            feedback_note = "\nDIRECT USER GUIDANCE (Priority - follow these instructions now):\n"
+            for fb in self.context.user_feedback:
+                feedback_note += f"- {fb}\n"
+            feedback_note += "\n"
+            # Clear feedback after incorporating it into the prompt
+            self.context.user_feedback = []
+
         prompt = (
             f"Original Request: {user_request}\n\n"
+            f"{feedback_note}"
             f"{work_summary}\n\n"
             f"{path_hints}\n"
             f"{agent_notes}\n"
