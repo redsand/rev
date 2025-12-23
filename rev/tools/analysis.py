@@ -780,10 +780,11 @@ def analyze_code_structures(path: str = ".") -> str:
 
         # Process Prisma files
         for file in structure_files['prisma']:
+            rel_path = str(file)
             try:
+                rel_path = file.relative_to(config.ROOT).as_posix()
                 with open(file, 'r', encoding='utf-8') as f:
                     content = f.read()
-                rel_path = file.relative_to(config.ROOT).as_posix()
 
                 # Parse Prisma enums
                 for match in re.finditer(r'enum\s+(\w+)\s*\{([^}]+)\}', content):
@@ -811,10 +812,11 @@ def analyze_code_structures(path: str = ".") -> str:
 
         # Process TypeScript/JavaScript files
         for file in structure_files['typescript']:
+            rel_path = str(file)
             try:
+                rel_path = file.relative_to(config.ROOT).as_posix()
                 with open(file, 'r', encoding='utf-8') as f:
                     content = f.read()
-                rel_path = file.relative_to(config.ROOT).as_posix()
 
                 # Parse TS enums
                 for match in re.finditer(r'enum\s+(\w+)\s*\{', content):
@@ -859,10 +861,11 @@ def analyze_code_structures(path: str = ".") -> str:
 
         # Process Python files
         for file in structure_files['python']:
+            rel_path = str(file)
             try:
+                rel_path = file.relative_to(config.ROOT).as_posix()
                 with open(file, 'r', encoding='utf-8') as f:
                     content = f.read()
-                rel_path = file.relative_to(config.ROOT).as_posix()
                 
                 tree = ast.parse(content, filename=str(file))
                 
@@ -891,7 +894,6 @@ def analyze_code_structures(path: str = ".") -> str:
                                 "line": node.lineno
                             })
             except Exception as e:
-                rel_path = str(file.relative_to(config.ROOT).as_posix())
                 results.setdefault("errors", []).append({
                     "file": rel_path,
                     "error": f"Python AST parse error: {e}"
@@ -899,10 +901,11 @@ def analyze_code_structures(path: str = ".") -> str:
 
         # Process C/C++ files
         for file in structure_files['c_cpp']:
+            rel_path = str(file)
             try:
+                rel_path = file.relative_to(config.ROOT).as_posix()
                 with open(file, 'r', encoding='utf-8') as f:
                     content = f.read()
-                rel_path = file.relative_to(config.ROOT).as_posix()
 
                 # Parse C/C++ structs
                 for match in re.finditer(r'struct\s+(\w+)', content):
@@ -947,10 +950,11 @@ def analyze_code_structures(path: str = ".") -> str:
 
         # Process SQL files
         for file in structure_files['sql']:
+            rel_path = str(file)
             try:
+                rel_path = file.relative_to(config.ROOT).as_posix()
                 with open(file, 'r', encoding='utf-8') as f:
                     content = f.read()
-                rel_path = file.relative_to(config.ROOT).as_posix()
 
                 # Parse SQL tables
                 for match in re.finditer(r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)', content, re.IGNORECASE):
