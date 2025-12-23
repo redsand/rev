@@ -25,17 +25,31 @@ from rev.tools.utils import quote_cmd_arg
 # ========== Helper Function ==========
 
 def _run_shell(cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:
-    """Execute shell command."""
+    """Execute shell command (DEPRECATED - use command_runner module instead).
+
+    This function is maintained for backward compatibility only.
+    New code should use rev.tools.command_runner.run_command_safe()
+    """
+    from rev.tools.command_runner import run_command_safe
+
     try:
-        return subprocess.run(
-            cmd,
-            shell=True,
-            cwd=str(config.ROOT),
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            encoding="utf-8",
-            errors="replace",
+        result = run_command_safe(cmd, timeout=timeout, check_interrupt=False)
+
+        # Return a CompletedProcess object for compatibility
+        if result.get("blocked"):
+            # Command was blocked for security reasons
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=-1,
+                stdout="",
+                stderr=f"BLOCKED: {result.get('error', 'security violation')}"
+            )
+
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=result.get("rc", -1),
+            stdout=result.get("stdout", ""),
+            stderr=result.get("stderr", "")
         )
     except OSError as exc:
         # On Windows low-memory/paging-file failures (e.g., WinError 1455), return a CompletedProcess-like
@@ -102,14 +116,46 @@ def _run_shell_streamed(
         )
 
         try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
+            # Poll for completion or interrupt
+            import time
+            start_time = time.time()
+            while True:
+                if proc.poll() is not None:
+                    break
+                
+                if config.get_escape_interrupt():
+                    proc.terminate()
+                    # Wait a bit for graceful termination
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    
+                    config.set_escape_interrupt(False)
+                    return {
+                        "cmd": cmd,
+                        "interrupted": True,
+                        "stdout": _tail_file(stdout_path, stdout_limit),
+                        "stderr": _tail_file(stderr_path, stderr_limit),
+                    }
+                
+                if time.time() - start_time > timeout:
+                    proc.kill()
+                    return {
+                        "cmd": cmd,
+                        "timeout": timeout,
+                        "stdout_log": str(stdout_path),
+                        "stderr_log": str(stderr_path),
+                    }
+                
+                time.sleep(0.5)
+        except Exception as e:
             proc.kill()
             return {
                 "cmd": cmd,
-                "timeout": timeout,
-                "stdout_log": str(stdout_path),
-                "stderr_log": str(stderr_path),
+                "error": str(e),
+                "stdout": _tail_file(stdout_path, stdout_limit),
+                "stderr": _tail_file(stderr_path, stderr_limit),
             }
 
     return {
@@ -680,64 +726,77 @@ def git_branch(action: str = "list", branch_name: str = None) -> str:
 # ========== Additional Git Operations ==========
 
 def run_cmd(cmd: str, timeout: int = 300) -> str:
-    """Run a shell command."""
-    parts0 = shlex.split(cmd)[:1]
-    ok = parts0 and (parts0[0] in config.ALLOW_CMDS or parts0[0] == "npx")
-    if not ok:
-        return json.dumps({"blocked": parts0, "allow": sorted(config.ALLOW_CMDS)})
+    """Run a shell command safely with security validation.
+
+    Security:
+        All commands are validated before execution. Shell metacharacters
+        and non-allowlisted commands are rejected. No shell=True is used.
+
+    Returns:
+        JSON string with execution results
+    """
+    from rev.tools.command_runner import run_command_streamed
 
     # Short-circuit repeated git clones to an existing destination
-    tokens = shlex.split(cmd)
-    if len(tokens) >= 2 and tokens[0] == "git" and tokens[1] == "clone":
-        # Identify destination directory if explicitly provided
-        dest_tokens = [t for t in tokens[2:] if not t.startswith("-")]
-        dest: Optional[str] = None
-        if len(dest_tokens) >= 2:
-            dest = dest_tokens[-1]
-        elif len(dest_tokens) == 1 and "://" not in dest_tokens[0]:
-            dest = dest_tokens[0]
-
-        if dest:
-            dest_path = pathlib.Path(dest)
-            if not dest_path.is_absolute():
-                dest_path = config.ROOT / dest_path
-
-            if dest_path.exists():
-                return json.dumps({
-                    "skipped": True,
-                    "reason": "destination already exists; skipping git clone",
-                    "path": str(dest_path),
-                    "cmd": cmd,
-                    "rc": 0,
-                })
-
     try:
-        result = _run_shell_streamed(
-            cmd,
-            timeout=timeout,
-            stdout_limit=8000,
-            stderr_limit=8000,
-        )
-        return json.dumps(result)
-    except subprocess.TimeoutExpired:
-        return json.dumps({"timeout": timeout, "cmd": cmd})
+        tokens = shlex.split(cmd)
+        if len(tokens) >= 2 and tokens[0] == "git" and tokens[1] == "clone":
+            # Identify destination directory if explicitly provided
+            dest_tokens = [t for t in tokens[2:] if not t.startswith("-")]
+            dest: Optional[str] = None
+            if len(dest_tokens) >= 2:
+                dest = dest_tokens[-1]
+            elif len(dest_tokens) == 1 and "://" not in dest_tokens[0]:
+                dest = dest_tokens[0]
+
+            if dest:
+                dest_path = pathlib.Path(dest)
+                if not dest_path.is_absolute():
+                    dest_path = config.ROOT / dest_path
+
+                if dest_path.exists():
+                    return json.dumps({
+                        "skipped": True,
+                        "reason": "destination already exists; skipping git clone",
+                        "path": str(dest_path),
+                        "cmd": cmd,
+                        "rc": 0,
+                    })
+    except (ValueError, IndexError):
+        # If parsing fails, let command_runner handle it
+        pass
+
+    # Use safe command runner
+    result = run_command_streamed(
+        cmd,
+        timeout=timeout,
+        stdout_limit=8000,
+        stderr_limit=8000,
+        check_interrupt=True,
+    )
+    return json.dumps(result)
 
 
 def run_tests(cmd: str = "pytest -q", timeout: int = 600) -> str:
-    """Run test suite."""
-    p0 = shlex.split(cmd)[0]
-    if p0 not in config.ALLOW_CMDS and p0 != "npx":
-        return json.dumps({"blocked": p0})
-    try:
-        result = _run_shell_streamed(
-            cmd,
-            timeout=timeout,
-            stdout_limit=12000,
-            stderr_limit=4000,
-        )
-        return json.dumps(result)
-    except subprocess.TimeoutExpired:
-        return json.dumps({"timeout": timeout, "cmd": cmd})
+    """Run test suite safely with security validation.
+
+    Security:
+        All commands are validated before execution. Shell metacharacters
+        and non-allowlisted commands are rejected. No shell=True is used.
+
+    Returns:
+        JSON string with execution results
+    """
+    from rev.tools.command_runner import run_command_streamed
+
+    result = run_command_streamed(
+        cmd,
+        timeout=timeout,
+        stdout_limit=12000,
+        stderr_limit=4000,
+        check_interrupt=True,
+    )
+    return json.dumps(result)
 
 
 def _get_detailed_file_structure(root_path=None, max_depth: int = 2, max_files: int = 50):

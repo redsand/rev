@@ -1633,10 +1633,13 @@ def determine_next_action(
     # Separate remaining tasks from completed work for clarity
     remaining_marker = "📝 REMAINING TASKS" if "REMAINING TASKS" in (completed_work or "") else ""
 
+    default_progress = "  (Starting - no tasks completed yet)\n  (All planned tasks are still pending)"
+    progress_text = completed_work if completed_work else default_progress
+
     next_action_prompt = f"""You are helping complete this request: {user_request}
 
 CURRENT PROGRESS:
-{completed_work if completed_work else "  (Starting - no tasks completed yet)\n  (All planned tasks are still pending)"}
+{progress_text}
 
 Current file state:
 {json.dumps(current_file_state, indent=2) if current_file_state else "  (No files changed)"}

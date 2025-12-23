@@ -261,12 +261,14 @@ def _is_semantically_duplicate_task(
     return similar_count >= 2
 
 
-def _count_file_reads(file_path: str, completed_tasks: List[str]) -> int:
+def _count_file_reads(file_path: str, completed_tasks: List) -> int:
     """Count how many times a file has been read in completed tasks.
+
+    P0-1 Fix: Now uses actual tool_events instead of keyword matching in descriptions.
 
     Args:
         file_path: The file path to check
-        completed_tasks: List of completed task log entries
+        completed_tasks: List of completed Task objects or task log entries (backward compatible)
 
     Returns:
         Number of times this file was read
@@ -278,21 +280,54 @@ def _count_file_reads(file_path: str, completed_tasks: List[str]) -> int:
     target = file_path.replace('\\', '/').lower()
     count = 0
 
-    for log_entry in completed_tasks:
-        # Only count completed read-like tasks
-        if not log_entry.startswith('[COMPLETED]'):
-            continue
+    # File reading tools to check for
+    FILE_READING_TOOLS = {'read_file', 'read_file_lines', 'search_code', 'list_dir', 'analyze_code_context'}
 
-        desc_lower = log_entry.lower()
-        if not any(kw in desc_lower for kw in ['read', 'inspect', 'examine', 'analyze']):
-            continue
+    for item in completed_tasks:
+        # NEW: Check if item is a Task object with tool_events
+        if hasattr(item, 'tool_events') and hasattr(item, 'status'):
+            # Only count completed tasks
+            if hasattr(item.status, 'value'):
+                if item.status.value != 'completed':
+                    continue
+            elif str(item.status).lower() != 'completed':
+                continue
 
-        # Extract file path from the log entry
-        entry_file = _extract_file_path_from_description(log_entry)
-        if entry_file:
-            entry_normalized = entry_file.replace('\\', '/').lower()
-            if target == entry_normalized or target.endswith(entry_normalized) or entry_normalized.endswith(target):
-                count += 1
+            # Check tool_events for file reading operations
+            if item.tool_events:
+                for event in item.tool_events:
+                    tool_name = event.get('tool', '').lower()
+                    if tool_name not in FILE_READING_TOOLS:
+                        continue
+
+                    # Extract file path from tool arguments
+                    args = event.get('args', {})
+                    if not isinstance(args, dict):
+                        continue
+
+                    # Check various argument names that contain file paths
+                    event_file = args.get('file_path') or args.get('path') or args.get('pattern')
+                    if event_file:
+                        event_normalized = str(event_file).replace('\\', '/').lower()
+                        if target == event_normalized or target.endswith(event_normalized) or event_normalized.endswith(target):
+                            count += 1
+
+        # BACKWARD COMPATIBLE: Handle string log entries (old format)
+        elif isinstance(item, str):
+            # Only count completed read-like tasks
+            if not item.startswith('[COMPLETED]'):
+                continue
+
+            desc_lower = item.lower()
+            if not any(kw in desc_lower for kw in ['read', 'inspect', 'examine', 'analyze']):
+                continue
+
+            # Extract file path from the log entry
+            entry_file = _extract_file_path_from_description(item)
+            if entry_file:
+                entry_normalized = entry_file.replace('\\', '/').lower()
+                if target == entry_normalized or target.endswith(entry_normalized) or entry_normalized.endswith(target):
+                    count += 1
 
     return count
 
@@ -1813,15 +1848,49 @@ class Orchestrator:
 
                     # Add file read/inspection summary FIRST to establish what's been inspected
                     file_read_counts: Dict[str, int] = defaultdict(int)
-                    for log_entry in completed_tasks_log:
-                        if log_entry.startswith('[COMPLETED]'):
-                            desc_lower = log_entry.lower()
-                            if any(kw in desc_lower for kw in ['read', 'inspect', 'examine', 'analyze']):
-                                file_path = _extract_file_path_from_description(log_entry)
-                                if file_path:
-                                    # Normalize to filename only for summary
-                                    filename = file_path.replace('\\', '/').split('/')[-1]
-                                    file_read_counts[filename] += 1
+
+                    # P0-1 Fix: Build file read counts from actual tool_events, not keywords
+                    FILE_READING_TOOLS = {'read_file', 'read_file_lines', 'search_code', 'list_dir', 'analyze_code_context'}
+
+                    for task in completed_tasks:
+                        # Check if task is completed
+                        if hasattr(task, 'status'):
+                            status_value = task.status.value if hasattr(task.status, 'value') else str(task.status)
+                            if status_value.lower() != 'completed':
+                                continue
+
+                            # Check tool_events for file reading operations
+                            if hasattr(task, 'tool_events') and task.tool_events:
+                                for event in task.tool_events:
+                                    tool_name = event.get('tool', '').lower()
+                                    if tool_name not in FILE_READING_TOOLS:
+                                        continue
+
+                                    # Extract file path from tool arguments
+                                    args = event.get('args', {})
+                                    if not isinstance(args, dict):
+                                        continue
+
+                                    # Check various argument names that contain file paths
+                                    file_path = args.get('file_path') or args.get('path') or args.get('pattern')
+                                    if file_path:
+                                        # Normalize to filename only for summary
+                                        filename = str(file_path).replace('\\', '/').split('/')[-1]
+                                        # Skip generic patterns like **/*
+                                        if '*' not in filename:
+                                            file_read_counts[filename] += 1
+
+                    # BACKWARD COMPATIBLE: Also check log entries if no tasks with tool_events
+                    if not file_read_counts:
+                        for log_entry in completed_tasks_log:
+                            if log_entry.startswith('[COMPLETED]'):
+                                desc_lower = log_entry.lower()
+                                if any(kw in desc_lower for kw in ['read', 'inspect', 'examine', 'analyze']):
+                                    file_path = _extract_file_path_from_description(log_entry)
+                                    if file_path:
+                                        # Normalize to filename only for summary
+                                        filename = file_path.replace('\\', '/').split('/')[-1]
+                                        file_read_counts[filename] += 1
 
                     if file_read_counts:
                         work_summary += "\n📄 Files Already Inspected (DO NOT re-read these files unless absolutely necessary):\n"
@@ -1849,11 +1918,21 @@ class Orchestrator:
 
                 # Calculate repetitive failure notes for the planner
                 failure_notes = []
+
+                # P0-2: Add blocked actions to failure notes
+                if self.context:
+                    blocked_sigs = self.context.get_agent_state("blocked_action_sigs", set())
+                    if blocked_sigs:
+                        failure_notes.append("🚫 BLOCKED ACTIONS (DO NOT propose any of these):")
+                        for blocked_sig in blocked_sigs:
+                            failure_notes.append(f"  ❌ BLOCKED: [{blocked_sig}]")
+                        failure_notes.append("")  # Blank line for readability
+
                 if action_counts:
                     for sig, count in action_counts.items():
                         if count >= 2:
                             failure_notes.append(f"⚠️ REPETITION WARNING: You have already proposed the action '[{sig}]' {count} times. It is not making forward progress or is failing verification. DO NOT REPEAT IT. Try a different strategy, such as reading the file again to check for subtle syntax errors or using a different tool.")
-                
+
                 failure_notes_str = "\n".join(failure_notes)
                 path_hints = _generate_path_hints(completed_tasks_log)
 
@@ -1980,10 +2059,42 @@ class Orchestrator:
 
             self.context.plan = ExecutionPlan(tasks=[next_task])
 
-            # Anti-loop: stop if the planner repeats the same action too many times.
+            # P0-2 & P0-3: Anti-loop with blocked actions and streak-based circuit breaker
             action_sig = f"{(next_task.action_type or '').strip().lower()}::{next_task.description.strip().lower()}"
-            action_counts[action_sig] += 1
-            if action_counts[action_sig] >= 3:
+            action_counts[action_sig] += 1  # Total count (for statistics)
+
+            # P0-3: Track consecutive repetitions (streak-based)
+            if action_sig == last_task_signature:
+                repeat_same_action += 1
+            else:
+                repeat_same_action = 1  # Reset streak
+                last_task_signature = action_sig
+
+            # Get or initialize blocked_action_sigs from context
+            if self.context:
+                blocked_sigs = self.context.get_agent_state("blocked_action_sigs", set())
+                if not isinstance(blocked_sigs, set):
+                    blocked_sigs = set()
+            else:
+                blocked_sigs = set()
+
+            # Check if this action is blocked
+            if action_sig in blocked_sigs:
+                print(f"  [blocked-action] This action is blocked due to previous repetition: {action_sig[:100]}...")
+                # Auto-rewrite to a diagnostic fallback
+                next_task.action_type = "analyze"
+                next_task.description = (
+                    f"BLOCKED: Previous approach failed repeatedly. "
+                    f"Instead, analyze the root cause by running diagnostic tests or examining related code. "
+                    f"Do NOT repeat: [{action_sig[:80]}...]"
+                )
+                print(f"  [blocked-action] Rewriting to: {next_task.description[:100]}...")
+                # Reset streak since we rewrote the task
+                repeat_same_action = 1
+                last_task_signature = f"analyze::{next_task.description.strip().lower()}"
+
+            # P0-3: Circuit breaker based on CONSECUTIVE streak, not total count
+            if repeat_same_action >= 3:
                 # Before failing, check if the goal was actually achieved
                 action_lower = (next_task.action_type or "").lower()
                 is_read_action = action_lower in {"read", "analyze", "research", "investigate", "review"}
@@ -2001,9 +2112,9 @@ class Orchestrator:
                 self.context.set_agent_state("no_retry", True)
                 self.context.add_error(f"Circuit breaker: repeating action '{next_task.action_type}'")
                 print("\n" + "=" * 70)
-                print("CIRCUIT BREAKER - REPEATED ACTION")
+                print("CIRCUIT BREAKER - REPEATED ACTION (CONSECUTIVE STREAK)")
                 print("=" * 70)
-                print(f"Repeated action {action_counts[action_sig]}x: [{(next_task.action_type or '').upper()}] {next_task.description}")
+                print(f"Repeated action {repeat_same_action}x consecutively (total {action_counts[action_sig]}x): [{(next_task.action_type or '').upper()}] {next_task.description}")
                 print("Blocking issue: planner is not making forward progress; refusing to repeat the same step.")
                 print("Next step: run with `--debug` and share the last verification failure + tool args.\n")
                 return False
@@ -2014,12 +2125,19 @@ class Orchestrator:
             ):
                 print("  [loop-guard] Repeated READ/ANALYZE detected; checking if goal is achieved.")
 
-                # Track which files are being read repeatedly
-                read_file_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\\\-\.]+\.py)'
+                # P0-2: Block this action from being proposed again
+                blocked_sigs.add(action_sig)
+                if self.context:
+                    self.context.set_agent_state("blocked_action_sigs", blocked_sigs)
+                print(f"  [loop-guard] Blocked action signature: {action_sig[:100]}...")
+
+                # P0-4: Track which files are being read repeatedly (language-agnostic)
+                # Support common file extensions: Python, JS, TS, Vue, JSON, YAML, Markdown, etc.
+                read_file_pattern = r'(?:\.\/)?([a-zA-Z0-9_/\\\-\.]+\.(?:py|js|ts|tsx|jsx|vue|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1))'
                 recent_read_files = []
                 for task in reversed(completed_tasks[-5:]):  # Look at last 5 completed Task objects
                     if (task.action_type or "").lower() in {"read", "analyze", "research"}:
-                        matches = re.findall(read_file_pattern, task.description or "")
+                        matches = re.findall(read_file_pattern, task.description or "", re.IGNORECASE)
                         recent_read_files.extend(matches)
 
                 # Check if the same file has been read 3+ times
@@ -2062,20 +2180,48 @@ class Orchestrator:
                         print("  [loop-guard] Verification already attempted - forcing completion.")
                         return True
                 else:
-                    # Extract target path from the task description to create a more relevant fallback
+                    # P0-5: Replace generic list_dir fallback with targeted, progress-making actions
                     target_path = _extract_file_path_from_description(next_task.description)
                     if target_path:
-                        parent_dir = str(Path(target_path.replace('\\', '/')).parent)
-                        next_task.description = (
-                            f"List the directory '{parent_dir}' to confirm all expected files exist, "
-                            f"then verify imports work by running a simple test or syntax check."
-                        )
+                        # Determine file type to suggest appropriate validation
+                        file_ext = target_path.split('.')[-1].lower() if '.' in target_path else ''
+
+                        if file_ext in ['js', 'ts', 'jsx', 'tsx', 'vue']:
+                            # Frontend file - suggest build/lint
+                            next_task.action_type = "test"
+                            next_task.description = (
+                                f"Instead of re-reading {target_path}, validate it by running: "
+                                f"1) npm run lint (if available) to check syntax, or "
+                                f"2) npm run build to verify it compiles correctly. "
+                                f"This will reveal actual issues rather than just reading the same file again."
+                            )
+                        elif file_ext in ['py']:
+                            # Python file - suggest syntax check or relevant tests
+                            next_task.action_type = "test"
+                            next_task.description = (
+                                f"Instead of re-reading {target_path}, validate it by running: "
+                                f"1) python -m py_compile {target_path} to check syntax, or "
+                                f"2) Run relevant unit tests for this module. "
+                                f"This will reveal actual issues rather than static reading."
+                            )
+                        else:
+                            # Generic file - analyze using cached contents
+                            next_task.action_type = "analyze"
+                            next_task.description = (
+                                f"Instead of re-reading {target_path}, analyze the cached file contents to: "
+                                f"1) Summarize what the file currently contains, "
+                                f"2) Identify what changes are still needed to satisfy acceptance criteria, "
+                                f"3) Determine if the implementation is actually complete or if specific issues remain."
+                            )
                     else:
+                        # No specific file - suggest running tests or verification
+                        next_task.action_type = "test"
                         next_task.description = (
-                            "List the target directory and summarize the current state; "
-                            "verify all expected files exist and imports work correctly."
+                            "Instead of re-reading files, validate the current state by running tests: "
+                            "Use pytest for Python code, npm test for JavaScript, or appropriate linting/build commands. "
+                            "This will reveal actual blocking issues that need to be fixed."
                         )
-                    print(f"  [loop-guard] Injecting fallback: {next_task.description[:80]}")
+                    print(f"  [loop-guard] Injecting targeted fallback: {next_task.description[:100]}...")
 
             # Fast-path: don't dispatch a no-op create_directory if it already exists.
             if (next_task.action_type or "").lower() == "create_directory":

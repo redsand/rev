@@ -366,11 +366,6 @@ EXCLUDE_DIRS = {
     ".venv", "venv", "target"
 }
 
-ALLOW_CMDS = {
-    "python", "pip", "pytest", "ruff", "black", "isort", "mypy",
-    "node", "npm", "npx", "pnpm", "prettier", "eslint", "git", "make"
-}
-
 # Resource budgets (for resource-aware optimization pattern)
 MAX_STEPS_PER_RUN = int(os.getenv("REV_MAX_STEPS", "500"))
 # Keep token budget comfortably below the provider cap to avoid hard failures when the heuristic
@@ -411,6 +406,12 @@ WARN_ON_NEW_FILES = os.getenv("REV_WARN_NEW_FILES", "true").lower() == "true"
 REQUIRE_REUSE_JUSTIFICATION = os.getenv("REV_REQUIRE_JUSTIFICATION", "false").lower() == "true"
 MAX_FILES_PER_FEATURE = int(os.getenv("REV_MAX_FILES", "5"))  # Encourage consolidation
 SIMILARITY_THRESHOLD = float(os.getenv("REV_SIMILARITY_THRESHOLD", "0.6"))  # For file name similarity
+
+# Security: Tool Permission Policy (REV-011)
+# PERMISSIONS_FAIL_OPEN: When permission check fails (e.g., malformed policy), should we allow or deny?
+# Default: false (fail closed - deny execution on error for security)
+# Set REV_PERMISSIONS_FAIL_OPEN=true to allow execution when permission checks fail (NOT RECOMMENDED for production)
+PERMISSIONS_FAIL_OPEN = os.getenv("REV_PERMISSIONS_FAIL_OPEN", "false").lower() in ("true", "1", "yes")
 
 # MCP (Model Context Protocol) Configuration
 # PRIVATE_MODE: When enabled, disables all public MCP servers for secure/confidential code work

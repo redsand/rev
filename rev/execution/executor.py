@@ -1229,8 +1229,11 @@ def execution_mode(
 
         def handle_user_input(text: str):
             if text.startswith("/stop") or text.startswith("/cancel"):
+                # REV-008: Actually set the interrupt flag to cancel execution
+                from rev.config import set_escape_interrupt
+                set_escape_interrupt(True)
                 message_queue.submit("STOP the current task immediately.", MessagePriority.INTERRUPT)
-                print("\n  ?? [Interrupt requested]")
+                print("\n  🛑 [Interrupt requested - stopping execution]")
             elif text.startswith("/priority "):
                 msg = text[len("/priority "):].strip()
                 if msg:
@@ -2608,8 +2611,12 @@ def streaming_execution_mode(
     def handle_user_input(text: str):
         """Handle user input during streaming execution."""
         if text.startswith('/stop') or text.startswith('/cancel'):
+            # REV-008: Actually cancel execution by setting interrupt flags
+            from rev.config import set_escape_interrupt
+            set_escape_interrupt(True)
+            streaming_manager.interrupt()
             message_queue.submit("STOP the current task immediately.", MessagePriority.INTERRUPT)
-            print(f"\n  📩 [Interrupt requested]")
+            print(f"\n  🛑 [Interrupt requested - stopping execution and canceling running commands]")
         elif text.startswith('/priority '):
             msg = text[len('/priority '):].strip()
             if msg:

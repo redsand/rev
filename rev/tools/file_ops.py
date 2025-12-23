@@ -84,24 +84,32 @@ def _iter_files(include_glob: str, include_dirs: bool = False) -> List[pathlib.P
 
 
 def _run_shell(cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:
-    """Execute shell command.
+    """Execute shell command (DEPRECATED - use command_runner module instead).
 
-    SECURITY NOTE: This function uses shell=True for compatibility with existing code,
-    but commands passed to it should be properly quoted using quote_cmd_arg() from rev.tools.utils.
-    Callers must ensure input is sanitized to prevent command injection.
+    SECURITY: This function has been replaced with safe command execution.
+    New code should use rev.tools.command_runner.run_command_safe()
+
+    This function is maintained for backward compatibility only.
     """
-    import shlex
-    # If cmd appears to be a list-style command (starts with '['), parse it as a list
-    # Otherwise trust that the caller has properly quoted the command
-    return subprocess.run(
-        cmd,
-        shell=True,  # Required for some git operations, but callers must sanitize
-        cwd=str(ROOT),
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-        encoding="utf-8",
-        errors="replace",
+    from rev.tools.command_runner import run_command_safe
+
+    result = run_command_safe(cmd, timeout=timeout, cwd=ROOT, check_interrupt=False)
+
+    # Return a CompletedProcess object for compatibility
+    if result.get("blocked"):
+        # Command was blocked for security reasons
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=-1,
+            stdout="",
+            stderr=f"BLOCKED: {result.get('error', 'security violation')}"
+        )
+
+    return subprocess.CompletedProcess(
+        args=cmd,
+        returncode=result.get("rc", -1),
+        stdout=result.get("stdout", ""),
+        stderr=result.get("stderr", "")
     )
 
 
