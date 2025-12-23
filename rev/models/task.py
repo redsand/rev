@@ -575,7 +575,6 @@ class ExecutionPlan:
         """
         steps = []
         
-        # Identify project type for better command suggestions
         from rev.execution.quick_verify import _detect_project_type
         project_type = _detect_project_type(config.ROOT)
         
@@ -584,6 +583,14 @@ class ExecutionPlan:
             test_cmd = "pytest"
         elif project_type in ("node", "vue", "react", "nextjs"):
             test_cmd = "npm test"
+        elif project_type == "go": test_cmd = "go test ./..."
+        elif project_type == "rust": test_cmd = "cargo test"
+        elif project_type == "csharp": test_cmd = "dotnet test"
+        elif project_type == "ruby": test_cmd = "bundle exec rake test"
+        elif project_type == "php": test_cmd = "vendor/bin/phpunit"
+        elif project_type == "java_maven": test_cmd = "mvn test"
+        elif project_type == "java_gradle" or project_type == "kotlin": test_cmd = "./gradlew test"
+        elif project_type == "flutter": test_cmd = "flutter test"
 
         # Common validation
         steps.append("Check for syntax errors")

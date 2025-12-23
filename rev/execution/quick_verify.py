@@ -982,20 +982,70 @@ def _paths_or_default(paths: list[Path]) -> list[Path]:
 
 
 def _detect_project_type(root: Path) -> str:
-    """Detect the project type (python, vue, node, etc)."""
+    """Detect the project type (python, vue, node, go, rust, etc)."""
     try:
+        # 1. Node.js Ecosystem
         if (root / "package.json").exists():
             content = (root / "package.json").read_text(errors="ignore")
             if '"vue"' in content: return "vue"
             if '"react"' in content: return "react"
             if '"next"' in content: return "nextjs"
             return "node"
+        
+        # 2. Python Ecosystem
         if (root / "pyproject.toml").exists() or (root / "requirements.txt").exists() or (root / "setup.py").exists():
             return "python"
+            
+        # 3. Go Ecosystem
+        if (root / "go.mod").exists():
+            return "go"
+            
+        # 4. Rust Ecosystem
+        if (root / "Cargo.toml").exists():
+            return "rust"
+            
+        # 5. Ruby Ecosystem
+        if (root / "Gemfile").exists() or (root / "Rakefile").exists():
+            return "ruby"
+            
+        # 6. PHP Ecosystem
+        if (root / "composer.json").exists():
+            return "php"
+            
+        # 7. Java/Kotlin Ecosystem
+        if (root / "pom.xml").exists():
+            return "java_maven"
+        if (root / "build.gradle").exists() or (root / "build.gradle.kts").exists():
+            # Check if it's Kotlin
+            if any(root.rglob("*.kt")):
+                return "kotlin"
+            return "java_gradle"
+            
+        # 8. C# / .NET Ecosystem
+        if any(root.glob("*.csproj")) or any(root.glob("*.sln")):
+            return "csharp"
+            
+        # 9. C/C++ Ecosystem
+        if (root / "CMakeLists.txt").exists():
+            return "cpp_cmake"
+        if (root / "Makefile").exists():
+            return "cpp_make"
+            
+        # 10. Mobile / Flutter
+        if (root / "pubspec.yaml").exists():
+            return "flutter"
+
         # Fallback by file extension in root
         for f in root.iterdir():
             if f.suffix == ".py": return "python"
             if f.suffix in (".js", ".ts"): return "node"
+            if f.suffix == ".go": return "go"
+            if f.suffix == ".rs": return "rust"
+            if f.suffix == ".rb": return "ruby"
+            if f.suffix == ".php": return "php"
+            if f.suffix == ".java": return "java_maven"
+            if f.suffix == ".kt": return "kotlin"
+            if f.suffix == ".cs": return "csharp"
     except Exception:
         pass
     return "unknown"
@@ -1057,7 +1107,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
     # -------------------------------------------------------------------------
     # PYTHON VERIFICATION
     # -------------------------------------------------------------------------
-    if project_type == "python" or any(p.suffix == ".py" for p in paths):
+    if project_type == "python":
         # Filter for Python files or directories for compileall
         compile_targets = [p for p in _paths_or_default(paths) if p.is_dir() or p.suffix == '.py']
         
@@ -1254,6 +1304,52 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
                             should_replan=True
                         )
 
+    # 3. GO
+    elif project_type == "go":
+        # 1. Compilation check
+        compile_res = _run_validation_command("go build ./...", timeout=120)
+        strict_details["go_build"] = compile_res
+        if compile_res.get("rc", 0) != 0:
+            return VerificationResult(passed=False, message="Go build failed", details={"strict": strict_details}, should_replan=True)
+        
+        # 2. Tests
+        if mode == "strict" or custom_test_cmd:
+            cmd = custom_test_cmd or "go test ./..."
+            test_res = _run_validation_command(cmd, use_tests_tool=True, timeout=120)
+            strict_details["go_test"] = test_res
+            if test_res.get("rc", 0) != 0:
+                return VerificationResult(passed=False, message="Go tests failed", details={"strict": strict_details}, should_replan=True)
+
+    # 4. RUST
+    elif project_type == "rust":
+        # 1. Check/Build
+        compile_res = _run_validation_command("cargo check", timeout=300)
+        strict_details["cargo_check"] = compile_res
+        if compile_res.get("rc", 0) != 0:
+            return VerificationResult(passed=False, message="Cargo check failed", details={"strict": strict_details}, should_replan=True)
+            
+        # 2. Tests
+        if mode == "strict" or custom_test_cmd:
+            cmd = custom_test_cmd or "cargo test"
+            test_res = _run_validation_command(cmd, use_tests_tool=True, timeout=300)
+            strict_details["cargo_test"] = test_res
+            if test_res.get("rc", 0) != 0:
+                return VerificationResult(passed=False, message="Cargo tests failed", details={"strict": strict_details}, should_replan=True)
+
+    # 5. C# / .NET
+    elif project_type == "csharp":
+        compile_res = _run_validation_command("dotnet build", timeout=180)
+        strict_details["dotnet_build"] = compile_res
+        if compile_res.get("rc", 0) != 0:
+            return VerificationResult(passed=False, message="Dotnet build failed", details={"strict": strict_details}, should_replan=True)
+            
+        if mode == "strict" or custom_test_cmd:
+            cmd = custom_test_cmd or "dotnet test"
+            test_res = _run_validation_command(cmd, use_tests_tool=True, timeout=180)
+            strict_details["dotnet_test"] = test_res
+            if test_res.get("rc", 0) != 0:
+                return VerificationResult(passed=False, message="Dotnet tests failed", details={"strict": strict_details}, should_replan=True)
+
     return strict_details
 
 
@@ -1270,31 +1366,59 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
         seen_cmds.add(cmd)
         commands.append((label, cmd, tool))
 
+    # Get project type for better defaults
+    project_type = _detect_project_type(config.ROOT)
+
     # Get Python file paths for targeted linting
     py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]
 
     for step in validation_steps:
         text = step.lower()
-        if "syntax" in text or "compile" in text:
-            # Filter for Python files or directories
-            compile_targets = [p for p in paths if p.is_dir() or p.suffix == '.py']
-            if compile_targets:
-                cmd = "python -m compileall " + " ".join(_quote_path(p) for p in compile_targets)
-                _add("compileall", cmd)
+        
+        # 1. SYNTAX / COMPILE
+        if "syntax" in text or "compile" in text or "build" in text:
+            if project_type == "python":
+                compile_targets = [p for p in paths if p.is_dir() or p.suffix == '.py']
+                if compile_targets:
+                    _add("compileall", "python -m compileall " + " ".join(_quote_path(p) for p in compile_targets))
+            elif project_type == "go": _add("go_build", "go build ./...")
+            elif project_type == "rust": _add("cargo_check", "cargo check")
+            elif project_type == "csharp": _add("dotnet_build", "dotnet build")
+            elif project_type == "cpp_cmake": _add("cmake_build", "cmake --build .")
+            elif project_type == "cpp_make": _add("make", "make")
+            elif project_type == "java_maven": _add("mvn_compile", "mvn compile")
+            elif project_type == "java_gradle" or project_type == "kotlin": _add("gradle_build", "./gradlew build")
+
+        # 2. LINT
         if "lint" in text or "linter" in text:
-            # Run ruff only on modified files, targeting severe errors to avoid pre-existing style issues
-            # E9: Runtime/syntax errors, F63: Invalid print syntax, F7: Statement problems
-            # NOTE: Removed F82 (undefined names) - too noisy for pre-existing issues
-            if py_paths:
+            if project_type == "python" and py_paths:
                 ruff_targets = " ".join(_quote_path(p) for p in py_paths[:10])
                 _add("ruff", f"ruff check {ruff_targets} --select E9,F63,F7")
+            elif project_type in ("node", "vue", "react"): _add("npm_lint", "npm run lint")
+            elif project_type == "go": _add("go_vet", "go vet ./...")
+            elif project_type == "rust": _add("clippy", "cargo clippy")
+
+        # 3. TEST
         if "test" in text:
-            _add("pytest", "pytest -q", "run_tests")
+            if project_type == "python": _add("pytest", "pytest -q", "run_tests")
+            elif project_type in ("node", "vue", "react", "nextjs"): _add("npm_test", "npm test", "run_tests")
+            elif project_type == "go": _add("go_test", "go test ./...", "run_tests")
+            elif project_type == "rust": _add("cargo_test", "cargo test", "run_tests")
+            elif project_type == "ruby": _add("rake_test", "bundle exec rake test", "run_tests")
+            elif project_type == "php": _add("phpunit", "vendor/bin/phpunit", "run_tests")
+            elif project_type == "java_maven": _add("mvn_test", "mvn test", "run_tests")
+            elif project_type == "java_gradle" or project_type == "kotlin": _add("gradle_test", "./gradlew test", "run_tests")
+            elif project_type == "csharp": _add("dotnet_test", "dotnet test", "run_tests")
+            elif project_type == "flutter": _add("flutter_test", "flutter test", "run_tests")
+            else: _add("pytest", "pytest -q", "run_tests") # Default fallback
+
+        # 4. TYPE CHECK
         if "mypy" in text or "type" in text:
-            # Run mypy only on modified files to avoid pre-existing errors
-            if py_paths:
+            if project_type == "python" and py_paths:
                 mypy_targets = " ".join(_quote_path(p) for p in py_paths[:10])
                 _add("mypy", f"mypy {mypy_targets}")
+            elif project_type in ("node", "typescript", "vue", "react"):
+                _add("tsc", "npx tsc --noEmit")
 
     if not commands:
         return None
