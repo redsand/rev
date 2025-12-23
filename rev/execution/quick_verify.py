@@ -960,8 +960,11 @@ def _run_validation_command(cmd: str, *, use_tests_tool: bool = False, timeout: 
         raw = execute_tool(tool, payload)
         data = json.loads(raw)
         if isinstance(data, dict):
+            # Ensure cmd is present in the result
+            if "cmd" not in data:
+                data["cmd"] = cmd
             return data
-        return {"raw": raw}
+        return {"raw": raw, "cmd": cmd}
     except Exception as e:
         return {"error": str(e), "cmd": cmd}
 
@@ -1165,23 +1168,22 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
         elif rc == 4:
             strict_details["pytest_note"] = "No tests collected (rc=4) - treated as pass"
 
-        # Optional lint/type checks if allowed
-        if "ruff" in config.ALLOW_CMDS:
-            py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]
-            if py_paths:
-                ruff_targets = " ".join(_quote_path(p) for p in py_paths[:10])
-                # E9: Runtime/syntax errors, F63: Invalid print syntax, F7: Statement problems
-                optional_checks = [("ruff", f"ruff check {ruff_targets} --select E9,F63,F7")]
-                if "mypy" in config.ALLOW_CMDS:
-                    optional_checks.append(("mypy", f"mypy {ruff_targets}"))
-                
-                for label, cmd in optional_checks:
-                    res = _run_validation_command(cmd, timeout=config.VALIDATION_TIMEOUT_SECONDS)
-                    strict_details[label] = res
-                    rc = res.get("rc")
-                    if rc is None:
-                        rc = 0 if res.get("blocked") else 1
-                    if not res.get("blocked") and rc not in (0, None):
+        # Optional lint/type checks
+        py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]
+        if py_paths:
+            ruff_targets = " ".join(_quote_path(p) for p in py_paths[:10])
+            # E9: Runtime/syntax errors, F63: Invalid print syntax, F7: Statement problems
+            optional_checks = [("ruff", f"ruff check {ruff_targets} --select E9,F63,F7")]
+            optional_checks.append(("mypy", f"mypy {ruff_targets}"))
+            
+            for label, cmd in optional_checks:
+                res = _run_validation_command(cmd, timeout=config.VALIDATION_TIMEOUT_SECONDS)
+                strict_details[label] = res
+                rc = res.get("rc")
+                if rc is None:
+                    rc = 0 if res.get("blocked") else 1
+                if not res.get("blocked") and rc not in (0, None):
+                    if rc != 127:
                         return VerificationResult(
                             passed=False,
                             message=f"Verification failed: {label} errors",
@@ -1195,12 +1197,12 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
     elif project_type in ("vue", "react", "node", "nextjs"):
         # 1. Syntax check for plain JS files (fast)
         js_paths = [p for p in paths if p.suffix == '.js' and p.exists()]
-        if js_paths and "node" in config.ALLOW_CMDS:
+        if js_paths:
             for js_file in js_paths:
                 cmd = f"node --check {quote_cmd_arg(str(js_file))}"
                 res = _run_validation_command(cmd, timeout=30)
                 strict_details[f"syntax_{js_file.name}"] = res
-                if not res.get("blocked") and res.get("rc", 1) != 0:
+                if not res.get("blocked") and res.get("rc", 1) != 0 and res.get("rc") != 127:
                     return VerificationResult(
                         passed=False,
                         message=f"Syntax error in {js_file.name}",
@@ -1210,7 +1212,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
 
         # 2. Vue/TS Type Checking (slower, maybe skip in strict=false?)
         # In 'fast' mode, we might skip full type checking unless it's a critical file
-        if project_type == "vue" and "npm" in config.ALLOW_CMDS:
+        if project_type == "vue":
             # Check if we should run vue-tsc
             # If we touched .vue or .ts files
             vue_ts_touched = any(p.suffix in ('.vue', '.ts') for p in paths)
@@ -1222,7 +1224,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
                     cmd = "npx vue-tsc --noEmit"
                     res = _run_validation_command(cmd, timeout=120)
                     strict_details["vue-tsc"] = res
-                    if not res.get("blocked") and res.get("rc", 1) != 0:
+                    if not res.get("blocked") and res.get("rc", 1) != 0 and res.get("rc") != 127:
                          return VerificationResult(
                             passed=False,
                             message="Vue type check failed",
@@ -1234,75 +1236,72 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
         # Look for test files in the paths
         test_touched = any("test" in p.name or "spec" in p.name for p in paths)
         if test_touched or mode == "strict":
-            if "npm" in config.ALLOW_CMDS:
-                # Try to detect test runner
-                test_cmd = "npm test"
-                # Check package.json for specific test scripts
-                try:
-                    pkg_json = json.loads((config.ROOT / "package.json").read_text())
-                    scripts = pkg_json.get("scripts", {})
-                    if "test:unit" in scripts:
-                        test_cmd = "npm run test:unit"
-                    elif "test" in scripts:
-                        test_cmd = "npm test"
-                    else:
-                        test_cmd = None
-                except Exception:
+            # Try to detect test runner
+            test_cmd = "npm test"
+            # Check package.json for specific test scripts
+            try:
+                pkg_json = json.loads((config.ROOT / "package.json").read_text())
+                scripts = pkg_json.get("scripts", {})
+                if "test:unit" in scripts:
+                    test_cmd = "npm run test:unit"
+                elif "test" in scripts:
+                    test_cmd = "npm test"
+                else:
                     test_cmd = None
+            except Exception:
+                test_cmd = None
 
-                if test_cmd:
-                    # Prevent watch mode which hangs execution
-                    # Try to detect if we need to add flags, or just prepend CI=true (cross-platform way is harder without extra tools)
-                    # We will append -- --run (for vitest) or --watchAll=false (for jest) if we can guess, 
-                    # but setting CI env var is the most robust standard method if the runner supports it.
-                    # rev's run_cmd doesn't easily let us set env vars per call in the string, 
-                    # so we'll try to chain it or assume the tool runner handles environment.
-                    # Ideally, we append flags.
-                    
-                    if "vitest" in test_cmd or "vite" in test_cmd:
-                        test_cmd += " --run"
-                    elif "jest" in test_cmd:
-                        test_cmd += " --watchAll=false"
-                    else:
-                        # Generic fallback: many runners respect --watch=false or --no-watch
-                        # But some might fail if they don't recognize the flag.
-                        # Safest is to try to rely on CI=true in the environment if the tool runner supported it.
-                        # Since we can't easily set env vars in the command string cross-platform without 'cross-env',
-                        # we will try to append '--passWithNoTests' which is common and harmless for jest/vitest,
-                        # and rely on the config.ALLOW_CMDS to hopefully include a non-watch command.
-                        pass
+            if test_cmd:
+                # Prevent watch mode which hangs execution
+                # Try to detect if we need to add flags, or just prepend CI=true (cross-platform way is harder without extra tools)
+                # We will append -- --run (for vitest) or --watchAll=false (for jest) if we can guess, 
+                # but setting CI env var is the most robust standard method if the runner supports it.
+                # rev's run_cmd doesn't easily let us set env vars per call in the string, 
+                # so we'll try to chain it or assume the tool runner handles environment.
+                # Ideally, we append flags.
+                
+                if "vitest" in test_cmd or "vite" in test_cmd:
+                    test_cmd += " --run"
+                elif "jest" in test_cmd:
+                    test_cmd += " --watchAll=false"
+                else:
+                    # Generic fallback: many runners respect --watch=false or --no-watch
+                                            # But some might fail if they don't recognize the flag.
+                                            # Safest is to try to rely on CI=true in the environment if the tool runner supported it.
+                                            # Since we can't easily set env vars in the command string cross-platform without 'cross-env',
+                                            # we will try to append '--passWithNoTests' which is common and harmless for jest/vitest.
+                                            pass
+                # Append file filters if possible? Vitest supports this.
+                # pytest supports it too.
+                # npm run test:unit -- <file>
+                if test_touched:
+                    test_files = [str(p) for p in paths if "test" in p.name or "spec" in p.name]
+                    if test_files:
+                        # Use ' -- ' to pass args to the underlying script
+                        test_cmd += " -- " + " ".join(quote_cmd_arg(f) for f in test_files)
+                
+                # Add CI flags to prevent hanging in watch mode
+                if " -- " not in test_cmd:
+                    test_cmd += " --"
+                
+                # Add flags that help both Jest and Vitest avoid watch mode
+                if "vitest" in test_cmd or "vite" in test_cmd:
+                    test_cmd += " --run"
+                else:
+                    # Jest / Generic
+                    test_cmd += " --watchAll=false --no-watch"
 
-                    # Append file filters if possible? Vitest supports this.
-                    # pytest supports it too.
-                    # npm run test:unit -- <file>
-                    if test_touched:
-                        test_files = [str(p) for p in paths if "test" in p.name or "spec" in p.name]
-                        if test_files:
-                            # Use ' -- ' to pass args to the underlying script
-                            test_cmd += " -- " + " ".join(quote_cmd_arg(f) for f in test_files)
-                    
-                    # Add CI flags to prevent hanging in watch mode
-                    if " -- " not in test_cmd:
-                        test_cmd += " --"
-                    
-                    # Add flags that help both Jest and Vitest avoid watch mode
-                    if "vitest" in test_cmd or "vite" in test_cmd:
-                        test_cmd += " --run"
-                    else:
-                        # Jest / Generic
-                        test_cmd += " --watchAll=false --no-watch"
-
-                    res = _run_validation_command(test_cmd, use_tests_tool=True, timeout=config.VALIDATION_TIMEOUT_SECONDS)
-                    strict_details["npm_test"] = res
-                    # Ignore rc if no tests found?
-                    # Vitest returns 1 if no tests found sometimes?
-                    if not res.get("blocked") and res.get("rc", 1) != 0:
-                         return VerificationResult(
-                            passed=False,
-                            message="Frontend tests failed",
-                            details={"strict": strict_details},
-                            should_replan=True
-                        )
+                res = _run_validation_command(test_cmd, use_tests_tool=True, timeout=config.VALIDATION_TIMEOUT_SECONDS)
+                strict_details["npm_test"] = res
+                # Ignore rc if no tests found?
+                # Vitest returns 1 if no tests found sometimes?
+                if not res.get("blocked") and res.get("rc", 1) != 0 and res.get("rc") != 127:
+                     return VerificationResult(
+                        passed=False,
+                        message="Frontend tests failed",
+                        details={"strict": strict_details},
+                        should_replan=True
+                    )
 
     # 3. GO
     elif project_type == "go":
