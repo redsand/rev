@@ -126,6 +126,13 @@ CRITICAL RULES FOR CODE EXTRACTION:
     - Proper error handling and validation
     - Docstrings explaining non-obvious logic
 
+SECURITY-MINDED CODING (CRITICAL):
+- Never store passwords, secrets, or API keys as plain strings in code.
+- Use environment variables or secure configuration managers for sensitive data.
+- Ensure proper input validation and sanitization.
+- Avoid insecure practices like `eval()`, `exec()`, or unsanitized shell command execution.
+- If creating a "password" field, it should be treated as sensitive (e.g., hashed/salted if for storage, or masked/secure-typed if for UI).
+
 IMPORT STRATEGY (CRITICAL):
 - If you have just split a module into a package (a directory with `__init__.py` exporting symbols), STOP and THINK.
 - Existing imports like `import package` or `from package import Symbol` are often STILL VALID because the `__init__.py` exports them.

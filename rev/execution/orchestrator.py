@@ -1628,6 +1628,7 @@ class Orchestrator:
              "- If the code was split into a package with __init__.py exports, prefer package-export imports at call sites.\n"
              "- Avoid replacing `from pkg import *` with dozens of per-module imports; only import names actually used.\n"
              "- Prefer `from package import ExportedSymbol` over `from package.module import ExportedSymbol` when the package exports it.\n"
+             "- SECURITY: Always propose security-minded actions. Never store secrets in plain text. Use proper input validation.\n"
              "- CRITICAL: ONLY declare GOAL_ACHIEVED if you have verified that the current filesystem state matches all parts of the request. If history shows work but you haven't inspected it in this run, VERIFY IT FIRST.\n"
              f"You MUST choose one of the following action types: {available_actions}\n"
              "\n"
@@ -1854,8 +1855,52 @@ class Orchestrator:
         # Track completed Task objects (separate from string-based logs)
         completed_tasks: List[Task] = []
 
-        iteration = 0
+        # Ensure we have a persistent plan and state manager for checkpoints
+        if not self.context.plan:
+            if self.context.resume:
+                latest = StateManager.find_latest_checkpoint()
+                if latest:
+                    try:
+                        self.context.plan = StateManager.load_from_checkpoint(latest)
+                        print(f"  ✓ Loaded cumulative plan from checkpoint: {latest}")
+                        # Populate completed_tasks from the plan
+                        for task in self.context.plan.tasks:
+                            if task.status == TaskStatus.COMPLETED:
+                                completed_tasks.append(task)
+                                # If history log is empty, reconstruct it from plan
+                                if not completed_tasks_log:
+                                    status_tag = f"[{task.status.name}]"
+                                    log_entry = f"{status_tag} {task.description}"
+                                    if task.result and isinstance(task.result, str):
+                                        try:
+                                            res = json.loads(task.result)
+                                            if isinstance(res, dict) and "summary" in res:
+                                                log_entry += f" | Output: {res['summary']}"
+                                        except: pass
+                                    completed_tasks_log.append(log_entry)
+                            elif task.status == TaskStatus.FAILED and not completed_tasks_log:
+                                completed_tasks_log.append(f"[{task.status.name}] {task.description} | Reason: {task.error}")
+                        
+                        if completed_tasks_log:
+                            self.context.work_history = completed_tasks_log
+                    except Exception as e:
+                        print(f"  ⚠️  Failed to load checkpoint: {e}")
+                        self.context.plan = ExecutionPlan(tasks=[])
+                else:
+                    self.context.plan = ExecutionPlan(tasks=[])
+            else:
+                self.context.plan = ExecutionPlan(tasks=[])
+
+        if not self.context.state_manager:
+            self.context.set_state_manager(StateManager(self.context.plan))
+
+        iteration = len(self.context.plan.tasks)
         action_counts: Dict[str, int] = defaultdict(int)
+        # Re-populate action counts from history
+        for task in self.context.plan.tasks:
+            action_sig = f"{(task.action_type or '').strip().lower()}::{task.description.strip().lower()}"
+            action_counts[action_sig] += 1
+
         failure_counts: Dict[str, int] = defaultdict(int)
         last_task_signature: Optional[str] = None
         repeat_same_action: int = 0
@@ -2103,7 +2148,12 @@ class Orchestrator:
                 ):
                     print("  [semantic-dedup] Warning: similar read already completed.")
 
-            self.context.plan = ExecutionPlan(tasks=[next_task])
+            # Append to cumulative plan instead of overwriting
+            if next_task not in self.context.plan.tasks:
+                self.context.plan.tasks.append(next_task)
+
+            if self.context.state_manager:
+                self.context.state_manager.on_task_started(next_task)
 
             # P0-2 & P0-3: Anti-loop with blocked actions and streak-based circuit breaker
             action_sig = f"{(next_task.action_type or '').strip().lower()}::{next_task.description.strip().lower()}"
@@ -2338,7 +2388,7 @@ class Orchestrator:
                     pass
 
             # STEP 2: EXECUTE
-            execution_success = self._dispatch_to_sub_agents(self.context)
+            execution_success = self._dispatch_to_sub_agents(self.context, next_task)
 
             # STEP 3: VERIFY - This is the critical addition
             verification_result = None
@@ -2500,6 +2550,13 @@ class Orchestrator:
                     print(f"  [!] Skipping last_code_change_iteration update - no real changes detected")
 
             # STEP 4: REPORT
+            if next_task.status == TaskStatus.COMPLETED:
+                if self.context.state_manager:
+                    self.context.state_manager.on_task_completed(next_task)
+            elif next_task.status == TaskStatus.FAILED:
+                if self.context.state_manager:
+                    self.context.state_manager.on_task_failed(next_task)
+
             status_tag = f"[{next_task.status.name}]"
             log_entry = f"{status_tag} {next_task.description}"
             
@@ -2614,12 +2671,13 @@ class Orchestrator:
         print("NEXT ACTION: Re-planning with different approach...")
         print("=" * 70 + "\n")
 
-    def _dispatch_to_sub_agents(self, context: RevContext) -> bool:
+    def _dispatch_to_sub_agents(self, context: RevContext, task: Optional[Task] = None) -> bool:
         """Dispatches tasks to appropriate sub-agents."""
-        if not context.plan or not context.plan.tasks:
-            return False
-            
-        task = context.plan.tasks[0]
+        if task is None:
+            if not context.plan or not context.plan.tasks:
+                return False
+            task = context.plan.tasks[0]
+
         if task.status == TaskStatus.COMPLETED:
             return True
 
