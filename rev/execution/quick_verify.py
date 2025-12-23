@@ -1023,6 +1023,7 @@ def _extract_error(res: Dict[str, Any], default: str = "Unknown error") -> str:
     stdout = res.get("stdout", "")
     stderr = res.get("stderr", "")
     rc = res.get("rc")
+    help_info = res.get("help_info")
     
     msg = stderr or stdout or default
     msg = msg.strip()
@@ -1032,6 +1033,10 @@ def _extract_error(res: Dict[str, Any], default: str = "Unknown error") -> str:
         msg = f"Command failed with exit code {rc} but produced no output (stdout/stderr)."
         if rc == 2:
             msg += " On Windows, exit code 2 often indicates a fatal configuration error or missing files for tools like ESLint."
+
+    # Include help information if available
+    if help_info:
+        msg += f"\n\n--- COMMAND USAGE INFO (--help) ---\n{help_info}"
 
     # Generic, broad recovery hint covering config, dependencies, and environment
     hint = (
@@ -1045,6 +1050,51 @@ def _extract_error(res: Dict[str, Any], default: str = "Unknown error") -> str:
         msg = msg[:497] + "..."
     
     return msg + hint
+
+
+def _get_help_output(cmd_name: str) -> Optional[str]:
+    """Attempt to get usage/help output for a command."""
+    # Common help flags
+    for flag in ("--help", "-h"):
+        try:
+            # We use execute_tool directly to avoid recursion
+            payload = {"cmd": f"{cmd_name} {flag}", "timeout": 5}
+            raw = execute_tool("run_cmd", payload)
+            res = json.loads(raw)
+            # rc=0 is success, but some tools output help to stderr or with non-zero rc
+            out = (res.get("stdout") or res.get("stderr") or "").strip()
+            if out and len(out) > 50: # Ignore very short outputs
+                return out[:1500] # Return first 1500 chars
+        except:
+            continue
+    return None
+
+
+def _try_dynamic_help_discovery(path: Path) -> Optional[str]:
+    """Try to determine how to run a file by executing it with help flags."""
+    try:
+        if not path.exists() or not path.is_file():
+            return None
+            
+        # Determine likely runner
+        runner = ""
+        if path.suffix == ".py": runner = "python"
+        elif path.suffix in (".js", ".ts", ".mjs", ".cjs"): runner = "node"
+        elif path.suffix in (".sh", ".bash"): runner = "bash"
+        
+        if not runner:
+            return None
+            
+        for flag in ("--help", "-h"):
+            cmd = f"{runner} {_quote_path(path)} {flag}"
+            raw = execute_tool("run_cmd", {"cmd": cmd, "timeout": 5})
+            res = json.loads(raw)
+            out = (res.get("stdout") or res.get("stderr") or "").strip()
+            if out and ("usage:" in out.lower() or "options:" in out.lower() or "arguments:" in out.lower()):
+                return out[:1000]
+    except:
+        pass
+    return None
 
 
 def _run_validation_command(cmd: str, *, use_tests_tool: bool = False, timeout: int | None = None) -> Dict[str, Any]:
@@ -1064,6 +1114,20 @@ def _run_validation_command(cmd: str, *, use_tests_tool: bool = False, timeout: 
             # Ensure cmd is present in the result
             if "cmd" not in data:
                 data["cmd"] = cmd
+            
+            # If the command failed, attempt to gather help output for better diagnostics
+            rc = data.get("rc")
+            if rc is not None and rc not in (0, 4):
+                try:
+                    tokens = shlex.split(cmd)
+                    if tokens:
+                        base_cmd = tokens[0]
+                        help_info = _get_help_output(base_cmd)
+                        if help_info:
+                            data["help_info"] = help_info
+                except:
+                    pass
+                    
             return data
         return {"raw": raw, "cmd": cmd}
     except Exception as e:
@@ -1589,6 +1653,13 @@ def _inspect_file_for_command_hints(path: Path, tool_type: str) -> Optional[str]
                 # If we see eslint comments or have a local config, prefer eslint
                 if "eslint" in content or any((root / f).exists() for f in (".eslintrc.json", "eslint.config.js", ".eslintrc.js", "eslint.config.mjs", "eslint.config.cjs")):
                     return "npx --yes eslint --quiet"
+        
+        # If static inspection fails, try dynamic help discovery
+        help_info = _try_dynamic_help_discovery(path)
+        if help_info:
+            # We don't return the full help, but we've verified it responds to help
+            # This logic could be expanded to parse the help for specific runners
+            pass
                     
     except Exception:
         pass
