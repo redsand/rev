@@ -1622,10 +1622,14 @@ class Orchestrator:
             "- Use [EDIT]/[ADD]/[CREATE_DIRECTORY]/[REFACTOR] only when you will perform a repo-changing tool call in this step.\n"
             "- Use [TOOL] only to execute an existing built-in tool (e.g., `split_python_module_classes`).\n"
             "- Use [CREATE_TOOL] only when no existing tool can do the job and you must create a new tool.\n"
-            "- If unsure whether a path exists, choose [READ] first to locate the correct file path(s).\n"
-            "\n"
-             "Constraints to avoid duplicating work:\n"
-             "- CRITICAL: Check the file tree in the history. If the project is already organized into subdirectories, USE THEM. Do NOT create duplicate files or project roots in the top-level directory.\n"
+                         "- If unsure whether a path exists, choose [READ] first to locate the correct file path(s).\n"
+                         "\n"
+                         "TASK SPECIFICITY (CRITICAL):\n"
+                         "- Be extremely specific in your task description. Include file paths and specific functions/features.\n"
+                         "- If a previous task partially completed a goal (e.g. added 1 of 3 endpoints), the next task description MUST reflect the remaining work (e.g. 'add the REMAINING PUT and DELETE endpoints...').\n"
+                         "- Avoid using the exact same description for multiple consecutive steps; this triggers circuit breakers.\n"
+                         "\n"
+                         "Constraints to avoid duplicating work:\n"             "- CRITICAL: Check the file tree in the history. If the project is already organized into subdirectories, USE THEM. Do NOT create duplicate files or project roots in the top-level directory.\n"
              "- Do not propose repeating a step that is already complete (e.g., do not re-create a directory that exists).\n"
              "- CRITICAL: If you have already completed 2+ READ/ANALYZE steps on the same file, you MUST now use [EDIT] to make changes. Do NOT propose another read.\n"
              "- If the same file/lines have been inspected multiple times, transition to [EDIT] immediately.\n"
@@ -2099,9 +2103,11 @@ class Orchestrator:
                     return True
 
                 # FORWARD PROGRESS RULE: Check for redundant actions
-                action_sig = f"{next_task.action_type}:{next_task.description}"
+                action_sig = f"{(next_task.action_type or '').strip().lower()}::{(next_task.description or '').strip().lower()}"
                 if action_counts[action_sig] >= 2:
                     next_task = self._transform_redundant_action(next_task, action_sig, action_counts[action_sig])
+                    # Update signature after transformation
+                    action_sig = f"{(next_task.action_type or '').strip().lower()}::{(next_task.description or '').strip().lower()}"
 
                 next_task.task_id = iteration
                 try:
@@ -2170,9 +2176,9 @@ class Orchestrator:
                     next_task.description,
                     next_task.action_type,
                     completed_tasks_log,
-                    threshold=0.65  # 65% similarity threshold
+                    threshold=0.85  # Increased from 0.65 to reduce false positives
                 ):
-                    print("  [semantic-dedup] Warning: similar read already completed.")
+                    print(f"  [semantic-dedup] Warning: highly similar {action_type_lower} already completed.")
 
             # Append to cumulative plan instead of overwriting
             if next_task not in self.context.plan.tasks:

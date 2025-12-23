@@ -509,27 +509,34 @@ def _find_typescript_symbol_usages(symbol: str) -> List[Dict[str, Any]]:
 def _find_symbol_with_grep(symbol: str) -> List[Dict[str, Any]]:
     """Fallback: find symbol using grep.
 
-    SECURITY: symbol is properly quoted to prevent command injection.
+    SECURITY: symbol is used in a list-based subprocess call, preventing injection.
     """
+    from rev.tools.command_runner import run_command_safe
+    from rev import config
     usages = []
 
     try:
-        # Use quote_cmd_arg to prevent command injection
-        quoted_symbol = quote_cmd_arg(symbol)
-        cmd = f"grep -rn '\\b{quoted_symbol}\\b' . --include='*.py' --include='*.ts' --include='*.js' --include='*.tsx' --include='*.jsx' 2>/dev/null | head -50"
-        proc = _run_shell(cmd, timeout=30)
+        # Avoid shell pipes and redirection by using list-based execution and Python-side filtering
+        cmd = [
+            "grep", "-rn", f"\\b{symbol}\\b", ".",
+            "--include=*.py", "--include=*.ts", "--include=*.js",
+            "--include=*.tsx", "--include=*.jsx"
+        ]
+        
+        result = run_command_safe(cmd, timeout=30, cwd=config.ROOT)
 
-        if proc.returncode == 0:
-            for line in proc.stdout.split('\n'):
-                if ':' in line:
-                    parts = line.split(':', 2)
-                    if len(parts) == 3:
-                        usages.append({
-                            "file": parts[0].lstrip('./'),
-                            "line": parts[1],
-                            "type": "grep_match",
-                            "context": parts[2].strip()[:100]
-                        })
+        # Process results, manually limiting to first 50 matches (like head -50)
+        stdout = result.get("stdout") or ""
+        for line in stdout.splitlines()[:50]:
+            if ':' in line:
+                parts = line.split(':', 2)
+                if len(parts) == 3:
+                    usages.append({
+                        "file": parts[0].lstrip('./'),
+                        "line": parts[1],
+                        "type": "grep_match",
+                        "context": parts[2].strip()[:100]
+                    })
     except Exception:
         pass
 

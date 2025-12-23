@@ -14,6 +14,7 @@ from enum import Enum
 from rev.models.task import Task
 from rev.execution.safety import prompt_scary_operation
 from rev.debug_logger import get_logger
+from rev.tools.command_runner import run_command_safe
 
 
 class RecoveryStrategy(Enum):
@@ -230,28 +231,24 @@ def create_git_snapshot(description: str = "Pre-task snapshot") -> Optional[str]
 
     try:
         # Check if we're in a git repo
-        result = subprocess.run(
+        result = run_command_safe(
             ["git", "rev-parse", "--git-dir"],
-            capture_output=True,
-            text=True,
             timeout=5
         )
 
-        if result.returncode != 0:
+        if result.get("rc") != 0:
             return None
 
         # Create a lightweight tag for easy reference
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         tag_name = f"rev_snapshot_{timestamp}"
 
-        result = subprocess.run(
+        result = run_command_safe(
             ["git", "tag", "-a", tag_name, "-m", description],
-            capture_output=True,
-            text=True,
             timeout=5
         )
 
-        if result.returncode == 0:
+        if result.get("rc") == 0:
             return tag_name
         else:
             return None
@@ -313,23 +310,21 @@ def apply_recovery_action(action: RecoveryAction, dry_run: bool = False) -> Dict
                 return result
 
         try:
-            proc_result = subprocess.run(
+            proc_result = run_command_safe(
                 cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
                 timeout=60
             )
 
             result["commands_executed"].append(cmd)
-            result["outputs"].append(proc_result.stdout)
+            result["outputs"].append(proc_result.get("stdout") or "")
             executed_any = True
 
-            if proc_result.returncode != 0:
+            rc = proc_result.get("rc", -1)
+            if rc != 0:
                 result["errors"].append({
                     "command": cmd,
-                    "stderr": proc_result.stderr,
-                    "returncode": proc_result.returncode
+                    "stderr": proc_result.get("stderr") or proc_result.get("error"),
+                    "returncode": rc
                 })
                 # Mark as partial success if some commands succeeded
                 if result["commands_executed"]:
@@ -342,16 +337,6 @@ def apply_recovery_action(action: RecoveryAction, dry_run: bool = False) -> Dict
                 # Stop on first failure
                 return result
 
-        except subprocess.TimeoutExpired:
-            result["errors"].append({
-                "command": cmd,
-                "error": "Command timeout"
-            })
-            logger.log("recovery", "COMMAND_TIMEOUT", result["errors"][-1], "ERROR")
-            # Mark as partial success if some commands succeeded
-            if result["commands_executed"]:
-                result["partial_success"] = True
-            return result
         except Exception as e:
             result["errors"].append({
                 "command": cmd,

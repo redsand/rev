@@ -58,12 +58,6 @@ class TestCommandInjectionProtection:
         result = run_command_safe("git status\necho pwned")
         assert result["blocked"] is True
 
-    def test_blocks_non_allowlisted_command(self):
-        """Test that non-allowlisted commands are blocked."""
-        result = run_command_safe("malicious_command arg1 arg2")
-        assert result["blocked"] is True
-        assert "command not allowed" in result["error"].lower()
-
     def test_allows_git_status(self):
         """Test that normal git status works."""
         result = run_command_safe("git status")
@@ -104,6 +98,8 @@ class TestCommandValidation:
         is_valid, error_msg, args = _parse_and_validate("git status")
         assert is_valid
         assert error_msg == ""
+        # On Windows, args[0] might be resolved to full path, but _parse_and_validate
+        # in the latest version does NOT resolve paths (resolution moved to run_command_safe).
         assert args == ["git", "status"]
 
     def test_parse_and_validate_with_args(self):

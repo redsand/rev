@@ -44,15 +44,6 @@ FORBIDDEN_TOKENS = {"&&", "||", ";", "|", "&", ">", "<", ">>", "2>", "1>", "<<",
                     "2>&1", "1>&2", "`", "$(", "${"}
 
 
-def _resolve_command(cmd_name: str) -> Optional[str]:
-    """Resolve a command name to its full path.
-    
-    On Windows, this correctly finds .cmd, .bat, and .exe files.
-    """
-    # shutil.which handles PATH and PATHEXT correctly on all platforms
-    return shutil.which(cmd_name)
-
-
 def _parse_and_validate(cmd: str) -> Tuple[bool, str, List[str]]:
     """Parse and validate a command string for safe execution.
 
@@ -83,13 +74,7 @@ def _parse_and_validate(cmd: str) -> Tuple[bool, str, List[str]]:
     if not args:
         return False, "empty command", []
 
-    # Check 3: Resolve command to absolute path (handles Windows .cmd/.bat)
-    cmd_name = args[0]
-    resolved = _resolve_command(cmd_name)
-    if resolved:
-        args[0] = resolved
-
-    # Check 4: Validate no forbidden tokens in arguments
+    # Check 3: Validate no forbidden tokens in arguments
     if any(tok in FORBIDDEN_TOKENS for tok in args):
         return False, "shell operators not allowed in arguments", []
 
@@ -97,7 +82,7 @@ def _parse_and_validate(cmd: str) -> Tuple[bool, str, List[str]]:
 
 
 def run_command_safe(
-    cmd: str,
+    cmd: str | List[str],
     *,
     timeout: int = 300,
     cwd: Optional[Path] = None,
@@ -107,7 +92,7 @@ def run_command_safe(
     """Execute a command safely with security validation.
 
     Args:
-        cmd: Command string to execute
+        cmd: Command string or list of arguments to execute
         timeout: Maximum execution time in seconds
         cwd: Working directory (defaults to config.ROOT)
         capture_output: Whether to capture stdout/stderr
@@ -131,15 +116,47 @@ def run_command_safe(
         cwd = config.ROOT
 
     # Validate command before execution
-    is_valid, error_msg, args = _parse_and_validate(cmd)
-
-    if not is_valid:
-        return {
-            "blocked": True,
-            "error": error_msg,
-            "cmd": cmd,
-            "rc": -1,
-        }
+    if isinstance(cmd, list):
+        # Already split, validate each part
+        if not cmd:
+            return {"blocked": True, "error": "empty command", "cmd": str(cmd), "rc": -1}
+        
+        args = [str(arg) for arg in cmd]
+        # Check for shell metacharacters in any part
+        for arg in args:
+            if FORBIDDEN_RE.search(arg):
+                return {
+                    "blocked": True,
+                    "error": f"shell metacharacters not allowed in command part: {arg}",
+                    "cmd": " ".join(args),
+                    "rc": -1,
+                }
+        
+        # Check for forbidden tokens
+        if any(tok in FORBIDDEN_TOKENS for tok in args):
+            return {
+                "blocked": True,
+                "error": "shell operators not allowed in arguments",
+                "cmd": " ".join(args),
+                "rc": -1,
+            }
+        
+        # Resolve command
+        resolved = _resolve_command(args[0])
+        if resolved:
+            args[0] = resolved
+        
+        original_cmd_str = " ".join(cmd)
+    else:
+        is_valid, error_msg, args = _parse_and_validate(cmd)
+        if not is_valid:
+            return {
+                "blocked": True,
+                "error": error_msg,
+                "cmd": cmd,
+                "rc": -1,
+            }
+        original_cmd_str = cmd
 
     # Execute safely with shell=False
     try:
@@ -167,7 +184,7 @@ def run_command_safe(
                 stdout_data, stderr_data = proc.communicate()
                 return {
                     "timeout": timeout,
-                    "cmd": cmd,
+                    "cmd": original_cmd_str,
                     "rc": -1,
                     "error": f"command exceeded {timeout}s timeout",
                 }
@@ -176,20 +193,20 @@ def run_command_safe(
             "rc": proc.returncode,
             "stdout": stdout_data or "",
             "stderr": stderr_data or "",
-            "cmd": cmd,
+            "cmd": original_cmd_str,
             "interrupted": interrupted,
         }
 
     except FileNotFoundError:
         return {
             "error": f"command not found: {args[0]}",
-            "cmd": cmd,
+            "cmd": original_cmd_str,
             "rc": -1,
         }
     except OSError as e:
         return {
             "error": f"OS error: {e}",
-            "cmd": cmd,
+            "cmd": original_cmd_str,
             "rc": -1,
         }
 
@@ -250,7 +267,7 @@ def _communicate_with_interrupt(
 
 
 def run_command_streamed(
-    cmd: str,
+    cmd: str | List[str],
     *,
     timeout: int = 300,
     cwd: Optional[Path] = None,
@@ -264,7 +281,7 @@ def run_command_streamed(
     Output is written to temporary files, then the last N lines are returned.
 
     Args:
-        cmd: Command string to execute
+        cmd: Command string or list of arguments to execute
         timeout: Maximum execution time in seconds
         cwd: Working directory (defaults to config.ROOT)
         stdout_limit: Maximum characters to return from stdout
@@ -278,15 +295,43 @@ def run_command_streamed(
         cwd = config.ROOT
 
     # Validate command before execution
-    is_valid, error_msg, args = _parse_and_validate(cmd)
-
-    if not is_valid:
-        return {
-            "blocked": True,
-            "error": error_msg,
-            "cmd": cmd,
-            "rc": -1,
-        }
+    if isinstance(cmd, list):
+        if not cmd:
+            return {"blocked": True, "error": "empty command", "cmd": str(cmd), "rc": -1}
+        
+        args = [str(arg) for arg in cmd]
+        for arg in args:
+            if FORBIDDEN_RE.search(arg):
+                return {
+                    "blocked": True,
+                    "error": f"shell metacharacters not allowed in command part: {arg}",
+                    "cmd": " ".join(args),
+                    "rc": -1,
+                }
+        
+        if any(tok in FORBIDDEN_TOKENS for tok in args):
+            return {
+                "blocked": True,
+                "error": "shell operators not allowed in arguments",
+                "cmd": " ".join(args),
+                "rc": -1,
+            }
+        
+        resolved = _resolve_command(args[0])
+        if resolved:
+            args[0] = resolved
+        
+        original_cmd_str = " ".join(cmd)
+    else:
+        is_valid, error_msg, args = _parse_and_validate(cmd)
+        if not is_valid:
+            return {
+                "blocked": True,
+                "error": error_msg,
+                "cmd": cmd,
+                "rc": -1,
+            }
+        original_cmd_str = cmd
 
     # Create temporary files for output streaming
     import tempfile
@@ -363,7 +408,7 @@ def run_command_streamed(
             "rc": proc.returncode,
             "stdout": stdout_data,
             "stderr": stderr_data,
-            "cmd": cmd,
+            "cmd": original_cmd_str,
             "interrupted": get_escape_interrupt(),
         }
 

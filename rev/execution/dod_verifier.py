@@ -10,9 +10,11 @@ from typing import List, Dict, Any, Optional
 from pathlib import Path
 import subprocess
 import re
+import json
 
 from rev.models.dod import DefinitionOfDone, Deliverable, DeliverableType
 from rev.models.task import Task
+from rev.tools.command_runner import run_command_safe
 
 
 @dataclass
@@ -263,16 +265,14 @@ def _verify_playwright_test(
     cmd = deliverable.command or "npx playwright test"
     
     try:
-        result = subprocess.run(
+        result = run_command_safe(
             cmd,
-            shell=True,
             cwd=workspace_root,
-            capture_output=True,
-            text=True,
             timeout=120
         )
 
-        if result.returncode == 0:
+        rc = result.get("rc", -1)
+        if rc == 0:
             return DeliverableVerificationResult(
                 deliverable=deliverable,
                 passed=True,
@@ -282,8 +282,8 @@ def _verify_playwright_test(
             return DeliverableVerificationResult(
                 deliverable=deliverable,
                 passed=False,
-                message=f"Playwright tests failed (rc={result.returncode})",
-                details={"stderr": result.stderr}
+                message=f"Playwright tests failed (rc={rc})",
+                details={"stderr": result.get("stderr") or result.get("error")}
             )
     except Exception as e:
         return DeliverableVerificationResult(
@@ -430,15 +430,13 @@ def _verify_test_pass(
         )
 
     try:
-        result = subprocess.run(
+        result = run_command_safe(
             deliverable.command,
-            shell=True,
             cwd=workspace_root,
-            capture_output=True,
-            text=True,
             timeout=60
         )
 
+        rc = result.get("rc", -1)
         expected_rc = 0
         if deliverable.expect:
             # Parse expected exit code from expect string
@@ -446,27 +444,21 @@ def _verify_test_pass(
             if match:
                 expected_rc = int(match.group(1))
 
-        if result.returncode == expected_rc:
+        if rc == expected_rc:
             return DeliverableVerificationResult(
                 deliverable=deliverable,
                 passed=True,
-                message=f"Tests passed (exit code: {result.returncode})",
-                details={"stdout": result.stdout[:500], "stderr": result.stderr[:500]}
+                message=f"Tests passed (exit code: {rc})",
+                details={"stdout": (result.get("stdout") or "")[:500], "stderr": (result.get("stderr") or "")[:500]}
             )
         else:
             return DeliverableVerificationResult(
                 deliverable=deliverable,
                 passed=False,
-                message=f"Tests failed (exit code: {result.returncode}, expected: {expected_rc})",
-                details={"stdout": result.stdout[:500], "stderr": result.stderr[:500]}
+                message=f"Tests failed (exit code: {rc}, expected: {expected_rc})",
+                details={"stdout": (result.get("stdout") or "")[:500], "stderr": (result.get("stderr") or result.get("error") or "")[:500]}
             )
 
-    except subprocess.TimeoutExpired:
-        return DeliverableVerificationResult(
-            deliverable=deliverable,
-            passed=False,
-            message="Test command timed out (60s)"
-        )
     except Exception as e:
         return DeliverableVerificationResult(
             deliverable=deliverable,
@@ -508,19 +500,18 @@ def _verify_syntax_valid(
             continue
 
         try:
-            result = subprocess.run(
+            result = run_command_safe(
                 ["python", "-m", "compileall", str(file_path)],
-                capture_output=True,
-                text=True,
-                timeout=10
+                timeout=10,
+                cwd=workspace_root
             )
 
-            if result.returncode != 0:
+            if result.get("rc") != 0:
                 return DeliverableVerificationResult(
                     deliverable=deliverable,
                     passed=False,
                     message=f"Syntax error in {path_str}",
-                    details={"stderr": result.stderr}
+                    details={"stderr": result.get("stderr") or result.get("error")}
                 )
 
         except Exception as e:
@@ -551,32 +542,30 @@ def _verify_runtime_check(
         )
 
     try:
-        result = subprocess.run(
+        result = run_command_safe(
             deliverable.command,
-            shell=True,
             cwd=workspace_root,
-            capture_output=True,
-            text=True,
             timeout=30
         )
 
+        rc = result.get("rc", -1)
         expected_rc = 0
         if deliverable.expect:
             match = re.search(r'exit.*?code.*?==\s*(\d+)', deliverable.expect)
             if match:
                 expected_rc = int(match.group(1))
 
-        if result.returncode == expected_rc:
+        if rc == expected_rc:
             return DeliverableVerificationResult(
                 deliverable=deliverable,
                 passed=True,
-                message=f"Runtime check passed (exit code: {result.returncode})"
+                message=f"Runtime check passed (exit code: {rc})"
             )
         else:
             return DeliverableVerificationResult(
                 deliverable=deliverable,
                 passed=False,
-                message=f"Runtime check failed (exit code: {result.returncode}, expected: {expected_rc})"
+                message=f"Runtime check failed (exit code: {rc}, expected: {expected_rc})"
             )
 
     except Exception as e:
@@ -604,15 +593,13 @@ def _verify_imports_work(
     module_name = deliverable.path.replace("/", ".").replace("\\", ".").replace(".py", "")
 
     try:
-        result = subprocess.run(
+        result = run_command_safe(
             ["python", "-c", f"import {module_name}"],
             cwd=workspace_root,
-            capture_output=True,
-            text=True,
             timeout=10
         )
 
-        if result.returncode == 0:
+        if result.get("rc") == 0:
             return DeliverableVerificationResult(
                 deliverable=deliverable,
                 passed=True,
@@ -623,7 +610,7 @@ def _verify_imports_work(
                 deliverable=deliverable,
                 passed=False,
                 message=f"Import failed: {module_name}",
-                details={"stderr": result.stderr}
+                details={"stderr": result.get("stderr") or result.get("error")}
             )
 
     except Exception as e:
