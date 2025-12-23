@@ -133,6 +133,9 @@ SECURITY-MINDED CODING (CRITICAL):
 - Avoid insecure practices like `eval()`, `exec()`, or unsanitized shell command execution.
 - If creating a "password" field, it should be treated as sensitive (e.g., hashed/salted if for storage, or masked/secure-typed if for UI).
 
+DEPENDENCY MANAGEMENT:
+- If you modify `package.json`, `requirements.txt`, or other manifest files, ensure the plan includes an installation step. If it doesn't, mention it in your task completion summary.
+
 IMPORT STRATEGY (CRITICAL):
 - If you have just split a module into a package (a directory with `__init__.py` exporting symbols), STOP and THINK.
 - Existing imports like `import package` or `from package import Symbol` are often STILL VALID because the `__init__.py` exports them.

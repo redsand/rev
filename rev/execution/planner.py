@@ -126,6 +126,7 @@ Output format (strict):
 Guidance:
 - Put review tasks first (find existing implementations and patterns).
 - For multi-feature work: one implementation task per feature with SPECIFIC names.
+- DEPENDENCY MANAGEMENT: If you add new project dependencies (to `package.json`, `requirements.txt`, `go.mod`, etc.), you MUST add a task to INSTALL them using the appropriate tool (`npm install`, `pip install`, etc.).
 - For code changes: include at least one test task and name the command when possible.
 - If a task creates a new file, the description must say why reuse was not possible.
 - When in doubt, create review tasks instead of calling more tools.
@@ -147,10 +148,12 @@ You are planning a CODE + TEST change to this repository.
 In addition to the general planning rules above, you MUST:
 
 1. Identify the specific files and modules you will touch.
-2. For every non-trivial code change ("edit" or "add"):
+2. If you modify dependency manifests (`package.json`, `requirements.txt`, `setup.py`, `pyproject.toml`, `go.mod`, etc.):
+   - Add a task to INSTALL the new dependencies (e.g., `npm install`, `pip install -r requirements.txt`).
+3. For every non-trivial code change ("edit" or "add"):
    - Add at least one task to CREATE or UPDATE automated tests.
    - Add at least one task to RUN the relevant test command.
-3. Prefer many small, atomic tasks over a few large ones.
+4. Prefer many small, atomic tasks over a few large ones.
 
 TEST-DRIVEN DEVELOPMENT (TDD) MANDATORY WORKFLOW:
 For any new feature or bug fix, your plan MUST follow this order:
