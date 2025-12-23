@@ -574,6 +574,16 @@ class ExecutionPlan:
             List of validation steps
         """
         steps = []
+        
+        # Identify project type for better command suggestions
+        from rev.execution.quick_verify import _detect_project_type
+        project_type = _detect_project_type(config.ROOT)
+        
+        test_cmd = "pytest / npm test"
+        if project_type == "python":
+            test_cmd = "pytest"
+        elif project_type in ("node", "vue", "react", "nextjs"):
+            test_cmd = "npm test"
 
         # Common validation
         steps.append("Check for syntax errors")
@@ -583,7 +593,7 @@ class ExecutionPlan:
             steps.append("Verify imports and dependencies")
 
         if task.action_type in ["add", "edit", "refactor", "create", "delete", "rename"]:
-            steps.append("Run test suite: pytest / npm test")
+            steps.append(f"Run test suite: {test_cmd}")
             steps.append("Check for failing tests")
 
         # Specific validations

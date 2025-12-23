@@ -1512,34 +1512,41 @@ class Orchestrator:
         if "CANNOT_DECOMPOSE" in response_content.upper():
             return None
 
-        # Try to parse the decomposed task format [ACTION_TYPE] description
-        match = re.match(r"[\s]*\[(.*?)\]\s*(.*)", response_content)
+        # Robust parsing: find the first instance of [ACTION_TYPE] anywhere in the response
+        match = re.search(r"\[([A-Z_]+)\]\s*(.*)", response_content, re.DOTALL)
         if match:
+            action_raw = match.group(1)
+            description = match.group(2).strip()
+            
+            # Clean up: if there's a second action block, stop there
+            next_action_pattern = r'\[[A-Z_]+\]'
+            match_next = re.search(next_action_pattern, description)
+            if match_next:
+                description = description[:match_next.start()].strip()
+
             action_type = normalize_action_type(
-                match.group(1),
+                action_raw,
                 available_actions=AgentRegistry.get_registered_action_types(),
             )
-            description = match.group(2).strip()
 
-            # Clean up malformed LLM output that contains multiple actions concatenated
-            if '[' in description:
-                bracket_idx = description.find('[')
-                if bracket_idx > 0:
-                    description = description[:bracket_idx].strip()
-
-            # Clean up trailing brackets
-            description = re.sub(r'\]$', '', description).strip()
-
-            print(f"\n  [DECOMPOSITION] LLM suggested decomposition:")
+            print(f"\n  [DECOMPOSITION] Parsed suggested subtask:")
             print(f"    Action: {action_type}")
-            print(f"    Task: {description}")
+            print(f"    Task: {description[:100]}...")
             return Task(description=description, action_type=action_type)
         else:
-            # If LLM didn't follow format, create a generic refactor task with its suggestion
-            print(f"\n  [DECOMPOSITION] LLM suggestion: {response_content[:100]}")
+            # Fallback: if no brackets found, try to find keywords or use the first line
+            lines = [l.strip() for l in response_content.splitlines() if l.strip()]
+            first_meaningful = ""
+            for line in lines:
+                if not any(kw in line.lower() for kw in ["yes", "decompose", "fail", "error", "subtask"]):
+                    first_meaningful = line
+                    break
+            
+            desc = first_meaningful or (lines[0] if lines else response_content)
+            print(f"\n  [DECOMPOSITION] Fallback suggestion: {desc[:100]}...")
             return Task(
-                description=response_content,
-                action_type="refactor"
+                description=desc,
+                action_type="edit" # Default to edit for repair
             )
 
     def _determine_next_action(self, user_request: str, work_summary: str, coding_mode: bool, iteration: int = 1, failure_notes: str = "", path_hints: str = "", agent_notes: str = "") -> Optional[Task]:
