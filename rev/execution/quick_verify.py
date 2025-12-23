@@ -994,6 +994,13 @@ def _ensure_tool_available(cmd: str) -> bool:
 
         if base_cmd in pkg_map:
             install_cmd = pkg_map[base_cmd]
+            
+            # For Node tools, ensure package.json exists if we're doing a local install
+            if base_cmd in ("eslint", "tsc") or (base_cmd == "npx" and len(args) > 1 and args[1] in ("eslint", "tsc")):
+                if not (config.ROOT / "package.json").exists():
+                    print("  [i] package.json missing, initializing with 'npm init -y'...")
+                    execute_tool("run_cmd", {"cmd": "npm init -y", "timeout": 30})
+
             print(f"  [i] Tool '{base_cmd}' not found, attempting auto-install: {install_cmd}...")
             install_res = execute_tool("run_cmd", {"cmd": install_cmd, "timeout": 300})
             try:
@@ -1008,6 +1015,25 @@ def _ensure_tool_available(cmd: str) -> bool:
     except Exception as e:
         print(f"  [!] Error checking/installing tool '{cmd}': {e}")
         return False
+
+
+def _extract_error(res: Dict[str, Any], default: str = "Unknown error") -> str:
+    """Extract and truncate error message from tool result, with a broad recovery hint."""
+    msg = res.get("stderr", "") or res.get("stdout", "") or default
+    msg = msg.strip()
+    
+    # Generic, broad recovery hint covering config, dependencies, and environment
+    hint = (
+        "\n\n[RECOVERY HINT] Analyze the output above. If it indicates a missing configuration file "
+        "(e.g., eslint.config.js, pyproject.toml, tsconfig.json), a missing dependency, or an "
+        "uninitialized environment, your next step should be to fix the environment (e.g., "
+        "create the config file, install the package, or initialize the project) before retrying."
+    )
+
+    if len(msg) > 500:
+        msg = msg[:497] + "..."
+    
+    return msg + hint
 
 
 def _run_validation_command(cmd: str, *, use_tests_tool: bool = False, timeout: int | None = None) -> Dict[str, Any]:
@@ -1166,7 +1192,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
         if build_res.get("rc", 0) != 0:
             return VerificationResult(
                 passed=False,
-                message=f"Verification failed: build command '{custom_build_cmd}' failed",
+                message=f"Verification failed: build command '{custom_build_cmd}' failed. Error: {_extract_error(build_res)}",
                 details={"strict": strict_details},
                 should_replan=True,
             )
@@ -1185,7 +1211,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
             if compile_res.get("blocked") or compile_res.get("rc", 1) != 0:
                 return VerificationResult(
                     passed=False,
-                    message="Verification failed: compileall errors",
+                    message=f"Verification failed: compileall errors. Error: {_extract_error(compile_res)}",
                     details={"strict": strict_details},
                     should_replan=True,
                 )
@@ -1225,7 +1251,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
             else:
                 return VerificationResult(
                     passed=False,
-                    message="Verification failed: pytest errors",
+                    message=f"Verification failed: pytest errors. Error: {_extract_error(pytest_res)}",
                     details={"strict": strict_details},
                     should_replan=True,
                 )
@@ -1247,13 +1273,12 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
                 if rc is None:
                     rc = 0 if res.get("blocked") else 1
                 if not res.get("blocked") and rc not in (0, None):
-                    if rc != 127:
-                        return VerificationResult(
-                            passed=False,
-                            message=f"Verification failed: {label} errors",
-                            details={"strict": strict_details},
-                            should_replan=True,
-                        )
+                    return VerificationResult(
+                        passed=False,
+                        message=f"Verification failed: {label} errors. Error: {_extract_error(res)}",
+                        details={"strict": strict_details},
+                        should_replan=True,
+                    )
 
     # -------------------------------------------------------------------------
     # NODE / VUE / REACT VERIFICATION
@@ -1270,10 +1295,10 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
                 cmd = f"node --check {quote_cmd_arg(str(js_file))}"
                 res = _run_validation_command(cmd, timeout=30)
                 strict_details[f"syntax_{js_file.name}"] = res
-                if not res.get("blocked") and res.get("rc", 1) != 0 and res.get("rc") != 127:
+                if not res.get("blocked") and res.get("rc", 1) != 0:
                     return VerificationResult(
                         passed=False,
-                        message=f"Syntax error in {js_file.name}",
+                        message=f"Syntax error in {js_file.name}. Error: {_extract_error(res)}",
                         details={"strict": strict_details},
                         should_replan=True
                     )
@@ -1286,15 +1311,11 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
              res = _run_validation_command(cmd, timeout=60)
              strict_details["eslint"] = res
              rc = res.get("rc")
-             if rc == 127:
-                  strict_details["eslint_note"] = "eslint not installed (rc=127) - skipped"
-             elif not res.get("blocked") and rc is not None and rc != 0:
-                  error_msg = res.get("stderr", "") or res.get("stdout", "") or "Unknown linting error"
-                  if len(error_msg) > 300:
-                      error_msg = error_msg[:297] + "..."
+             if not res.get("blocked") and rc is not None and rc != 0:
+                  error_msg = _extract_error(res, "Unknown linting error")
                   return VerificationResult(
                         passed=False,
-                        message=f"Linting failed: {error_msg.strip()}",
+                        message=f"Linting failed: {error_msg}",
                         details={"strict": strict_details},
                         should_replan=True
                     )
@@ -1313,10 +1334,10 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
                     cmd = "npx vue-tsc --noEmit"
                     res = _run_validation_command(cmd, timeout=120)
                     strict_details["vue-tsc"] = res
-                    if not res.get("blocked") and res.get("rc", 1) != 0 and res.get("rc") != 127:
+                    if not res.get("blocked") and res.get("rc", 1) != 0:
                          return VerificationResult(
                             passed=False,
-                            message="Vue type check failed",
+                            message=f"Vue type check failed. Error: {_extract_error(res)}",
                             details={"strict": strict_details},
                             should_replan=True
                         )
@@ -1325,6 +1346,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
         # Look for test files in the paths
         test_touched = any("test" in p.name or "spec" in p.name for p in paths)
         if test_touched or mode == "strict":
+            # ... (rest of test detection logic)
             # Try to detect test runner
             test_cmd = "npm test"
             # Check package.json for specific test scripts
@@ -1384,10 +1406,10 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
                 strict_details["npm_test"] = res
                 # Ignore rc if no tests found?
                 # Vitest returns 1 if no tests found sometimes?
-                if not res.get("blocked") and res.get("rc", 1) != 0 and res.get("rc") != 127:
+                if not res.get("blocked") and res.get("rc", 1) != 0:
                      return VerificationResult(
                         passed=False,
-                        message="Frontend tests failed",
+                        message=f"Frontend tests failed. Error: {_extract_error(res)}",
                         details={"strict": strict_details},
                         should_replan=True
                     )
@@ -1398,7 +1420,12 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
         compile_res = _run_validation_command("go build ./...", timeout=120)
         strict_details["go_build"] = compile_res
         if compile_res.get("rc", 0) != 0:
-            return VerificationResult(passed=False, message="Go build failed", details={"strict": strict_details}, should_replan=True)
+            return VerificationResult(
+                passed=False,
+                message=f"Go build failed. Error: {_extract_error(compile_res)}",
+                details={"strict": strict_details},
+                should_replan=True
+            )
         
         # 2. Tests
         if mode == "strict" or custom_test_cmd:
@@ -1406,7 +1433,12 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
             test_res = _run_validation_command(cmd, use_tests_tool=True, timeout=120)
             strict_details["go_test"] = test_res
             if test_res.get("rc", 0) != 0:
-                return VerificationResult(passed=False, message="Go tests failed", details={"strict": strict_details}, should_replan=True)
+                return VerificationResult(
+                    passed=False,
+                    message=f"Go tests failed. Error: {_extract_error(test_res)}",
+                    details={"strict": strict_details},
+                    should_replan=True
+                )
 
     # 4. RUST
     elif project_type == "rust":
@@ -1414,7 +1446,12 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
         compile_res = _run_validation_command("cargo check", timeout=300)
         strict_details["cargo_check"] = compile_res
         if compile_res.get("rc", 0) != 0:
-            return VerificationResult(passed=False, message="Cargo check failed", details={"strict": strict_details}, should_replan=True)
+            return VerificationResult(
+                passed=False,
+                message=f"Cargo check failed. Error: {_extract_error(compile_res)}",
+                details={"strict": strict_details},
+                should_replan=True
+            )
             
         # 2. Tests
         if mode == "strict" or custom_test_cmd:
@@ -1422,21 +1459,36 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
             test_res = _run_validation_command(cmd, use_tests_tool=True, timeout=300)
             strict_details["cargo_test"] = test_res
             if test_res.get("rc", 0) != 0:
-                return VerificationResult(passed=False, message="Cargo tests failed", details={"strict": strict_details}, should_replan=True)
+                return VerificationResult(
+                    passed=False,
+                    message=f"Cargo tests failed. Error: {_extract_error(test_res)}",
+                    details={"strict": strict_details},
+                    should_replan=True
+                )
 
     # 5. C# / .NET
     elif project_type == "csharp":
         compile_res = _run_validation_command("dotnet build", timeout=180)
         strict_details["dotnet_build"] = compile_res
         if compile_res.get("rc", 0) != 0:
-            return VerificationResult(passed=False, message="Dotnet build failed", details={"strict": strict_details}, should_replan=True)
+            return VerificationResult(
+                passed=False,
+                message=f"Dotnet build failed. Error: {_extract_error(compile_res)}",
+                details={"strict": strict_details},
+                should_replan=True
+            )
             
         if mode == "strict" or custom_test_cmd:
             cmd = custom_test_cmd or "dotnet test"
             test_res = _run_validation_command(cmd, use_tests_tool=True, timeout=180)
             strict_details["dotnet_test"] = test_res
             if test_res.get("rc", 0) != 0:
-                return VerificationResult(passed=False, message="Dotnet tests failed", details={"strict": strict_details}, should_replan=True)
+                return VerificationResult(
+                    passed=False,
+                    message=f"Dotnet tests failed. Error: {_extract_error(test_res)}",
+                    details={"strict": strict_details},
+                    should_replan=True
+                )
 
     return strict_details
 
@@ -1532,9 +1584,6 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
         # Handle pytest exit code 4 (usage error/no tests in older versions) as pass
         if label == "pytest" and rc == 4:
             results[label] = {**res, "note": "No tests collected (rc=4) - treated as pass"}
-        # Handle command not found (rc=127) as warning but not failure
-        elif rc == 127:
-            results[label] = {**res, "note": f"Tool '{label}' not installed (rc=127) - skipped"}
         # Handle exit code 5 (no tests collected) as INCONCLUSIVE unless explicitly allowed
         elif label == "pytest" and rc == 5:
             if _no_tests_expected(task):
@@ -1547,14 +1596,10 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
                     should_replan=True,
                 )
         elif res.get("blocked") or (rc is not None and rc not in (0, 4)):
-            # Extract error message for better feedback
-            error_msg = res.get("stderr", "") or res.get("stdout", "") or "Unknown error"
-            if len(error_msg) > 300:
-                error_msg = error_msg[:297] + "..."
-            
+            error_msg = _extract_error(res)
             return VerificationResult(
                 passed=False,
-                message=f"Validation step failed: {label}. Error: {error_msg.strip()}",
+                message=f"Validation step failed: {label}. Error: {error_msg}",
                 details={"validation": results, "failed_step": label},
                 should_replan=True,
             )

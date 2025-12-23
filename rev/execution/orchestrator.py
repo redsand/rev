@@ -75,13 +75,14 @@ from difflib import SequenceMatcher
 
 def _format_verification_feedback(result: VerificationResult) -> str:
     """Format verification result for LLM feedback."""
-    feedback = result.message or "Verification failed"
+    feedback = f"VERIFICATION FAILED: {result.message or 'No specific error message provided.'}"
     
     details = result.details or {}
     
     # Extract validation command outputs if present (from quick_verify.py)
     validation = details.get("validation") or details.get("strict")
     if isinstance(validation, dict):
+        feedback += "\n\n--- DETAILED COMMAND OUTPUTS ---"
         for label, res in validation.items():
             if not isinstance(res, dict):
                 continue
@@ -89,7 +90,7 @@ def _format_verification_feedback(result: VerificationResult) -> str:
             if rc is not None and rc != 0:
                 stdout = (res.get("stdout") or "").strip()
                 stderr = (res.get("stderr") or "").strip()
-                feedback += f"\n\n--- {label} failure (exit code: {rc}) ---"
+                feedback += f"\n\n[FAILED STEP]: {label} (exit code: {rc})"
                 if stderr:
                     # Take last 20 lines of stderr for context
                     stderr_lines = stderr.splitlines()
@@ -1924,6 +1925,14 @@ class Orchestrator:
 
                 # Calculate repetitive failure notes for the planner
                 failure_notes = []
+
+                # Add the most recent failure prominently if the last task failed
+                if completed_tasks_log:
+                    last_entry = completed_tasks_log[-1]
+                    if last_entry.startswith('[FAILED]'):
+                        failure_notes.append("❌ LAST TASK FAILED:")
+                        failure_notes.append(f"  {last_entry}")
+                        failure_notes.append("")
 
                 # P0-2: Add blocked actions to failure notes
                 if self.context:
