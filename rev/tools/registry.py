@@ -505,82 +505,82 @@ def _format_description(name: str, args: Dict[str, Any]) -> str:
         "convert_env_to_json": f"Converting .env to JSON: {args.get('env_path', '')}",
 
         # Git operations
-        "git_diff": f"Showing git diff: {args.get('pathspec', '.')}",
-        "apply_patch": f"Applying patch{' (dry run)' if args.get('dry_run') else ''}",
-        "git_add": f"Adding files to staging: {args.get('files', '.')}",
-        "git_commit": f"Creating git commit{' (with auto-add)' if args.get('add_files') else ''}: {args.get('message', '')[:50]}{'...' if len(args.get('message', '')) > 50 else ''}",
-        "git_status": "Getting git status",
-        "git_log": f"Viewing git log ({args.get('count', 10)} commits)",
-        "git_branch": f"Git branch: {args.get('action', 'list')}" + (f" {args.get('branch_name', '')}" if args.get('branch_name') else ""),
-        "run_cmd": f"Running command: {args.get('cmd', '')}",
-        "run_tests": f"Running tests: {args.get('cmd', 'pytest -q')}",
-        "get_repo_context": f"Getting repository context ({args.get('commits', 6)} commits)",
+        "git_diff": f"diff {args.get('pathspec', '.')}",
+        "apply_patch": f"apply patch{' (dry run)' if args.get('dry_run') else ''}",
+        "git_add": f"add {args.get('files', '.')}",
+        "git_commit": f"commit: {args.get('message', '')[:40]}{'...' if len(args.get('message', '')) > 40 else ''}",
+        "git_status": "git status",
+        "git_log": f"git log ({args.get('count', 10)})",
+        "git_branch": f"branch: {args.get('action', 'list')}" + (f" {args.get('branch_name', '')}" if args.get('branch_name') else ""),
+        "run_cmd": f"run: {args.get('cmd', '')[:60]}...",
+        "run_tests": f"test: {args.get('cmd', 'pytest')[:60]}...",
+        "get_repo_context": "repo context",
 
         # Utility tools
-        "install_package": f"Installing package: {args.get('package', '')}",
-        "web_fetch": f"Fetching URL: {args.get('url', '')}",
-        "execute_python": "Executing Python code",
-        "run_python_diagnostic": f"Running Python diagnostic: {args.get('description', 'runtime test')}",
-        "inspect_module_hierarchy": f"Inspecting module hierarchy: {args.get('module_path', '')}",
-        "get_system_info": "Getting system information",
+        "install_package": f"install {args.get('package', '')}",
+        "web_fetch": f"fetch {args.get('url', '')[:50]}...",
+        "execute_python": "exec python",
+        "run_python_diagnostic": f"diag: {args.get('description', 'runtime test')}",
+        "inspect_module_hierarchy": f"inspect: {args.get('module_path', '')}",
+        "get_system_info": "sys info",
 
         # SSH operations
-        "ssh_connect": f"Connecting via SSH: {args.get('username', '')}@{args.get('host', '')}",
-        "ssh_exec": f"Executing SSH command on {args.get('connection_id', '')}: {args.get('command', '')}",
-        "ssh_copy_to": f"Copying to SSH server: {args.get('local_path', '')} → {args.get('remote_path', '')}",
-        "ssh_copy_from": f"Copying from SSH server: {args.get('remote_path', '')} → {args.get('local_path', '')}",
-        "ssh_disconnect": f"Disconnecting SSH: {args.get('connection_id', '')}",
-        "ssh_list_connections": "Listing SSH connections",
+        "ssh_connect": f"ssh connect: {args.get('username', '')}@{args.get('host', '')}",
+        "ssh_exec": f"ssh exec: {args.get('command', '')[:50]}...",
+        "ssh_copy_to": f"ssh upload: {args.get('local_path', '')}",
+        "ssh_copy_from": f"ssh download: {args.get('remote_path', '')}",
+        "ssh_disconnect": "ssh disconnect",
+        "ssh_list_connections": "ssh list",
 
         # MCP tools
-        "mcp_add_server": f"Adding MCP server: {args.get('name', '')}",
-        "mcp_list_servers": "Listing MCP servers",
-        "mcp_call_tool": f"Calling MCP tool: {args.get('server', '')}.{args.get('tool', '')}",
+        "mcp_add_server": f"mcp add: {args.get('name', '')}",
+        "mcp_list_servers": "mcp list",
+        "mcp_call_tool": f"mcp call: {args.get('server', '')}.{args.get('tool', '')}",
 
         # Static analysis tools
-        "analyze_ast_patterns": f"Analyzing AST patterns: {args.get('path', '.')}",
-        "run_pylint": f"Running pylint on: {args.get('path', '.')}",
-        "run_mypy": f"Running mypy type check on: {args.get('path', '.')}",
-        "analyze_static_types": f"Running static type checks on: {args.get('paths', args.get('path', '.'))}",
-        "run_linters": f"Running aggregated linters on: {args.get('paths', args.get('path', '.'))}",
-        "run_type_checks": f"Running aggregated type checks on: {args.get('paths', args.get('path', '.'))}",
-        "run_property_tests": f"Running property tests on: {args.get('test_paths', args.get('path', '.'))}",
-        "generate_property_tests": f"Generating property tests for: {args.get('targets', [])}",
-        "check_contracts": f"Checking contracts in: {args.get('paths', args.get('path', '.'))}",
-        "detect_flaky_tests": f"Detecting flaky tests (pattern: {args.get('pattern', '')})",
-        "compare_behavior_with_baseline": f"Comparing behavior vs {args.get('baseline_ref', 'origin/main')} on {args.get('test_selector', 'selected tests')}",
-        "analyze_runtime_logs": f"Analyzing runtime logs: {args.get('log_paths', [])}",
-        "analyze_performance_regression": f"Analyzing performance vs baseline using: {args.get('benchmark_cmd', '')}",
-        "analyze_error_traces": f"Analyzing error traces from: {args.get('log_paths', [])}",
-        "check_dependency_vulnerabilities": f"Scanning dependency vulnerabilities ({args.get('language', 'auto')})",
-        "check_dependency_updates": f"Checking dependency updates ({args.get('language', 'auto')})",
-        "update_dependencies": f"Updating dependencies ({args.get('language', 'auto')})",
-        "scan_dependencies_vulnerabilities": f"Scanning dependency vulnerabilities ({args.get('language', 'auto')})",
-        "bisect_test_failure": f"Bisecting failing test: {args.get('test_command', '')}",
-        "generate_repro_case": f"Generating repro case at: {args.get('target_path', 'tests/regressions/test_repro_case.py')}",
-        "validate_ci_config": f"Validating CI configs: {args.get('paths', [])}",
-        "verify_migrations": f"Verifying migrations at: {args.get('path', 'migrations')}",
-        "run_radon_complexity": f"Analyzing code complexity: {args.get('path', '.')}",
-        "find_dead_code": f"Finding dead code in: {args.get('path', '.')}",
-        "run_all_analysis": f"Running full analysis suite on: {args.get('path', '.')}",
-        "analyze_code_structures": f"Analyzing code structures: {args.get('path', '.')}",
-        "check_structural_consistency": f"Checking structural consistency: {args.get('path', '.')}",
-        "scan_security_issues": f"Scanning security issues in: {args.get('paths', args.get('path', '.'))}",
-        "detect_secrets": f"Detecting secrets in: {args.get('path', '.')}",
-        "check_license_compliance": f"Checking license compliance in: {args.get('path', '.')}",
-        "split_python_module_classes": f"Splitting classes from {args.get('source_path', '')} into package: {args.get('target_directory', '')}",
+        "analyze_ast_patterns": f"ast: {args.get('path', '.')}",
+        "run_pylint": f"pylint: {args.get('path', '.')}",
+        "run_mypy": f"mypy: {args.get('path', '.')}",
+        "analyze_static_types": f"types: {args.get('paths', args.get('path', '.'))}",
+        "run_linters": f"lint: {args.get('paths', args.get('path', '.'))}",
+        "run_type_checks": f"type check: {args.get('paths', args.get('path', '.'))}",
+        "run_property_tests": f"prop test: {args.get('test_paths', args.get('path', '.'))}",
+        "generate_property_tests": f"gen prop test: {args.get('targets', [])}",
+        "check_contracts": f"contracts: {args.get('paths', args.get('path', '.'))}",
+        "detect_flaky_tests": f"flaky: {args.get('pattern', '')}",
+        "compare_behavior_with_baseline": f"diff behavior: {args.get('baseline_ref', 'origin/main')}",
+        "analyze_runtime_logs": f"logs: {args.get('log_paths', [])}",
+        "analyze_performance_regression": f"perf: {args.get('benchmark_cmd', '')}",
+        "analyze_error_traces": f"traces: {args.get('log_paths', [])}",
+        "check_dependency_vulnerabilities": f"audit: {args.get('language', 'auto')}",
+        "check_dependency_updates": f"updates: {args.get('language', 'auto')}",
+        "update_dependencies": f"update deps: {args.get('language', 'auto')}",
+        "scan_dependencies_vulnerabilities": f"audit: {args.get('language', 'auto')}",
+        "bisect_test_failure": f"bisect: {args.get('test_command', '')}",
+        "generate_repro_case": f"repro: {args.get('target_path', 'tests/regressions/test_repro_case.py')}",
+        "validate_ci_config": f"ci config: {args.get('paths', [])}",
+        "verify_migrations": f"migrations: {args.get('path', 'migrations')}",
+        "run_radon_complexity": f"complexity: {args.get('path', '.')}",
+        "find_dead_code": f"dead code: {args.get('path', '.')}",
+        "run_all_analysis": f"analysis suite: {args.get('path', '.')}",
+        "analyze_code_structures": f"structures: {args.get('path', '.')}",
+        "check_structural_consistency": f"consistency: {args.get('path', '.')}",
+        "scan_security_issues": f"security: {args.get('paths', args.get('path', '.'))}",
+        "detect_secrets": f"secrets: {args.get('path', '.')}",
+        "check_license_compliance": f"license: {args.get('path', '.')}",
+        "split_python_module_classes": f"split: {args.get('source_path', '')}",
 
         # Advanced analysis tools
-        "analyze_test_coverage": f"Analyzing test coverage: {args.get('path', '.')}",
-        "analyze_code_context": f"Analyzing code context: {args.get('file_path', '')}",
-        "find_symbol_usages": f"Finding usages of symbol: {args.get('symbol', '')}",
-        "analyze_dependencies": f"Analyzing dependencies: {args.get('target', '')}",
-        "analyze_semantic_diff": f"Analyzing semantic diff: {args.get('file_path', '')}",
+        "analyze_test_coverage": f"coverage: {args.get('path', '.')}",
+        "analyze_code_context": f"context: {args.get('file_path', '')}",
+        "find_symbol_usages": f"usages: {args.get('symbol', '')}",
+        "analyze_dependencies": f"deps: {args.get('target', '')}",
+        "analyze_semantic_diff": f"semantic diff: {args.get('file_path', '')}",
 
         # Cache operations
-        "get_cache_stats": "Inspecting cache statistics",
-        "clear_caches": f"Clearing caches: {args.get('cache_name', 'all')}",
-        "persist_caches": "Persisting caches to disk",
+        "get_cache_stats": "cache stats",
+        "clear_caches": f"clear cache: {args.get('cache_name', 'all')}",
+        "persist_caches": "persist cache",
     }
 
     # Return the friendly description or fall back to technical format
@@ -772,12 +772,12 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
     from rev.execution.ledger import get_ledger
     ledger = get_ledger()
 
+    from rev.terminal.formatting import colorize, Colors, Symbols
     friendly_desc = _get_friendly_description(name, args)
-    try:
-        print(f"  → {friendly_desc}")
-    except UnicodeEncodeError:
-        # Windows console encoding issue - fallback to ASCII arrow
-        print(f"  -> {friendly_desc}")
+    
+    # Professional tool execution line
+    tool_tag = colorize(f" {Symbols.ARROW} {name}", Colors.BRIGHT_BLACK)
+    print(f"  {tool_tag} {colorize(friendly_desc, Colors.BRIGHT_BLACK)}")
 
     # Get debug logger
     debug_logger = get_logger()

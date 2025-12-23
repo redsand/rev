@@ -70,19 +70,20 @@ from rev.tools.workspace_resolver import resolve_workspace_path
 from rev.core.text_tool_shim import maybe_execute_tool_call_from_text
 from rev.agents.subagent_io import build_subagent_output
 from rev.execution.action_normalizer import normalize_action_type
+from rev.terminal.formatting import colorize, Colors, Symbols
 from difflib import SequenceMatcher
 
 
 def _format_verification_feedback(result: VerificationResult) -> str:
     """Format verification result for LLM feedback."""
-    feedback = f"VERIFICATION FAILED: {result.message or 'No specific error message provided.'}"
+    feedback = f"VERIFICATION FAILED: {result.message or 'Check environment.'}"
     
     details = result.details or {}
     
     # Extract validation command outputs if present (from quick_verify.py)
     validation = details.get("validation") or details.get("strict")
     if isinstance(validation, dict):
-        feedback += "\n\n--- DETAILED COMMAND OUTPUTS ---"
+        feedback += "\n\nDETAILED OUTPUTS:"
         for label, res in validation.items():
             if not isinstance(res, dict):
                 continue
@@ -90,15 +91,11 @@ def _format_verification_feedback(result: VerificationResult) -> str:
             if rc is not None and rc != 0:
                 stdout = (res.get("stdout") or "").strip()
                 stderr = (res.get("stderr") or "").strip()
-                feedback += f"\n\n[FAILED STEP]: {label} (exit code: {rc})"
+                feedback += f"\n- {label} (rc={rc})"
                 if stderr:
-                    # Take last 20 lines of stderr for context
-                    stderr_lines = stderr.splitlines()
-                    feedback += "\nstderr:\n" + "\n".join(stderr_lines[-20:])
+                    feedback += "\n  stderr: " + " ".join(stderr.splitlines()[-3:]) # Last 3 lines
                 elif stdout:
-                    # Take last 20 lines of stdout
-                    stdout_lines = stdout.splitlines()
-                    feedback += "\nstdout:\n" + "\n".join(stdout_lines[-20:])
+                    feedback += "\n  stdout: " + " ".join(stdout.splitlines()[-3:])
                 else:
                     feedback += "\n(No stdout or stderr output captured from command)"
     
@@ -1815,9 +1812,7 @@ class Orchestrator:
         4. Report results
         5. Re-plan if needed
         """
-        print("\n" + "=" * 60)
-        print("CONTINUOUS SUB-AGENT MODE (REPL-Style with Verification)")
-        print("=" * 60)
+        print(f"\n◈ {colorize('Sub-agent Orchestrator', Colors.BRIGHT_CYAN, bold=True)} active")
 
         from rev.execution.ledger import get_ledger
         ledger = get_ledger()
@@ -1860,13 +1855,7 @@ class Orchestrator:
                         action_type="read"
                     )
                     forced_next_task.task_id = 0
-                    print("\n" + "="*70)
-                    print("  🔍 MANDATORY INITIAL WORKSPACE EXAMINATION")
-                    print("="*70)
-                    print("  The agent must first understand what exists in the workspace")
-                    print("  before planning any actions. This prevents blindly creating")
-                    print("  directories or files that may already exist.")
-                    print("="*70 + "\n")
+                    print(f"  {colorize(Symbols.INFO, Colors.BRIGHT_BLUE)} {colorize('Analyzing workspace structure...', Colors.BRIGHT_BLACK)}")
 
             if self.context.resource_budget.is_exceeded() and not budget_warning_shown:
                 exceeded = self.context.resource_budget.get_exceeded_resources()
@@ -1911,12 +1900,16 @@ class Orchestrator:
                             work_summary += "\n"
                         work_summary += "\n"
 
-                    # Then provide last 10 detailed tasks for recent context
-                    if total_tasks > 10:
-                        work_summary += f"Recent Tasks (showing last 10 of {total_tasks}):\n"
+                    # Then provide a condensed view of the history
+                    # Keep the first task (usually workspace examination) and the last 5
+                    if total_tasks > 6:
+                        work_summary += f"\n[History Truncated: showing first task and last 5 of {total_tasks}]\n"
+                        work_summary += f"- {completed_tasks_log[0]}\n"
+                        work_summary += "  ...\n"
+                        work_summary += "\n".join(f"- {log}" for log in completed_tasks_log[-5:])
                     else:
                         work_summary += "All Tasks:\n"
-                    work_summary += "\n".join(f"- {log}" for log in completed_tasks_log[-10:])
+                        work_summary += "\n".join(f"- {log}" for log in completed_tasks_log)
 
                     if hasattr(self, "debug_logger") and self.debug_logger:
                         self.debug_logger.log("orchestrator", "WORK_SUMMARY_GENERATED", {
@@ -1948,7 +1941,7 @@ class Orchestrator:
                 if action_counts:
                     for sig, count in action_counts.items():
                         if count >= 2:
-                            failure_notes.append(f"⚠️ REPETITION WARNING: You have already proposed the action '[{sig}]' {count} times. It is not making forward progress or is failing verification. DO NOT REPEAT IT. Try a different strategy, such as reading the file again to check for subtle syntax errors or using a different tool.")
+                            failure_notes.append(f"⚠️ REPETITION: Action '[{sig}]' proposed {count}x. It is not progressing. DO NOT REPEAT. Try a different tool or inspect code again.")
 
                 failure_notes_str = "\n".join(failure_notes)
                 path_hints = _generate_path_hints(completed_tasks_log)
@@ -1998,11 +1991,11 @@ class Orchestrator:
                     # Grounded Completion Check (Bait Density)
                     is_grounded, grounding_msg = self._is_completion_grounded(completed_tasks_log)
                     if not is_grounded:
-                        print(f"\n  [UCCT] {grounding_msg} Forcing verification.")
+                        print(f"\n  {colorize(Symbols.INFO, Colors.BRIGHT_BLUE)} {colorize(grounding_msg + ' Forcing verification.', Colors.BRIGHT_BLACK)}")
                         forced_next_task = Task(description="Provide concrete evidence of the work completed by running tests and inspecting the modified files.", action_type="test")
                         continue
 
-                    print("\n✅ Planner determined the goal is achieved.")
+                    print(f"\n{colorize(Symbols.CHECK, Colors.BRIGHT_GREEN)} {colorize('Goal achieved.', Colors.BRIGHT_GREEN, bold=True)}")
                     return True
 
                 # FORWARD PROGRESS RULE: Check for redundant actions
@@ -2017,7 +2010,9 @@ class Orchestrator:
                 except Exception:
                     pass
 
-                print(f"  -> Next action: [{next_task.action_type.upper()}] {next_task.description[:80]}")
+                # ACTION LOGGING: Concise and consistent
+                action_type = (next_task.action_type or "general").upper()
+                print(f"\n{colorize(str(iteration), Colors.BRIGHT_BLACK)}. {colorize(action_type, Colors.BRIGHT_CYAN, bold=True)} {next_task.description}")
 
             if config.PREFLIGHT_ENABLED:
                 ok, sem_msgs = _preflight_correct_action_semantics(next_task)
@@ -2334,18 +2329,15 @@ class Orchestrator:
                 }
                 action_type = (next_task.action_type or "").lower()
                 if action_type in verifiable_actions:
-                    print(f"  -> Verifying execution...")
+                    print(f"  {colorize('◌', Colors.BRIGHT_BLACK)} {colorize('Verifying...', Colors.BRIGHT_BLACK)}")
                     verification_result = verify_task_execution(next_task, self.context)
-                    print(f"    {verification_result}")
+                    # Don't print the raw result object, just handle the outcome
                 else:
                     verification_result = VerificationResult(
                         passed=True,
                         message="Verification skipped",
                         details={"action_type": action_type, "skipped": True},
                     )
-                    # Only log skip details when debug logging is enabled.
-                    if self.context and getattr(self.context, "debug", False):
-                        print(f"    {verification_result}")
 
                 # If tests are being skipped because nothing has changed since a failure,
                 # don't treat this as a verification failure (it causes loops). Instead,
@@ -2357,15 +2349,14 @@ class Orchestrator:
                     and verification_result.details.get("blocked") is True
                 ):
                     self.context.set_agent_state("tests_blocked_no_changes", True)
-                    print("  [!] Skipped re-running tests: no code changes since the last failing run.")
+                    print(f"  {colorize(Symbols.WARNING, Colors.BRIGHT_YELLOW)} {colorize('Skipped re-running tests: no code changes detected.', Colors.BRIGHT_BLACK)}")
 
                 if not verification_result.passed:
                     # Verification failed - mark task as failed and mark for re-planning
                     next_task.status = TaskStatus.FAILED
                     next_task.error = _format_verification_feedback(verification_result)
                     execution_success = False
-                    print(f"  [!] Verification failed, marking for re-planning")
-
+                    
                     # Display detailed debug information
                     self._handle_verification_failure(verification_result)
 
@@ -2384,12 +2375,7 @@ class Orchestrator:
 
                         if is_syntax_error and syntax_repair_attempts < 5:
                             # Enter syntax repair mode - give LLM focused attempts to fix
-                            print("\n" + "=" * 70)
-                            print("SYNTAX ERROR RECOVERY MODE")
-                            print("=" * 70)
-                            print(f"Syntax errors detected after {failure_counts[failure_sig]} general attempts.")
-                            print(f"Entering focused syntax repair mode (attempt {syntax_repair_attempts + 1}/5)")
-                            print("=" * 70 + "\n")
+                            print(f"  {colorize(Symbols.WARNING, Colors.BRIGHT_YELLOW)} {colorize('Syntax error detected. Entering focused repair mode (attempt ' + str(syntax_repair_attempts + 1) + '/5)', Colors.BRIGHT_WHITE)}")
 
                             # Increment syntax repair counter
                             self.context.set_agent_state(syntax_repair_key, syntax_repair_attempts + 1)
@@ -2406,38 +2392,21 @@ class Orchestrator:
 
                         elif is_syntax_error and syntax_repair_attempts >= 5:
                             # Exhausted syntax repair attempts - try auto-revert as last resort
-                            print("\n" + "=" * 70)
-                            print("SYNTAX REPAIR EXHAUSTED - ATTEMPTING AUTO-REVERT")
-                            print("=" * 70)
-                            print(f"Failed to fix syntax after {syntax_repair_attempts} focused repair attempts.")
-                            print("Attempting to revert files to restore working state...")
-                            print("=" * 70 + "\n")
+                            print(f"  {colorize(Symbols.CROSS, Colors.BRIGHT_RED)} {colorize('Repair exhausted. Reverting changes...', Colors.BRIGHT_WHITE)}")
 
                             reverted_files = _attempt_git_revert_for_syntax_errors(next_task)
                             if reverted_files:
-                                print("\n" + "=" * 70)
-                                print("SYNTAX ERROR RECOVERY - AUTO REVERT SUCCESSFUL")
-                                print("=" * 70)
-                                print(f"Auto-reverted files to restore working state: {', '.join(reverted_files)}")
-                                print("Code restored to working state. Goal NOT achieved - manual fix required.\n")
+                                print(f"  {colorize(Symbols.CHECK, Colors.BRIGHT_GREEN)} {colorize('Auto-reverted: ' + ', '.join(reverted_files), Colors.BRIGHT_BLACK)}")
                                 # Clear syntax repair counter
                                 self.context.set_agent_state(syntax_repair_key, 0)
                                 return False  # Stop execution, but code is in working state
                             else:
-                                print("\n" + "=" * 70)
-                                print("SYNTAX ERROR RECOVERY - AUTO-REVERT FAILED")
-                                print("=" * 70)
-                                print(f"Auto-revert failed. Manual intervention required.\n")
+                                print(f"  {colorize(Symbols.CROSS, Colors.BRIGHT_RED)} {colorize('Auto-revert failed. Manual intervention required.', Colors.BRIGHT_RED)}")
 
                         # Non-syntax errors or revert failed - use original circuit breaker
                         self.context.set_agent_state("no_retry", True)
                         self.context.add_error("Circuit breaker: repeating verification failure")
-                        print("\n" + "=" * 70)
-                        print("CIRCUIT BREAKER - REPEATED VERIFICATION FAILURE")
-                        print("=" * 70)
-                        print(f"Repeated failure {failure_counts[failure_sig]}x: {first_line}")
-                        print("Blocking issue: verification is failing the same way repeatedly; refusing to loop.")
-                        print("Next step: fix the blocking issue shown above, then re-run.\n")
+                        print(f"  {colorize(Symbols.CROSS, Colors.BRIGHT_RED)} {colorize('Circuit Breaker: repeated failure ' + str(failure_counts[failure_sig]) + 'x. Stopping loop.', Colors.BRIGHT_RED)}")
                         return False
 
                     # Try to decompose the failed task into more granular steps.
@@ -2578,30 +2547,17 @@ class Orchestrator:
 
     def _handle_verification_failure(self, verification_result: VerificationResult):
         """Handle and display detailed information about verification failures."""
-        print("\n" + "=" * 70)
-        print("VERIFICATION FAILURE - DEBUG INFORMATION")
-        print("=" * 70)
+        print(f"\n{colorize('  ' + Symbols.CROSS + ' Verification Details', Colors.BRIGHT_RED, bold=True)}")
 
         # Display main message (which includes issue descriptions)
         if verification_result.message:
-            print(f"\n{verification_result.message}")
+            print(f"    {colorize(verification_result.message, Colors.BRIGHT_RED)}")
 
         # Display debug information if available
         if verification_result.details and "debug" in verification_result.details:
             debug_info = verification_result.details["debug"]
-            print("\nDebug Information:")
-            print("-" * 70)
             for key, value in debug_info.items():
-                if isinstance(value, list):
-                    print(f"  {key}:")
-                    for item in value:
-                        print(f"    - {item}")
-                elif isinstance(value, dict):
-                    print(f"  {key}:")
-                    for k, v in value.items():
-                        print(f"    {k}: {v}")
-                else:
-                    print(f"  {key}: {value}")
+                print(f"    {colorize(key + ':', Colors.BRIGHT_BLACK)} {value}")
 
         # Display strict/validation command outputs (compileall/pytest/etc)
         details = verification_result.details or {}
@@ -2609,28 +2565,21 @@ class Orchestrator:
             block = details.get(block_key)
             if not isinstance(block, dict) or not block:
                 continue
-            print(f"\n{block_key.upper()} OUTPUTS:")
-            print("-" * 70)
             for label, res in block.items():
                 if not isinstance(res, dict):
                     continue
-                cmd = res.get("cmd")
                 rc = res.get("rc")
                 stdout = (res.get("stdout") or "").strip()
                 stderr = (res.get("stderr") or "").strip()
-                stdout_log = res.get("stdout_log")
-                stderr_log = res.get("stderr_log")
-                print(f"  [{label}] rc={rc} cmd={cmd}")
-                if stdout:
-                    print("    stdout:")
-                    for line in str(stdout).splitlines()[-25:]:
-                        print(f"      {line}")
-                if stderr:
-                    print("    stderr:")
-                    for line in str(stderr).splitlines()[-25:]:
-                        print(f"      {line}")
-                if stdout_log or stderr_log:
-                    print(f"    logs: stdout_log={stdout_log} stderr_log={stderr_log}")
+                
+                if rc is not None and rc != 0:
+                    print(f"    {colorize('[' + label + '] failed (rc=' + str(rc) + ')', Colors.BRIGHT_YELLOW)}")
+                    if stdout:
+                        for line in str(stdout).splitlines()[-5:]: # Only show last 5 lines
+                            print(f"      {colorize('stdout:', Colors.BRIGHT_BLACK)} {line}")
+                    if stderr:
+                        for line in str(stderr).splitlines()[-5:]:
+                            print(f"      {colorize('stderr:', Colors.BRIGHT_BLACK)} {line}")
 
         print("\n" + "=" * 70)
         print("NEXT ACTION: Re-planning with different approach...")

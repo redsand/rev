@@ -62,13 +62,8 @@ class DebuggingAgent(BaseAgent):
     """
 
     def execute(self, task: Task, context: RevContext) -> str:
-        """
-        Executes a debugging task by calling an LLM to generate a tool call.
-        Implements error recovery with intelligent retry logic.
-        """
-        print(f"DebuggingAgent executing task: {task.description}")
-
-        # Track recovery attempts
+        """Execute a debugging task."""
+        # Focus on identifying root cause and proposing a fix
         recovery_attempts = self.increment_recovery_attempts(task, context)
 
         allowed_tool_names = ['write_file', 'replace_in_file', 'read_file', 'search_code', 'rag_search']

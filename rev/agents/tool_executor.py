@@ -78,7 +78,8 @@ class ToolExecutorAgent(BaseAgent):
     """Executes existing tools (distinct from ToolCreationAgent)."""
 
     def execute(self, task: Task, context: RevContext) -> str:
-        print(f"ToolExecutorAgent executing task: {task.description}")
+        """Execute a tool task."""
+        # Find which tool to run based on the description or context
 
         recovery_attempts = self.increment_recovery_attempts(task, context)
 

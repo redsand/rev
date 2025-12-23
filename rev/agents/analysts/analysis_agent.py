@@ -126,11 +126,7 @@ class AnalysisAgent(BaseAgent):
     """
 
     def execute(self, task: Task, context: RevContext) -> str:
-        """
-        Executes an analysis task by calling an LLM to generate a tool call.
-        Implements error recovery with intelligent retry logic.
-        """
-        print(f"AnalysisAgent executing task: {task.description}")
+        """Execute an analysis task."""
 
         # Track recovery attempts
         recovery_attempts = self.increment_recovery_attempts(task, context)

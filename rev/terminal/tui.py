@@ -36,13 +36,52 @@ class TuiStream:
         return False
 
 
-_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_ANSI_RE = re.compile(r"(\x1b\[[0-?]*[ -/]*[@-~])")
 
 
-def _strip_ansi(text: str) -> str:
-    if not text:
-        return ""
-    return _ANSI_RE.sub("", text)
+def _parse_ansi(text: str) -> list[tuple[str, int]]:
+    """Parse string with ANSI codes into segments with curses color pairs."""
+    segments = []
+    parts = _ANSI_RE.split(text)
+    
+    # Default color (pair 0)
+    current_color = 0
+    
+    # Mapping of ANSI color codes to curses color pairs
+    # These pairs must be initialized in _curses_main
+    color_map = {
+        "\x1b[30m": 8,  # Black
+        "\x1b[31m": 1,  # Red
+        "\x1b[32m": 2,  # Green
+        "\x1b[33m": 3,  # Yellow
+        "\x1b[34m": 4,  # Blue
+        "\x1b[35m": 5,  # Magenta
+        "\x1b[36m": 6,  # Cyan
+        "\x1b[37m": 7,  # White
+        "\x1b[90m": 8,  # Bright Black (Gray)
+        "\x1b[91m": 9,  # Bright Red
+        "\x1b[92m": 10, # Bright Green
+        "\x1b[93m": 11, # Bright Yellow
+        "\x1b[94m": 12, # Bright Blue
+        "\x1b[95m": 13, # Bright Magenta
+        "\x1b[96m": 14, # Bright Cyan
+        "\x1b[97m": 15, # Bright White
+        "\x1b[0m": 0,   # Reset
+    }
+
+    for part in parts:
+        if not part:
+            continue
+        if part.startswith("\x1b["):
+            # Update current color if it's a known code
+            if part in color_map:
+                current_color = color_map[part]
+            elif part == "\x1b[1m": # Bold - we handle as attr but keeping it simple for now
+                pass
+        else:
+            segments.append((part, current_color))
+            
+    return segments
 
 
 class TUI:
@@ -57,14 +96,16 @@ class TUI:
         self._input_win = None
         self._log_win = None
         self._input_buffer = ""
+        self._cursor_pos = 0 # Character position in input buffer
+        self._scroll_pos = 0 # Horizontal scroll for input
         self._worker: Optional[threading.Thread] = None
 
     def log(self, text: str) -> None:
         """Queue text for append to scrollback (thread-safe)."""
         if text is None:
             return
-        # Curses cannot render ANSI escape sequences; strip them.
-        text = _strip_ansi(str(text)).replace("\r\n", "\n").replace("\r", "\n")
+        # Keep ANSI for parsing during render
+        text = str(text).replace("\r\n", "\n").replace("\r", "\n")
         for line in text.splitlines():
             self._log_queue.put(line)
 
@@ -75,14 +116,44 @@ class TUI:
         """Start the curses UI and dispatch input lines to on_input."""
 
         def _curses_main(stdscr):
+            # Initialize colors
+            curses.start_color()
+            curses.use_default_colors()
+            
+            # Base colors
+            curses.init_pair(1, curses.COLOR_RED, -1)
+            curses.init_pair(2, curses.COLOR_GREEN, -1)
+            curses.init_pair(3, curses.COLOR_YELLOW, -1)
+            curses.init_pair(4, curses.COLOR_BLUE, -1)
+            curses.init_pair(5, curses.COLOR_MAGENTA, -1)
+            curses.init_pair(6, curses.COLOR_CYAN, -1)
+            curses.init_pair(7, curses.COLOR_WHITE, -1)
+            
+            # Bright colors (if supported, otherwise fallback to base)
+            # 8 is gray/bright black
+            try:
+                curses.init_pair(8, 244, -1) # Dark gray
+                curses.init_pair(9, 196, -1) # Bright red
+                curses.init_pair(10, 46, -1) # Bright green
+                curses.init_pair(11, 226, -1)# Bright yellow
+                curses.init_pair(12, 21, -1) # Bright blue
+                curses.init_pair(13, 201, -1)# Bright magenta
+                curses.init_pair(14, 51, -1) # Bright cyan
+                curses.init_pair(15, 231, -1)# Bright white
+            except:
+                # Fallback for limited terminals
+                for i in range(8, 16):
+                    curses.init_pair(i, (i-8) % 7 + 1, -1)
+
             curses.curs_set(1)
             stdscr.nodelay(True)
+            stdscr.keypad(True) # Enable special keys
             self._screen = stdscr
             self._resize_windows()
             self._render_input()
 
             if initial_input and initial_input.strip():
-                self.log(self.prompt + initial_input)
+                self.log("\x1b[95m" + self.prompt + "\x1b[0m" + initial_input)
                 self._start_worker(on_input, initial_input)
 
             while not self._stop.is_set():
@@ -104,20 +175,49 @@ class TUI:
                 if ch in (curses.KEY_ENTER, 10, 13):
                     line = self._input_buffer
                     self._input_buffer = ""
+                    self._cursor_pos = 0
+                    self._scroll_pos = 0
                     self._render_input()
                     if line.strip():
-                        self.log(self.prompt + line)
+                        # Log with prompt color
+                        self.log("\x1b[95m" + self.prompt + "\x1b[0m" + line)
                         self._start_worker(on_input, line)
                     continue
                 if ch in (27,):  # ESC
                     self.stop()
                     break
                 if ch in (curses.KEY_BACKSPACE, 127, 8):
-                    self._input_buffer = self._input_buffer[:-1]
+                    if self._cursor_pos > 0:
+                        self._input_buffer = self._input_buffer[:self._cursor_pos-1] + self._input_buffer[self._cursor_pos:]
+                        self._cursor_pos -= 1
+                        self._render_input()
+                    continue
+                if ch == curses.KEY_DC: # Delete
+                    if self._cursor_pos < len(self._input_buffer):
+                        self._input_buffer = self._input_buffer[:self._cursor_pos] + self._input_buffer[self._cursor_pos+1:]
+                        self._render_input()
+                    continue
+                if ch == curses.KEY_LEFT:
+                    if self._cursor_pos > 0:
+                        self._cursor_pos -= 1
+                        self._render_input()
+                    continue
+                if ch == curses.KEY_RIGHT:
+                    if self._cursor_pos < len(self._input_buffer):
+                        self._cursor_pos += 1
+                        self._render_input()
+                    continue
+                if ch == curses.KEY_HOME:
+                    self._cursor_pos = 0
                     self._render_input()
                     continue
-                if ch >= 32:
-                    self._input_buffer += chr(ch)
+                if ch == curses.KEY_END:
+                    self._cursor_pos = len(self._input_buffer)
+                    self._render_input()
+                    continue
+                if ch >= 32 and ch <= 126:
+                    self._input_buffer = self._input_buffer[:self._cursor_pos] + chr(ch) + self._input_buffer[self._cursor_pos:]
+                    self._cursor_pos += 1
                     self._render_input()
 
         curses.wrapper(_curses_main)
@@ -128,19 +228,16 @@ class TUI:
     # Internal helpers
     def _start_worker(self, on_input: Callable[[str], None], line: str) -> None:
         if self._worker and self._worker.is_alive():
-            self.log("[TUI] Busy (previous command still running)")
+            self.log("\x1b[93m[TUI] Busy (previous command still running)\x1b[0m")
             return
 
         def _run():
-            self.log("[running]")
             try:
                 on_input(line)
             except SystemExit:
                 self.stop()
             except Exception as e:
-                self.log(f"[TUI ERROR] {e}")
-            finally:
-                self.log("[done]")
+                self.log(f"\x1b[91m[TUI ERROR] {e}\x1b[0m")
 
         self._worker = threading.Thread(target=_run, daemon=True)
         self._worker.start()
@@ -162,10 +259,18 @@ class TUI:
             return
         max_y, max_x = self._screen.getmaxyx()
         input_height = 1
-        log_height = max_y - input_height
+        log_height = max_y - 2 # One line for separator, one for input
+        
         self._log_win = curses.newwin(log_height, max_x, 0, 0)
         self._log_win.scrollok(True)
-        self._input_win = curses.newwin(input_height, max_x, log_height, 0)
+        
+        # Render separator
+        self._screen.attron(curses.color_pair(8))
+        self._screen.hline(log_height, 0, ord('━'), max_x)
+        self._screen.attroff(curses.color_pair(8))
+        self._screen.refresh()
+        
+        self._input_win = curses.newwin(input_height, max_x, log_height + 1, 0)
         self._input_win.nodelay(True)
 
     def _refresh_log(self) -> None:
@@ -175,11 +280,15 @@ class TUI:
         max_y, max_x = self._log_win.getmaxyx()
         start = max(0, len(self.lines) - max_y)
         for idx, line in enumerate(self.lines[start:]):
-            try:
-                self._log_win.addnstr(idx, 0, line, max_x - 1)
-            except curses.error:
-                # Window may be too small; ignore render errors.
-                pass
+            segments = _parse_ansi(line)
+            x = 0
+            for text, color_pair in segments:
+                try:
+                    if x < max_x - 1:
+                        self._log_win.addnstr(idx, x, text, max_x - x - 1, curses.color_pair(color_pair))
+                        x += len(text)
+                except curses.error:
+                    pass
         self._log_win.refresh()
 
     def _render_input(self) -> None:
@@ -187,11 +296,28 @@ class TUI:
             return
         self._input_win.erase()
         max_y, max_x = self._input_win.getmaxyx()
+        
+        # Prompt in magenta
         prompt = self.prompt
-        buf = self._input_buffer
+        self._input_win.attron(curses.color_pair(13) | curses.A_BOLD)
+        self._input_win.addstr(0, 0, prompt)
+        self._input_win.attroff(curses.color_pair(13) | curses.A_BOLD)
+        
+        # Calculate available width for buffer
+        avail_width = max_x - len(prompt) - 1
+        
+        # Adjust scroll_pos to keep cursor in view
+        if self._cursor_pos < self._scroll_pos:
+            self._scroll_pos = self._cursor_pos
+        elif self._cursor_pos >= self._scroll_pos + avail_width:
+            self._scroll_pos = self._cursor_pos - avail_width + 1
+            
+        buf = self._input_buffer[self._scroll_pos : self._scroll_pos + avail_width]
         try:
-            self._input_win.addnstr(0, 0, prompt + buf, max_x - 1)
-            self._input_win.move(0, min(len(prompt + buf), max_x - 1))
+            self._input_win.addstr(0, len(prompt), buf)
+            # Position cursor relative to prompt and scroll
+            cursor_x = len(prompt) + (self._cursor_pos - self._scroll_pos)
+            self._input_win.move(0, cursor_x)
         except curses.error:
             pass
         self._input_win.refresh()

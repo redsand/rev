@@ -86,7 +86,6 @@ class ToolCreationAgent(BaseAgent):
         Executes a tool creation task by calling an LLM to generate a tool file.
         Implements error recovery with intelligent retry logic.
         """
-        print(f"ToolCreationAgent executing task: {task.description}")
 
         # Track recovery attempts
         recovery_attempts = self.increment_recovery_attempts(task, context)

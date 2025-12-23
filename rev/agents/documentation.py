@@ -73,8 +73,6 @@ class DocumentationAgent(BaseAgent):
         Executes a documentation task by calling an LLM to generate a tool call.
         Implements error recovery with intelligent retry logic.
         """
-        print(f"DocumentationAgent executing task: {task.description}")
-
         # Track recovery attempts
         recovery_attempts = self.increment_recovery_attempts(task, context)
 

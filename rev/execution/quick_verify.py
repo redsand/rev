@@ -1115,16 +1115,18 @@ def _run_validation_command(cmd: str, *, use_tests_tool: bool = False, timeout: 
             if "cmd" not in data:
                 data["cmd"] = cmd
             
-            # If the command failed, attempt to gather help output for better diagnostics
+            # If the command failed and produced no output, attempt to gather help output for better diagnostics
             rc = data.get("rc")
-            if rc is not None and rc not in (0, 4):
+            if rc is not None and rc not in (0, 4) and not data.get("stdout") and not data.get("stderr"):
                 try:
                     tokens = shlex.split(cmd)
                     if tokens:
                         base_cmd = tokens[0]
-                        help_info = _get_help_output(base_cmd)
-                        if help_info:
-                            data["help_info"] = help_info
+                        # Only get help for tools, not for source files
+                        if base_cmd in ("npm", "pip", "pytest", "eslint", "ruff", "mypy", "npx", "node", "python", "go", "cargo"):
+                            help_info = _get_help_output(base_cmd)
+                            if help_info:
+                                data["help_info"] = help_info
                 except:
                     pass
                     
@@ -1282,6 +1284,10 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
     """Run verification checks depending on verification mode (fast/strict) and project type."""
     if not paths:
         return None
+
+    # Clear discovery cache
+    global _COMMAND_HINT_CACHE
+    _COMMAND_HINT_CACHE = {}
 
     strict_details: Dict[str, Any] = {}
     primary_path = paths[0] if paths else config.ROOT
@@ -1603,8 +1609,16 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
     return strict_details
 
 
+# Simple cache for file command hints to avoid redundant discovery per task
+_COMMAND_HINT_CACHE: Dict[Tuple[str, str], Optional[str]] = {}
+
 def _inspect_file_for_command_hints(path: Path, tool_type: str) -> Optional[str]:
     """Inspect a file's content and environment for tool-specific execution hints."""
+    cache_key = (str(path.resolve()), tool_type)
+    if cache_key in _COMMAND_HINT_CACHE:
+        return _COMMAND_HINT_CACHE[cache_key]
+        
+    result = None
     try:
         if not path.exists() or not path.is_file():
             return None
@@ -1617,57 +1631,66 @@ def _inspect_file_for_command_hints(path: Path, tool_type: str) -> Optional[str]
             if path.suffix in (".js", ".ts", ".jsx", ".tsx"):
                 # 1. Content-based detection
                 if "vitest" in content or "from 'vitest'" in content or "from \"vitest\"" in content:
-                    return "npx --yes vitest run"
-                if "jest" in content or "@jest/globals" in content or "describe(" in content:
-                    return "npx --yes jest --watchAll=false"
-                if "mocha" in content or "describe(" in content: # Mocha also uses describe
+                    result = "npx --yes vitest run"
+                elif "jest" in content or "@jest/globals" in content or "describe(" in content:
+                    result = "npx --yes jest --watchAll=false"
+                elif "mocha" in content or "describe(" in content: # Mocha also uses describe
                     # Check package.json for mocha
                     pkg_json_path = root / "package.json"
                     if pkg_json_path.exists():
                         pkg_json = json.loads(pkg_json_path.read_text(errors='ignore'))
                         if "mocha" in str(pkg_json.get("devDependencies", {})) or "mocha" in str(pkg_json.get("dependencies", {})):
-                            return "npx --yes mocha"
+                            result = "npx --yes mocha"
 
-                # 2. Package.json script detection
-                pkg_json_path = root / "package.json"
-                if pkg_json_path.exists():
-                    pkg_json = json.loads(pkg_json_path.read_text(errors='ignore'))
-                    scripts = pkg_json.get("scripts", {})
-                    for s_name in ("test:unit", "test", "unit"):
-                        if s_name in scripts:
-                            s_cmd = scripts[s_name].lower()
-                            if "vitest" in s_cmd: return "npx --yes vitest run"
-                            if "jest" in s_cmd: return "npx --yes jest --watchAll=false"
-                            if "mocha" in s_cmd: return "npx --yes mocha"
+                if not result:
+                    # 2. Package.json script detection
+                    pkg_json_path = root / "package.json"
+                    if pkg_json_path.exists():
+                        pkg_json = json.loads(pkg_json_path.read_text(errors='ignore'))
+                        scripts = pkg_json.get("scripts", {})
+                        for s_name in ("test:unit", "test", "unit"):
+                            if s_name in scripts:
+                                s_cmd = scripts[s_name].lower()
+                                if "vitest" in s_cmd: result = "npx --yes vitest run"; break
+                                if "jest" in s_cmd: result = "npx --yes jest --watchAll=false"; break
+                                if "mocha" in s_cmd: result = "npx --yes mocha"; break
             
             # Python Test detection
-            if path.suffix == ".py":
+            if not result and path.suffix == ".py":
                 if "import unittest" in content or "unittest.TestCase" in content:
-                    return "python -m unittest"
-                if "import pytest" in content or "def test_" in content or "@pytest." in content:
-                    return "pytest -q"
+                    result = "python -m unittest"
+                elif "import pytest" in content or "def test_" in content or "@pytest." in content:
+                    result = "pytest -q"
                     
         elif tool_type == "lint":
             # Node.js Lint detection
             if path.suffix in (".js", ".ts", ".jsx", ".tsx"):
                 # If we see eslint comments or have a local config, prefer eslint
                 if "eslint" in content or any((root / f).exists() for f in (".eslintrc.json", "eslint.config.js", ".eslintrc.js", "eslint.config.mjs", "eslint.config.cjs")):
-                    return "npx --yes eslint --quiet"
+                    result = "npx --yes eslint --quiet"
         
-        # If static inspection fails, try dynamic help discovery
-        help_info = _try_dynamic_help_discovery(path)
-        if help_info:
-            # We don't return the full help, but we've verified it responds to help
-            # This logic could be expanded to parse the help for specific runners
-            pass
+        # If static inspection fails and it looks like a CLI/script, try dynamic help discovery
+        if not result and path.suffix in (".js", ".py", ".sh"):
+            # Only probe if it contains likely CLI markers or is in a bin/scripts dir
+            if "process.argv" in content or "sys.argv" in content or "argparse" in content or "click" in content:
+                help_info = _try_dynamic_help_discovery(path)
+                if help_info:
+                    # We don't return the full help, but we've verified it responds to help
+                    pass
                     
     except Exception:
         pass
-    return None
+        
+    _COMMAND_HINT_CACHE[cache_key] = result
+    return result
 
 
 def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Optional[Iterable[Dict[str, Any]]]) -> Optional[VerificationResult | Dict[str, Any]]:
     """Execute declarative validation steps (lint/tests/compile) via tool runner."""
+    # Clear discovery cache for each task validation run
+    global _COMMAND_HINT_CACHE
+    _COMMAND_HINT_CACHE = {}
+    
     validation_steps = task.validation_steps
     commands: list[tuple[str, str, str]] = []
     seen_cmds = set()

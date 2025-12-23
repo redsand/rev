@@ -55,7 +55,6 @@ class RefactoringAgent(BaseAgent):
         Executes a refactoring task by leveraging the LLM's general
         code understanding capabilities for a language-agnostic approach.
         """
-        print(f"RefactoringAgent executing task: {task.description}")
         logger.info(f"[REFACTORING] Starting task: {task.description}")
 
         # Check if an improved system prompt was provided (for adaptive retry)

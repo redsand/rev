@@ -46,8 +46,6 @@ def repl_mode(
             from rev.terminal.tui import TUI, TuiStream
             import rev.terminal.formatting as fmt
             from rev.run_log import wrap_stream
-            # Disable ANSI colors inside curses UI to avoid escape artifacts on Windows.
-            fmt._COLORS_ENABLED = False
             tui = TUI(prompt="rev> ")
             if init_logs:
                 for line in init_logs:
