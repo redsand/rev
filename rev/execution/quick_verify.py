@@ -9,6 +9,8 @@ for the workflow loop: Plan → Execute → Verify → Report → Re-plan if nee
 import json
 import re
 import os
+import shlex
+import shutil
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, Iterable
 from dataclasses import dataclass
@@ -949,8 +951,70 @@ def _collect_paths_for_strict_checks(
     return unique_paths
 
 
+def _ensure_tool_available(cmd: str) -> bool:
+    """Check if a tool is available, and if not, attempt to install it.
+    
+    Returns:
+        bool: True if tool is available (already existed or successfully installed).
+    """
+    try:
+        args = shlex.split(cmd)
+        if not args:
+            return True
+        
+        base_cmd = args[0]
+        # Resolve command (handles .exe, .cmd, etc on Windows)
+        resolved = shutil.which(base_cmd)
+        
+        if resolved:
+            # If it's npx, we might still be missing the specific package
+            if base_cmd == "npx" and len(args) > 1:
+                pkg = args[1]
+                # If we're looking for eslint or tsc specifically, we can check node_modules
+                if pkg in ("eslint", "tsc"):
+                    pkg_name = "typescript" if pkg == "tsc" else pkg
+                    if not (config.ROOT / "node_modules" / pkg_name).exists():
+                        print(f"  [i] npx command '{pkg}' missing from node_modules, attempting install...")
+                        # Run npm install locally
+                        install_res = execute_tool("run_cmd", {"cmd": f"npm install {pkg_name} --save-dev", "timeout": 300})
+                        try:
+                            return json.loads(install_res).get("rc") == 0
+                        except:
+                            return False
+            return True
+
+        # Tool missing - attempt auto-install
+        pkg_map = {
+            "ruff": "pip install ruff",
+            "mypy": "pip install mypy",
+            "pytest": "pip install pytest",
+            "eslint": "npm install eslint --save-dev",
+            "tsc": "npm install typescript --save-dev",
+        }
+
+        if base_cmd in pkg_map:
+            install_cmd = pkg_map[base_cmd]
+            print(f"  [i] Tool '{base_cmd}' not found, attempting auto-install: {install_cmd}...")
+            install_res = execute_tool("run_cmd", {"cmd": install_cmd, "timeout": 300})
+            try:
+                success = json.loads(install_res).get("rc") == 0
+                if success:
+                    print(f"  [OK] Successfully installed {base_cmd}")
+                    return True
+            except:
+                pass
+            
+        return False
+    except Exception as e:
+        print(f"  [!] Error checking/installing tool '{cmd}': {e}")
+        return False
+
+
 def _run_validation_command(cmd: str, *, use_tests_tool: bool = False, timeout: int | None = None) -> Dict[str, Any]:
     """Run a validation command via the tool runner and return parsed JSON."""
+    # Ensure tool is available before running
+    _ensure_tool_available(cmd)
+    
     payload = {"cmd": cmd}
     if timeout:
         payload["timeout"] = timeout
@@ -1221,10 +1285,16 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
              cmd = f"npx eslint {targets} --quiet"
              res = _run_validation_command(cmd, timeout=60)
              strict_details["eslint"] = res
-             if not res.get("blocked") and res.get("rc", 1) != 0 and res.get("rc") != 127:
+             rc = res.get("rc")
+             if rc == 127:
+                  strict_details["eslint_note"] = "eslint not installed (rc=127) - skipped"
+             elif not res.get("blocked") and rc is not None and rc != 0:
+                  error_msg = res.get("stderr", "") or res.get("stdout", "") or "Unknown linting error"
+                  if len(error_msg) > 300:
+                      error_msg = error_msg[:297] + "..."
                   return VerificationResult(
                         passed=False,
-                        message="Linting failed (errors found)",
+                        message=f"Linting failed: {error_msg.strip()}",
                         details={"strict": strict_details},
                         should_replan=True
                     )
@@ -1462,6 +1532,9 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
         # Handle pytest exit code 4 (usage error/no tests in older versions) as pass
         if label == "pytest" and rc == 4:
             results[label] = {**res, "note": "No tests collected (rc=4) - treated as pass"}
+        # Handle command not found (rc=127) as warning but not failure
+        elif rc == 127:
+            results[label] = {**res, "note": f"Tool '{label}' not installed (rc=127) - skipped"}
         # Handle exit code 5 (no tests collected) as INCONCLUSIVE unless explicitly allowed
         elif label == "pytest" and rc == 5:
             if _no_tests_expected(task):
@@ -1474,9 +1547,14 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
                     should_replan=True,
                 )
         elif res.get("blocked") or (rc is not None and rc not in (0, 4)):
+            # Extract error message for better feedback
+            error_msg = res.get("stderr", "") or res.get("stdout", "") or "Unknown error"
+            if len(error_msg) > 300:
+                error_msg = error_msg[:297] + "..."
+            
             return VerificationResult(
                 passed=False,
-                message=f"Validation step failed: {label}",
+                message=f"Validation step failed: {label}. Error: {error_msg.strip()}",
                 details={"validation": results, "failed_step": label},
                 should_replan=True,
             )
