@@ -774,11 +774,11 @@ def run_cmd(cmd: str, timeout: int = 300) -> str:
         pass
 
     # Use safe command runner
-    result = run_command_streamed(
+    from rev.tools.command_runner import run_command_safe
+    result = run_command_safe(
         cmd,
         timeout=timeout,
-        stdout_limit=8000,
-        stderr_limit=8000,
+        capture_output=True,
         check_interrupt=True,
     )
     return json.dumps(result)
@@ -794,13 +794,12 @@ def run_tests(cmd: str = "pytest -q", timeout: int = 600) -> str:
     Returns:
         JSON string with execution results
     """
-    from rev.tools.command_runner import run_command_streamed
+    from rev.tools.command_runner import run_command_safe
 
-    result = run_command_streamed(
+    result = run_command_safe(
         cmd,
         timeout=timeout,
-        stdout_limit=12000,
-        stderr_limit=4000,
+        capture_output=True,
         check_interrupt=True,
     )
     return json.dumps(result)

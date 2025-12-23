@@ -99,6 +99,8 @@ def _format_verification_feedback(result: VerificationResult) -> str:
                     # Take last 20 lines of stdout
                     stdout_lines = stdout.splitlines()
                     feedback += "\nstdout:\n" + "\n".join(stdout_lines[-20:])
+                else:
+                    feedback += "\n(No stdout or stderr output captured from command)"
     
     # Extract debug info if present
     if "debug" in details:

@@ -981,6 +981,7 @@ def _ensure_tool_available(cmd: str) -> bool:
                             return json.loads(install_res).get("rc") == 0
                         except:
                             return False
+            # Verify if the resolved path is inside the workspace and return True if it exists
             return True
 
         # Tool missing - attempt auto-install
@@ -1019,13 +1020,23 @@ def _ensure_tool_available(cmd: str) -> bool:
 
 def _extract_error(res: Dict[str, Any], default: str = "Unknown error") -> str:
     """Extract and truncate error message from tool result, with a broad recovery hint."""
-    msg = res.get("stderr", "") or res.get("stdout", "") or default
+    stdout = res.get("stdout", "")
+    stderr = res.get("stderr", "")
+    rc = res.get("rc")
+    
+    msg = stderr or stdout or default
     msg = msg.strip()
     
+    # If we have a failure (non-zero rc) but no output, provide more context
+    if (rc is not None and rc != 0) and not stderr and not stdout:
+        msg = f"Command failed with exit code {rc} but produced no output (stdout/stderr)."
+        if rc == 2:
+            msg += " On Windows, exit code 2 often indicates a fatal configuration error or missing files for tools like ESLint."
+
     # Generic, broad recovery hint covering config, dependencies, and environment
     hint = (
         "\n\n[RECOVERY HINT] Analyze the output above. If it indicates a missing configuration file "
-        "(e.g., eslint.config.js, pyproject.toml, tsconfig.json), a missing dependency, or an "
+        "(e.g., eslint.config.js, .eslintrc.json, pyproject.toml, tsconfig.json), a missing dependency, or an "
         "uninitialized environment, your next step should be to fix the environment (e.g., "
         "create the config file, install the package, or initialize the project) before retrying."
     )
@@ -1060,7 +1071,15 @@ def _run_validation_command(cmd: str, *, use_tests_tool: bool = False, timeout: 
 
 
 def _quote_path(path: Path) -> str:
-    """Quote a path for shell commands."""
+    """Quote a path for shell commands, using relative path if within workspace."""
+    try:
+        if path.is_absolute() and path.is_relative_to(config.ROOT):
+            rel_path = path.relative_to(config.ROOT)
+            # Use "." for current directory instead of empty string
+            path_str = str(rel_path) if str(rel_path) != "." else "."
+            return quote_cmd_arg(path_str)
+    except (ValueError, AttributeError):
+        pass
     return quote_cmd_arg(str(path))
 
 
@@ -1074,9 +1093,45 @@ def _paths_or_default(paths: list[Path]) -> list[Path]:
         return [Path(".").resolve()]
 
 
-def _detect_project_type(root: Path) -> str:
-    """Detect the project type (python, vue, node, go, rust, etc)."""
+def _find_project_root(path: Path) -> Path:
+    """Find the nearest project root containing project markers, staying within workspace."""
     try:
+        current = path.resolve()
+        if not current.is_dir():
+            current = current.parent
+        
+        # Don't go outside workspace root
+        try:
+            root_limit = config.ROOT.resolve()
+        except:
+            root_limit = Path(".").resolve()
+        
+        markers = {
+            "package.json", "pyproject.toml", "requirements.txt", "setup.py",
+            "go.mod", "Cargo.toml", "Gemfile", "composer.json", "pom.xml",
+            "build.gradle", "CMakeLists.txt", "Makefile", "prisma", ".git"
+        }
+        
+        while len(current.parts) >= len(root_limit.parts):
+            if any((current / m).exists() for m in markers):
+                return current
+            if current == root_limit:
+                break
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+            
+        return root_limit
+    except Exception:
+        return config.ROOT
+
+
+def _detect_project_type(path: Path) -> str:
+    """Detect the project type (python, vue, node, go, rust, etc) relative to a path."""
+    try:
+        root = _find_project_root(path)
+        
         # 1. Node.js Ecosystem
         if (root / "package.json").exists():
             content = (root / "package.json").read_text(errors="ignore")
@@ -1129,16 +1184,17 @@ def _detect_project_type(root: Path) -> str:
             return "flutter"
 
         # Fallback by file extension in root
-        for f in root.iterdir():
-            if f.suffix == ".py": return "python"
-            if f.suffix in (".js", ".ts"): return "node"
-            if f.suffix == ".go": return "go"
-            if f.suffix == ".rs": return "rust"
-            if f.suffix == ".rb": return "ruby"
-            if f.suffix == ".php": return "php"
-            if f.suffix == ".java": return "java_maven"
-            if f.suffix == ".kt": return "kotlin"
-            if f.suffix == ".cs": return "csharp"
+        if root.exists() and root.is_dir():
+            for f in root.iterdir():
+                if f.suffix == ".py": return "python"
+                if f.suffix in (".js", ".ts"): return "node"
+                if f.suffix == ".go": return "go"
+                if f.suffix == ".rs": return "rust"
+                if f.suffix == ".rb": return "ruby"
+                if f.suffix == ".php": return "php"
+                if f.suffix == ".java": return "java_maven"
+                if f.suffix == ".kt": return "kotlin"
+                if f.suffix == ".cs": return "csharp"
     except Exception:
         pass
     return "unknown"
@@ -1164,7 +1220,8 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
         return None
 
     strict_details: Dict[str, Any] = {}
-    project_type = _detect_project_type(config.ROOT)
+    primary_path = paths[0] if paths else config.ROOT
+    project_type = _detect_project_type(primary_path)
     
     # Check for per-repo configuration overrides
     repo_config = getattr(config, "REPO_CONFIG", {})
@@ -1306,8 +1363,8 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
         # 2. Targeted Linting (eslint)
         if node_paths and mode == "strict":
              targets = " ".join(_quote_path(p) for p in node_paths[:10])
-             # Use --quiet to ignore formatting warnings (too strict)
-             cmd = f"npx eslint {targets} --quiet"
+             # Use --yes to ignore prompts and --quiet to ignore formatting warnings (too strict)
+             cmd = f"npx --yes eslint {targets} --quiet"
              res = _run_validation_command(cmd, timeout=60)
              strict_details["eslint"] = res
              rc = res.get("rc")
@@ -1331,7 +1388,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
                 # This is heavy, so only run if we're not in super-fast mode?
                 # For now, let's assume 'fast' mode avoids full project type check.
                 if mode == "strict":
-                    cmd = "npx vue-tsc --noEmit"
+                    cmd = "npx --yes vue-tsc --noEmit"
                     res = _run_validation_command(cmd, timeout=120)
                     strict_details["vue-tsc"] = res
                     if not res.get("blocked") and res.get("rc", 1) != 0:
@@ -1346,66 +1403,55 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
         # Look for test files in the paths
         test_touched = any("test" in p.name or "spec" in p.name for p in paths)
         if test_touched or mode == "strict":
-            # ... (rest of test detection logic)
-            # Try to detect test runner
-            test_cmd = "npm test"
-            # Check package.json for specific test scripts
-            try:
-                pkg_json = json.loads((config.ROOT / "package.json").read_text())
-                scripts = pkg_json.get("scripts", {})
-                if "test:unit" in scripts:
-                    test_cmd = "npm run test:unit"
-                elif "test" in scripts:
+            # Try dynamic discovery first
+            test_cmd = None
+            hinted_test = None
+            
+            # Find a relevant test file to inspect
+            relevant_test_file = next((p for p in paths if p.is_file() and ("test" in p.name or "spec" in p.name)), None)
+            if relevant_test_file:
+                hinted_test = _inspect_file_for_command_hints(relevant_test_file, "test")
+            
+            if hinted_test:
+                test_cmd = hinted_test
+            else:
+                # Fallback to package.json detection
+                root = _find_project_root(primary_path)
+                try:
+                    pkg_json = json.loads((root / "package.json").read_text(errors='ignore'))
+                    scripts = pkg_json.get("scripts", {})
+                    if "test:unit" in scripts:
+                        test_cmd = "npm run test:unit"
+                    elif "test" in scripts:
+                        test_cmd = "npm test"
+                    else:
+                        test_cmd = "npm test" # Generic fallback
+                except Exception:
                     test_cmd = "npm test"
-                else:
-                    test_cmd = None
-            except Exception:
-                test_cmd = None
 
             if test_cmd:
                 # Prevent watch mode which hangs execution
-                # Try to detect if we need to add flags, or just prepend CI=true (cross-platform way is harder without extra tools)
-                # We will append -- --run (for vitest) or --watchAll=false (for jest) if we can guess, 
-                # but setting CI env var is the most robust standard method if the runner supports it.
-                # rev's run_cmd doesn't easily let us set env vars per call in the string, 
-                # so we'll try to chain it or assume the tool runner handles environment.
-                # Ideally, we append flags.
-                
                 if "vitest" in test_cmd or "vite" in test_cmd:
-                    test_cmd += " --run"
+                    if "--run" not in test_cmd and " run" not in test_cmd:
+                        test_cmd += " --run"
                 elif "jest" in test_cmd:
-                    test_cmd += " --watchAll=false"
-                else:
-                    # Generic fallback: many runners respect --watch=false or --no-watch
-                                            # But some might fail if they don't recognize the flag.
-                                            # Safest is to try to rely on CI=true in the environment if the tool runner supported it.
-                                            # Since we can't easily set env vars in the command string cross-platform without 'cross-env',
-                                            # we will try to append '--passWithNoTests' which is common and harmless for jest/vitest.
-                                            pass
-                # Append file filters if possible? Vitest supports this.
-                # pytest supports it too.
-                # npm run test:unit -- <file>
+                    if "--watchAll=false" not in test_cmd:
+                        test_cmd += " --watchAll=false"
+                
+                # Append file filters if possible
                 if test_touched:
-                    test_files = [str(p) for p in paths if "test" in p.name or "spec" in p.name]
+                    test_files = [str(p.relative_to(root)) if p.is_relative_to(root) else str(p) 
+                                 for p in paths if "test" in p.name or "spec" in p.name]
                     if test_files:
                         # Use ' -- ' to pass args to the underlying script
-                        test_cmd += " -- " + " ".join(quote_cmd_arg(f) for f in test_files)
-                
-                # Add CI flags to prevent hanging in watch mode
-                if " -- " not in test_cmd:
-                    test_cmd += " --"
-                
-                # Add flags that help both Jest and Vitest avoid watch mode
-                if "vitest" in test_cmd or "vite" in test_cmd:
-                    test_cmd += " --run"
-                else:
-                    # Jest / Generic
-                    test_cmd += " --watchAll=false --no-watch"
+                        if "npm run" in test_cmd:
+                            test_cmd += " -- " + " ".join(quote_cmd_arg(f) for f in test_files)
+                        else:
+                            test_cmd += " " + " ".join(quote_cmd_arg(f) for f in test_files)
 
                 res = _run_validation_command(test_cmd, use_tests_tool=True, timeout=config.VALIDATION_TIMEOUT_SECONDS)
                 strict_details["npm_test"] = res
                 # Ignore rc if no tests found?
-                # Vitest returns 1 if no tests found sometimes?
                 if not res.get("blocked") and res.get("rc", 1) != 0:
                      return VerificationResult(
                         passed=False,
@@ -1493,6 +1539,62 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
     return strict_details
 
 
+def _inspect_file_for_command_hints(path: Path, tool_type: str) -> Optional[str]:
+    """Inspect a file's content and environment for tool-specific execution hints."""
+    try:
+        if not path.exists() or not path.is_file():
+            return None
+            
+        content = path.read_text(errors='ignore')
+        root = _find_project_root(path)
+        
+        if tool_type == "test":
+            # Node.js Test detection
+            if path.suffix in (".js", ".ts", ".jsx", ".tsx"):
+                # 1. Content-based detection
+                if "vitest" in content or "from 'vitest'" in content or "from \"vitest\"" in content:
+                    return "npx --yes vitest run"
+                if "jest" in content or "@jest/globals" in content or "describe(" in content:
+                    return "npx --yes jest --watchAll=false"
+                if "mocha" in content or "describe(" in content: # Mocha also uses describe
+                    # Check package.json for mocha
+                    pkg_json_path = root / "package.json"
+                    if pkg_json_path.exists():
+                        pkg_json = json.loads(pkg_json_path.read_text(errors='ignore'))
+                        if "mocha" in str(pkg_json.get("devDependencies", {})) or "mocha" in str(pkg_json.get("dependencies", {})):
+                            return "npx --yes mocha"
+
+                # 2. Package.json script detection
+                pkg_json_path = root / "package.json"
+                if pkg_json_path.exists():
+                    pkg_json = json.loads(pkg_json_path.read_text(errors='ignore'))
+                    scripts = pkg_json.get("scripts", {})
+                    for s_name in ("test:unit", "test", "unit"):
+                        if s_name in scripts:
+                            s_cmd = scripts[s_name].lower()
+                            if "vitest" in s_cmd: return "npx --yes vitest run"
+                            if "jest" in s_cmd: return "npx --yes jest --watchAll=false"
+                            if "mocha" in s_cmd: return "npx --yes mocha"
+            
+            # Python Test detection
+            if path.suffix == ".py":
+                if "import unittest" in content or "unittest.TestCase" in content:
+                    return "python -m unittest"
+                if "import pytest" in content or "def test_" in content or "@pytest." in content:
+                    return "pytest -q"
+                    
+        elif tool_type == "lint":
+            # Node.js Lint detection
+            if path.suffix in (".js", ".ts", ".jsx", ".tsx"):
+                # If we see eslint comments or have a local config, prefer eslint
+                if "eslint" in content or any((root / f).exists() for f in (".eslintrc.json", "eslint.config.js", ".eslintrc.js", "eslint.config.mjs", "eslint.config.cjs")):
+                    return "npx --yes eslint --quiet"
+                    
+    except Exception:
+        pass
+    return None
+
+
 def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Optional[Iterable[Dict[str, Any]]]) -> Optional[VerificationResult | Dict[str, Any]]:
     """Execute declarative validation steps (lint/tests/compile) via tool runner."""
     validation_steps = task.validation_steps
@@ -1506,8 +1608,9 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
         seen_cmds.add(cmd)
         commands.append((label, cmd, tool))
 
-    # Get project type for better defaults
-    project_type = _detect_project_type(config.ROOT)
+    # Get project type relative to the first relevant path
+    primary_path = paths[0] if paths else config.ROOT
+    project_type = _detect_project_type(primary_path)
 
     # Get Python file paths for targeted linting
     py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]
@@ -1535,14 +1638,19 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
 
         # 2. LINT
         if "lint" in text or "linter" in text:
-            if project_type == "python" and py_paths:
+            hinted_lint = _inspect_file_for_command_hints(primary_path, "lint") if paths else None
+            
+            if hinted_lint and node_paths:
+                targets = " ".join(_quote_path(p) for p in node_paths[:10])
+                _add("eslint_hinted", f"{hinted_lint} {targets}")
+            elif project_type == "python" and py_paths:
                 ruff_targets = " ".join(_quote_path(p) for p in py_paths[:10])
                 _add("ruff", f"ruff check {ruff_targets} --select E9,F63,F7")
             elif project_type in ("node", "vue", "react", "nextjs"):
                 if node_paths:
                     targets = " ".join(_quote_path(p) for p in node_paths[:10])
-                    # Use npx eslint --quiet to target specific files and ignore formatting warnings (too strict)
-                    _add("eslint", f"npx eslint {targets} --quiet")
+                    # Use npx --yes eslint --quiet to target specific files and ignore formatting warnings (too strict)
+                    _add("eslint", f"npx --yes eslint {targets} --quiet")
                 else:
                     _add("npm_lint", "npm run lint")
             elif project_type == "go": _add("go_vet", "go vet ./...")
@@ -1550,7 +1658,12 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
 
         # 3. TEST
         if "test" in text:
-            if project_type == "python": _add("pytest", "pytest -q", "run_tests")
+            hinted_test = _inspect_file_for_command_hints(primary_path, "test") if paths else None
+            
+            if hinted_test:
+                target = _quote_path(primary_path)
+                _add("hinted_test", f"{hinted_test} {target}", "run_tests")
+            elif project_type == "python": _add("pytest", "pytest -q", "run_tests")
             elif project_type in ("node", "vue", "react", "nextjs"): _add("npm_test", "npm test", "run_tests")
             elif project_type == "go": _add("go_test", "go test ./...", "run_tests")
             elif project_type == "rust": _add("cargo_test", "cargo test", "run_tests")
@@ -1568,7 +1681,7 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
                 mypy_targets = " ".join(_quote_path(p) for p in py_paths[:10])
                 _add("mypy", f"mypy {mypy_targets}")
             elif project_type in ("node", "typescript", "vue", "react", "nextjs"):
-                _add("tsc", "npx tsc --noEmit")
+                _add("tsc", "npx --yes tsc --noEmit")
 
     if not commands:
         return None
