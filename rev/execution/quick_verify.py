@@ -1195,6 +1195,10 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
     # NODE / VUE / REACT VERIFICATION
     # -------------------------------------------------------------------------
     elif project_type in ("vue", "react", "node", "nextjs"):
+        # Identify relevant Node files
+        node_extensions = {".js", ".ts", ".jsx", ".tsx", ".vue", ".mjs", ".cjs"}
+        node_paths = [p for p in paths if p.suffix in node_extensions and p.exists()]
+
         # 1. Syntax check for plain JS files (fast)
         js_paths = [p for p in paths if p.suffix == '.js' and p.exists()]
         if js_paths:
@@ -1210,7 +1214,22 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
                         should_replan=True
                     )
 
-        # 2. Vue/TS Type Checking (slower, maybe skip in strict=false?)
+        # 2. Targeted Linting (eslint)
+        if node_paths and mode == "strict":
+             targets = " ".join(_quote_path(p) for p in node_paths[:10])
+             # Use --quiet to ignore formatting warnings (too strict)
+             cmd = f"npx eslint {targets} --quiet"
+             res = _run_validation_command(cmd, timeout=60)
+             strict_details["eslint"] = res
+             if not res.get("blocked") and res.get("rc", 1) != 0 and res.get("rc") != 127:
+                  return VerificationResult(
+                        passed=False,
+                        message="Linting failed (errors found)",
+                        details={"strict": strict_details},
+                        should_replan=True
+                    )
+
+        # 3. Vue/TS Type Checking (slower, maybe skip in strict=false?)
         # In 'fast' mode, we might skip full type checking unless it's a critical file
         if project_type == "vue":
             # Check if we should run vue-tsc
@@ -1371,6 +1390,10 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
     # Get Python file paths for targeted linting
     py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]
 
+    # Get Node file paths for targeted linting
+    node_extensions = {".js", ".ts", ".jsx", ".tsx", ".vue", ".mjs", ".cjs"}
+    node_paths = [p for p in paths if p.suffix in node_extensions and p.exists()]
+
     for step in validation_steps:
         text = step.lower()
         
@@ -1393,7 +1416,13 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
             if project_type == "python" and py_paths:
                 ruff_targets = " ".join(_quote_path(p) for p in py_paths[:10])
                 _add("ruff", f"ruff check {ruff_targets} --select E9,F63,F7")
-            elif project_type in ("node", "vue", "react"): _add("npm_lint", "npm run lint")
+            elif project_type in ("node", "vue", "react", "nextjs"):
+                if node_paths:
+                    targets = " ".join(_quote_path(p) for p in node_paths[:10])
+                    # Use npx eslint --quiet to target specific files and ignore formatting warnings (too strict)
+                    _add("eslint", f"npx eslint {targets} --quiet")
+                else:
+                    _add("npm_lint", "npm run lint")
             elif project_type == "go": _add("go_vet", "go vet ./...")
             elif project_type == "rust": _add("clippy", "cargo clippy")
 
@@ -1416,7 +1445,7 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
             if project_type == "python" and py_paths:
                 mypy_targets = " ".join(_quote_path(p) for p in py_paths[:10])
                 _add("mypy", f"mypy {mypy_targets}")
-            elif project_type in ("node", "typescript", "vue", "react"):
+            elif project_type in ("node", "typescript", "vue", "react", "nextjs"):
                 _add("tsc", "npx tsc --noEmit")
 
     if not commands:
