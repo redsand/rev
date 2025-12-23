@@ -43,6 +43,16 @@ FORBIDDEN_RE = re.compile(r"[;&|><`]|(\$\()|\r|\n")
 FORBIDDEN_TOKENS = {"&&", "||", ";", "|", "&", ">", "<", ">>", "2>", "1>", "<<",
                     "2>&1", "1>&2", "`", "$(", "${"}
 
+
+def _resolve_command(cmd_name: str) -> Optional[str]:
+    """Resolve a command name to its full path.
+    
+    On Windows, this correctly finds .cmd, .bat, and .exe files.
+    """
+    # shutil.which handles PATH and PATHEXT correctly on all platforms
+    return shutil.which(cmd_name)
+
+
 def _parse_and_validate(cmd: str) -> Tuple[bool, str, List[str]]:
     """Parse and validate a command string for safe execution.
 
