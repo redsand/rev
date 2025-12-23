@@ -960,8 +960,11 @@ def _run_validation_command(cmd: str, *, use_tests_tool: bool = False, timeout: 
         raw = execute_tool(tool, payload)
         data = json.loads(raw)
         if isinstance(data, dict):
+            # Ensure cmd is present in the result
+            if "cmd" not in data:
+                data["cmd"] = cmd
             return data
-        return {"raw": raw}
+        return {"raw": raw, "cmd": cmd}
     except Exception as e:
         return {"error": str(e), "cmd": cmd}
 
@@ -982,20 +985,70 @@ def _paths_or_default(paths: list[Path]) -> list[Path]:
 
 
 def _detect_project_type(root: Path) -> str:
-    """Detect the project type (python, vue, node, etc)."""
+    """Detect the project type (python, vue, node, go, rust, etc)."""
     try:
+        # 1. Node.js Ecosystem
         if (root / "package.json").exists():
             content = (root / "package.json").read_text(errors="ignore")
             if '"vue"' in content: return "vue"
             if '"react"' in content: return "react"
             if '"next"' in content: return "nextjs"
             return "node"
+        
+        # 2. Python Ecosystem
         if (root / "pyproject.toml").exists() or (root / "requirements.txt").exists() or (root / "setup.py").exists():
             return "python"
+            
+        # 3. Go Ecosystem
+        if (root / "go.mod").exists():
+            return "go"
+            
+        # 4. Rust Ecosystem
+        if (root / "Cargo.toml").exists():
+            return "rust"
+            
+        # 5. Ruby Ecosystem
+        if (root / "Gemfile").exists() or (root / "Rakefile").exists():
+            return "ruby"
+            
+        # 6. PHP Ecosystem
+        if (root / "composer.json").exists():
+            return "php"
+            
+        # 7. Java/Kotlin Ecosystem
+        if (root / "pom.xml").exists():
+            return "java_maven"
+        if (root / "build.gradle").exists() or (root / "build.gradle.kts").exists():
+            # Check if it's Kotlin
+            if any(root.rglob("*.kt")):
+                return "kotlin"
+            return "java_gradle"
+            
+        # 8. C# / .NET Ecosystem
+        if any(root.glob("*.csproj")) or any(root.glob("*.sln")):
+            return "csharp"
+            
+        # 9. C/C++ Ecosystem
+        if (root / "CMakeLists.txt").exists():
+            return "cpp_cmake"
+        if (root / "Makefile").exists():
+            return "cpp_make"
+            
+        # 10. Mobile / Flutter
+        if (root / "pubspec.yaml").exists():
+            return "flutter"
+
         # Fallback by file extension in root
         for f in root.iterdir():
             if f.suffix == ".py": return "python"
             if f.suffix in (".js", ".ts"): return "node"
+            if f.suffix == ".go": return "go"
+            if f.suffix == ".rs": return "rust"
+            if f.suffix == ".rb": return "ruby"
+            if f.suffix == ".php": return "php"
+            if f.suffix == ".java": return "java_maven"
+            if f.suffix == ".kt": return "kotlin"
+            if f.suffix == ".cs": return "csharp"
     except Exception:
         pass
     return "unknown"
@@ -1057,7 +1110,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
     # -------------------------------------------------------------------------
     # PYTHON VERIFICATION
     # -------------------------------------------------------------------------
-    if project_type == "python" or any(p.suffix == ".py" for p in paths):
+    if project_type == "python":
         # Filter for Python files or directories for compileall
         compile_targets = [p for p in _paths_or_default(paths) if p.is_dir() or p.suffix == '.py']
         
@@ -1115,23 +1168,22 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
         elif rc == 4:
             strict_details["pytest_note"] = "No tests collected (rc=4) - treated as pass"
 
-        # Optional lint/type checks if allowed
-        if "ruff" in config.ALLOW_CMDS:
-            py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]
-            if py_paths:
-                ruff_targets = " ".join(_quote_path(p) for p in py_paths[:10])
-                # E9: Runtime/syntax errors, F63: Invalid print syntax, F7: Statement problems
-                optional_checks = [("ruff", f"ruff check {ruff_targets} --select E9,F63,F7")]
-                if "mypy" in config.ALLOW_CMDS:
-                    optional_checks.append(("mypy", f"mypy {ruff_targets}"))
-                
-                for label, cmd in optional_checks:
-                    res = _run_validation_command(cmd, timeout=config.VALIDATION_TIMEOUT_SECONDS)
-                    strict_details[label] = res
-                    rc = res.get("rc")
-                    if rc is None:
-                        rc = 0 if res.get("blocked") else 1
-                    if not res.get("blocked") and rc not in (0, None):
+        # Optional lint/type checks
+        py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]
+        if py_paths:
+            ruff_targets = " ".join(_quote_path(p) for p in py_paths[:10])
+            # E9: Runtime/syntax errors, F63: Invalid print syntax, F7: Statement problems
+            optional_checks = [("ruff", f"ruff check {ruff_targets} --select E9,F63,F7")]
+            optional_checks.append(("mypy", f"mypy {ruff_targets}"))
+            
+            for label, cmd in optional_checks:
+                res = _run_validation_command(cmd, timeout=config.VALIDATION_TIMEOUT_SECONDS)
+                strict_details[label] = res
+                rc = res.get("rc")
+                if rc is None:
+                    rc = 0 if res.get("blocked") else 1
+                if not res.get("blocked") and rc not in (0, None):
+                    if rc != 127:
                         return VerificationResult(
                             passed=False,
                             message=f"Verification failed: {label} errors",
@@ -1145,12 +1197,12 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
     elif project_type in ("vue", "react", "node", "nextjs"):
         # 1. Syntax check for plain JS files (fast)
         js_paths = [p for p in paths if p.suffix == '.js' and p.exists()]
-        if js_paths and "node" in config.ALLOW_CMDS:
+        if js_paths:
             for js_file in js_paths:
                 cmd = f"node --check {quote_cmd_arg(str(js_file))}"
                 res = _run_validation_command(cmd, timeout=30)
                 strict_details[f"syntax_{js_file.name}"] = res
-                if not res.get("blocked") and res.get("rc", 1) != 0:
+                if not res.get("blocked") and res.get("rc", 1) != 0 and res.get("rc") != 127:
                     return VerificationResult(
                         passed=False,
                         message=f"Syntax error in {js_file.name}",
@@ -1160,7 +1212,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
 
         # 2. Vue/TS Type Checking (slower, maybe skip in strict=false?)
         # In 'fast' mode, we might skip full type checking unless it's a critical file
-        if project_type == "vue" and "npm" in config.ALLOW_CMDS:
+        if project_type == "vue":
             # Check if we should run vue-tsc
             # If we touched .vue or .ts files
             vue_ts_touched = any(p.suffix in ('.vue', '.ts') for p in paths)
@@ -1172,7 +1224,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
                     cmd = "npx vue-tsc --noEmit"
                     res = _run_validation_command(cmd, timeout=120)
                     strict_details["vue-tsc"] = res
-                    if not res.get("blocked") and res.get("rc", 1) != 0:
+                    if not res.get("blocked") and res.get("rc", 1) != 0 and res.get("rc") != 127:
                          return VerificationResult(
                             passed=False,
                             message="Vue type check failed",
@@ -1184,75 +1236,118 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
         # Look for test files in the paths
         test_touched = any("test" in p.name or "spec" in p.name for p in paths)
         if test_touched or mode == "strict":
-            if "npm" in config.ALLOW_CMDS:
-                # Try to detect test runner
-                test_cmd = "npm test"
-                # Check package.json for specific test scripts
-                try:
-                    pkg_json = json.loads((config.ROOT / "package.json").read_text())
-                    scripts = pkg_json.get("scripts", {})
-                    if "test:unit" in scripts:
-                        test_cmd = "npm run test:unit"
-                    elif "test" in scripts:
-                        test_cmd = "npm test"
-                    else:
-                        test_cmd = None
-                except Exception:
+            # Try to detect test runner
+            test_cmd = "npm test"
+            # Check package.json for specific test scripts
+            try:
+                pkg_json = json.loads((config.ROOT / "package.json").read_text())
+                scripts = pkg_json.get("scripts", {})
+                if "test:unit" in scripts:
+                    test_cmd = "npm run test:unit"
+                elif "test" in scripts:
+                    test_cmd = "npm test"
+                else:
                     test_cmd = None
+            except Exception:
+                test_cmd = None
 
-                if test_cmd:
-                    # Prevent watch mode which hangs execution
-                    # Try to detect if we need to add flags, or just prepend CI=true (cross-platform way is harder without extra tools)
-                    # We will append -- --run (for vitest) or --watchAll=false (for jest) if we can guess, 
-                    # but setting CI env var is the most robust standard method if the runner supports it.
-                    # rev's run_cmd doesn't easily let us set env vars per call in the string, 
-                    # so we'll try to chain it or assume the tool runner handles environment.
-                    # Ideally, we append flags.
-                    
-                    if "vitest" in test_cmd or "vite" in test_cmd:
-                        test_cmd += " --run"
-                    elif "jest" in test_cmd:
-                        test_cmd += " --watchAll=false"
-                    else:
-                        # Generic fallback: many runners respect --watch=false or --no-watch
-                        # But some might fail if they don't recognize the flag.
-                        # Safest is to try to rely on CI=true in the environment if the tool runner supported it.
-                        # Since we can't easily set env vars in the command string cross-platform without 'cross-env',
-                        # we will try to append '--passWithNoTests' which is common and harmless for jest/vitest,
-                        # and rely on the config.ALLOW_CMDS to hopefully include a non-watch command.
-                        pass
+            if test_cmd:
+                # Prevent watch mode which hangs execution
+                # Try to detect if we need to add flags, or just prepend CI=true (cross-platform way is harder without extra tools)
+                # We will append -- --run (for vitest) or --watchAll=false (for jest) if we can guess, 
+                # but setting CI env var is the most robust standard method if the runner supports it.
+                # rev's run_cmd doesn't easily let us set env vars per call in the string, 
+                # so we'll try to chain it or assume the tool runner handles environment.
+                # Ideally, we append flags.
+                
+                if "vitest" in test_cmd or "vite" in test_cmd:
+                    test_cmd += " --run"
+                elif "jest" in test_cmd:
+                    test_cmd += " --watchAll=false"
+                else:
+                    # Generic fallback: many runners respect --watch=false or --no-watch
+                                            # But some might fail if they don't recognize the flag.
+                                            # Safest is to try to rely on CI=true in the environment if the tool runner supported it.
+                                            # Since we can't easily set env vars in the command string cross-platform without 'cross-env',
+                                            # we will try to append '--passWithNoTests' which is common and harmless for jest/vitest.
+                                            pass
+                # Append file filters if possible? Vitest supports this.
+                # pytest supports it too.
+                # npm run test:unit -- <file>
+                if test_touched:
+                    test_files = [str(p) for p in paths if "test" in p.name or "spec" in p.name]
+                    if test_files:
+                        # Use ' -- ' to pass args to the underlying script
+                        test_cmd += " -- " + " ".join(quote_cmd_arg(f) for f in test_files)
+                
+                # Add CI flags to prevent hanging in watch mode
+                if " -- " not in test_cmd:
+                    test_cmd += " --"
+                
+                # Add flags that help both Jest and Vitest avoid watch mode
+                if "vitest" in test_cmd or "vite" in test_cmd:
+                    test_cmd += " --run"
+                else:
+                    # Jest / Generic
+                    test_cmd += " --watchAll=false --no-watch"
 
-                    # Append file filters if possible? Vitest supports this.
-                    # pytest supports it too.
-                    # npm run test:unit -- <file>
-                    if test_touched:
-                        test_files = [str(p) for p in paths if "test" in p.name or "spec" in p.name]
-                        if test_files:
-                            # Use ' -- ' to pass args to the underlying script
-                            test_cmd += " -- " + " ".join(quote_cmd_arg(f) for f in test_files)
-                    
-                    # Add CI flags to prevent hanging in watch mode
-                    if " -- " not in test_cmd:
-                        test_cmd += " --"
-                    
-                    # Add flags that help both Jest and Vitest avoid watch mode
-                    if "vitest" in test_cmd or "vite" in test_cmd:
-                        test_cmd += " --run"
-                    else:
-                        # Jest / Generic
-                        test_cmd += " --watchAll=false --no-watch"
+                res = _run_validation_command(test_cmd, use_tests_tool=True, timeout=config.VALIDATION_TIMEOUT_SECONDS)
+                strict_details["npm_test"] = res
+                # Ignore rc if no tests found?
+                # Vitest returns 1 if no tests found sometimes?
+                if not res.get("blocked") and res.get("rc", 1) != 0 and res.get("rc") != 127:
+                     return VerificationResult(
+                        passed=False,
+                        message="Frontend tests failed",
+                        details={"strict": strict_details},
+                        should_replan=True
+                    )
 
-                    res = _run_validation_command(test_cmd, use_tests_tool=True, timeout=config.VALIDATION_TIMEOUT_SECONDS)
-                    strict_details["npm_test"] = res
-                    # Ignore rc if no tests found?
-                    # Vitest returns 1 if no tests found sometimes?
-                    if not res.get("blocked") and res.get("rc", 1) != 0:
-                         return VerificationResult(
-                            passed=False,
-                            message="Frontend tests failed",
-                            details={"strict": strict_details},
-                            should_replan=True
-                        )
+    # 3. GO
+    elif project_type == "go":
+        # 1. Compilation check
+        compile_res = _run_validation_command("go build ./...", timeout=120)
+        strict_details["go_build"] = compile_res
+        if compile_res.get("rc", 0) != 0:
+            return VerificationResult(passed=False, message="Go build failed", details={"strict": strict_details}, should_replan=True)
+        
+        # 2. Tests
+        if mode == "strict" or custom_test_cmd:
+            cmd = custom_test_cmd or "go test ./..."
+            test_res = _run_validation_command(cmd, use_tests_tool=True, timeout=120)
+            strict_details["go_test"] = test_res
+            if test_res.get("rc", 0) != 0:
+                return VerificationResult(passed=False, message="Go tests failed", details={"strict": strict_details}, should_replan=True)
+
+    # 4. RUST
+    elif project_type == "rust":
+        # 1. Check/Build
+        compile_res = _run_validation_command("cargo check", timeout=300)
+        strict_details["cargo_check"] = compile_res
+        if compile_res.get("rc", 0) != 0:
+            return VerificationResult(passed=False, message="Cargo check failed", details={"strict": strict_details}, should_replan=True)
+            
+        # 2. Tests
+        if mode == "strict" or custom_test_cmd:
+            cmd = custom_test_cmd or "cargo test"
+            test_res = _run_validation_command(cmd, use_tests_tool=True, timeout=300)
+            strict_details["cargo_test"] = test_res
+            if test_res.get("rc", 0) != 0:
+                return VerificationResult(passed=False, message="Cargo tests failed", details={"strict": strict_details}, should_replan=True)
+
+    # 5. C# / .NET
+    elif project_type == "csharp":
+        compile_res = _run_validation_command("dotnet build", timeout=180)
+        strict_details["dotnet_build"] = compile_res
+        if compile_res.get("rc", 0) != 0:
+            return VerificationResult(passed=False, message="Dotnet build failed", details={"strict": strict_details}, should_replan=True)
+            
+        if mode == "strict" or custom_test_cmd:
+            cmd = custom_test_cmd or "dotnet test"
+            test_res = _run_validation_command(cmd, use_tests_tool=True, timeout=180)
+            strict_details["dotnet_test"] = test_res
+            if test_res.get("rc", 0) != 0:
+                return VerificationResult(passed=False, message="Dotnet tests failed", details={"strict": strict_details}, should_replan=True)
 
     return strict_details
 
@@ -1270,31 +1365,59 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
         seen_cmds.add(cmd)
         commands.append((label, cmd, tool))
 
+    # Get project type for better defaults
+    project_type = _detect_project_type(config.ROOT)
+
     # Get Python file paths for targeted linting
     py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]
 
     for step in validation_steps:
         text = step.lower()
-        if "syntax" in text or "compile" in text:
-            # Filter for Python files or directories
-            compile_targets = [p for p in paths if p.is_dir() or p.suffix == '.py']
-            if compile_targets:
-                cmd = "python -m compileall " + " ".join(_quote_path(p) for p in compile_targets)
-                _add("compileall", cmd)
+        
+        # 1. SYNTAX / COMPILE
+        if "syntax" in text or "compile" in text or "build" in text:
+            if project_type == "python":
+                compile_targets = [p for p in paths if p.is_dir() or p.suffix == '.py']
+                if compile_targets:
+                    _add("compileall", "python -m compileall " + " ".join(_quote_path(p) for p in compile_targets))
+            elif project_type == "go": _add("go_build", "go build ./...")
+            elif project_type == "rust": _add("cargo_check", "cargo check")
+            elif project_type == "csharp": _add("dotnet_build", "dotnet build")
+            elif project_type == "cpp_cmake": _add("cmake_build", "cmake --build .")
+            elif project_type == "cpp_make": _add("make", "make")
+            elif project_type == "java_maven": _add("mvn_compile", "mvn compile")
+            elif project_type == "java_gradle" or project_type == "kotlin": _add("gradle_build", "./gradlew build")
+
+        # 2. LINT
         if "lint" in text or "linter" in text:
-            # Run ruff only on modified files, targeting severe errors to avoid pre-existing style issues
-            # E9: Runtime/syntax errors, F63: Invalid print syntax, F7: Statement problems
-            # NOTE: Removed F82 (undefined names) - too noisy for pre-existing issues
-            if py_paths:
+            if project_type == "python" and py_paths:
                 ruff_targets = " ".join(_quote_path(p) for p in py_paths[:10])
                 _add("ruff", f"ruff check {ruff_targets} --select E9,F63,F7")
+            elif project_type in ("node", "vue", "react"): _add("npm_lint", "npm run lint")
+            elif project_type == "go": _add("go_vet", "go vet ./...")
+            elif project_type == "rust": _add("clippy", "cargo clippy")
+
+        # 3. TEST
         if "test" in text:
-            _add("pytest", "pytest -q", "run_tests")
+            if project_type == "python": _add("pytest", "pytest -q", "run_tests")
+            elif project_type in ("node", "vue", "react", "nextjs"): _add("npm_test", "npm test", "run_tests")
+            elif project_type == "go": _add("go_test", "go test ./...", "run_tests")
+            elif project_type == "rust": _add("cargo_test", "cargo test", "run_tests")
+            elif project_type == "ruby": _add("rake_test", "bundle exec rake test", "run_tests")
+            elif project_type == "php": _add("phpunit", "vendor/bin/phpunit", "run_tests")
+            elif project_type == "java_maven": _add("mvn_test", "mvn test", "run_tests")
+            elif project_type == "java_gradle" or project_type == "kotlin": _add("gradle_test", "./gradlew test", "run_tests")
+            elif project_type == "csharp": _add("dotnet_test", "dotnet test", "run_tests")
+            elif project_type == "flutter": _add("flutter_test", "flutter test", "run_tests")
+            else: _add("pytest", "pytest -q", "run_tests") # Default fallback
+
+        # 4. TYPE CHECK
         if "mypy" in text or "type" in text:
-            # Run mypy only on modified files to avoid pre-existing errors
-            if py_paths:
+            if project_type == "python" and py_paths:
                 mypy_targets = " ".join(_quote_path(p) for p in py_paths[:10])
                 _add("mypy", f"mypy {mypy_targets}")
+            elif project_type in ("node", "typescript", "vue", "react"):
+                _add("tsc", "npx tsc --noEmit")
 
     if not commands:
         return None

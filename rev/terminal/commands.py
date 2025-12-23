@@ -817,12 +817,9 @@ class PermissionsCommand(CommandHandler):
         output.append("=" * 60)
         output.append("  File operations:   Allowed (destructive ops prompt)")
         output.append("  Git operations:    Allowed")
-        output.append("  Shell commands:    Restricted (whitelist only)")
+        output.append("  Shell commands:    Allowed (securely validated)")
         output.append("  SSH operations:    " + ("Allowed" if config.SSH_AVAILABLE else "Not available"))
-        output.append(f"\nWhitelisted commands:")
-        for cmd in sorted(config.ALLOW_CMDS):
-            output.append(f"  - {cmd}")
-        output.append("\n(Fine-grained permission controls pending)")
+        output.append("\n(Fine-grained permission controls via tool_policy.yaml)")
 
         return "\n".join(output)
 

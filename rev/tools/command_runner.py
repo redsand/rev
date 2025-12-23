@@ -28,6 +28,7 @@ import subprocess
 import time
 import json
 import pathlib
+import shutil
 from typing import Dict, Any, List, Optional, Tuple
 from pathlib import Path
 
@@ -42,30 +43,14 @@ FORBIDDEN_RE = re.compile(r"[;&|><`]|(\$\()|\r|\n")
 FORBIDDEN_TOKENS = {"&&", "||", ";", "|", "&", ">", "<", ">>", "2>", "1>", "<<",
                     "2>&1", "1>&2", "`", "$(", "${"}
 
-# Security: Allowlist of permitted commands
-# This should be expanded based on actual requirements
-ALLOW_CMDS = {
-    # Git commands
-    "git",
-    # Python commands
-    "python", "python3", "py", "pytest", "pip", "pip3",
-    # Node.js commands
-    "node", "npm", "npx", "yarn", "pnpm",
-    # Build tools
-    "make", "cmake", "cargo", "go",
-    # Linters and formatters
-    "ruff", "mypy", "pylint", "black", "isort", "flake8",
-    "eslint", "prettier",
-    # Test runners
-    "jest", "vitest", "mocha",
-    # Other tools
-    "docker", "docker-compose",
-    "grep", "find", "ls", "cat", "echo", "pwd",
-}
 
-# Add any custom allowed commands from config
-if hasattr(config, 'ALLOW_CMDS'):
-    ALLOW_CMDS.update(config.ALLOW_CMDS)
+def _resolve_command(cmd_name: str) -> Optional[str]:
+    """Resolve a command name to its full path.
+    
+    On Windows, this correctly finds .cmd, .bat, and .exe files.
+    """
+    # shutil.which handles PATH and PATHEXT correctly on all platforms
+    return shutil.which(cmd_name)
 
 
 def _parse_and_validate(cmd: str) -> Tuple[bool, str, List[str]]:
@@ -83,8 +68,7 @@ def _parse_and_validate(cmd: str) -> Tuple[bool, str, List[str]]:
     Security checks:
     1. Reject shell metacharacters in the raw command string
     2. Parse with shlex.split() to get individual tokens
-    3. Check that command name is in allowlist
-    4. Check that no forbidden tokens appear in arguments
+    3. Check that no forbidden tokens appear in arguments
     """
     # Check 1: Raw string validation for shell metacharacters
     if FORBIDDEN_RE.search(cmd):
@@ -99,17 +83,11 @@ def _parse_and_validate(cmd: str) -> Tuple[bool, str, List[str]]:
     if not args:
         return False, "empty command", []
 
-    # Check 3: Validate command name is in allowlist
+    # Check 3: Resolve command to absolute path (handles Windows .cmd/.bat)
     cmd_name = args[0]
-
-    # Special case: Allow full paths to Python executable
-    if "python" in cmd_name.lower():
-        # Extract just the executable name
-        cmd_base = pathlib.Path(cmd_name).name.lower()
-        if cmd_base not in {"python.exe", "python3.exe", "python", "python3", "py.exe", "py"}:
-            return False, f"command not allowed: {cmd_name}", []
-    elif cmd_name not in ALLOW_CMDS:
-        return False, f"command not allowed: {cmd_name}", []
+    resolved = _resolve_command(cmd_name)
+    if resolved:
+        args[0] = resolved
 
     # Check 4: Validate no forbidden tokens in arguments
     if any(tok in FORBIDDEN_TOKENS for tok in args):
