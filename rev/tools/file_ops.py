@@ -563,6 +563,12 @@ def copy_file(src: str, dest: str) -> str:
             return json.dumps({"error": f"Cannot copy directory: {src}"})
         dest_p.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src_p, dest_p)
+
+        # Invalidate cache for the destination file
+        file_cache = get_file_cache()
+        if file_cache is not None:
+            file_cache.invalidate_file(dest_p)
+
         return json.dumps(
             {
                 "copied": _rel_to_root(src_p),

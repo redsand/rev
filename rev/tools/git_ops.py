@@ -567,6 +567,13 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
                         "retry_plan": retry_plan,
                     }
                 )
+            
+            # Invalidate cache for all affected files
+            from rev.cache import get_file_cache
+            file_cache = get_file_cache()
+            if file_cache is not None:
+                for path_str in patch_paths:
+                    file_cache.invalidate_file(config.ROOT / path_str)
 
         if apply_proc.returncode != 0 and _allow_chunking and not dry_run and len(chunked_parts) > 1:
             chunk_result = _apply_patch_in_chunks(chunked_parts, dry_run=dry_run)

@@ -22,6 +22,9 @@ class DeliverableType(Enum):
     RUNTIME_CHECK = "runtime_check"
     IMPORTS_WORK = "imports_work"
     NO_REGRESSION = "no_regression"
+    API_ROUTE_CHECK = "api_route_check"
+    CURL_SMOKE_TEST = "curl_smoke_test"
+    PLAYWRIGHT_TEST = "playwright_test"
 
 
 class ValidationStage(Enum):

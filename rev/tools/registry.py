@@ -769,6 +769,9 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
         "agent": agent_name
     })
 
+    from rev.execution.ledger import get_ledger
+    ledger = get_ledger()
+
     friendly_desc = _get_friendly_description(name, args)
     try:
         print(f"  → {friendly_desc}")
@@ -798,6 +801,7 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
                 "result": result,
                 "duration_ms": duration
             })
+            ledger.record(name, args, result, duration, agent_name)
             return result
 
         # O(1) dictionary lookup
@@ -810,6 +814,7 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
                 "arguments": args,
                 "error": error_msg
             })
+            ledger.record(name, args, error_msg, 0, agent_name, status="error")
             return json.dumps({"error": error_msg})
 
         # Execute with timeout protection if applicable
@@ -830,6 +835,7 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
                         "result": result,
                         "duration_ms": duration
                     })
+                    ledger.record(name, args, result, duration, agent_name)
                     return result
                 except Exception as e:
                     # Timeout or max retries exceeded
@@ -840,6 +846,7 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
                         "arguments": args,
                         "error": error_msg
                     })
+                    ledger.record(name, args, error_msg, (time.time() - start_time) * 1000, agent_name, status="error")
                     return json.dumps({"error": error_msg})
 
         # Execute the tool handler without timeout protection
@@ -852,6 +859,7 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
             "result": result,
             "duration_ms": duration
         })
+        ledger.record(name, args, result, duration, agent_name)
         return result
 
     except Exception as e:
@@ -862,6 +870,7 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
             "arguments": args,
             "error": error_msg
         })
+        ledger.record(name, args, error_msg, (time.time() - start_time) * 1000, agent_name, status="error")
         return json.dumps({"error": error_msg})
 
 

@@ -226,6 +226,15 @@ def split_python_module_classes(
         final_content = init_content + exports + all_section
         package_init.write_text(final_content, encoding="utf-8")
         
+        # Invalidate cache for all created files
+        from rev.cache import get_file_cache
+        file_cache = get_file_cache()
+        if file_cache is not None:
+            for f_rel in created_files:
+                file_cache.invalidate_file(config.ROOT / f_rel)
+            file_cache.invalidate_file(package_init)
+            file_cache.invalidate_file(source_file)
+
         # 5. Handle original source file
         source_moved_to = None
         source_file_exists = source_file.exists()

@@ -7,6 +7,45 @@ import pathlib
 import platform
 from typing import Dict, Any, Optional, List
 
+# Global repository configuration (loaded from .rev/config.yml or rev.toml)
+REPO_CONFIG: Dict[str, Any] = {}
+
+
+def load_repo_config(root: pathlib.Path) -> None:
+    """Load per-repo configuration from .rev/config.yml or rev.toml."""
+    global REPO_CONFIG
+    
+    # Try .rev/config.yml (YAML)
+    yaml_config = root / ".rev" / "config.yml"
+    if yaml_config.exists():
+        try:
+            import yaml
+            with open(yaml_config, 'r') as f:
+                REPO_CONFIG = yaml.safe_load(f) or {}
+                print(f"[OK] Loaded repo config from {yaml_config}")
+                return
+        except (ImportError, Exception) as e:
+            print(f"⚠️  Warning: Failed to load {yaml_config}: {e}")
+            
+    # Try rev.toml (TOML)
+    toml_config = root / "rev.toml"
+    if toml_config.exists():
+        try:
+            try:
+                import tomllib as toml # Python 3.11+
+                with open(toml_config, 'rb') as f:
+                    REPO_CONFIG = toml.load(f) or {}
+            except ImportError:
+                import toml
+                with open(toml_config, 'r') as f:
+                    REPO_CONFIG = toml.load(f) or {}
+            
+            print(f"[OK] Loaded repo config from {toml_config}")
+            return
+        except (ImportError, Exception) as e:
+            print(f"⚠️  Warning: Failed to load {toml_config}: {e}")
+
+
 # Check for optional dependencies
 try:
     import paramiko
@@ -113,6 +152,9 @@ def set_workspace_root(path: pathlib.Path, allow_external: bool = False) -> None
 
     init_workspace(root=path, allow_external=allow_external)
     _sync_from_workspace()
+    
+    # Load per-repo configuration
+    load_repo_config(path)
 
 
 def register_additional_root(path: pathlib.Path) -> None:

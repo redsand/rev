@@ -1192,6 +1192,45 @@ class Orchestrator:
             if config.EXECUTION_MODE != 'sub-agent':
                 print(f"\nðŸ”¸ Entering phase: {new_phase.value}")
 
+    def _transform_redundant_action(self, task: Task, action_sig: str, count: int) -> Task:
+        """Transform a redundant action into one that produces new evidence."""
+        desc = task.description.lower()
+        file_path = _extract_file_path_from_description(task.description)
+        
+        print(f"  ⚠️  Redundant action detected ({count}x): {action_sig}")
+        
+        if task.action_type in {"read", "analyze"} and file_path:
+            # If reading the same file, try searching for usages instead
+            symbol_match = re.search(r'class\s+(\w+)|def\s+(\w+)', desc)
+            symbol = symbol_match.group(1) or symbol_match.group(2) if symbol_match else None
+            
+            if symbol:
+                print(f"  → Transforming to symbol usage search: {symbol}")
+                return Task(
+                    description=f"Find all usages of symbol '{symbol}' in the codebase to understand its context",
+                    action_type="analyze"
+                )
+            else:
+                print(f"  → Transforming to git diff check")
+                return Task(
+                    description=f"Check git diff for {file_path} to see recent changes and identify potential issues",
+                    action_type="analyze"
+                )
+        
+        if task.action_type == "test":
+            print(f"  → Transforming to build/compile check")
+            return Task(
+                description="Run a full build or compilation check to ensure structural integrity",
+                action_type="test"
+            )
+            
+        # Generic transformation: search for related patterns
+        print(f"  → Transforming to generic pattern search")
+        return Task(
+            description=f"Search for patterns related to: {task.description[:50]}",
+            action_type="analyze"
+        )
+
     def _display_prompt_optimization(self, original: str, optimized: str) -> None:
         """Display original vs improved prompts for transparency."""
         original_lines = original.strip().splitlines() or [original]
@@ -1770,6 +1809,9 @@ class Orchestrator:
         print("CONTINUOUS SUB-AGENT MODE (REPL-Style with Verification)")
         print("=" * 60)
 
+        from rev.execution.ledger import get_ledger
+        ledger = get_ledger()
+
         # Persistence: load previous work history
         completed_tasks_log = self.context.load_history()
         if completed_tasks_log:
@@ -1847,50 +1889,7 @@ class Orchestrator:
                     work_summary = f"Work Completed So Far ({total_tasks} total tasks: {completed_count} completed, {failed_count} failed):\n"
 
                     # Add file read/inspection summary FIRST to establish what's been inspected
-                    file_read_counts: Dict[str, int] = defaultdict(int)
-
-                    # P0-1 Fix: Build file read counts from actual tool_events, not keywords
-                    FILE_READING_TOOLS = {'read_file', 'read_file_lines', 'search_code', 'list_dir', 'analyze_code_context'}
-
-                    for task in completed_tasks:
-                        # Check if task is completed
-                        if hasattr(task, 'status'):
-                            status_value = task.status.value if hasattr(task.status, 'value') else str(task.status)
-                            if status_value.lower() != 'completed':
-                                continue
-
-                            # Check tool_events for file reading operations
-                            if hasattr(task, 'tool_events') and task.tool_events:
-                                for event in task.tool_events:
-                                    tool_name = event.get('tool', '').lower()
-                                    if tool_name not in FILE_READING_TOOLS:
-                                        continue
-
-                                    # Extract file path from tool arguments
-                                    args = event.get('args', {})
-                                    if not isinstance(args, dict):
-                                        continue
-
-                                    # Check various argument names that contain file paths
-                                    file_path = args.get('file_path') or args.get('path') or args.get('pattern')
-                                    if file_path:
-                                        # Normalize to filename only for summary
-                                        filename = str(file_path).replace('\\', '/').split('/')[-1]
-                                        # Skip generic patterns like **/*
-                                        if '*' not in filename:
-                                            file_read_counts[filename] += 1
-
-                    # BACKWARD COMPATIBLE: Also check log entries if no tasks with tool_events
-                    if not file_read_counts:
-                        for log_entry in completed_tasks_log:
-                            if log_entry.startswith('[COMPLETED]'):
-                                desc_lower = log_entry.lower()
-                                if any(kw in desc_lower for kw in ['read', 'inspect', 'examine', 'analyze']):
-                                    file_path = _extract_file_path_from_description(log_entry)
-                                    if file_path:
-                                        # Normalize to filename only for summary
-                                        filename = file_path.replace('\\', '/').split('/')[-1]
-                                        file_read_counts[filename] += 1
+                    file_read_counts = ledger.get_files_inspected()
 
                     if file_read_counts:
                         work_summary += "\n📄 Files Already Inspected (DO NOT re-read these files unless absolutely necessary):\n"
@@ -1921,7 +1920,7 @@ class Orchestrator:
 
                 # P0-2: Add blocked actions to failure notes
                 if self.context:
-                    blocked_sigs = self.context.get_agent_state("blocked_action_sigs", set())
+                    blocked_sigs = ledger.get_blocked_action_sigs()
                     if blocked_sigs:
                         failure_notes.append("🚫 BLOCKED ACTIONS (DO NOT propose any of these):")
                         for blocked_sig in blocked_sigs:
@@ -1987,6 +1986,11 @@ class Orchestrator:
 
                     print("\n✅ Planner determined the goal is achieved.")
                     return True
+
+                # FORWARD PROGRESS RULE: Check for redundant actions
+                action_sig = f"{next_task.action_type}:{next_task.description}"
+                if action_counts[action_sig] >= 2:
+                    next_task = self._transform_redundant_action(next_task, action_sig, action_counts[action_sig])
 
                 next_task.task_id = iteration
                 try:
@@ -2112,11 +2116,35 @@ class Orchestrator:
                 self.context.set_agent_state("no_retry", True)
                 self.context.add_error(f"Circuit breaker: repeating action '{next_task.action_type}'")
                 print("\n" + "=" * 70)
-                print("CIRCUIT BREAKER - REPEATED ACTION (CONSECUTIVE STREAK)")
+                print("🛑 CIRCUIT BREAKER TRIGGERED: REPEATED ACTION")
                 print("=" * 70)
                 print(f"Repeated action {repeat_same_action}x consecutively (total {action_counts[action_sig]}x): [{(next_task.action_type or '').upper()}] {next_task.description}")
+                
+                # Enhanced circuit-breaker message
+                recent_ledger_actions = ledger.get_recent_actions(5)
+                last_verification = ledger.get_last_verification_status()
+                blocked_sigs = ledger.get_blocked_action_sigs()
+                
+                print("\n--- DEBUG CONTEXT ---")
+                print(f"Action Signature: {action_sig}")
+                
+                if recent_ledger_actions:
+                    print("\nLast 5 Tool Calls:")
+                    for i, a in enumerate(recent_ledger_actions, 1):
+                        print(f"  {i}. {a['tool']}({json.dumps(a['arguments'])}) -> {a['status']}")
+                
+                if last_verification:
+                    print("\nLast Verification Status:")
+                    print(json.dumps(last_verification, indent=2)[:500])
+                
+                if blocked_sigs:
+                    print("\nBlocked Signatures:")
+                    for sig in blocked_sigs:
+                        print(f"  - {sig}")
+                
+                print("\n---------------------\n")
+                
                 print("Blocking issue: planner is not making forward progress; refusing to repeat the same step.")
-                print("Next step: run with `--debug` and share the last verification failure + tool args.\n")
                 return False
             if (
                 config.LOOP_GUARD_ENABLED

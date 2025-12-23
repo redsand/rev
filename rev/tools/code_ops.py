@@ -31,6 +31,12 @@ def remove_unused_imports(file_path: str, language: str = "python") -> str:
             try:
                 result = _run_shell(f"autoflake --remove-all-unused-imports --in-place {quote_cmd_arg(str(file))}")
                 if result.returncode == 0:
+                    # Invalidate cache for the modified file
+                    from rev.cache import get_file_cache
+                    file_cache = get_file_cache()
+                    if file_cache is not None:
+                        file_cache.invalidate_file(file)
+
                     return json.dumps({
                         "file": str(file),
                         "refactored": file.relative_to(config.ROOT).as_posix(),
