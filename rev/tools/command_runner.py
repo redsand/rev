@@ -450,30 +450,38 @@ def run_command_streamed(
 
 
 # Backwards compatibility: Provide run_cmd and run_tests interfaces
-def run_cmd(cmd: str, timeout: int = 300) -> str:
+def run_cmd(cmd: str | list[str], timeout: int = 300, cwd: Optional[Path] = None) -> str:
     """Run a shell command (backwards compatible interface).
 
     Returns:
         JSON string with execution results
     """
+    if cwd is not None and not isinstance(cwd, Path):
+        cwd = Path(cwd)
+
     result = run_command_safe(
         cmd,
         timeout=timeout,
+        cwd=cwd,
         capture_output=True,
         check_interrupt=True,
     )
     return json.dumps(result)
 
 
-def run_tests(cmd: str = "pytest -q", timeout: int = 600) -> str:
+def run_tests(cmd: str | list[str] = "pytest -q", timeout: int = 600, cwd: Optional[Path] = None) -> str:
     """Run test suite (backwards compatible interface).
 
     Returns:
         JSON string with execution results
     """
+    if cwd is not None and not isinstance(cwd, Path):
+        cwd = Path(cwd)
+
     result = run_command_safe(
         cmd,
         timeout=timeout,
+        cwd=cwd,
         capture_output=True,
         check_interrupt=True,
     )

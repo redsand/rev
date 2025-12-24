@@ -17,6 +17,7 @@ from rev import config
 from rev.debug_logger import get_logger
 from rev.tools.permissions import get_permission_manager
 from rev.workspace import get_workspace
+from rev.tools.workspace_resolver import resolve_workspace_path, WorkspacePathError
 
 if TYPE_CHECKING:  # pragma: no cover - used only for type hints
     from rev.execution.timeout_manager import TimeoutManager, TimeoutConfig
@@ -194,6 +195,84 @@ _TIMEOUT_PROTECTED_TOOLS = {
     "check_license_compliance",
     "split_python_module_classes",
 }
+
+_COMMAND_TOKENS = {
+    "npm",
+    "npx",
+    "yarn",
+    "pnpm",
+    "pytest",
+    "py.test",
+    "python",
+    "python3",
+    "pip",
+    "pip3",
+    "node",
+    "go",
+    "cargo",
+    "mvn",
+    "gradle",
+    "gradlew",
+    "dotnet",
+    "bundle",
+    "rake",
+    "phpunit",
+    "flutter",
+    "java",
+    "ruby",
+    "perl",
+    "bash",
+    "sh",
+    "pwsh",
+    "powershell",
+    "cmd",
+    "make",
+    "cmake",
+    "git",
+}
+
+_PATH_TOOLS = {"read_file", "read_file_lines", "get_file_info", "file_exists"}
+
+
+def _looks_like_command(value: str) -> bool:
+    text = (value or "").strip()
+    if not text:
+        return False
+    if "\n" in text or "\r" in text:
+        return True
+    parts = text.split()
+    if not parts:
+        return False
+    first = parts[0].lower()
+    if first in _COMMAND_TOKENS:
+        return True
+    return False
+
+
+def _guard_command_like_path(tool: str, args: Dict[str, Any]) -> Optional[str]:
+    if tool not in _PATH_TOOLS:
+        return None
+    path = args.get("path")
+    if not isinstance(path, str):
+        return None
+    text = path.strip()
+    if not text:
+        return None
+    try:
+        resolved = resolve_workspace_path(text, purpose=f"{tool} guard")
+    except WorkspacePathError:
+        resolved = None
+    if resolved and resolved.abs_path.exists():
+        return None
+    if _looks_like_command(text):
+        return json.dumps(
+            {
+                "error": f"Command-like input passed to {tool}. Use run_cmd/run_tests instead.",
+                "blocked": True,
+                "input": text,
+            }
+        )
+    return None
 
 # --- Dynamic Tool Registration ---
 _DYNAMIC_TOOLS: Dict[str, Dict[str, Any]] = {}
@@ -402,8 +481,8 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         "git_status": lambda args: git_status(),
         "git_log": lambda args: git_log(args.get("count", 10), args.get("oneline", False)),
         "git_branch": lambda args: git_branch(args.get("action", "list"), args.get("branch_name")),
-        "run_cmd": lambda args: run_cmd(args["cmd"], args.get("timeout", 300)),
-        "run_tests": lambda args: run_tests(args.get("cmd", "pytest -q"), args.get("timeout", 600)),
+        "run_cmd": lambda args: run_cmd(args["cmd"], args.get("timeout", 300), args.get("cwd")),
+        "run_tests": lambda args: run_tests(args.get("cmd", "pytest -q"), args.get("timeout", 600), args.get("cwd")),
         "get_repo_context": lambda args: get_repo_context(args.get("commits", 6)),
 
         # Utility tools
@@ -763,8 +842,35 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
                     if isinstance(normalized_args.get(alt), (str, list)):
                         normalized_args["cmd"] = normalized_args[alt]
                         break
+            if "cwd" not in normalized_args:
+                for alt in ("workdir", "working_dir", "workingdir"):
+                    if isinstance(normalized_args.get(alt), str):
+                        normalized_args["cwd"] = normalized_args[alt]
+                        break
 
         args = normalized_args
+
+    # Guard against passing command-like strings to file path tools.
+    tool_lower = (name or "").lower()
+    guard_error = _guard_command_like_path(tool_lower, args)
+    if guard_error:
+        logger.log_transaction_event("TOOL_BLOCKED", {
+            "tool": name,
+            "arguments": args,
+            "reason": "command-like input to path tool",
+        })
+        return guard_error
+
+    if tool_lower in {"run_cmd", "run_tests"} and isinstance(args, dict):
+        cwd = args.get("cwd")
+        if isinstance(cwd, (str, Path)) and str(cwd).strip():
+            try:
+                resolved = resolve_workspace_path(cwd, purpose="run command")
+                args["cwd"] = resolved.abs_path
+            except WorkspacePathError as path_error:
+                return json.dumps({"error": str(path_error), "blocked": True, "cwd": str(cwd)})
+        elif "cwd" in args:
+            args.pop("cwd", None)
 
     # CHECK PERMISSIONS before execution
     # Only enforce permissions if tool_policy.yaml exists
@@ -1568,8 +1674,15 @@ def get_available_tools() -> list:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "cmd": {"type": "string", "description": "Command to execute"},
-                        "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 300}
+                        "cmd": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {"type": "array", "items": {"type": "string"}}
+                            ],
+                            "description": "Command to execute"
+                        },
+                        "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 300},
+                        "cwd": {"type": "string", "description": "Working directory (relative to workspace)"}
                     },
                     "required": ["cmd"]
                 }
@@ -1583,8 +1696,16 @@ def get_available_tools() -> list:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "cmd": {"type": "string", "description": "Test command", "default": "pytest -q"},
-                        "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 600}
+                        "cmd": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {"type": "array", "items": {"type": "string"}}
+                            ],
+                            "description": "Test command",
+                            "default": "pytest -q"
+                        },
+                        "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 600},
+                        "cwd": {"type": "string", "description": "Working directory (relative to workspace)"}
                     }
                 }
             }

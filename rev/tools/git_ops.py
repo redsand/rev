@@ -649,7 +649,7 @@ def git_branch(action: str = "list", branch_name: str = None) -> str:
 
 # ========== Additional Git Operations ==========
 
-def run_cmd(cmd: str | list[str], timeout: int = 300) -> str:
+def run_cmd(cmd: str | list[str], timeout: int = 300, cwd: Optional[pathlib.Path] = None) -> str:
     """Run a shell command safely with security validation.
 
     Security:
@@ -700,16 +700,20 @@ def run_cmd(cmd: str | list[str], timeout: int = 300) -> str:
 
     # Use safe command runner
     from rev.tools.command_runner import run_command_safe
+    if cwd is not None and not isinstance(cwd, pathlib.Path):
+        cwd = pathlib.Path(cwd)
+
     result = run_command_safe(
         cmd,
         timeout=timeout,
+        cwd=cwd,
         capture_output=True,
         check_interrupt=True,
     )
     return json.dumps(result)
 
 
-def run_tests(cmd: str | list[str] = "pytest -q", timeout: int = 600) -> str:
+def run_tests(cmd: str | list[str] = "pytest -q", timeout: int = 600, cwd: Optional[pathlib.Path] = None) -> str:
     """Run test suite safely with security validation.
 
     Security:
@@ -721,9 +725,13 @@ def run_tests(cmd: str | list[str] = "pytest -q", timeout: int = 600) -> str:
     """
     from rev.tools.command_runner import run_command_safe
 
+    if cwd is not None and not isinstance(cwd, pathlib.Path):
+        cwd = pathlib.Path(cwd)
+
     result = run_command_safe(
         cmd,
         timeout=timeout,
+        cwd=cwd,
         capture_output=True,
         check_interrupt=True,
     )

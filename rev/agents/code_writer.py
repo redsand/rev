@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 
 from rev.core.tool_call_recovery import recover_tool_call_from_text
+from rev.core.tool_call_retry import retry_tool_call_with_response_format
 from rev.agents.context_provider import build_context_and_tools
 from rev.agents.subagent_io import build_subagent_output
 from rev.tools.registry import execute_tool as execute_registry_tool
@@ -807,14 +808,29 @@ class CodeWriterAgent(BaseAgent):
             # If we reach here, there was an error
             if error_type:
                 if error_type in {"text_instead_of_tool_call", "empty_tool_calls", "missing_tool_calls"}:
-                    recovered = recover_tool_call_from_text(
-                        response.get("message", {}).get("content", ""),
+                    retried = False
+                    recovered = retry_tool_call_with_response_format(
+                        messages,
+                        available_tools,
                         allowed_tools=[t["function"]["name"] for t in available_tools],
                     )
                     if recovered:
+                        retried = True
+                        print(f"  -> Retried tool call with JSON format: {recovered.name}")
+                    else:
+                        recovered = recover_tool_call_from_text(
+                            response.get("message", {}).get("content", ""),
+                            allowed_tools=[t["function"]["name"] for t in available_tools],
+                        )
+                    if recovered:
                         tool_name = recovered.name
                         arguments = recovered.arguments
-                        print(f"  -> Recovered tool call from text output: {tool_name}")
+                        if not tool_name:
+                            return self.make_failure_signal("missing_tool", "Recovered tool call missing name")
+                        if not arguments:
+                            return self.make_failure_signal("missing_tool_args", "Recovered tool call missing arguments")
+                        if not retried:
+                            print(f"  -> Recovered tool call from text output: {tool_name}")
 
                         if tool_name in ["write_file", "replace_in_file", "create_directory", "move_file", "copy_file"]:
                             self._display_change_preview(tool_name, arguments)

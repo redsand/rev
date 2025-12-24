@@ -43,7 +43,7 @@ from rev.execution.state_manager import StateManager
 from rev.execution.prompt_optimizer import optimize_prompt_if_needed
 from rev.execution.quick_verify import verify_task_execution, VerificationResult
 from rev.execution.anchoring_scorer import AnchoringScorer, AnchoringDecision
-from rev.tools.registry import get_available_tools, get_repo_context
+from rev.tools.registry import execute_tool, get_available_tools, get_repo_context
 from rev.debug_logger import DebugLogger
 from rev.config import (
     MAX_PLAN_TASKS,
@@ -56,6 +56,7 @@ from rev.config import (
     MAX_PLAN_REGEN_RETRIES,
     MAX_ADAPTIVE_REPLANS,
     MAX_VALIDATION_RETRIES,
+    EXCLUDE_DIRS,
 )
 from rev.llm.client import get_token_usage, ollama_chat
 from rev.core.context import RevContext, ResourceBudget
@@ -67,9 +68,11 @@ import re
 from rev.retrieval.context_builder import ContextBuilder
 from rev.memory.project_memory import ensure_project_memory_file, maybe_record_known_failure_from_error
 from rev.tools.workspace_resolver import resolve_workspace_path
+from rev.workspace import get_workspace
 from rev.core.text_tool_shim import maybe_execute_tool_call_from_text
 from rev.agents.subagent_io import build_subagent_output
 from rev.execution.action_normalizer import normalize_action_type
+from rev.execution.tool_constraints import allowed_tools_for_action, has_write_tool, WRITE_ACTIONS
 from rev.terminal.formatting import colorize, Colors, Symbols
 from difflib import SequenceMatcher
 
@@ -586,6 +589,23 @@ def _append_task_tool_event(task: Task, result_payload: Any) -> None:
             "summary": summary,
         }
     )
+
+
+def _enforce_action_tool_constraints(task: Task) -> tuple[bool, Optional[str]]:
+    """Ensure write actions actually execute a write tool."""
+    action = (task.action_type or "").lower()
+    if action not in WRITE_ACTIONS:
+        return True, None
+
+    events = getattr(task, "tool_events", None) or []
+    if not events:
+        return False, "Write action completed without tool execution"
+
+    tool_names = [str(ev.get("tool") or "").lower() for ev in events]
+    if not has_write_tool(tool_names):
+        return False, "Write action completed without write tool execution"
+
+    return True, None
 
 
 def _find_workspace_matches_by_basename(*, root: Path, basename: str, limit: int = 25) -> List[str]:
@@ -1196,6 +1216,7 @@ class Orchestrator:
         self.learning_agent = LearningAgent(project_root) if self.config.enable_learning else None
         self.debug_logger = DebugLogger.get_instance()
         self._context_builder: Optional[ContextBuilder] = None
+        self._project_roots_cache: Optional[List[Path]] = None
 
     def _update_phase(self, new_phase: AgentPhase):
         if self.context:
@@ -1248,6 +1269,175 @@ class Orchestrator:
             description=f"Search for patterns related to: {task.description[:50]}",
             action_type="analyze"
         )
+
+    def _discover_project_roots(self) -> List[Path]:
+        if self._project_roots_cache is not None:
+            return self._project_roots_cache
+
+        markers = {
+            "package.json",
+            "pyproject.toml",
+            "requirements.txt",
+            "setup.py",
+            "go.mod",
+            "Cargo.toml",
+            "Gemfile",
+            "composer.json",
+            "pom.xml",
+            "build.gradle",
+            "build.gradle.kts",
+            "CMakeLists.txt",
+            "Makefile",
+            ".git",
+            ".rev",
+        }
+
+        max_depth = 4
+        roots: set[Path] = set()
+        root_path = self.project_root.resolve()
+
+        for dirpath, dirnames, filenames in os.walk(root_path):
+            current = Path(dirpath)
+            try:
+                rel = current.relative_to(root_path)
+            except Exception:
+                rel = Path(".")
+
+            depth = len(rel.parts)
+            dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS]
+            if depth > max_depth:
+                dirnames[:] = []
+                continue
+
+            if any(marker in filenames for marker in markers):
+                roots.add(current)
+
+        if not roots:
+            roots.add(root_path)
+
+        self._project_roots_cache = sorted(roots, key=lambda p: len(p.parts))
+        return self._project_roots_cache
+
+    def _find_root_for_path(self, path: Path, roots: List[Path]) -> Optional[Path]:
+        if not roots:
+            return None
+        candidates = []
+        for root in roots:
+            try:
+                if path.is_relative_to(root):
+                    candidates.append(root)
+            except Exception:
+                if str(path).startswith(str(root)):
+                    candidates.append(root)
+        if not candidates:
+            return None
+        return max(candidates, key=lambda p: len(p.parts))
+
+    def _select_project_root_for_task(self, task: Task) -> Optional[Path]:
+        if not task or not task.description:
+            return None
+
+        roots = self._discover_project_roots()
+        if not roots:
+            return None
+
+        desc = task.description.lower()
+        workspace = get_workspace()
+        workspace_root = workspace.root.resolve()
+
+        # Prefer explicit relative directory references in the description.
+        best_match: Optional[Path] = None
+        best_len = 0
+        for root in roots:
+            try:
+                rel = root.relative_to(workspace_root)
+            except Exception:
+                continue
+            rel_str = str(rel).replace("\\", "/").lower()
+            if rel_str and rel_str != "." and rel_str in desc:
+                if len(rel_str) > best_len:
+                    best_match = root
+                    best_len = len(rel_str)
+
+        if best_match:
+            return best_match
+
+        # Match by project root name if a single token maps to one root.
+        tokens = set(re.findall(r"[a-z0-9_-]+", desc))
+        name_matches = [root for root in roots if root.name.lower() in tokens]
+        if len(name_matches) == 1:
+            return name_matches[0]
+
+        # If a file path is mentioned, use it only when it is unambiguous.
+        file_hint = _extract_file_path_from_description(task.description)
+        if file_hint:
+            hint_path = Path(file_hint)
+            if hint_path.is_absolute():
+                return self._find_root_for_path(hint_path, roots)
+
+            # Avoid changing workdir when the description already includes a scoped path.
+            if len(hint_path.parts) > 1:
+                return None
+
+            if workspace.current_working_dir.resolve() == workspace_root:
+                candidate = workspace_root / hint_path
+                return self._find_root_for_path(candidate, roots)
+
+        return None
+
+    def _should_autoset_workdir(self, task: Task) -> bool:
+        if not task or not task.description:
+            return False
+        action_type = (task.action_type or "").lower()
+        if action_type in {"read", "analyze", "research", "review", "set_workdir"}:
+            return False
+        if action_type in {"test", "general"}:
+            return True
+        desc = task.description.lower()
+        keywords = (
+            "install",
+            "test",
+            "lint",
+            "build",
+            "compile",
+            "run",
+            "npm",
+            "yarn",
+            "pnpm",
+            "pip",
+            "pytest",
+            "gradle",
+            "mvn",
+            "cargo",
+            "dotnet",
+        )
+        return any(keyword in desc for keyword in keywords)
+
+    def _maybe_set_workdir_for_task(self, task: Task) -> Optional[Path]:
+        if not self._should_autoset_workdir(task):
+            return None
+
+        file_hint = _extract_file_path_from_description(task.description)
+        if file_hint:
+            hint_path = Path(file_hint)
+            if not hint_path.is_absolute() and len(hint_path.parts) > 1:
+                return None
+
+        root = self._select_project_root_for_task(task)
+        if not root:
+            return None
+
+        workspace = get_workspace()
+        current = workspace.current_working_dir.resolve()
+        target = root.resolve()
+        if current == target:
+            return None
+
+        try:
+            execute_tool("set_workdir", {"path": str(target)})
+        except Exception:
+            return None
+        return target
 
     def _display_prompt_optimization(self, original: str, optimized: str) -> None:
         """Display original vs improved prompts for transparency."""
@@ -2864,6 +3054,8 @@ class Orchestrator:
             task.error = f"No agent available to handle action type: '{task.action_type}'"
             return False
 
+        self._maybe_set_workdir_for_task(task)
+
         task.status = TaskStatus.IN_PROGRESS
         try:
             # Build a focused context snapshot (selection pipeline); agents will also
@@ -2895,12 +3087,17 @@ class Orchestrator:
             # structured tool_calls for the runtime adapter.
             if isinstance(result, str):
                 try:
-                    allowed = [
-                        t.get("function", {}).get("name")
-                        for t in get_available_tools()
-                        if isinstance(t, dict)
-                    ]
-                    executed = maybe_execute_tool_call_from_text(result, allowed_tools=[n for n in allowed if isinstance(n, str)])
+                    allowed = allowed_tools_for_action(task.action_type)
+                    if allowed is None:
+                        allowed = [
+                            t.get("function", {}).get("name")
+                            for t in get_available_tools()
+                            if isinstance(t, dict)
+                        ]
+                    executed = maybe_execute_tool_call_from_text(
+                        result,
+                        allowed_tools=[n for n in allowed if isinstance(n, str)],
+                    )
                 except Exception:
                     executed = None
 
@@ -2920,6 +3117,11 @@ class Orchestrator:
                 _append_task_tool_event(task, result)
             except Exception:
                 pass
+            ok, constraint_error = _enforce_action_tool_constraints(task)
+            if not ok:
+                task.status = TaskStatus.FAILED
+                task.error = constraint_error
+                return False
             # If sub-agent reported tool error, fail the task and replan.
             try:
                 if isinstance(result, str):

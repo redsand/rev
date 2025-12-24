@@ -16,6 +16,7 @@ import threading
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import OrderedDict
+from difflib import SequenceMatcher
 from typing import Dict, Any, List, Optional, Tuple
 
 from rev.models.task import ExecutionPlan, Task, TaskStatus
@@ -264,6 +265,9 @@ class ExecutionContext:
         self.session_unavailable_paths: List[str] = []  # Paths that don't exist
         self.session_learnings: List[str] = []  # Key learnings from previous tasks
         self.completed_task_summaries: List[str] = []  # What each completed task accomplished
+        self.thought_history: List[str] = []
+        self.max_thought_history = 6
+        self.thought_loop_warnings = 0
 
     def get_code(self, path: Optional[str]) -> Optional[str]:
         """Return cached code for a path if available."""
@@ -324,6 +328,36 @@ class ExecutionContext:
         """Return a copy of cached snippets."""
         with self._lock:
             return list(self.snippet_cache)
+
+    def reset_thought_tracking(self) -> None:
+        """Reset repetitive-thought detection state for a new task."""
+        with self._lock:
+            self.thought_history = []
+            self.thought_loop_warnings = 0
+
+    def detect_thought_loop(self, content: str) -> Optional[str]:
+        """Detect repetitive thought loops in model text output."""
+        normalized = _normalize_thought_content(content)
+        if len(normalized) < 40:
+            return None
+
+        with self._lock:
+            recent = self.thought_history[-3:]
+            reason = None
+            if normalized in recent:
+                reason = "repeated response"
+            elif recent:
+                ratio = SequenceMatcher(None, normalized, recent[-1]).ratio()
+                if ratio >= 0.92:
+                    reason = f"high similarity ({ratio:.2f})"
+                elif _repeated_prefix(normalized, recent[-1]):
+                    reason = "repeated prefix"
+
+            self.thought_history.append(normalized)
+            if len(self.thought_history) > self.max_thought_history:
+                self.thought_history = self.thought_history[-self.max_thought_history:]
+
+        return reason
 
     def _hash_args(self, args: Dict[str, Any]) -> str:
         """Create a stable hash of tool arguments."""
@@ -975,6 +1009,77 @@ def _apply_text_fallbacks(
     return False
 
 
+def _normalize_thought_content(content: str) -> str:
+    text = (content or "").lower()
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"[^a-z0-9\s]", "", text)
+    return text.strip()
+
+
+def _repeated_prefix(current: str, previous: str, length: int = 80) -> bool:
+    if not current or not previous:
+        return False
+    if len(current) < length or len(previous) < length:
+        return False
+    return current[:length] == previous[:length]
+
+
+def _handle_thought_loop(
+    reason: str,
+    action_type: str,
+    messages: List[Dict[str, Any]],
+    exec_context: Optional[ExecutionContext],
+    debug_logger,
+    *,
+    session_tracker: Optional[SessionTracker] = None,
+    current_task: Optional[Task] = None,
+) -> bool:
+    if not reason:
+        return False
+
+    if exec_context and exec_context.thought_loop_warnings >= 2:
+        return False
+
+    action = (action_type or "").lower()
+    if exec_context:
+        exec_context.thought_loop_warnings += 1
+
+    if action in {"read", "analyze", "research", "review", "general"}:
+        tool_args = {"path": ".", "max_depth": 2}
+        try:
+            result = execute_tool("tree_view", tool_args, agent_name="executor")
+            if exec_context:
+                exec_context.record_tool_call("tree_view", tool_args)
+            messages.append({
+                "role": "tool",
+                "name": "tree_view",
+                "content": _tool_message_content(
+                    "tree_view",
+                    tool_args,
+                    result,
+                    session_tracker,
+                    task_id=getattr(current_task, "task_id", None),
+                    current_task=current_task,
+                ),
+            })
+            if debug_logger:
+                debug_logger.log("executor", "THOUGHT_LOOP_FALLBACK", {"reason": reason, "tool": "tree_view"}, "WARNING")
+            return True
+        except Exception as exc:
+            if debug_logger:
+                debug_logger.log("executor", "THOUGHT_LOOP_FALLBACK_FAILED", {"error": str(exc)}, "ERROR")
+
+    prompt = (
+        "You are repeating yourself. Stop and call ONE concrete tool now. "
+        "If you need structure, use tree_view or list_dir. If you need a file, use read_file. "
+        "Do not respond with analysis only."
+    )
+    messages.append({"role": "user", "content": prompt})
+    if debug_logger:
+        debug_logger.log("executor", "THOUGHT_LOOP_PROMPT", {"reason": reason}, "WARNING")
+    return True
+
+
 def _build_task_constraints(task: Task) -> str:
     """Build task-specific constraints to enforce boundaries.
 
@@ -1377,6 +1482,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
         tools_enabled = model_supports_tools
         no_tool_call_streak = 0
         iter_warned = False
+        exec_context.reset_thought_tracking()
 
         while task_iterations < max_task_iterations and not task_complete:
             # Check for escape key interrupt during task execution
@@ -1823,6 +1929,19 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                 if applied_fallback:
                     continue
 
+                loop_reason = exec_context.detect_thought_loop(content) if exec_context else None
+                if loop_reason and _handle_thought_loop(
+                    loop_reason,
+                    current_task.action_type,
+                    messages,
+                    exec_context,
+                    debug_logger,
+                    session_tracker=session_tracker,
+                    current_task=current_task,
+                ):
+                    no_tool_call_streak = 0
+                    continue
+
                 # If model keeps responding without tools or completion, inject guidance instead of failing
                 if no_tool_call_streak >= 3:
                     print(f"  ⚠️ Model still not calling tools; injecting reminder and continuing.")
@@ -1997,6 +2116,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
     no_tool_call_streak = 0
     budget_warned = False
     iter_warned = False
+    exec_context.reset_thought_tracking()
 
     def _log_usage(success: bool):
         debug_logger.log("executor", "TASK_USAGE", {
@@ -2320,6 +2440,18 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             no_tool_call_streak += 1
             applied_fallback = _apply_text_fallbacks(content, task.action_type, messages, None, exec_context, debug_logger, current_task=task)
             if applied_fallback:
+                continue
+
+            loop_reason = exec_context.detect_thought_loop(content) if exec_context else None
+            if loop_reason and _handle_thought_loop(
+                loop_reason,
+                task.action_type,
+                messages,
+                exec_context,
+                debug_logger,
+                current_task=task,
+            ):
+                no_tool_call_streak = 0
                 continue
 
             # If model keeps responding without tools or completion, inject guidance instead of failing

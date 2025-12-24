@@ -6,6 +6,7 @@ from rev.tools.registry import execute_tool, get_available_tools
 from rev.llm.client import ollama_chat
 from rev.core.context import RevContext
 from rev.core.tool_call_recovery import recover_tool_call_from_text
+from rev.core.tool_call_retry import retry_tool_call_with_response_format
 from rev.agents.context_provider import build_context_and_tools
 from rev.agents.subagent_io import build_subagent_output
 
@@ -16,6 +17,18 @@ KEYWORD_SNIPPET_PATTERNS = [
     "importlib",
     "registry",
 ]
+
+STRUCTURE_LIST_KEYWORDS = {
+    "list", "listing", "tree", "structure", "layout", "directories", "directory",
+    "files", "folders", "project structure", "repo structure", "file structure",
+    "show me", "what files", "what folders", "where is",
+}
+
+STRUCTURE_DEEP_KEYWORDS = {
+    "architecture", "call graph", "dependency graph", "dependencies",
+    "class hierarchy", "inheritance", "module relationships", "semantic",
+    "analyze code", "analyze structure", "structural consistency",
+}
 
 
 def _extract_snippet(tool_name: str, tool_args: dict, raw_result: Any) -> str:
@@ -63,6 +76,45 @@ def _extract_snippet(tool_name: str, tool_args: dict, raw_result: Any) -> str:
             return kw
     return text[:500]
 
+
+def _is_structure_inventory_task(description: str) -> bool:
+    if not description:
+        return False
+    desc = description.lower()
+    if any(keyword in desc for keyword in STRUCTURE_DEEP_KEYWORDS):
+        return False
+    return any(keyword in desc for keyword in STRUCTURE_LIST_KEYWORDS)
+
+
+def _pattern_from_path(path: str) -> str:
+    if not path:
+        return "**/*"
+    if any(ch in path for ch in ("*", "?", "[")):
+        return path
+    trimmed = path.rstrip("/\\")
+    if trimmed in ("", "."):
+        return "**/*"
+    return f"{trimmed}/**"
+
+
+def _coerce_structure_tool(description: str, tool_name: str, arguments: dict) -> tuple[str, dict, bool]:
+    """Prefer list_dir/tree_view over analyze_code_structures for simple listings."""
+    if tool_name != "analyze_code_structures":
+        return tool_name, arguments, False
+    if not _is_structure_inventory_task(description):
+        return tool_name, arguments, False
+
+    path = "."
+    if isinstance(arguments, dict):
+        candidate = arguments.get("path") or arguments.get("directory") or arguments.get("dir")
+        if isinstance(candidate, str) and candidate.strip():
+            path = candidate.strip()
+
+    desc = (description or "").lower()
+    if any(keyword in desc for keyword in ("tree", "structure", "layout", "directory", "directories")):
+        return "tree_view", {"path": path, "max_depth": 2}, True
+    return "list_dir", {"pattern": _pattern_from_path(path)}, True
+
 RESEARCH_SYSTEM_PROMPT = """You are a specialized Research agent. Your purpose is to investigate codebases, gather context, analyze code structures, and provide insights.
 
 You will be given a research task and context about the repository. Your goal is to gather information using available tools.
@@ -84,8 +136,8 @@ CRITICAL RULES (PERFORMANCE FIX 5 - STRICT JSON ENFORCEMENT):
    - `read_file` to examine specific files
    - `search_code` for regex-based source searches
    - `rag_search` for semantic/natural-language lookup
-   - `list_dir` / `tree_view` to inspect directory layout
-   - `analyze_code_structures` to understand code organization
+   - `list_dir` / `tree_view` to inspect directory layout (prefer these for structure listings)
+   - `analyze_code_structures` to understand code organization (use only for deep analysis)
    - `find_symbol_usages` to track symbol usage
    - `analyze_dependencies` to understand module relationships
    - `analyze_code_context` to learn change history and intent
@@ -239,6 +291,13 @@ class ResearchAgent(BaseAgent):
                                 arguments = inner
 
                         if not error_type:
+                            tool_name, arguments, coerced = _coerce_structure_tool(
+                                task.description,
+                                tool_name,
+                                arguments if isinstance(arguments, dict) else {},
+                            )
+                            if coerced:
+                                print(f"  -> ResearchAgent coerced to cheaper tool '{tool_name}' for structure listing")
                             print(f"  -> ResearchAgent will call tool '{tool_name}' with arguments: {arguments}")
                             raw_result = execute_tool(tool_name, arguments)
 
@@ -261,6 +320,40 @@ class ResearchAgent(BaseAgent):
                 if error_type:
                     # Try recovery first
                     if error_type in {"text_instead_of_tool_call", "empty_tool_calls", "missing_tool_calls"}:
+                        retry = retry_tool_call_with_response_format(
+                            messages,
+                            available_tools,
+                            allowed_tools=[t["function"]["name"] for t in get_available_tools()],
+                        )
+                        if retry:
+                            print(f"  -> Retried tool call with JSON format: {retry.name}")
+                            if (
+                                retry.name == "read_file"
+                                and isinstance(retry.arguments, dict)
+                                and isinstance(retry.arguments.get("paths"), list)
+                            ):
+                                outputs = {}
+                                for path in retry.arguments.get("paths", []):
+                                    if not isinstance(path, str):
+                                        continue
+                                    outputs[path] = execute_tool("read_file", {"path": path})
+                                raw_result = json.dumps(outputs)
+                            else:
+                                raw_result = execute_tool(retry.name, retry.arguments)
+                            snippet = _extract_snippet(retry.name, retry.arguments, raw_result)
+                            context.add_insight("research_agent", f"task_{task.task_id}_result", {
+                                "tool": retry.name,
+                                "result": snippet
+                            })
+                            return build_subagent_output(
+                                agent_name="ResearchAgent",
+                                tool_name=retry.name,
+                                tool_args=retry.arguments,
+                                tool_output=raw_result,
+                                context=context,
+                                task_id=task.task_id,
+                            )
+
                         recovered = recover_tool_call_from_text(
                             response.get("message", {}).get("content", ""),
                             allowed_tools=[t["function"]["name"] for t in get_available_tools()],

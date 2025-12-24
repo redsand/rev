@@ -263,6 +263,9 @@ class OllamaProvider(LLMProvider):
             "options": options
         }
 
+        if "format" in kwargs and kwargs["format"] is not None:
+            payload["format"] = kwargs["format"]
+
         if tools_provided:
             payload["mode"] = "tools"
             payload["tools"] = tools or []

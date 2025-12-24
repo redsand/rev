@@ -52,6 +52,15 @@ _WRITE_TOOLS = {
     "split_python_module_classes",
 }
 
+_TEST_FILE_EXTENSIONS = {
+    ".c", ".cc", ".cpp", ".cs", ".cxx",
+    ".dart", ".ex", ".exs", ".fs", ".fsx",
+    ".go", ".java", ".js", ".jsx", ".kt", ".kts",
+    ".mjs", ".cjs", ".php", ".py", ".rb",
+    ".rs", ".scala", ".swift", ".ts", ".tsx",
+}
+_TEST_DIR_TOKENS = {"test", "tests", "spec", "specs", "__tests__", "__specs__"}
+
 
 def _extract_tool_noop(tool: str, raw_result: Any) -> Optional[str]:
     """Return a tool_noop reason string when a tool reports no changes."""
@@ -1234,7 +1243,456 @@ def _try_dynamic_help_discovery(path: Path) -> Optional[str]:
     return None
 
 
-def _run_validation_command(cmd: str | List[str], *, use_tests_tool: bool = False, timeout: int | None = None, _retry_count: int = 0) -> Dict[str, Any]:
+def _split_command_parts(cmd: str | list[str]) -> list[str]:
+    if isinstance(cmd, list):
+        return [str(part) for part in cmd if part is not None]
+    try:
+        return shlex.split(cmd)
+    except Exception:
+        return [str(cmd)]
+
+
+def _command_has_explicit_cwd(cmd_parts: list[str]) -> bool:
+    if not cmd_parts:
+        return False
+    base = cmd_parts[0].lower()
+    if base == "npm":
+        return "--prefix" in cmd_parts or "--cwd" in cmd_parts
+    if base == "yarn":
+        return "--cwd" in cmd_parts
+    if base == "pnpm":
+        return "--dir" in cmd_parts or "--prefix" in cmd_parts
+    return False
+
+
+def _resolve_validation_cwd(cmd: str | list[str], primary_path: Optional[Path]) -> Optional[Path]:
+    if not primary_path:
+        return None
+    cmd_parts = _split_command_parts(cmd)
+    if not cmd_parts:
+        return None
+    base = cmd_parts[0].lower()
+    if base in {"npm", "yarn", "pnpm", "npx"} and not _command_has_explicit_cwd(cmd_parts):
+        return find_project_root(primary_path)
+    return None
+
+
+def _output_indicates_no_tests(stdout: str, stderr: str) -> bool:
+    combined = f"{stdout}\n{stderr}".lower()
+    patterns = (
+        "no tests found",
+        "no tests ran",
+        "no tests collected",
+        "collected 0 items",
+        "ran 0 tests",
+        "no test files",
+        "0 tests",
+        "0 passing",
+    )
+    return any(pat in combined for pat in patterns)
+
+
+def _normalized_tokens(cmd_parts: list[str]) -> list[str]:
+    tokens: list[str] = []
+    for part in cmd_parts:
+        if not part:
+            continue
+        part_lower = str(part).lower()
+        tokens.append(part_lower)
+        try:
+            tokens.append(Path(part).name.lower())
+        except Exception:
+            continue
+    return tokens
+
+
+def _detect_test_runner(cmd_parts: list[str], stdout: str = "", stderr: str = "") -> str:
+    combined = f"{stdout}\n{stderr}".lower()
+    if "jest" in combined:
+        return "jest"
+    if "vitest" in combined:
+        return "vitest"
+    if "pytest" in combined or "collected 0 items" in combined:
+        return "pytest"
+    if "unittest" in combined:
+        return "unittest"
+    if "phpunit" in combined:
+        return "phpunit"
+    if "rspec" in combined:
+        return "rspec"
+    if "gradle" in combined:
+        return "gradle"
+    if "maven" in combined or "surefire" in combined:
+        return "maven"
+    if "dotnet" in combined or "mstest" in combined or "xunit" in combined or "nunit" in combined:
+        return "dotnet"
+    if "dart" in combined:
+        return "dart"
+    if "flutter" in combined:
+        return "flutter"
+
+    tokens = _normalized_tokens(cmd_parts)
+    if not tokens:
+        return "unknown"
+
+    if tokens[0] in {"npm", "yarn", "pnpm", "composer"}:
+        return tokens[0]
+
+    if cmd_parts:
+        cmd_parts_lower = [part.lower() for part in cmd_parts]
+        head = cmd_parts_lower[0]
+        if head == "go" and "test" in cmd_parts_lower:
+            return "go"
+        if head == "cargo" and "test" in cmd_parts_lower:
+            return "cargo"
+        if head == "dotnet" and "test" in cmd_parts_lower:
+            return "dotnet"
+        if head in {"mvn", "mvnw"} and "test" in cmd_parts_lower:
+            return "maven"
+        if Path(head).name in {"gradle", "gradlew"} and "test" in cmd_parts_lower:
+            return "gradle"
+
+    if tokens[0] in {"python", "python3", "py"} and "-m" in tokens:
+        idx = tokens.index("-m")
+        if idx + 1 < len(tokens):
+            module = tokens[idx + 1]
+            if module == "pytest":
+                return "pytest"
+            if module == "unittest":
+                return "unittest"
+
+    if "pytest" in tokens:
+        return "pytest"
+    if "unittest" in tokens:
+        return "unittest"
+    if "jest" in tokens:
+        return "jest"
+    if "vitest" in tokens:
+        return "vitest"
+    if "mocha" in tokens:
+        return "mocha"
+    if "ava" in tokens:
+        return "ava"
+    if "tap" in tokens:
+        return "tap"
+    if "jasmine" in tokens:
+        return "jasmine"
+    if "phpunit" in tokens:
+        return "phpunit"
+    if "rspec" in tokens:
+        return "rspec"
+    if "rake" in tokens and "test" in tokens:
+        return "rake"
+    if "node" in tokens and "--test" in tokens:
+        return "node_test"
+    if "dart" in tokens and "test" in tokens:
+        return "dart"
+    if "flutter" in tokens and "test" in tokens:
+        return "flutter"
+
+    return "unknown"
+
+
+def _extract_test_paths_from_cmd(cmd_parts: list[str]) -> list[str]:
+    test_paths: list[str] = []
+    for arg in cmd_parts:
+        if not arg or arg.startswith("-"):
+            continue
+        lower = str(arg).lower()
+        if lower in _TEST_DIR_TOKENS and not any(sep in lower for sep in ("/", "\\")):
+            continue
+        try:
+            path = Path(lower)
+        except Exception:
+            path = None
+        suffix = path.suffix if path else ""
+        parts = set(path.parts) if path else set()
+        name = path.name if path else lower
+        if suffix in _TEST_FILE_EXTENSIONS and ("test" in name or "spec" in name):
+            test_paths.append(arg)
+            continue
+        if parts and any(token in parts for token in _TEST_DIR_TOKENS):
+            test_paths.append(arg)
+    return test_paths
+
+
+def _normalize_path_token(value: str) -> str:
+    return str(value).replace("\\", "/")
+
+
+def _normalize_test_paths(test_paths: list[str], cwd: Optional[Path | str]) -> list[str]:
+    normalized: list[str] = []
+    cwd_path = Path(cwd) if cwd else None
+    for path in test_paths:
+        try:
+            current = Path(path)
+            if cwd_path and current.is_absolute():
+                try:
+                    current = current.relative_to(cwd_path)
+                except Exception:
+                    pass
+            normalized.append(str(current))
+        except Exception:
+            normalized.append(path)
+    return normalized
+
+
+def _strip_test_paths(cmd_parts: list[str], test_paths: list[str]) -> list[str]:
+    test_set = {_normalize_path_token(path) for path in test_paths}
+    return [part for part in cmd_parts if _normalize_path_token(part) not in test_set]
+
+
+def _inject_double_dash(cmd_parts: list[str], test_paths: list[str]) -> list[str]:
+    base = _strip_test_paths(cmd_parts, test_paths)
+    if "--" in base:
+        idx = base.index("--")
+        before = base[:idx + 1]
+        test_set = {_normalize_path_token(path) for path in test_paths}
+        after = [part for part in base[idx + 1:] if _normalize_path_token(part) not in test_set]
+        return before + test_paths + after
+    return base + ["--"] + test_paths
+
+
+def _build_jest_run_tests_by_path_command(cmd_parts: list[str], test_paths: list[str]) -> Optional[list[str]]:
+    if not test_paths:
+        return None
+    if any(arg.startswith("--runTestsByPath") for arg in cmd_parts):
+        return None
+
+    parts = list(cmd_parts)
+    test_set = set(test_paths)
+
+    if parts and parts[0].lower() in {"npm", "yarn", "pnpm"}:
+        if "--" in parts:
+            idx = parts.index("--")
+            before = parts[:idx + 1]
+            after = [arg for arg in parts[idx + 1:] if arg not in test_set]
+            return before + ["--runTestsByPath"] + test_paths + after
+        return parts + ["--", "--runTestsByPath"] + test_paths
+
+    new_parts: list[str] = []
+    inserted = False
+    for arg in parts:
+        if not inserted and arg in test_set:
+            new_parts.append("--runTestsByPath")
+            inserted = True
+        new_parts.append(arg)
+    if not inserted:
+        new_parts.append("--runTestsByPath")
+        new_parts.extend(test_paths)
+    return new_parts
+
+
+def _build_vitest_command(cmd_parts: list[str], test_paths: list[str]) -> Optional[list[str]]:
+    if not test_paths:
+        return None
+    parts = list(cmd_parts)
+    tokens = _normalized_tokens(parts)
+    if "npm" in tokens or "yarn" in tokens or "pnpm" in tokens:
+        parts = _inject_double_dash(parts, test_paths)
+    else:
+        parts = _strip_test_paths(parts, test_paths) + test_paths
+    if "--run" not in parts and "run" not in parts:
+        parts.append("--run")
+    return parts
+
+
+def _build_pytest_command(cmd_parts: list[str], test_paths: list[str], cwd: Optional[Path | str]) -> Optional[list[str]]:
+    if not test_paths:
+        return None
+    normalized = _normalize_test_paths(test_paths, cwd)
+    parts = _strip_test_paths(cmd_parts, test_paths)
+    normalized_set = {_normalize_path_token(path) for path in normalized}
+    existing = {_normalize_path_token(part) for part in parts}
+    for path in normalized:
+        if _normalize_path_token(path) not in existing:
+            parts.append(path)
+    return parts
+
+
+def _build_unittest_command(cmd_parts: list[str], test_paths: list[str], cwd: Optional[Path | str]) -> Optional[list[str]]:
+    if not test_paths:
+        return None
+    modules: list[str] = []
+    cwd_path = Path(cwd) if cwd else None
+    for path in test_paths:
+        try:
+            current = Path(path)
+            if cwd_path and current.is_absolute():
+                try:
+                    current = current.relative_to(cwd_path)
+                except Exception:
+                    pass
+            if current.suffix != ".py":
+                continue
+            module = ".".join(current.with_suffix("").parts)
+            if module and module not in modules:
+                modules.append(module)
+        except Exception:
+            continue
+    if not modules:
+        return None
+    parts = _strip_test_paths(cmd_parts, test_paths)
+    for module in modules:
+        if module not in parts:
+            parts.append(module)
+    return parts
+
+
+def _build_go_test_command(cmd_parts: list[str], test_paths: list[str], cwd: Optional[Path | str]) -> Optional[list[str]]:
+    if not test_paths:
+        return None
+    if "./..." in cmd_parts:
+        return None
+    packages: list[str] = []
+    cwd_path = Path(cwd) if cwd else None
+    for path in test_paths:
+        current = Path(path)
+        if current.suffix == ".go":
+            current = current.parent
+        if cwd_path and current.is_absolute():
+            try:
+                current = current.relative_to(cwd_path)
+            except Exception:
+                pass
+        pkg = str(current)
+        if not pkg.startswith("."):
+            pkg = f"./{pkg}"
+        if pkg not in packages:
+            packages.append(pkg)
+    if not packages:
+        return None
+    parts = _strip_test_paths(cmd_parts, test_paths) + packages
+    return parts
+
+
+def _build_cargo_test_command(cmd_parts: list[str], test_paths: list[str]) -> Optional[list[str]]:
+    if not test_paths:
+        return None
+    if any(part.startswith("--test") for part in cmd_parts):
+        return None
+    tests: list[str] = []
+    filters: list[str] = []
+    for path in test_paths:
+        current = Path(path)
+        stem = current.stem
+        if not stem:
+            continue
+        if "tests" in {part.lower() for part in current.parts}:
+            if stem not in tests:
+                tests.append(stem)
+        else:
+            if stem not in filters:
+                filters.append(stem)
+    parts = _strip_test_paths(cmd_parts, test_paths)
+    for test_name in tests:
+        parts.extend(["--test", test_name])
+    for filt in filters:
+        if filt not in parts:
+            parts.append(filt)
+    return parts if tests or filters else None
+
+
+def _build_dotnet_test_command(cmd_parts: list[str], test_paths: list[str]) -> Optional[list[str]]:
+    if not test_paths or "--filter" in cmd_parts:
+        return None
+    names: list[str] = []
+    for path in test_paths:
+        stem = Path(path).stem
+        if stem and stem not in names:
+            names.append(stem)
+    if not names:
+        return None
+    expr = " | ".join(f"FullyQualifiedName~{name}" for name in names)
+    parts = _strip_test_paths(cmd_parts, test_paths) + ["--filter", expr]
+    return parts
+
+
+def _build_maven_test_command(cmd_parts: list[str], test_paths: list[str]) -> Optional[list[str]]:
+    if not test_paths or any(part.startswith("-Dtest=") for part in cmd_parts):
+        return None
+    names: list[str] = []
+    for path in test_paths:
+        stem = Path(path).stem
+        if stem and stem not in names:
+            names.append(stem)
+    if not names:
+        return None
+    parts = _strip_test_paths(cmd_parts, test_paths) + [f"-Dtest={','.join(names)}"]
+    return parts
+
+
+def _build_gradle_test_command(cmd_parts: list[str], test_paths: list[str]) -> Optional[list[str]]:
+    if not test_paths or "--tests" in cmd_parts:
+        return None
+    names: list[str] = []
+    for path in test_paths:
+        stem = Path(path).stem
+        if stem and stem not in names:
+            names.append(stem)
+    if not names:
+        return None
+    parts = _strip_test_paths(cmd_parts, test_paths)
+    for name in names:
+        parts.extend(["--tests", name])
+    return parts
+
+
+def _build_rake_test_command(cmd_parts: list[str], test_paths: list[str]) -> Optional[list[str]]:
+    if not test_paths or any(part.startswith("TEST=") for part in cmd_parts):
+        return None
+    parts = _strip_test_paths(cmd_parts, test_paths)
+    parts.append(f"TEST={test_paths[0]}")
+    return parts
+
+
+def _append_test_paths(cmd_parts: list[str], test_paths: list[str]) -> Optional[list[str]]:
+    if not test_paths:
+        return None
+    parts = _strip_test_paths(cmd_parts, test_paths)
+    existing = {_normalize_path_token(part) for part in parts}
+    for path in test_paths:
+        if _normalize_path_token(path) not in existing:
+            parts.append(path)
+    return parts
+
+
+def _attempt_no_tests_fallback(cmd_parts: list[str], stdout: str, stderr: str, cwd: Optional[Path | str]) -> Optional[list[str]]:
+    test_paths = _extract_test_paths_from_cmd(cmd_parts)
+    if not test_paths:
+        return None
+    runner = _detect_test_runner(cmd_parts, stdout, stderr)
+    normalized_paths = _normalize_test_paths(test_paths, cwd)
+
+    if runner in {"npm", "yarn", "pnpm", "composer"}:
+        return _inject_double_dash(cmd_parts, normalized_paths)
+    if runner == "jest":
+        return _build_jest_run_tests_by_path_command(cmd_parts, normalized_paths)
+    if runner == "vitest":
+        return _build_vitest_command(cmd_parts, normalized_paths)
+    if runner == "pytest":
+        return _build_pytest_command(cmd_parts, normalized_paths, cwd)
+    if runner == "unittest":
+        return _build_unittest_command(cmd_parts, normalized_paths, cwd)
+    if runner == "go":
+        return _build_go_test_command(cmd_parts, normalized_paths, cwd)
+    if runner == "cargo":
+        return _build_cargo_test_command(cmd_parts, normalized_paths)
+    if runner == "dotnet":
+        return _build_dotnet_test_command(cmd_parts, normalized_paths)
+    if runner == "maven":
+        return _build_maven_test_command(cmd_parts, normalized_paths)
+    if runner == "gradle":
+        return _build_gradle_test_command(cmd_parts, normalized_paths)
+    if runner == "rake":
+        return _build_rake_test_command(cmd_parts, normalized_paths)
+    if runner in {"phpunit", "rspec", "mocha", "ava", "tap", "jasmine", "node_test", "dart", "flutter"}:
+        return _append_test_paths(cmd_parts, normalized_paths)
+
+    return None
+
+
+def _run_validation_command(cmd: str | List[str], *, use_tests_tool: bool = False, timeout: int | None = None, cwd: Optional[Path | str] = None, _retry_count: int = 0) -> Dict[str, Any]:
     """Run a validation command via the tool runner and return parsed JSON."""
     if _retry_count > 2:
         return {"error": f"Max retries exceeded for command: {cmd}", "rc": -1}
@@ -1246,6 +1704,8 @@ def _run_validation_command(cmd: str | List[str], *, use_tests_tool: bool = Fals
     payload = {"cmd": cmd}
     if timeout:
         payload["timeout"] = timeout
+    if cwd:
+        payload["cwd"] = str(cwd)
 
     tool = "run_tests" if use_tests_tool else "run_cmd"
     try:
@@ -1282,6 +1742,21 @@ def _run_validation_command(cmd: str | List[str], *, use_tests_tool: bool = Fals
                 except:
                     pass
                     
+            if _retry_count < 2:
+                stdout = str(data.get("stdout") or "")
+                stderr = str(data.get("stderr") or "")
+                cmd_parts = _split_command_parts(cmd)
+                if _output_indicates_no_tests(stdout, stderr):
+                    fallback_cmd = _attempt_no_tests_fallback(cmd_parts, stdout, stderr, cwd)
+                    if fallback_cmd and fallback_cmd != cmd_parts:
+                        return _run_validation_command(
+                            fallback_cmd,
+                            use_tests_tool=use_tests_tool,
+                            timeout=timeout,
+                            cwd=cwd,
+                            _retry_count=_retry_count + 1,
+                        )
+
             return data
         return {"raw": raw, "cmd": cmd_str}
     except Exception as e:
@@ -1359,7 +1834,11 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
     # Run custom build if configured
     if custom_build_cmd:
         print(f"  → Running configured build command: {custom_build_cmd}")
-        build_res = _run_validation_command(custom_build_cmd, timeout=config.VALIDATION_TIMEOUT_SECONDS)
+        build_res = _run_validation_command(
+            custom_build_cmd,
+            timeout=config.VALIDATION_TIMEOUT_SECONDS,
+            cwd=_resolve_validation_cwd(custom_build_cmd, primary_path),
+        )
         strict_details["custom_build"] = build_res
         if build_res.get("rc", 0) != 0:
             return VerificationResult(
@@ -1468,7 +1947,11 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
         if js_paths:
             for js_file in js_paths:
                 cmd = ["node", "--check", str(js_file)]
-                res = _run_validation_command(cmd, timeout=30)
+                res = _run_validation_command(
+                    cmd,
+                    timeout=30,
+                    cwd=_resolve_validation_cwd(cmd, primary_path),
+                )
                 strict_details[f"syntax_{js_file.name}"] = res
                 if not res.get("blocked") and res.get("rc", 1) != 0:
                     return VerificationResult(
@@ -1483,7 +1966,11 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
              targets = [str(p) for p in node_paths[:10]]
              # Use list-based npx command to avoid security blocks
              cmd = ["npx", "--yes", "eslint"] + targets + ["--quiet"]
-             res = _run_validation_command(cmd, timeout=60)
+             res = _run_validation_command(
+                 cmd,
+                 timeout=60,
+                 cwd=_resolve_validation_cwd(cmd, primary_path),
+             )
              strict_details["eslint"] = res
              rc = res.get("rc")
              if not res.get("blocked") and rc is not None and rc != 0:
@@ -1501,7 +1988,11 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
             if vue_ts_touched:
                 if mode == "strict":
                     cmd = ["npx", "--yes", "vue-tsc", "--noEmit"]
-                    res = _run_validation_command(cmd, timeout=120)
+                    res = _run_validation_command(
+                        cmd,
+                        timeout=120,
+                        cwd=_resolve_validation_cwd(cmd, primary_path),
+                    )
                     strict_details["vue-tsc"] = res
                     if not res.get("blocked") and res.get("rc", 1) != 0:
                          return VerificationResult(
@@ -1569,7 +2060,12 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
                             test_cmd.append("--")
                         test_cmd.extend(test_files)
 
-                res = _run_validation_command(test_cmd, use_tests_tool=True, timeout=config.VALIDATION_TIMEOUT_SECONDS)
+                res = _run_validation_command(
+                    test_cmd,
+                    use_tests_tool=True,
+                    timeout=config.VALIDATION_TIMEOUT_SECONDS,
+                    cwd=_resolve_validation_cwd(test_cmd, primary_path),
+                )
                 strict_details["npm_test"] = res
                 # Ignore rc if no tests found?
                 if not res.get("blocked") and res.get("rc", 1) != 0:
@@ -1842,7 +2338,13 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
 
     results: Dict[str, Any] = {}
     for label, cmd, tool in commands:
-        res = _run_validation_command(cmd, use_tests_tool=(tool == "run_tests"), timeout=config.VALIDATION_TIMEOUT_SECONDS)
+        cwd = _resolve_validation_cwd(cmd, primary_path)
+        res = _run_validation_command(
+            cmd,
+            use_tests_tool=(tool == "run_tests"),
+            timeout=config.VALIDATION_TIMEOUT_SECONDS,
+            cwd=cwd,
+        )
         results[label] = res
         rc = res.get("rc")
         if rc is None:
