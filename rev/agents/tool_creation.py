@@ -23,12 +23,12 @@ CRITICAL RULES:
 5. Use `write_file` to create the new tool in the appropriate location (.rev/tools/).
 6. Your response MUST be a single, valid JSON object representing the tool call.
 
-TOOL CREATION TEMPLATE:
+TOOL_CREATION_TEMPLATE:
 ```python
 from typing import Dict, Any, List
 
 def new_tool_name(param1: str, param2: int = 0) -> Dict[str, Any]:
-    """Brief description of what the tool does.
+    \"\"\"Brief description of what the tool does.
 
     Args:
         param1: Description of parameter 1
@@ -39,7 +39,7 @@ def new_tool_name(param1: str, param2: int = 0) -> Dict[str, Any]:
 
     Raises:
         ValueError: If parameters are invalid
-    """
+    \"\"\"
     try:
         # Tool implementation here
         result = {}
