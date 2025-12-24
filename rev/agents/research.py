@@ -69,7 +69,8 @@ You will be given a research task and context about the repository. Your goal is
 
 CRITICAL RULES:
 1. You MUST respond with a single tool call in JSON format. Do NOT provide any other text, explanations, or markdown.
-2. Use the most appropriate research tool for the task:
+2. Use the provided 'System Information' (OS, Platform, Shell Type) to choose the correct commands and path syntax.
+3. Use the most appropriate research tool for the task:
    - `read_file` to examine specific files
    - `search_code` for regex-based source searches
    - `rag_search` for semantic/natural-language lookup
@@ -79,8 +80,8 @@ CRITICAL RULES:
    - `analyze_dependencies` to understand module relationships
    - `analyze_code_context` to learn change history and intent
    - `check_structural_consistency` to validate schemas/models
-3. Your research should be focused and actionable.
-4. Your response MUST be a single, valid JSON object representing the tool call.
+4. Your research should be focused and actionable.
+5. Your response MUST be a single, valid JSON object representing the tool call.
 
 CONTEXT AWARENESS (CRITICAL):
 - ALWAYS check your context for information before reading files

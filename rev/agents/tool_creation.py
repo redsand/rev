@@ -14,20 +14,21 @@ You will be given a task that requires a new tool, and context about the reposit
 CRITICAL RULES:
 1. You MUST respond with a single tool call in JSON format. Do NOT provide any other text, explanations, or markdown.
 2. Analyze the task to determine what new tool is needed.
-3. Create a Python tool file following this template:
+3. Use the provided 'System Information' (OS, Platform, Shell Type) to ensure the tool is compatible with the current environment.
+4. Create a Python tool file following this template:
    - Function with clear name and docstring
    - Type hints for all parameters
    - Proper error handling
    - Return value documentation
-4. Use `write_file` to create the new tool in the appropriate location (rev/tools/).
-5. Your response MUST be a single, valid JSON object representing the tool call.
+5. Use `write_file` to create the new tool in the appropriate location (.rev/tools/).
+6. Your response MUST be a single, valid JSON object representing the tool call.
 
 TOOL CREATION TEMPLATE:
 ```python
 from typing import Dict, Any, List
 
 def new_tool_name(param1: str, param2: int = 0) -> Dict[str, Any]:
-    \"\"\"Brief description of what the tool does.
+    """Brief description of what the tool does.
 
     Args:
         param1: Description of parameter 1
@@ -38,7 +39,7 @@ def new_tool_name(param1: str, param2: int = 0) -> Dict[str, Any]:
 
     Raises:
         ValueError: If parameters are invalid
-    \"\"\"
+    """
     try:
         # Tool implementation here
         result = {}
@@ -67,8 +68,8 @@ Example for creating a new tool:
 {
   "tool_name": "write_file",
   "arguments": {
-    "file_path": "rev/tools/custom_analyzer.py",
-    "content": "from typing import Dict, Any\\n\\ndef analyze_complexity(file_path: str) -> Dict[str, Any]:\\n    \\\"\\\"\\\"Analyze code complexity.\\n\\n    Args:\\n        file_path: Path to file to analyze\\n\\n    Returns:\\n        Complexity metrics\\n    \\\"\\\"\\\"\\n    # Implementation\\n    return {\\\"complexity\\\": 5}"
+    "file_path": ".rev/tools/custom_analyzer.py",
+    "content": "from typing import Dict, Any\n\ndef analyze_complexity(file_path: str) -> Dict[str, Any]:\n    \"\"\"Analyze code complexity.\n\n    Args:\n        file_path: Path to file to analyze\n\n    Returns:\n        Complexity metrics\n    \"\"\"\n    # Implementation\n    return {\"complexity\": 5}"
   }
 }
 
@@ -150,10 +151,10 @@ class ToolCreationAgent(BaseAgent):
 
                         # Store info about created tool
                         if tool_name == "write_file" and "file_path" in arguments:
-                            context.add_insight("tool_creation_agent", f"task_{task.task_id}_created", {
+                            context.add_insight("tool_creation_agent", f"task_{task.task_id}_created", {{
                                 "tool_file": arguments["file_path"],
                                 "created": True
-                            })
+                            }})
 
                         return result
 

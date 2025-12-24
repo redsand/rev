@@ -15,6 +15,7 @@ from rev import config
 
 from rev.models.task import ExecutionPlan, Task, TaskStatus
 from rev.tools.registry import execute_tool
+from rev.tools.project_types import find_project_root, detect_project_type
 from rev.llm.client import ollama_chat
 
 
@@ -397,28 +398,56 @@ def validate_execution(
         _display_validation_report(report)
         return report
 
-    # Configure validation scope
+    # Configure validation scope based on project type
     common_dirs = _get_common_dirs()
-    primary_test_dir = common_dirs["tests"][0] if common_dirs["tests"] else "tests"
+    project_type = detect_project_type(config.ROOT)
     
-    if validation_mode == "smoke":
-        check_syntax = True
-        run_tests = True
+    check_syntax = True
+    run_tests = True
+    run_linter = (validation_mode != "smoke")
+    
+    test_cmd = None
+    lint_cmd = None
+    syntax_cmd = None
+
+    if project_type == "python":
+        primary_test_dir = common_dirs["tests"][0] if common_dirs["tests"] else "tests"
+        syntax_cmd = "python -m compileall ."
+        if validation_mode == "smoke":
+            test_cmd = syntax_cmd
+        elif validation_mode == "targeted":
+            test_cmd = f"pytest -q {primary_test_dir}/ --maxfail=1"
+            lint_cmd = "ruff check . --select E9,F63,F7,F82 --output-format=json"
+        else: # full
+            test_cmd = f"pytest -q {primary_test_dir}/"
+            lint_cmd = "ruff check . --output-format=json"
+            
+    elif project_type in ("node", "vue", "react", "nextjs"):
+        syntax_cmd = "npm run build" # Best effort for generic syntax check
+        if validation_mode == "smoke":
+            test_cmd = "npm test -- --run" # Try Vitest/Jest run once
+        elif validation_mode == "targeted":
+            test_cmd = "npm test -- --run"
+            lint_cmd = "npx --yes eslint . --quiet"
+        else: # full
+            test_cmd = "npm test"
+            lint_cmd = "npm run lint"
+            
+    elif project_type == "go":
+        syntax_cmd = "go build ./..."
+        test_cmd = "go test ./..."
+        lint_cmd = "go vet ./..."
+        
+    elif project_type == "rust":
+        syntax_cmd = "cargo check"
+        test_cmd = "cargo test"
+        lint_cmd = "cargo clippy"
+        
+    else:
+        # Fallback for unknown project types
+        check_syntax = False
         run_linter = False
-        test_cmd = "python -m compileall ."
-        lint_cmd = None
-    elif validation_mode == "targeted":
-        check_syntax = True
-        run_tests = True
-        run_linter = True
-        test_cmd = f"pytest -q {primary_test_dir}/ --maxfail=1"
-        lint_cmd = "ruff check . --select E9,F63,F7,F82 --output-format=json"
-    else:  # full
-        check_syntax = True
-        run_tests = True
-        run_linter = True
-        test_cmd = f"pytest -q {primary_test_dir}/"
-        lint_cmd = "ruff check . --output-format=json"
+        run_tests = False
 
     # 0. Goal Validation (if goals were set)
     if hasattr(plan, 'goals') and plan.goals:
@@ -427,15 +456,15 @@ def validate_execution(
         report.add_result(goal_result)
 
     # 1. Syntax Check
-    if check_syntax:
-        print("→ Running syntax checks...")
-        syntax_result = _check_syntax()
+    if check_syntax and syntax_cmd:
+        print(f"→ Running syntax checks ({syntax_cmd})...")
+        syntax_result = _check_syntax(syntax_cmd)
         report.add_result(syntax_result)
-        commands_run.append({"name": "syntax_check", "command": "python -m compileall ."})
+        commands_run.append({"name": "syntax_check", "command": syntax_cmd})
 
     # 2. Run Tests
-    if run_tests:
-        print("→ Running test suite...")
+    if run_tests and test_cmd:
+        print(f"→ Running test suite ({test_cmd})...")
         test_result = _run_test_suite(test_cmd)
         report.add_result(test_result)
         commands_run.append({"name": "tests", "command": test_cmd})
@@ -567,11 +596,9 @@ def _validate_goals(goals: List) -> ValidationResult:
         )
 
 
-def _check_syntax() -> ValidationResult:
-    """Check for Python syntax errors."""
+def _check_syntax(cmd: str = "python -m compileall -q .") -> ValidationResult:
+    """Check for syntax errors."""
     try:
-        # Use compileall for robust syntax checking
-        cmd = "python -m compileall -q ."
         # Use 'executor' agent name to bypass restricted permissions in validator
         result = execute_tool("run_cmd", {"cmd": cmd, "timeout": config.VALIDATION_TIMEOUT_SECONDS}, agent_name="executor")
         result_data = json.loads(result)
@@ -607,7 +634,7 @@ def _check_syntax() -> ValidationResult:
         )
 
 
-def _run_test_suite(cmd: str) -> ValidationResult:
+def _run_test_suite(cmd: str | list[str]) -> ValidationResult:
     """Run the project's test suite."""
     try:
         result = execute_tool("run_tests", {"cmd": cmd, "timeout": config.VALIDATION_TIMEOUT_SECONDS}, agent_name="executor")
@@ -683,8 +710,8 @@ def _run_test_suite(cmd: str) -> ValidationResult:
         )
 
 
-def _run_linter(cmd: str) -> ValidationResult:
-    """Run linter checks (ruff/flake8/pylint)."""
+def _run_linter(cmd: str | list[str]) -> ValidationResult:
+    """Run linter checks."""
     try:
         result = execute_tool("run_cmd", {"cmd": cmd, "timeout": config.VALIDATION_TIMEOUT_SECONDS}, agent_name="executor")
         result_data = json.loads(result)
@@ -696,36 +723,54 @@ def _run_linter(cmd: str) -> ValidationResult:
                 message=f"Linter tool error: {result_data['error']}"
             )
 
-        output = result_data.get("stdout", "[]")
+        stdout = result_data.get("stdout", "")
+        stderr = result_data.get("stderr", "")
+        rc = result_data.get("rc", 0)
 
-        try:
-            issues = json.loads(output)
-            if not issues or issues == []:
-                return ValidationResult(
-                    name="linter",
-                    status=ValidationStatus.PASSED,
-                    message="No linting issues found"
-                )
-            elif len(issues) < 5:
-                return ValidationResult(
-                    name="linter",
-                    status=ValidationStatus.PASSED_WITH_WARNINGS,
-                    message=f"{len(issues)} minor linting issues",
-                    details={"issues": issues[:5]}
-                )
-            else:
-                return ValidationResult(
-                    name="linter",
-                    status=ValidationStatus.FAILED,
-                    message=f"{len(issues)} linting issues found",
-                    details={"issues": issues[:10]}
-                )
-        except json.JSONDecodeError:
-            # Non-JSON output, probably an error or no ruff
+        # Try to parse as JSON if it looks like JSON
+        stripped_stdout = stdout.strip()
+        if (stripped_stdout.startswith("[") and stripped_stdout.endswith("]")) or \
+           (stripped_stdout.startswith("{") and stripped_stdout.endswith("}")):
+            try:
+                issues = json.loads(stripped_stdout)
+                if not issues or issues == []:
+                    return ValidationResult(
+                        name="linter",
+                        status=ValidationStatus.PASSED,
+                        message="No linting issues found"
+                    )
+                elif isinstance(issues, list):
+                    if len(issues) < 5:
+                        return ValidationResult(
+                            name="linter",
+                            status=ValidationStatus.PASSED_WITH_WARNINGS,
+                            message=f"{len(issues)} minor linting issues",
+                            details={"issues": issues}
+                        )
+                    else:
+                        return ValidationResult(
+                            name="linter",
+                            status=ValidationStatus.FAILED,
+                            message=f"{len(issues)} linting issues found",
+                            details={"issues": issues[:10]}
+                        )
+            except json.JSONDecodeError:
+                pass
+
+        # Fallback to plain text analysis if JSON parsing failed or wasn't expected
+        combined_output = (stdout + "\n" + stderr).strip()
+        if rc == 0:
             return ValidationResult(
                 name="linter",
-                status=ValidationStatus.SKIPPED,
-                message="Linter not available or produced non-JSON output"
+                status=ValidationStatus.PASSED,
+                message="Linter passed" + (f" with output: {combined_output[:100]}" if combined_output else "")
+            )
+        else:
+            return ValidationResult(
+                name="linter",
+                status=ValidationStatus.FAILED,
+                message=f"Linter found issues or failed (rc={rc})",
+                details={"return_code": rc, "output": combined_output[-1000:]}
             )
     except Exception as e:
         return ValidationResult(
@@ -888,8 +933,35 @@ def _attempt_auto_fix(test_result: ValidationResult, max_attempts: int = 3) -> b
 
 def _auto_fix_linting() -> bool:
     """Attempt to auto-fix linting issues."""
+    project_type = detect_project_type(config.ROOT)
+    
+    cmd = None
+    if project_type == "python":
+        cmd = "ruff check . --fix"
+    elif project_type in ("node", "vue", "react", "nextjs"):
+        # Try common lint fix scripts
+        pkg_json_path = config.ROOT / "package.json"
+        if pkg_json_path.exists():
+            try:
+                pkg_data = json.loads(pkg_json_path.read_text(errors='ignore'))
+                scripts = pkg_data.get("scripts", {})
+                if "lint:fix" in scripts:
+                    cmd = "npm run lint:fix"
+                elif "lint" in scripts:
+                    # check if the script supports --fix (common for eslint)
+                    if "eslint" in scripts["lint"]:
+                        cmd = "npm run lint -- --fix"
+            except:
+                pass
+        
+        if not cmd:
+            cmd = "npx --yes eslint . --fix"
+
+    if not cmd:
+        return False
+
     try:
-        execute_tool("run_cmd", {"cmd": "ruff check . --fix", "timeout": config.VALIDATION_TIMEOUT_SECONDS}, agent_name="executor")
+        execute_tool("run_cmd", {"cmd": cmd, "timeout": config.VALIDATION_TIMEOUT_SECONDS}, agent_name="executor")
         return True
     except:
         return False

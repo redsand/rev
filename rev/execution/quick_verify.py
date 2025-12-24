@@ -26,6 +26,8 @@ from rev.tools.workspace_resolver import (
     normalize_to_workspace_relative,
 )
 from rev.tools.utils import quote_cmd_arg
+from rev.tools.command_runner import _resolve_command
+from rev.tools.project_types import find_project_root, detect_project_type
 from rev.llm.client import ollama_chat
 
 _READ_ONLY_TOOLS = {
@@ -964,58 +966,157 @@ def _ensure_tool_available(cmd: str) -> bool:
         
         base_cmd = args[0]
         # Resolve command (handles .exe, .cmd, etc on Windows)
-        resolved = shutil.which(base_cmd)
+        resolved = _resolve_command(base_cmd)
         
+        # 1. If command is found, perform integrity check for runners
         if resolved:
-            # If it's npx, we might still be missing the specific package
-            if base_cmd == "npx" and len(args) > 1:
-                pkg = args[1]
-                # If we're looking for eslint or tsc specifically, we can check node_modules
-                if pkg in ("eslint", "tsc"):
-                    pkg_name = "typescript" if pkg == "tsc" else pkg
-                    if not (config.ROOT / "node_modules" / pkg_name).exists():
-                        print(f"  [i] npx command '{pkg}' missing from node_modules, attempting install...")
-                        # Run npm install locally
-                        install_res = execute_tool("run_cmd", {"cmd": f"npm install {pkg_name} --save-dev", "timeout": 300})
-                        try:
-                            return json.loads(install_res).get("rc") == 0
-                        except:
-                            return False
-            # Verify if the resolved path is inside the workspace and return True if it exists
+            # Handle runners like npx, python -m, etc.
+            if _is_command_runner(base_cmd):
+                _repair_environment_for_runner(base_cmd, args)
             return True
 
-        # Tool missing - attempt auto-install
-        pkg_map = {
-            "ruff": "pip install ruff",
-            "mypy": "pip install mypy",
-            "pytest": "pip install pytest",
-            "eslint": "npm install eslint --save-dev",
-            "tsc": "npm install typescript --save-dev",
-        }
+        # 2. If command is missing from PATH, try ecosystem-specific recovery
+        if _try_node_recovery(base_cmd):
+            return True
 
-        if base_cmd in pkg_map:
-            install_cmd = pkg_map[base_cmd]
-            
-            # For Node tools, ensure package.json exists if we're doing a local install
-            if base_cmd in ("eslint", "tsc") or (base_cmd == "npx" and len(args) > 1 and args[1] in ("eslint", "tsc")):
-                if not (config.ROOT / "package.json").exists():
-                    print("  [i] package.json missing, initializing with 'npm init -y'...")
-                    execute_tool("run_cmd", {"cmd": "npm init -y", "timeout": 30})
-
-            print(f"  [i] Tool '{base_cmd}' not found, attempting auto-install: {install_cmd}...")
-            install_res = execute_tool("run_cmd", {"cmd": install_cmd, "timeout": 300})
-            try:
-                success = json.loads(install_res).get("rc") == 0
-                if success:
-                    print(f"  [OK] Successfully installed {base_cmd}")
-                    return True
-            except:
-                pass
-            
-        return False
+        # Fallback to auto-install for known common tools across ecosystems
+        return _try_auto_install(base_cmd)
+        
     except Exception as e:
         print(f"  [!] Error checking/installing tool '{cmd}': {e}")
         return False
+
+
+def _is_command_runner(base_cmd: str) -> bool:
+    """Check if the command is a known package runner."""
+    return base_cmd in ("npx", "npm", "python", "python3")
+
+
+def _repair_environment_for_runner(runner: str, args: List[str]) -> None:
+    """Attempt to repair the environment for a specific runner if its target is missing."""
+    if runner in ("npx", "npm") and len(args) > 1:
+        # Extract package name from npx/npm call
+        pkg = args[1] if args[1] != "--yes" else (args[2] if len(args) > 2 else "")
+        if pkg and pkg not in ("run", "install", "test"):
+            _try_npm_repair(pkg)
+    elif runner in ("python", "python3") and len(args) > 2 and args[1] == "-m":
+        # Handle python -m <module>
+        # (Generic pip repair could be added here if needed)
+        pass
+
+
+def _try_auto_install(base_cmd: str) -> bool:
+    """Attempt to install a missing tool based on its name."""
+    pkg_map = {
+        "ruff": ["pip", "install", "ruff"],
+        "mypy": ["pip", "install", "mypy"],
+        "pytest": ["pip", "install", "pytest"],
+        "eslint": ["npm", "install", "eslint", "--save-dev"],
+    }
+
+    if base_cmd in pkg_map:
+        install_cmd = pkg_map[base_cmd]
+        print(f"  [i] Tool '{base_cmd}' not found, attempting auto-install: {install_cmd}...")
+        install_res = execute_tool("run_cmd", {"cmd": install_cmd, "timeout": 300})
+        try:
+            if json.loads(install_res).get("rc") == 0:
+                print(f"  [OK] Successfully installed {base_cmd}")
+                return True
+        except:
+            pass
+    return False
+
+
+def _try_npm_repair(pkg: str) -> bool:
+    """Attempt to repair node_modules if a package is expected but missing."""
+    pkg_name = "typescript" if pkg == "tsc" else pkg
+    if (config.ROOT / "node_modules" / pkg_name).exists():
+        return True
+
+    pkg_json_path = config.ROOT / "package.json"
+    if not pkg_json_path.exists():
+        return False
+        
+    try:
+        pkg_data = json.loads(pkg_json_path.read_text(errors='ignore'))
+        deps = {**pkg_data.get("dependencies", {}), **pkg_data.get("devDependencies", {})}
+        
+        if pkg in deps or pkg_name in deps:
+            print(f"  [i] package '{pkg}' missing from node_modules, attempting repair...")
+            execute_tool("run_cmd", {"cmd": ["npm", "install"], "timeout": 600})
+            return (config.ROOT / "node_modules" / pkg_name).exists()
+    except:
+        pass
+    return False
+
+
+def _try_node_recovery(base_cmd: str) -> bool:
+    """Attempt to recover missing command in Node environment by checking project config."""
+    pkg_json_path = config.ROOT / "package.json"
+    if not pkg_json_path.exists():
+        return False
+
+    try:
+        pkg_data = json.loads(pkg_json_path.read_text(errors='ignore'))
+        scripts = pkg_data.get("scripts", {})
+        deps = {**pkg_data.get("dependencies", {}), **pkg_data.get("devDependencies", {})}
+
+        # If it's a script or dependency, it's considered "available" (either directly or via npm/npx)
+        return base_cmd in scripts or base_cmd in deps
+    except:
+        return False
+
+
+def _attempt_ecosystem_fallback(cmd: str | List[str], timeout: int | None, use_tests_tool: bool, retry_count: int) -> Optional[Dict[str, Any]]:
+    """Attempt to find an alternative way to run a missing command based on project context."""
+    base_cmd = cmd[0] if isinstance(cmd, list) else shlex.split(cmd)[0]
+    
+    # 1. NODE.JS FALLBACKS
+    pkg_json_path = config.ROOT / "package.json"
+    if pkg_json_path.exists():
+        try:
+            pkg_data = json.loads(pkg_json_path.read_text(errors='ignore'))
+            scripts = pkg_data.get("scripts", {})
+            deps = {**pkg_data.get("dependencies", {}), **pkg_data.get("devDependencies", {})}
+            
+            # If the missing command is exactly an npm script name, try 'npm run <cmd>'
+            if base_cmd in scripts and base_cmd != "npm":
+                print(f"  [i] '{base_cmd}' not in PATH, but exists as npm script. Trying 'npm run {base_cmd}'...")
+                return _run_validation_command(["npm", "run", base_cmd], timeout=timeout, _retry_count=retry_count+1)
+            
+            # If it's in dependencies but not PATH, try npx
+            if base_cmd in deps and base_cmd != "npx":
+                print(f"  [i] '{base_cmd}' not in PATH, but exists in dependencies. Trying 'npx {base_cmd}'...")
+                return _run_validation_command(["npx", "--yes", base_cmd], timeout=timeout, _retry_count=retry_count+1)
+                
+            # If a runner itself failed (e.g. npx), try to extract the target and find a script for it
+            if base_cmd in ("npx", "npm", "node") and len(cmd) > 1:
+                # Extract target tool (e.g. npx eslint -> eslint)
+                target = ""
+                if base_cmd in ("npx", "npm"):
+                    target = cmd[2] if isinstance(cmd, list) and len(cmd) > 2 and cmd[1] == "--yes" else (cmd[1] if len(cmd) > 1 else "")
+                
+                if target:
+                    if target in scripts:
+                        return _run_validation_command(["npm", "run", target], timeout=timeout, _retry_count=retry_count+1)
+                    # Special case: common tool aliases in scripts
+                    if target == "eslint" and "lint" in scripts:
+                        return _run_validation_command(["npm", "run", "lint"], timeout=timeout, _retry_count=retry_count+1)
+                    if target in ("vitest", "jest", "pytest") and "test" in scripts:
+                        return _run_validation_command(["npm", "test"], use_tests_tool=True, timeout=timeout, _retry_count=retry_count+1)
+        except:
+            pass
+
+    # 2. PYTHON FALLBACKS
+    if base_cmd != "python":
+        # Check if it might be available via python -m
+        # (This is more of a probe, but safe for common tools)
+        common_python_tools = {"pytest", "ruff", "mypy", "pylint", "black", "isort"}
+        if base_cmd in common_python_tools:
+            print(f"  [i] '{base_cmd}' not in PATH, trying 'python -m {base_cmd}'...")
+            return _run_validation_command(["python", "-m", base_cmd], timeout=timeout, _retry_count=retry_count+1)
+
+    return None
 
 
 def _extract_error(res: Dict[str, Any], default: str = "Unknown error") -> str:
@@ -1098,8 +1199,11 @@ def _try_dynamic_help_discovery(path: Path) -> Optional[str]:
     return None
 
 
-def _run_validation_command(cmd: str | List[str], *, use_tests_tool: bool = False, timeout: int | None = None) -> Dict[str, Any]:
+def _run_validation_command(cmd: str | List[str], *, use_tests_tool: bool = False, timeout: int | None = None, _retry_count: int = 0) -> Dict[str, Any]:
     """Run a validation command via the tool runner and return parsed JSON."""
+    if _retry_count > 2:
+        return {"error": f"Max retries exceeded for command: {cmd}", "rc": -1}
+
     # Ensure tool is available before running
     cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
     _ensure_tool_available(cmd_str)
@@ -1117,8 +1221,16 @@ def _run_validation_command(cmd: str | List[str], *, use_tests_tool: bool = Fals
             if "cmd" not in data:
                 data["cmd"] = cmd_str
             
-            # If the command failed and produced no output, attempt to gather help output for better diagnostics
+            # RECOVERY LOGIC: If command failed because it was not found, try generic ecosystem fallbacks
             rc = data.get("rc")
+            error_msg = str(data.get("error", "")).lower()
+            
+            if rc == -1 and ("not found" in error_msg or "file not found" in error_msg):
+                fallback_res = _attempt_ecosystem_fallback(cmd, timeout, use_tests_tool, _retry_count)
+                if fallback_res:
+                    return fallback_res
+
+            # If the command failed and produced no output, attempt to gather help output for better diagnostics
             if rc is not None and rc not in (0, 4) and not data.get("stdout") and not data.get("stderr"):
                 try:
                     if isinstance(cmd, list):
@@ -1164,113 +1276,6 @@ def _paths_or_default(paths: list[Path]) -> list[Path]:
         return [Path(".").resolve()]
 
 
-def _find_project_root(path: Path) -> Path:
-    """Find the nearest project root containing project markers, staying within workspace."""
-    try:
-        current = path.resolve()
-        if not current.is_dir():
-            current = current.parent
-        
-        # Don't go outside workspace root
-        try:
-            root_limit = config.ROOT.resolve()
-        except:
-            root_limit = Path(".").resolve()
-        
-        markers = {
-            "package.json", "pyproject.toml", "requirements.txt", "setup.py",
-            "go.mod", "Cargo.toml", "Gemfile", "composer.json", "pom.xml",
-            "build.gradle", "CMakeLists.txt", "Makefile", "prisma", ".git"
-        }
-        
-        while len(current.parts) >= len(root_limit.parts):
-            if any((current / m).exists() for m in markers):
-                return current
-            if current == root_limit:
-                break
-            parent = current.parent
-            if parent == current:
-                break
-            current = parent
-            
-        return root_limit
-    except Exception:
-        return config.ROOT
-
-
-def _detect_project_type(path: Path) -> str:
-    """Detect the project type (python, vue, node, go, rust, etc) relative to a path."""
-    try:
-        root = _find_project_root(path)
-        
-        # 1. Node.js Ecosystem
-        if (root / "package.json").exists():
-            content = (root / "package.json").read_text(errors="ignore")
-            if '"vue"' in content: return "vue"
-            if '"react"' in content: return "react"
-            if '"next"' in content: return "nextjs"
-            return "node"
-        
-        # 2. Python Ecosystem
-        if (root / "pyproject.toml").exists() or (root / "requirements.txt").exists() or (root / "setup.py").exists():
-            return "python"
-            
-        # 3. Go Ecosystem
-        if (root / "go.mod").exists():
-            return "go"
-            
-        # 4. Rust Ecosystem
-        if (root / "Cargo.toml").exists():
-            return "rust"
-            
-        # 5. Ruby Ecosystem
-        if (root / "Gemfile").exists() or (root / "Rakefile").exists():
-            return "ruby"
-            
-        # 6. PHP Ecosystem
-        if (root / "composer.json").exists():
-            return "php"
-            
-        # 7. Java/Kotlin Ecosystem
-        if (root / "pom.xml").exists():
-            return "java_maven"
-        if (root / "build.gradle").exists() or (root / "build.gradle.kts").exists():
-            # Check if it's Kotlin
-            if any(root.rglob("*.kt")):
-                return "kotlin"
-            return "java_gradle"
-            
-        # 8. C# / .NET Ecosystem
-        if any(root.glob("*.csproj")) or any(root.glob("*.sln")):
-            return "csharp"
-            
-        # 9. C/C++ Ecosystem
-        if (root / "CMakeLists.txt").exists():
-            return "cpp_cmake"
-        if (root / "Makefile").exists():
-            return "cpp_make"
-            
-        # 10. Mobile / Flutter
-        if (root / "pubspec.yaml").exists():
-            return "flutter"
-
-        # Fallback by file extension in root
-        if root.exists() and root.is_dir():
-            for f in root.iterdir():
-                if f.suffix == ".py": return "python"
-                if f.suffix in (".js", ".ts"): return "node"
-                if f.suffix == ".go": return "go"
-                if f.suffix == ".rs": return "rust"
-                if f.suffix == ".rb": return "ruby"
-                if f.suffix == ".php": return "php"
-                if f.suffix == ".java": return "java_maven"
-                if f.suffix == ".kt": return "kotlin"
-                if f.suffix == ".cs": return "csharp"
-    except Exception:
-        pass
-    return "unknown"
-
-
 def _no_tests_expected(task: Optional[Task]) -> bool:
     """Check if 'no tests expected' is explicitly configured in task description or steps."""
     if not task:
@@ -1296,7 +1301,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
 
     strict_details: Dict[str, Any] = {}
     primary_path = paths[0] if paths else config.ROOT
-    project_type = _detect_project_type(primary_path)
+    project_type = detect_project_type(primary_path)
     
     # Check for per-repo configuration overrides
     repo_config = getattr(config, "REPO_CONFIG", {})
@@ -1488,7 +1493,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
                 test_cmd = hinted_test
             else:
                 # Fallback to package.json detection
-                root = _find_project_root(primary_path)
+                root = find_project_root(primary_path)
                 try:
                     pkg_json = json.loads((root / "package.json").read_text(errors='ignore'))
                     scripts = pkg_json.get("scripts", {})
@@ -1632,7 +1637,7 @@ def _inspect_file_for_command_hints(path: Path, tool_type: str) -> Optional[str]
             return None
             
         content = path.read_text(errors='ignore')
-        root = _find_project_root(path)
+        root = find_project_root(path)
         
         if tool_type == "test":
             # Node.js Test detection
@@ -1714,7 +1719,7 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
 
     # Get project type relative to the first relevant path
     primary_path = paths[0] if paths else config.ROOT
-    project_type = _detect_project_type(primary_path)
+    project_type = detect_project_type(primary_path)
 
     # Get Python file paths for targeted linting
     py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]

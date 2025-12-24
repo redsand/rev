@@ -7,8 +7,11 @@ from __future__ import annotations
 import json
 import os
 import time
+import importlib
+import inspect
+import pkgutil
 from pathlib import Path
-from typing import Dict, Any, TYPE_CHECKING
+from typing import Dict, Any, TYPE_CHECKING, List, Callable, Optional
 
 from rev import config
 from rev.debug_logger import get_logger
@@ -191,6 +194,71 @@ _TIMEOUT_PROTECTED_TOOLS = {
     "check_license_compliance",
     "split_python_module_classes",
 }
+
+# --- Dynamic Tool Registration ---
+_DYNAMIC_TOOLS: Dict[str, Dict[str, Any]] = {}
+_DYNAMIC_DISPATCH: Dict[str, Callable] = {}
+
+def register_tool(name: str, schema: Dict[str, Any]):
+    """Decorator or function to register a tool at runtime."""
+    def decorator(func: Callable):
+        _DYNAMIC_TOOLS[name] = schema
+        _DYNAMIC_DISPATCH[name] = func
+        return func
+    return decorator
+
+def _discover_custom_tools():
+    """Scan both core and workspace tools directories for custom tools."""
+    # 1. Core tools
+    core_tools_dir = Path(__file__).parent
+    _scan_directory_for_tools(core_tools_dir, "rev.tools")
+    
+    # 2. Workspace tools (.rev/tools)
+    try:
+        workspace_tools_dir = config.ROOT / ".rev" / "tools"
+        if workspace_tools_dir.exists():
+            # Add to sys.path if not present so we can import them
+            import sys
+            ws_path = str(workspace_tools_dir.parent.parent) # The project root
+            if ws_path not in sys.path:
+                sys.path.insert(0, ws_path)
+            
+            # Scan .rev/tools files
+            for file in workspace_tools_dir.glob("*.py"):
+                if file.name.startswith('_'): continue
+                module_name = f".rev.tools.{file.stem}"
+                try:
+                    # We might need to handle absolute imports for files in .rev/tools
+                    # For simplicity, we assume they are discoverable via the root
+                    spec = importlib.util.spec_from_file_location(module_name, file)
+                    if spec and spec.loader:
+                        module = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(module)
+                        _register_from_module(module)
+                except Exception as e:
+                    logger.debug(f"Failed to load workspace tool {file.name}: {e}")
+    except Exception:
+        pass
+
+def _scan_directory_for_tools(directory: Path, package_prefix: str):
+    """Helper to scan a directory for tool modules."""
+    for _, name, is_pkg in pkgutil.iter_modules([str(directory)]):
+        if is_pkg or name.startswith('_') or name in ('registry', 'permissions', 'workspace_resolver'):
+            continue
+        try:
+            module = importlib.import_module(f"{package_prefix}.{name}")
+            _register_from_module(module)
+        except Exception as e:
+            logger.debug(f"Failed to import dynamic tool module {name}: {e}")
+
+def _register_from_module(module):
+    """Register tool functions from an imported module."""
+    for attr_name in dir(module):
+        attr = getattr(module, attr_name)
+        if callable(attr) and hasattr(attr, "tool_schema"):
+            tool_name = getattr(attr, "tool_name", attr_name)
+            _DYNAMIC_TOOLS[tool_name] = attr.tool_schema
+            _DYNAMIC_DISPATCH[tool_name] = attr
 
 def _get_timeout_manager() -> TimeoutManager | None:
     """Get or create the global timeout manager."""
@@ -805,7 +873,7 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
             return result
 
         # O(1) dictionary lookup
-        handler = _TOOL_DISPATCH.get(name)
+        handler = _DYNAMIC_DISPATCH.get(name) or _TOOL_DISPATCH.get(name)
         if handler is None:
             error_msg = f"Unknown tool: {name}"
             debug_logger.log_tool_execution(name, args, error=error_msg)

@@ -120,11 +120,14 @@ Output format (strict):
 - Return ONLY a JSON array. No prose, no markdown, no code fences.
 - Each item must be an object with exactly:
   - "description": string
-  - "action_type": "review" | "edit" | "add" | "delete" | "test" | "doc"
+  - "action_type": "review" | "edit" | "add" | "delete" | "test" | "doc" | "refactor" | "debug" | "create_tool" | "set_workdir"
   - "complexity": "low" | "medium" | "high"
 
 Guidance:
-- Put review tasks first (find existing implementations and patterns).
+- Put review/read tasks first (find existing implementations and patterns).
+- Use [SET_WORKDIR] if the task is focused on a specific subdirectory to avoid path drift.
+- Use [ADD] to create platform-specific validation or reproduction scripts (e.g., .ps1 for Windows, .sh for Linux/macOS) based on the 'System Information' provided.
+- Use [CREATE_TOOL] if you need a specialized Python tool that doesn't exist yet.
 - For multi-feature work: one implementation task per feature with SPECIFIC names.
 - DEPENDENCY MANAGEMENT: If you add new project dependencies (to `package.json`, `requirements.txt`, `go.mod`, etc.), you MUST add a task to INSTALL them using the appropriate tool (`npm install`, `pip install`, etc.).
 - For code changes: include at least one test task and name the command when possible.

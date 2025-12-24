@@ -62,6 +62,15 @@ def _collect_memory_items(context: RevContext) -> List[Tuple[str, str]]:
     if isinstance(recent_tasks, list) and recent_tasks:
         items.append(("recent_tasks", "; ".join(recent_tasks[-5:])))
 
+    # System Information (Platform awareness)
+    try:
+        sys_info = config.get_system_info_cached()
+        items.append(("os", sys_info.get("os", "unknown")))
+        items.append(("platform", sys_info.get("platform", "unknown")))
+        items.append(("shell_type", sys_info.get("shell_type", "unknown")))
+    except Exception:
+        pass
+
     return items
 
 

@@ -55,7 +55,8 @@ from rev.memory.project_memory import (
 EXECUTION_SYSTEM = """You are an autonomous coding agent that executes planned tasks using tools.
 
 System context:
-- Use the provided OS details to choose correct commands and paths.
+- Use the provided 'System Information' (OS, Platform, Shell Type) to choose correct commands and paths.
+- For complex validation or reproduction, you are encouraged to CREATE scripts (.ps1 for Windows, .sh for POSIX) using `write_file` and execute them via `run_cmd`.
 
 How to work:
 1) Understand the current task and its action_type.
@@ -63,6 +64,7 @@ How to work:
 3) If action_type is "add" or "edit", make the change with write_file/apply_patch.
 4) If action_type is "review", do not modify files; summarize findings and move on.
 5) If action_type is "test", run tests via run_cmd/run_tests and report results.
+6) Use [CREATE_TOOL] if you need a specialized Python tool that doesn't exist yet.
 
 Tool discipline:
 - Do not call the same tool with identical arguments twice in a row.
@@ -2399,6 +2401,9 @@ def concurrent_execution_mode(
     
     debug_logger = get_logger()
     
+    # Shared execution context for all tasks in this concurrent run
+    shared_exec_context = ExecutionContext(plan)
+    
     # For scary operations, we need a lock to prevent multiple threads from prompting at once
     prompt_lock = threading.Lock()
     
@@ -2418,8 +2423,7 @@ def concurrent_execution_mode(
             
             print(f"\n[Task {task.task_id + 1}/{len(plan.tasks)}] STARTING: {task.description}")
             
-            # Isolated context for this task
-            task_context = ExecutionContext(plan)
+            # Use shared context but task-specific message history
             task_messages = [{"role": "system", "content": system_context}]
             
             # Add session context from previously completed tasks
@@ -2436,7 +2440,7 @@ def concurrent_execution_mode(
             # Sub-agent execution loop (simplified version of sequential loop)
             # Logic here follows the same pattern as execution_mode but thread-safe
             success = _execute_task_loop_concurrent(
-                task, task_messages, task_context, tools, 
+                task, task_messages, shared_exec_context, tools, 
                 enable_action_review, coding_mode, state_manager, 
                 budget, prompt_lock, session_tracker
             )
@@ -2489,15 +2493,25 @@ def concurrent_execution_mode(
                 continue
             
             # Wait for at least one task to complete
-            done, _ = as_completed(futures, timeout=1.0)
-            for future in done:
-                task = futures.pop(future)
-                try:
-                    success = future.result()
-                    status_symbol = "✓" if success else "✗"
-                    print(f"\n[{status_symbol}] Task {task.task_id + 1} finished: {task.description[:60]}...")
-                except Exception as e:
-                    print(f"✗ Future error for task {task.task_id}: {e}")
+            try:
+                # Use a small timeout so we can periodically check for new ready tasks
+                # and handle interrupts.
+                for future in concurrent.futures.as_completed(futures, timeout=1.0):
+                    task = futures.pop(future)
+                    try:
+                        success = future.result()
+                        status_symbol = "✓" if success else "✗"
+                        print(f"\n[{status_symbol}] Task {task.task_id + 1} finished: {task.description[:60]}...")
+                    except Exception as e:
+                        print(f"✗ Future error for task {task.task_id}: {e}")
+                    
+                    # Break after processing one completed task to re-check for newly ready tasks
+                    break
+            except TimeoutError:
+                # No tasks completed in this interval, just continue the loop
+                pass
+            except Exception as e:
+                print(f"⚠️ Error in coordination loop: {e}")
             
             # Small delay to prevent tight loop
             time.sleep(0.1)

@@ -44,6 +44,25 @@ FORBIDDEN_TOKENS = {"&&", "||", ";", "|", "&", ">", "<", ">>", "2>", "1>", "<<",
                     "2>&1", "1>&2", "`", "$(", "${"}
 
 
+def _resolve_command(cmd_name: str) -> Optional[str | List[str]]:
+    """Resolve a command name to its full path or execution wrapper.
+    
+    On Windows, this correctly finds .cmd, .bat, and .exe files.
+    If a .cmd or .bat file is found, it returns a list prefixed with cmd /c
+    to ensure it can be executed with shell=False.
+    """
+    resolved = shutil.which(cmd_name)
+    if not resolved:
+        return None
+        
+    if os.name == 'nt':
+        # If it's a batch file, we need cmd /c to run it with shell=False
+        if resolved.lower().endswith(('.cmd', '.bat')):
+            return ["cmd.exe", "/c", resolved]
+            
+    return resolved
+
+
 def _parse_and_validate(cmd: str) -> Tuple[bool, str, List[str]]:
     """Parse and validate a command string for safe execution.
 
@@ -148,8 +167,21 @@ def run_command_safe(
             }
         original_cmd_str = cmd
 
+    # Resolve command just before execution
+    executable = args[0]
+    resolved = _resolve_command(executable)
+    if resolved:
+        if isinstance(resolved, list):
+            # Command needs a wrapper (e.g. cmd /c for Windows batch files)
+            args = resolved + args[1:]
+        else:
+            args[0] = resolved
+
     # Execute safely with shell=False
     try:
+        if os.getenv("REV_DEBUG_CMD"):
+            print(f"  [DEBUG_CMD] Executing: {args} (cwd={cwd})")
+            
         proc = subprocess.Popen(
             args,
             shell=False,  # CRITICAL: Never use shell=True
@@ -178,6 +210,9 @@ def run_command_safe(
                     "rc": -1,
                     "error": f"command exceeded {timeout}s timeout",
                 }
+
+        if os.getenv("REV_DEBUG_CMD"):
+            print(f"  [DEBUG_CMD] Result: rc={proc.returncode}, stdout_len={len(stdout_data or '')}, stderr_len={len(stderr_data or '')}")
 
         return {
             "rc": proc.returncode,
@@ -315,6 +350,16 @@ def run_command_streamed(
                 "rc": -1,
             }
         original_cmd_str = cmd
+
+    # Resolve command just before execution
+    executable = args[0]
+    resolved = _resolve_command(executable)
+    if resolved:
+        if isinstance(resolved, list):
+            # Command needs a wrapper (e.g. cmd /c for Windows batch files)
+            args = resolved + args[1:]
+        else:
+            args[0] = resolved
 
     # Create temporary files for output streaming
     import tempfile
