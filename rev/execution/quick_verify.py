@@ -12,7 +12,7 @@ import os
 import shlex
 import shutil
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple, Iterable
+from typing import Dict, Any, Optional, Tuple, Iterable, List
 from dataclasses import dataclass
 
 from rev.models.task import Task, TaskStatus
