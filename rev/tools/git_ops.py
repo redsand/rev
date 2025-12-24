@@ -649,7 +649,7 @@ def git_branch(action: str = "list", branch_name: str = None) -> str:
 
 # ========== Additional Git Operations ==========
 
-def run_cmd(cmd: str, timeout: int = 300) -> str:
+def run_cmd(cmd: str | list[str], timeout: int = 300) -> str:
     """Run a shell command safely with security validation.
 
     Security:
@@ -661,7 +661,11 @@ def run_cmd(cmd: str, timeout: int = 300) -> str:
     """
     # Short-circuit repeated git clones to an existing destination
     try:
-        tokens = shlex.split(cmd)
+        if isinstance(cmd, str):
+            tokens = shlex.split(cmd)
+        else:
+            tokens = cmd
+
         if len(tokens) >= 2 and tokens[0] == "git" and tokens[1] == "clone":
             # Identify destination directory if explicitly provided
             # git clone <url> [directory]
@@ -705,7 +709,7 @@ def run_cmd(cmd: str, timeout: int = 300) -> str:
     return json.dumps(result)
 
 
-def run_tests(cmd: str = "pytest -q", timeout: int = 600) -> str:
+def run_tests(cmd: str | list[str] = "pytest -q", timeout: int = 600) -> str:
     """Run test suite safely with security validation.
 
     Security:

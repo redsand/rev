@@ -122,29 +122,19 @@ def run_command_safe(
             return {"blocked": True, "error": "empty command", "cmd": str(cmd), "rc": -1}
         
         args = [str(arg) for arg in cmd]
-        # Check for shell metacharacters in any part
-        for arg in args:
-            if FORBIDDEN_RE.search(arg):
-                return {
-                    "blocked": True,
-                    "error": f"shell metacharacters not allowed in command part: {arg}",
-                    "cmd": " ".join(args),
-                    "rc": -1,
-                }
         
-        # Check for forbidden tokens
-        if any(tok in FORBIDDEN_TOKENS for tok in args):
+        # For list-based commands (shell=False), we only block the most dangerous
+        # tokens if they are standalone arguments, to prevent accidental shell-like
+        # behavior if the executable itself is a shell (like cmd.exe or sh).
+        # We allow these characters within arguments (e.g. in paths).
+        danger_tokens = {"&&", "||", "|", ">>", "<<", "`", "$("}
+        if any(tok in danger_tokens for tok in args):
             return {
                 "blocked": True,
-                "error": "shell operators not allowed in arguments",
+                "error": "dangerous shell operators not allowed as standalone arguments",
                 "cmd": " ".join(args),
                 "rc": -1,
             }
-        
-        # Resolve command
-        resolved = _resolve_command(args[0])
-        if resolved:
-            args[0] = resolved
         
         original_cmd_str = " ".join(cmd)
     else:
@@ -300,26 +290,19 @@ def run_command_streamed(
             return {"blocked": True, "error": "empty command", "cmd": str(cmd), "rc": -1}
         
         args = [str(arg) for arg in cmd]
-        for arg in args:
-            if FORBIDDEN_RE.search(arg):
-                return {
-                    "blocked": True,
-                    "error": f"shell metacharacters not allowed in command part: {arg}",
-                    "cmd": " ".join(args),
-                    "rc": -1,
-                }
         
-        if any(tok in FORBIDDEN_TOKENS for tok in args):
+        # For list-based commands (shell=False), we only block the most dangerous
+        # tokens if they are standalone arguments, to prevent accidental shell-like
+        # behavior if the executable itself is a shell (like cmd.exe or sh).
+        # We allow these characters within arguments (e.g. in paths).
+        danger_tokens = {"&&", "||", "|", ">>", "<<", "`", "$("}
+        if any(tok in danger_tokens for tok in args):
             return {
                 "blocked": True,
-                "error": "shell operators not allowed in arguments",
+                "error": "dangerous shell operators not allowed as standalone arguments",
                 "cmd": " ".join(args),
                 "rc": -1,
             }
-        
-        resolved = _resolve_command(args[0])
-        if resolved:
-            args[0] = resolved
         
         original_cmd_str = " ".join(cmd)
     else:

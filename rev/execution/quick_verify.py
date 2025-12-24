@@ -1022,14 +1022,15 @@ def _extract_error(res: Dict[str, Any], default: str = "Unknown error") -> str:
     """Extract and truncate error message from tool result, with a broad recovery hint."""
     stdout = res.get("stdout", "")
     stderr = res.get("stderr", "")
+    error = res.get("error", "")
     rc = res.get("rc")
     help_info = res.get("help_info")
     
-    msg = stderr or stdout or default
+    msg = stderr or stdout or error or default
     msg = msg.strip()
     
     # If we have a failure (non-zero rc) but no output, provide more context
-    if (rc is not None and rc != 0) and not stderr and not stdout:
+    if (rc is not None and rc != 0) and not stderr and not stdout and not error:
         msg = f"Command failed with exit code {rc} but produced no output (stdout/stderr)."
         if rc == 2:
             msg += " On Windows, exit code 2 often indicates a fatal configuration error or missing files for tools like ESLint."
@@ -1699,14 +1700,16 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
     _COMMAND_HINT_CACHE = {}
     
     validation_steps = task.validation_steps
-    commands: list[tuple[str, str, str]] = []
+    commands: list[tuple[str, str | list[str], str]] = []
     seen_cmds = set()
     paths = _paths_or_default(_collect_paths_for_strict_checks("", details, tool_events))
 
-    def _add(label: str, cmd: str, tool: str = "run_cmd") -> None:
-        if cmd in seen_cmds:
+    def _add(label: str, cmd: str | list[str], tool: str = "run_cmd") -> None:
+        # Convert list to string for de-duplication
+        cmd_key = " ".join(cmd) if isinstance(cmd, list) else cmd
+        if cmd_key in seen_cmds:
             return
-        seen_cmds.add(cmd)
+        seen_cmds.add(cmd_key)
         commands.append((label, cmd, tool))
 
     # Get project type relative to the first relevant path
@@ -1728,61 +1731,63 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
             if project_type == "python":
                 compile_targets = [p for p in paths if p.is_dir() or p.suffix == '.py']
                 if compile_targets:
-                    _add("compileall", "python -m compileall " + " ".join(_quote_path(p) for p in compile_targets))
-            elif project_type == "go": _add("go_build", "go build ./...")
-            elif project_type == "rust": _add("cargo_check", "cargo check")
-            elif project_type == "csharp": _add("dotnet_build", "dotnet build")
-            elif project_type == "cpp_cmake": _add("cmake_build", "cmake --build .")
-            elif project_type == "cpp_make": _add("make", "make")
-            elif project_type == "java_maven": _add("mvn_compile", "mvn compile")
-            elif project_type == "java_gradle" or project_type == "kotlin": _add("gradle_build", "./gradlew build")
+                    _add("compileall", ["python", "-m", "compileall"] + [str(p) for p in compile_targets])
+            elif project_type == "go": _add("go_build", ["go", "build", "./..."])
+            elif project_type == "rust": _add("cargo_check", ["cargo", "check"])
+            elif project_type == "csharp": _add("dotnet_build", ["dotnet", "build"])
+            elif project_type == "cpp_cmake": _add("cmake_build", ["cmake", "--build", "."])
+            elif project_type == "cpp_make": _add("make", ["make"])
+            elif project_type == "java_maven": _add("mvn_compile", ["mvn", "compile"])
+            elif project_type == "java_gradle" or project_type == "kotlin": _add("gradle_build", ["./gradlew", "build"])
 
         # 2. LINT
         if "lint" in text or "linter" in text:
             hinted_lint = _inspect_file_for_command_hints(primary_path, "lint") if paths else None
             
             if hinted_lint and node_paths:
-                targets = " ".join(_quote_path(p) for p in node_paths[:10])
-                _add("eslint_hinted", f"{hinted_lint} {targets}")
+                targets = [str(p) for p in node_paths[:10]]
+                # Split hinted_lint if it's a string
+                lint_parts = shlex.split(hinted_lint) if isinstance(hinted_lint, str) else hinted_lint
+                _add("eslint_hinted", lint_parts + targets)
             elif project_type == "python" and py_paths:
-                ruff_targets = " ".join(_quote_path(p) for p in py_paths[:10])
-                _add("ruff", f"ruff check {ruff_targets} --select E9,F63,F7")
+                ruff_targets = [str(p) for p in py_paths[:10]]
+                _add("ruff", ["ruff", "check"] + ruff_targets + ["--select", "E9,F63,F7"])
             elif project_type in ("node", "vue", "react", "nextjs"):
                 if node_paths:
-                    targets = " ".join(_quote_path(p) for p in node_paths[:10])
-                    # Use npx --yes eslint --quiet to target specific files and ignore formatting warnings (too strict)
-                    _add("eslint", f"npx --yes eslint {targets} --quiet")
+                    targets = [str(p) for p in node_paths[:10]]
+                    # Use list-based npx command to avoid security blocks
+                    _add("eslint", ["npx", "--yes", "eslint"] + targets + ["--quiet"])
                 else:
-                    _add("npm_lint", "npm run lint")
-            elif project_type == "go": _add("go_vet", "go vet ./...")
-            elif project_type == "rust": _add("clippy", "cargo clippy")
+                    _add("npm_lint", ["npm", "run", "lint"])
+            elif project_type == "go": _add("go_vet", ["go", "vet", "./..."])
+            elif project_type == "rust": _add("clippy", ["cargo", "clippy"])
 
         # 3. TEST
         if "test" in text:
             hinted_test = _inspect_file_for_command_hints(primary_path, "test") if paths else None
             
             if hinted_test:
-                target = _quote_path(primary_path)
-                _add("hinted_test", f"{hinted_test} {target}", "run_tests")
-            elif project_type == "python": _add("pytest", "pytest -q", "run_tests")
-            elif project_type in ("node", "vue", "react", "nextjs"): _add("npm_test", "npm test", "run_tests")
-            elif project_type == "go": _add("go_test", "go test ./...", "run_tests")
-            elif project_type == "rust": _add("cargo_test", "cargo test", "run_tests")
-            elif project_type == "ruby": _add("rake_test", "bundle exec rake test", "run_tests")
-            elif project_type == "php": _add("phpunit", "vendor/bin/phpunit", "run_tests")
-            elif project_type == "java_maven": _add("mvn_test", "mvn test", "run_tests")
-            elif project_type == "java_gradle" or project_type == "kotlin": _add("gradle_test", "./gradlew test", "run_tests")
-            elif project_type == "csharp": _add("dotnet_test", "dotnet test", "run_tests")
-            elif project_type == "flutter": _add("flutter_test", "flutter test", "run_tests")
-            else: _add("pytest", "pytest -q", "run_tests") # Default fallback
+                test_parts = shlex.split(hinted_test) if isinstance(hinted_test, str) else hinted_test
+                _add("hinted_test", test_parts + [str(primary_path)], "run_tests")
+            elif project_type == "python": _add("pytest", ["pytest", "-q"], "run_tests")
+            elif project_type in ("node", "vue", "react", "nextjs"): _add("npm_test", ["npm", "test"], "run_tests")
+            elif project_type == "go": _add("go_test", ["go", "test", "./..."], "run_tests")
+            elif project_type == "rust": _add("cargo_test", ["cargo", "test"], "run_tests")
+            elif project_type == "ruby": _add("rake_test", ["bundle", "exec", "rake", "test"], "run_tests")
+            elif project_type == "php": _add("phpunit", ["vendor/bin/phpunit"], "run_tests")
+            elif project_type == "java_maven": _add("mvn_test", ["mvn", "test"], "run_tests")
+            elif project_type == "java_gradle" or project_type == "kotlin": _add("gradle_test", ["./gradlew", "test"], "run_tests")
+            elif project_type == "csharp": _add("dotnet_test", ["dotnet", "test"], "run_tests")
+            elif project_type == "flutter": _add("flutter_test", ["flutter", "test"], "run_tests")
+            else: _add("pytest", ["pytest", "-q"], "run_tests") # Default fallback
 
         # 4. TYPE CHECK
         if "mypy" in text or "type" in text:
             if project_type == "python" and py_paths:
-                mypy_targets = " ".join(_quote_path(p) for p in py_paths[:10])
-                _add("mypy", f"mypy {mypy_targets}")
+                mypy_targets = [str(p) for p in py_paths[:10]]
+                _add("mypy", ["mypy"] + mypy_targets)
             elif project_type in ("node", "typescript", "vue", "react", "nextjs"):
-                _add("tsc", "npx --yes tsc --noEmit")
+                _add("tsc", ["npx", "--yes", "tsc", "--noEmit"])
 
     if not commands:
         return None
