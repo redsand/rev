@@ -2692,12 +2692,21 @@ class Orchestrator:
         return False
 
     def _handle_verification_failure(self, verification_result: VerificationResult):
-        """Handle and display detailed information about verification failures."""
-        print(f"\n{colorize('  ' + Symbols.CROSS + ' Verification Details', Colors.BRIGHT_RED, bold=True)}")
+        """Handle and display detailed information about verification failures.
+
+        P0-6: Distinguish inconclusive results from actual failures.
+        """
+        # P0-6: Use different colors/symbols for inconclusive vs failed
+        if getattr(verification_result, 'inconclusive', False):
+            print(f"\n{colorize('  ' + Symbols.WARNING + ' Verification Inconclusive', Colors.BRIGHT_YELLOW, bold=True)}")
+            message_color = Colors.BRIGHT_YELLOW
+        else:
+            print(f"\n{colorize('  ' + Symbols.CROSS + ' Verification Details', Colors.BRIGHT_RED, bold=True)}")
+            message_color = Colors.BRIGHT_RED
 
         # Display main message (which includes issue descriptions)
         if verification_result.message:
-            print(f"    {colorize(verification_result.message, Colors.BRIGHT_RED)}")
+            print(f"    {colorize(verification_result.message, message_color)}")
 
         # Display debug information if available
         if verification_result.details and "debug" in verification_result.details:
@@ -2727,8 +2736,12 @@ class Orchestrator:
                         for line in str(stderr).splitlines()[-5:]:
                             print(f"      {colorize('stderr:', Colors.BRIGHT_BLACK)} {line}")
 
+        # P0-6: Different message for inconclusive vs failed
         print("\n" + "=" * 70)
-        print("NEXT ACTION: Re-planning with different approach...")
+        if getattr(verification_result, 'inconclusive', False):
+            print("NEXT ACTION: Run validation to confirm changes are correct (tests/syntax checks)...")
+        else:
+            print("NEXT ACTION: Re-planning with different approach...")
         print("=" * 70 + "\n")
 
     def _dispatch_to_sub_agents(self, context: RevContext, task: Optional[Task] = None) -> bool:

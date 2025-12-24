@@ -75,10 +75,17 @@ def _extract_tool_noop(tool: str, raw_result: Any) -> Optional[str]:
             )
     
     elif tool_l in ("search_code", "rag_search"):
-        results = payload.get("matches") or payload.get("results")
+        # Check both 'matches' and 'results' fields, handling empty lists correctly
+        results = payload.get("matches") if "matches" in payload else payload.get("results")
         if isinstance(results, list) and len(results) == 0:
             return f"tool_noop: {tool_l} returned 0 results. RECOVERY: Broaden your search pattern or check for typos in file names/symbols."
-            
+
+    elif tool_l == "list_dir":
+        # Check both 'files' and 'entries' fields, handling empty lists correctly
+        files = payload.get("files") if "files" in payload else payload.get("entries", [])
+        if isinstance(files, list) and len(files) == 0:
+            return "tool_noop: list_dir returned 0 files. RECOVERY: Check the path exists and contains files, or broaden the pattern."
+
     elif tool_l == "run_tests":
         stdout = (payload.get("stdout") or "").lower()
         if "collected 0 items" in stdout or "no tests ran" in stdout or "no tests found" in stdout:
@@ -864,15 +871,33 @@ def _parse_task_result_payload(result: Any) -> Optional[Dict[str, Any]]:
     """Best-effort JSON parsing of a task's result payload."""
     if not result:
         return None
+    parsed: Optional[Dict[str, Any]] = None
     if isinstance(result, dict):
-        return result
-    if isinstance(result, str):
+        parsed = result
+    elif isinstance(result, str):
         try:
             parsed = json.loads(result)
-            return parsed if isinstance(parsed, dict) else None
         except json.JSONDecodeError:
             return None
-    return None
+    if not isinstance(parsed, dict):
+        return None
+
+    tool_output = parsed.get("tool_output")
+    if isinstance(tool_output, dict):
+        merged = dict(parsed)
+        merged.update(tool_output)
+        return merged
+    if isinstance(tool_output, str):
+        try:
+            nested = json.loads(tool_output)
+        except json.JSONDecodeError:
+            nested = None
+        if isinstance(nested, dict):
+            merged = dict(parsed)
+            merged.update(nested)
+            return merged
+
+    return parsed
 
 
 def _get_verification_mode() -> Optional[str]:
@@ -1796,7 +1821,13 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
             elif project_type == "java_gradle" or project_type == "kotlin": _add("gradle_test", ["./gradlew", "test"], "run_tests")
             elif project_type == "csharp": _add("dotnet_test", ["dotnet", "test"], "run_tests")
             elif project_type == "flutter": _add("flutter_test", ["flutter", "test"], "run_tests")
-            else: _add("pytest", ["pytest", "-q"], "run_tests") # Default fallback
+            else:
+                # P0-7: Smart fallback - detect package.json for npm test, otherwise pytest
+                root = find_project_root(primary_path)
+                if (root / "package.json").exists():
+                    _add("npm_test", ["npm", "test"], "run_tests")
+                else:
+                    _add("pytest", ["pytest", "-q"], "run_tests")
 
         # 4. TYPE CHECK
         if "mypy" in text or "type" in text:

@@ -141,11 +141,93 @@ class TestExecutorAgent(BaseAgent):
 
     def _execute_fallback_heuristic(self, task: Task, context: RevContext) -> str:
         """Deterministic fallback if LLM selection fails."""
-        # Minimal version of original heuristic logic
-        desc = task.description.lower()
-        cmd = "pytest"
-        if "npm" in desc or "jest" in desc or "vitest" in desc: cmd = "npm test"
-        elif "go test" in desc: cmd = "go test ./..."
-        
+        desc = (task.description or "")
+        desc_lower = desc.lower()
+
+        cmd = None
+        explicit_cmds = [
+            "npm ci",
+            "npm install",
+            "npm test",
+            "yarn install",
+            "yarn test",
+            "pnpm install",
+            "pnpm test",
+            "pytest",
+            "go test",
+        ]
+        for explicit in explicit_cmds:
+            if explicit in desc_lower:
+                cmd = explicit if explicit != "go test" else "go test ./..."
+                break
+
+        if cmd is None:
+            if "install" in desc_lower:
+                if "yarn" in desc_lower:
+                    cmd = "yarn install"
+                elif "pnpm" in desc_lower:
+                    cmd = "pnpm install"
+                elif any(token in desc_lower for token in ("npm", "node", "frontend", "package.json")):
+                    cmd = "npm install"
+
+            if cmd is None:
+                if "npm" in desc_lower or "jest" in desc_lower or "vitest" in desc_lower:
+                    cmd = "npm test"
+                elif "yarn" in desc_lower:
+                    cmd = "yarn test"
+                elif "pnpm" in desc_lower:
+                    cmd = "pnpm test"
+                elif "go test" in desc_lower:
+                    cmd = "go test ./..."
+                else:
+                    cmd = "pytest"
+
+        workdir = self._extract_workdir_hint(desc)
+        cmd = self._apply_workdir(cmd, workdir)
+
         print(f"  [i] Using fallback heuristic: {cmd}")
-        return execute_tool("run_cmd", {"command": cmd})
+        raw_result = execute_tool("run_cmd", {"cmd": cmd})
+        return build_subagent_output(
+            agent_name="TestExecutorAgent",
+            tool_name="run_cmd",
+            tool_args={"cmd": cmd},
+            tool_output=raw_result,
+            context=context,
+            task_id=task.task_id,
+        )
+
+    def _extract_workdir_hint(self, desc: str) -> Optional[str]:
+        """Best-effort guess for a working directory hinted in task text."""
+        if not desc:
+            return None
+        patterns = [
+            r"(?:in|within|under|inside)\s+(?:the\s+)?([a-zA-Z0-9_./\\-]+)\s+(?:directory|dir|folder)\b",
+            r"\b([a-zA-Z0-9_./\\-]+)\s+(?:directory|dir|folder)\b",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, desc, re.IGNORECASE)
+            if match:
+                candidate = match.group(1).rstrip(".,;:")
+                if candidate:
+                    return candidate
+        for known in ("frontend", "client", "web", "ui", "backend", "server", "api"):
+            if re.search(rf"\b{known}\b", desc, re.IGNORECASE):
+                return known
+        return None
+
+    def _apply_workdir(self, cmd: str, workdir: Optional[str]) -> str:
+        """Inject a working directory flag for supported package managers."""
+        if not workdir:
+            return cmd
+        if re.search(r"\b(--prefix|--cwd|--dir|-C)\b", cmd):
+            return cmd
+        workdir_arg = workdir
+        if " " in workdir_arg or "\t" in workdir_arg:
+            workdir_arg = f"\"{workdir_arg}\""
+        if cmd.startswith("npm "):
+            return f"npm --prefix {workdir_arg} {cmd[4:]}"
+        if cmd.startswith("yarn "):
+            return f"yarn --cwd {workdir_arg} {cmd[5:]}"
+        if cmd.startswith("pnpm "):
+            return f"pnpm --dir {workdir_arg} {cmd[5:]}"
+        return cmd

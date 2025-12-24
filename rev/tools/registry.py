@@ -757,6 +757,13 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
                 # Default to False - let LLM handle the original source file
                 normalized_args["delete_source"] = False
 
+        if tool in {"run_cmd", "run_tests"}:
+            if "cmd" not in normalized_args:
+                for alt in ("command", "cmdline", "run", "shell_command"):
+                    if isinstance(normalized_args.get(alt), (str, list)):
+                        normalized_args["cmd"] = normalized_args[alt]
+                        break
+
         args = normalized_args
 
     # CHECK PERMISSIONS before execution
