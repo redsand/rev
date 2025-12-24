@@ -1950,6 +1950,10 @@ class Orchestrator:
         forced_next_task: Optional[Task] = None
         budget_warning_shown: bool = False
 
+        # PERFORMANCE FIX 1: Track consecutive research tasks to prevent endless loops
+        consecutive_reads: int = 0
+        MAX_CONSECUTIVE_READS: int = 5  # Allow max 5 consecutive READ tasks
+
         while True:
             iteration += 1
             self.context.set_agent_state("current_iteration", iteration)
@@ -2213,6 +2217,13 @@ class Orchestrator:
                 repeat_same_action = 1  # Reset streak
                 last_task_signature = action_sig
 
+            # PERFORMANCE FIX 1: Track consecutive research tasks
+            action_type_normalized = (next_task.action_type or '').strip().lower()
+            if action_type_normalized in {'read', 'analyze', 'research', 'investigate', 'review'}:
+                consecutive_reads += 1
+            else:
+                consecutive_reads = 0  # Reset on any non-research action
+
             # Get or initialize blocked_action_sigs from context
             if self.context:
                 blocked_sigs = self.context.get_agent_state("blocked_action_sigs", set())
@@ -2235,6 +2246,55 @@ class Orchestrator:
                 # Reset streak since we rewrote the task
                 repeat_same_action = 1
                 last_task_signature = f"analyze::{next_task.description.strip().lower()}"
+
+            # PERFORMANCE FIX 3: Block redundant file reads (same file 2+ times)
+            if action_type_normalized in {'read', 'analyze', 'research'}:
+                target_file = _extract_file_path_from_description(next_task.description)
+                if target_file:
+                    # Count how many times this file has been read
+                    read_count = _count_file_reads(target_file, completed_tasks)
+                    if read_count >= 2:
+                        print(f"  [redundant-read] File '{target_file}' already read {read_count}x - BLOCKING")
+                        # Block this specific action
+                        blocked_sigs.add(action_sig)
+                        if self.context:
+                            self.context.set_agent_state("blocked_action_sigs", blocked_sigs)
+
+                        # Force re-planning with constraint
+                        self.context.add_agent_request(
+                            "REDUNDANT_FILE_READ",
+                            {
+                                "agent": "Orchestrator",
+                                "reason": f"File '{target_file}' already read {read_count} times",
+                                "detailed_reason": (
+                                    f"REDUNDANT READ BLOCKED: File '{target_file}' has already been read {read_count} times. "
+                                    f"Use the cached information from previous reads, or propose an action (EDIT/ADD/TEST) instead of re-reading. "
+                                    f"DO NOT propose reading this file again."
+                                )
+                            }
+                        )
+                        continue  # Skip to next iteration
+
+            # PERFORMANCE FIX 1: Block excessive consecutive research
+            if consecutive_reads >= MAX_CONSECUTIVE_READS and action_type_normalized in {'read', 'analyze', 'research', 'investigate', 'review'}:
+                print(f"  [research-budget-exceeded] {consecutive_reads} consecutive research tasks - forcing action phase")
+                # Force re-planning with constraint
+                forced_next_task = None  # Clear any forced task
+                # Add to failure notes for next planning iteration
+                self.context.add_agent_request(
+                    "RESEARCH_BUDGET_EXHAUSTED",
+                    {
+                        "agent": "Orchestrator",
+                        "reason": f"Research budget exhausted ({consecutive_reads} consecutive READ tasks)",
+                        "detailed_reason": (
+                            "RESEARCH BUDGET EXHAUSTED: You have completed extensive research. "
+                            "You MUST now propose a concrete action task (EDIT/ADD/TEST/DELETE), NOT another READ/ANALYZE/RESEARCH. "
+                            "All necessary context is available in the completed tasks."
+                        )
+                    }
+                )
+                consecutive_reads = 0  # Reset counter
+                continue  # Skip to next iteration with constraint
 
             # P0-3: Circuit breaker based on CONSECUTIVE streak, not total count
             if repeat_same_action >= 3:
@@ -2478,11 +2538,45 @@ class Orchestrator:
                     print(f"  {colorize(Symbols.WARNING, Colors.BRIGHT_YELLOW)} {colorize('Skipped re-running tests: no code changes detected.', Colors.BRIGHT_BLACK)}")
 
                 if not verification_result.passed:
-                    # Verification failed - mark task as failed and mark for re-planning
+                    # PERFORMANCE FIX 2: Check if verification is inconclusive (P0-6)
+                    if getattr(verification_result, 'inconclusive', False):
+                        print(f"  [inconclusive-verification] Edit completed but needs validation - injecting TEST task")
+
+                        # Display inconclusive warning (already handled by _handle_verification_failure)
+                        self._handle_verification_failure(verification_result)
+
+                        # Determine appropriate test command based on file type
+                        file_path = verification_result.details.get('file_path', '')
+                        suggestion = verification_result.details.get('suggestion', '')
+
+                        # Extract test command from suggestion if available
+                        if 'npm test' in suggestion or 'npm run' in suggestion:
+                            test_description = f"Run npm test to validate the changes to {file_path}"
+                        elif 'pytest' in suggestion:
+                            test_description = f"Run pytest to validate the changes to {file_path}"
+                        elif '.js' in file_path or '.ts' in file_path or '.vue' in file_path:
+                            test_description = f"Run npm test to validate the changes to {file_path}"
+                        else:
+                            test_description = f"Run pytest to validate the changes to {file_path}"
+
+                        # Inject TEST task to validate the edit
+                        forced_next_task = Task(
+                            description=test_description,
+                            action_type="test"
+                        )
+
+                        # Mark current task as completed (edit succeeded, just needs validation)
+                        next_task.status = TaskStatus.COMPLETED
+                        execution_success = True
+
+                        # Continue to next iteration with the TEST task
+                        continue
+
+                    # Verification definitely failed - mark task as failed and mark for re-planning
                     next_task.status = TaskStatus.FAILED
                     next_task.error = _format_verification_feedback(verification_result)
                     execution_success = False
-                    
+
                     # Display detailed debug information
                     self._handle_verification_failure(verification_result)
 

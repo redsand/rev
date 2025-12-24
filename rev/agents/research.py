@@ -67,8 +67,18 @@ RESEARCH_SYSTEM_PROMPT = """You are a specialized Research agent. Your purpose i
 
 You will be given a research task and context about the repository. Your goal is to gather information using available tools.
 
-CRITICAL RULES:
-1. You MUST respond with a single tool call in JSON format. Do NOT provide any other text, explanations, or markdown.
+CRITICAL RULES (PERFORMANCE FIX 5 - STRICT JSON ENFORCEMENT):
+1. You MUST respond with ONLY a JSON object. NOTHING ELSE.
+   - NO explanations before the JSON
+   - NO explanations after the JSON
+   - NO markdown code blocks (no ```)
+   - NO natural language
+   - ONLY the raw JSON object
+   - Example of CORRECT response:
+     {"tool_name": "read_file", "arguments": {"path": "src/app.js"}}
+   - Example of WRONG response:
+     I'll read the file using read_file.
+     {"tool_name": "read_file", "arguments": {"path": "src/app.js"}}
 2. Use the provided 'System Information' (OS, Platform, Shell Type) to choose the correct commands and path syntax.
 3. Use the most appropriate research tool for the task:
    - `read_file` to examine specific files
@@ -81,7 +91,7 @@ CRITICAL RULES:
    - `analyze_code_context` to learn change history and intent
    - `check_structural_consistency` to validate schemas/models
 4. Your research should be focused and actionable.
-5. Your response MUST be a single, valid JSON object representing the tool call.
+5. RESPONSE FORMAT (NO EXCEPTIONS): Your ENTIRE response must be ONLY the JSON object. Do not write ANY text outside the JSON. Start your response with { and end with }. Nothing before, nothing after.
 
 CONTEXT AWARENESS (CRITICAL):
 - ALWAYS check your context for information before reading files
@@ -137,7 +147,7 @@ Example for analyzing structures:
   }
 }
 
-Now, generate the tool call to complete the research request.
+RESPOND NOW WITH ONLY THE JSON OBJECT - NO OTHER TEXT:
 """
 
 class ResearchAgent(BaseAgent):
