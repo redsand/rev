@@ -177,135 +177,148 @@ class ResearchAgent(BaseAgent):
             {"role": "user", "content": f"Task: {task.description}\n\nSelected Context:\n{rendered_context}"}
         ]
 
-        try:
-            response = ollama_chat(messages, tools=available_tools)
-            error_type = None
-            error_detail = None
+        max_llm_retries = 3
+        last_error_type = None
+        last_error_detail = None
 
-            if not response:
-                error_type = "empty_response"
-                error_detail = "LLM returned None/empty response"
-            elif "message" not in response:
-                error_type = "missing_message_key"
-                error_detail = f"Response missing 'message' key: {list(response.keys())}"
-            elif "tool_calls" not in response["message"]:
-                if "content" in response["message"]:
-                    error_type = "text_instead_of_tool_call"
-                    error_detail = f"LLM returned text instead of tool call: {response['message']['content'][:200]}"
-                else:
-                    error_type = "missing_tool_calls"
-                    error_detail = f"Response missing 'tool_calls': {list(response['message'].keys())}"
-            else:
-                tool_calls = response["message"]["tool_calls"]
-                if not tool_calls:
-                    error_type = "empty_tool_calls"
-                    error_detail = "tool_calls array is empty"
-                else:
-                    # Success path
-                    tool_call = tool_calls[0]
-                    tool_name = tool_call['function']['name']
-                    arguments_str = tool_call['function']['arguments']
+        for attempt in range(max_llm_retries):
+            try:
+                response = ollama_chat(messages, tools=available_tools)
+                error_type = None
+                error_detail = None
 
-                    if isinstance(arguments_str, dict):
-                        arguments = arguments_str
+                if not response:
+                    error_type = "empty_response"
+                    error_detail = "LLM returned None/empty response"
+                elif "message" not in response:
+                    error_type = "missing_message_key"
+                    error_detail = f"Response missing 'message' key: {list(response.keys())}"
+                elif "tool_calls" not in response["message"]:
+                    if "content" in response["message"]:
+                        error_type = "text_instead_of_tool_call"
+                        error_detail = f"LLM returned text instead of tool call: {response['message']['content'][:200]}"
                     else:
-                        try:
-                            arguments = json.loads(arguments_str)
-                        except json.JSONDecodeError:
-                            error_type = "invalid_json"
-                            error_detail = f"Invalid JSON in tool arguments: {arguments_str[:200]}"
-
-                    # Unwrap nested {"arguments": {...}} payloads when present.
-                    if not error_type and isinstance(arguments, dict) and "arguments" in arguments and not any(
-                        k in arguments for k in ("path", "paths")
-                    ):
-                        inner = arguments.get("arguments")
-                        if isinstance(inner, dict):
-                            arguments = inner
-
-                    if not error_type:
-                        print(f"  -> ResearchAgent will call tool '{tool_name}' with arguments: {arguments}")
-                        raw_result = execute_tool(tool_name, arguments)
-
-                        snippet = _extract_snippet(tool_name, arguments, raw_result)
-                        context.add_insight("research_agent", f"task_{task.task_id}_result", {
-                            "tool": tool_name,
-                            "result": snippet
-                        })
-
-                        return build_subagent_output(
-                            agent_name="ResearchAgent",
-                            tool_name=tool_name,
-                            tool_args=arguments,
-                            tool_output=raw_result,
-                            context=context,
-                            task_id=task.task_id,
-                        )
-
-            # Error handling
-            if error_type:
-                if error_type in {"text_instead_of_tool_call", "empty_tool_calls", "missing_tool_calls"}:
-                    recovered = recover_tool_call_from_text(
-                        response.get("message", {}).get("content", ""),
-                        allowed_tools=[t["function"]["name"] for t in get_available_tools()],
-                    )
-                    if recovered:
-                        print(f"  -> Recovered tool call from text output: {recovered.name}")
-                        if (
-                            recovered.name == "read_file"
-                            and isinstance(recovered.arguments, dict)
-                            and isinstance(recovered.arguments.get("paths"), list)
-                        ):
-                            outputs = {}
-                            for path in recovered.arguments.get("paths", []):
-                                if not isinstance(path, str):
-                                    continue
-                                outputs[path] = execute_tool("read_file", {"path": path})
-                            raw_result = json.dumps(outputs)
-                        else:
-                            raw_result = execute_tool(recovered.name, recovered.arguments)
-                        snippet = _extract_snippet(recovered.name, recovered.arguments, raw_result)
-                        context.add_insight("research_agent", f"task_{task.task_id}_result", {
-                            "tool": recovered.name,
-                            "result": snippet
-                        })
-                        return build_subagent_output(
-                            agent_name="ResearchAgent",
-                            tool_name=recovered.name,
-                            tool_args=recovered.arguments,
-                            tool_output=raw_result,
-                            context=context,
-                            task_id=task.task_id,
-                        )
-
-                print(f"  [WARN] ResearchAgent: {error_detail}")
-
-                if self.should_attempt_recovery(task, context):
-                    print(f"  -> Requesting replan (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
-                    self.request_replan(
-                        context,
-                        reason="Tool call generation failed",
-                        detailed_reason=f"Error type: {error_type}. Details: {error_detail}. Please specify what code or files need to be researched."
-                    )
-                    return self.make_recovery_request(error_type, error_detail)
+                        error_type = "missing_tool_calls"
+                        error_detail = f"Response missing 'tool_calls': {list(response['message'].keys())}"
                 else:
-                    print(f"  -> Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
-                    context.add_error(f"ResearchAgent: {error_detail} (after {recovery_attempts} recovery attempts)")
-                    return self.make_failure_signal(error_type, error_detail)
+                    tool_calls = response["message"]["tool_calls"]
+                    if not tool_calls:
+                        error_type = "empty_tool_calls"
+                        error_detail = "tool_calls array is empty"
+                    else:
+                        # Success path
+                        tool_call = tool_calls[0]
+                        tool_name = tool_call['function']['name']
+                        arguments_str = tool_call['function']['arguments']
 
-        except Exception as e:
-            error_msg = f"Exception in ResearchAgent: {e}"
-            print(f"  [WARN] {error_msg}")
+                        if isinstance(arguments_str, dict):
+                            arguments = arguments_str
+                        else:
+                            try:
+                                arguments = json.loads(arguments_str)
+                            except json.JSONDecodeError:
+                                error_type = "invalid_json"
+                                error_detail = f"Invalid JSON in tool arguments: {arguments_str[:200]}"
 
+                        # Unwrap nested {"arguments": {...}} payloads when present.
+                        if not error_type and isinstance(arguments, dict) and "arguments" in arguments and not any(
+                            k in arguments for k in ("path", "paths")
+                        ):
+                            inner = arguments.get("arguments")
+                            if isinstance(inner, dict):
+                                arguments = inner
+
+                        if not error_type:
+                            print(f"  -> ResearchAgent will call tool '{tool_name}' with arguments: {arguments}")
+                            raw_result = execute_tool(tool_name, arguments)
+
+                            snippet = _extract_snippet(tool_name, arguments, raw_result)
+                            context.add_insight("research_agent", f"task_{task.task_id}_result", {
+                                "tool": tool_name,
+                                "result": snippet
+                            })
+
+                            return build_subagent_output(
+                                agent_name="ResearchAgent",
+                                tool_name=tool_name,
+                                tool_args=arguments,
+                                tool_output=raw_result,
+                                context=context,
+                                task_id=task.task_id,
+                            )
+
+                # Error handling inside loop
+                if error_type:
+                    # Try recovery first
+                    if error_type in {"text_instead_of_tool_call", "empty_tool_calls", "missing_tool_calls"}:
+                        recovered = recover_tool_call_from_text(
+                            response.get("message", {}).get("content", ""),
+                            allowed_tools=[t["function"]["name"] for t in get_available_tools()],
+                        )
+                        if recovered:
+                            print(f"  -> Recovered tool call from text output: {recovered.name}")
+                            if (
+                                recovered.name == "read_file"
+                                and isinstance(recovered.arguments, dict)
+                                and isinstance(recovered.arguments.get("paths"), list)
+                            ):
+                                outputs = {}
+                                for path in recovered.arguments.get("paths", []):
+                                    if not isinstance(path, str):
+                                        continue
+                                    outputs[path] = execute_tool("read_file", {"path": path})
+                                raw_result = json.dumps(outputs)
+                            else:
+                                raw_result = execute_tool(recovered.name, recovered.arguments)
+                            snippet = _extract_snippet(recovered.name, recovered.arguments, raw_result)
+                            context.add_insight("research_agent", f"task_{task.task_id}_result", {
+                                "tool": recovered.name,
+                                "result": snippet
+                            })
+                            return build_subagent_output(
+                                agent_name="ResearchAgent",
+                                tool_name=recovered.name,
+                                tool_args=recovered.arguments,
+                                tool_output=raw_result,
+                                context=context,
+                                task_id=task.task_id,
+                            )
+
+                    # If recovery failed, track error and maybe retry
+                    last_error_type = error_type
+                    last_error_detail = error_detail
+                    print(f"  [WARN] ResearchAgent: {error_detail} (attempt {attempt + 1}/{max_llm_retries})")
+
+                    if attempt < max_llm_retries - 1:
+                        content = response.get("message", {}).get("content", "") if response else ""
+                        messages.append({"role": "assistant", "content": content})
+                        messages.append({"role": "user", "content": f"SYSTEM: Your last response failed validation ({error_detail}). You MUST respond with a valid JSON tool call."})
+                        continue
+
+            except Exception as e:
+                error_msg = f"Exception in ResearchAgent: {e}"
+                print(f"  [WARN] {error_msg} (attempt {attempt + 1}/{max_llm_retries})")
+                last_error_type = "exception"
+                last_error_detail = error_msg
+                
+                if attempt < max_llm_retries - 1:
+                    import time
+                    time.sleep(1)
+                    continue
+
+        # Post-loop failure handling
+        if last_error_type:
             if self.should_attempt_recovery(task, context):
-                print(f"  -> Requesting replan due to exception (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
+                print(f"  -> Requesting replan (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
                 self.request_replan(
                     context,
-                    reason="Exception during research",
-                    detailed_reason=str(e)
+                    reason="Tool call generation failed",
+                    detailed_reason=f"Error type: {last_error_type}. Details: {last_error_detail}. Please specify what code or files need to be researched."
                 )
-                return self.make_recovery_request("exception", str(e))
+                return self.make_recovery_request(last_error_type, last_error_detail)
             else:
                 print(f"  -> Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
-                context.add_error(error_msg)
-                return self.make_failure_signal("exception", error_msg)
+                context.add_error(f"ResearchAgent: {last_error_detail} (after {recovery_attempts} recovery attempts)")
+                return self.make_failure_signal(last_error_type, last_error_detail)
+        
+        return self.make_failure_signal("unknown", "Loop exhausted without specific error")
