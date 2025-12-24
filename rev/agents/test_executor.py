@@ -17,7 +17,12 @@ class TestExecutorAgent(BaseAgent):
         desc_lower = (description or "").lower()
         parts = (description or "").split()
         
-        # Check for explicit command in description
+        # 1. Check for explicit commands in description first
+        if "npm install" in desc_lower:
+            return "npm install", {"timeout": 600}
+        if "pip install" in desc_lower:
+            return "pip install", {"timeout": 600}
+        
         for part in parts:
             if any(cmd in part.lower() for cmd in ["pytest", "npm", "jest", "vitest", "mocha"]):
                 # If description contains a command-like string, try to use it if it's qualified
@@ -29,15 +34,15 @@ class TestExecutorAgent(BaseAgent):
                     if "pytest" in part.lower():
                         return part, {"timeout": 600}
 
-        # Project type detection
+        # 2. Project type detection (fallback)
         from pathlib import Path
-        if Path("package.json").exists():
+        if Path("package.json").exists() and "install" not in desc_lower:
             return "npm test", {"timeout": 600}
         
         if Path("go.mod").exists():
             return "go test ./...", {"timeout": 600}
 
-        # Default to pytest for Python
+        # 3. Default to pytest for Python
         test_path = None
         for part in parts:
             if "tests/" in part or "tests\\" in part:

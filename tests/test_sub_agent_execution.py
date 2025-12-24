@@ -2,7 +2,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from rev.execution.orchestrator import Orchestrator, OrchestratorConfig
-from rev.models.task import ExecutionPlan, Task
+from rev.models.task import ExecutionPlan, Task, TaskStatus
 from rev import config
 from rev.core.context import RevContext # Import RevContext
 from rev.agents.code_writer import CodeWriterAgent # Import CodeWriterAgent (for mocking)
@@ -13,7 +13,9 @@ from rev.agents.test_executor import TestExecutorAgent # Import TestExecutorAgen
 def sub_agent_config():
     """Fixture to set execution mode to sub-agent."""
     original_mode = config.EXECUTION_MODE
+    original_ucct = config.UCCT_ENABLED
     config.EXECUTION_MODE = "sub-agent"
+    config.UCCT_ENABLED = False
     # Disable other phases to isolate execution
     yield OrchestratorConfig(
         enable_research=False, 
@@ -24,6 +26,7 @@ def sub_agent_config():
         enable_context_guard=False
     )
     config.EXECUTION_MODE = original_mode
+    config.UCCT_ENABLED = original_ucct
 
 
 # Mock implementation for CodeWriterAgent.execute that can simulate replan request
@@ -41,29 +44,48 @@ def test_sub_agent_dispatch(monkeypatch, sub_agent_config):
     """
     Tests that the orchestrator correctly dispatches tasks to sub-agents.
     """
-    # 1. Create a mock plan
-    plan = ExecutionPlan()
-    plan.add_task("Write 'hello' to 'world.txt'", "add")
-    plan.add_task("Run tests for 'world.txt'", "test")
-
-    # 2. Mock the planner to return this plan
-    monkeypatch.setattr("rev.execution.orchestrator.planning_mode", lambda *args, **kwargs: plan)
+    # 1. Mock the planner/LLM responses
+    mock_responses = [
+        # First turn: Orchestrator calls _determine_next_action
+        {"message": {"role": "assistant", "content": "[ADD] Write 'hello' to 'world.txt'"}},
+        # Second turn: Orchestrator calls _determine_next_action
+        {"message": {"role": "assistant", "content": "[TEST] Run tests for 'world.txt'"}},
+    ]
     
-    # 3. Mock the dispatch method to avoid real agent calls
-    mock_dispatch = MagicMock(return_value=True)
+    def mock_chat_side_effect(*args, **kwargs):
+        if mock_responses:
+            return mock_responses.pop(0)
+        return {"message": {"role": "assistant", "content": "GOAL_ACHIEVED"}}
+
+    monkeypatch.setattr("rev.execution.orchestrator.ollama_chat", mock_chat_side_effect)
+
+    # 2. Mock the dispatch method to avoid real agent calls
+    def mock_dispatch_fn(context, task=None):
+        if task is None and context.plan and context.plan.tasks:
+            task = context.plan.tasks[0]
+        if task:
+            task.status = TaskStatus.COMPLETED
+        return True
+
+    mock_dispatch = MagicMock(side_effect=mock_dispatch_fn)
     monkeypatch.setattr("rev.execution.orchestrator.Orchestrator._dispatch_to_sub_agents", mock_dispatch)
     
-    # 4. Mock the verification method to always pass
+    # 3. Mock the verification method to always pass
     from rev.execution.quick_verify import VerificationResult
     monkeypatch.setattr("rev.execution.orchestrator.verify_task_execution", 
                         lambda *args, **kwargs: VerificationResult(passed=True, message="Success", details={}))
     
-    # 5. Run the orchestrator
+    # 4. Run the orchestrator
     orchestrator = Orchestrator(project_root=config.ROOT, config=sub_agent_config)
+    # Inject an empty history so it doesn't try to load anything
+    orchestrator.context = RevContext(user_request="test sub-agent dispatch")
+    orchestrator.context.work_history = ["[COMPLETED] initial workspace examination"] # Bypass forced exam
+    
     result = orchestrator.execute(user_request="test sub-agent dispatch")
 
-    # 6. Assertions
+    # 5. Assertions
     assert result.success is True, f"Orchestrator failed with errors: {result.errors}"
+    # Expect 3 calls: initial workspace examination + 2 tasks from LLM
     assert mock_dispatch.call_count >= 2
 
 
@@ -73,6 +95,7 @@ def test_sub_agent_replan_request(monkeypatch):
     and triggers the adaptive replanning mechanism.
     """
     config.EXECUTION_MODE = "sub-agent"
+    config.UCCT_ENABLED = False
     orchestrator_config = OrchestratorConfig(
         enable_research=False, # Disable for this specific test flow
         enable_review=False,
@@ -83,20 +106,37 @@ def test_sub_agent_replan_request(monkeypatch):
         adaptive_replan_attempts=1 # Allow at least one adaptive replan attempt
     )
 
-    plan = ExecutionPlan()
-    plan.add_task("First successful task", "add")
-    plan.add_task("Fail this task to trigger replan", "add") 
+    # Mock the planner/LLM
+    mock_responses = [
+        {"message": {"role": "assistant", "content": "[ADD] First successful task"}},
+        {"message": {"role": "assistant", "content": "[ADD] Fail this task to trigger replan"}},
+        # Next turn after failure: should be replanning or another action
+        {"message": {"role": "assistant", "content": "[ADD] Recovery task"}},
+        {"message": {"role": "assistant", "content": "GOAL_ACHIEVED"}}
+    ]
+    
+    def mock_chat_side_effect(*args, **kwargs):
+        if mock_responses:
+            return mock_responses.pop(0)
+        return {"message": {"role": "assistant", "content": "GOAL_ACHIEVED"}}
 
-    # Mock the planner
-    monkeypatch.setattr("rev.execution.orchestrator.planning_mode", MagicMock(return_value=plan))
+    monkeypatch.setattr("rev.execution.orchestrator.ollama_chat", mock_chat_side_effect)
     
     # Mock dispatch to simulate replan request on specific task
-    def mock_dispatch(self, context, task=None):
+    def mock_dispatch_fn(context, task=None):
+        if task is None and context.plan and context.plan.tasks:
+            task = context.plan.tasks[0]
+        
         if task and "Fail this task to trigger replan" in task.description:
             context.add_agent_request("REPLAN_REQUEST", {"agent": "CodeWriter", "reason": "Simulated LLM tool call error"})
+            task.status = TaskStatus.FAILED
             return False
+        
+        if task:
+            task.status = TaskStatus.COMPLETED
         return True
         
+    mock_dispatch = MagicMock(side_effect=mock_dispatch_fn)
     monkeypatch.setattr("rev.execution.orchestrator.Orchestrator._dispatch_to_sub_agents", mock_dispatch)
     
     # Mock verification
@@ -105,6 +145,10 @@ def test_sub_agent_replan_request(monkeypatch):
                         lambda *args, **kwargs: VerificationResult(passed=True, message="Success", details={}))
 
     orchestrator = Orchestrator(project_root=config.ROOT, config=orchestrator_config)
+    # Inject an empty history so it doesn't try to load anything
+    orchestrator.context = RevContext(user_request="test sub-agent dispatch")
+    orchestrator.context.work_history = ["[COMPLETED] initial workspace examination"] # Bypass forced exam
+
     result = orchestrator.execute(user_request="test replan request from agent")
 
     # Assertions

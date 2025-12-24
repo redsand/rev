@@ -394,6 +394,7 @@ MAX_TASK_ITERATIONS = int(os.getenv("REV_MAX_TASK_ITER", "45"))
 MAX_PLANNING_TOOL_ITERATIONS = int(os.getenv("REV_MAX_PLANNING_ITER", "45"))
 CONTEXT_WINDOW_HISTORY = int(os.getenv("REV_CONTEXT_WINDOW_HISTORY", "8"))
 LOOP_GUARD_ENABLED = os.getenv("REV_LOOP_GUARD_ENABLED", "true").strip().lower() != "false"
+UCCT_ENABLED = os.getenv("REV_UCCT_ENABLED", "true").strip().lower() != "false"
 # Disabled by default until duplicate directory inclusion bug is fixed
 PREFLIGHT_ENABLED = os.getenv("REV_PREFLIGHT_ENABLED", "false").strip().lower() == "true"
 LLM_TRANSACTION_LOG_ENABLED = os.getenv("REV_LLM_TRACE", "false").strip().lower() == "true"

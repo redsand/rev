@@ -2082,22 +2082,24 @@ class Orchestrator:
                         return False
                     
                     # UCCT Anchoring check before declaring victory
-                    anchoring_decision = self._evaluate_anchoring(user_request, completed_tasks_log)
-                    if anchoring_decision == AnchoringDecision.RE_SEARCH:
-                        print("\n  [UCCT] Goal may be achieved, but evidence density is low. Forcing one more search.")
-                        forced_next_task = Task(description="Verify the implemented changes by listing the affected files and confirming their content matches the request.", action_type="read")
-                        continue
-                    elif anchoring_decision == AnchoringDecision.DEBATE:
-                        print("\n  [UCCT] High mismatch risk detected. Verifying structural consistency before stopping.")
-                        forced_next_task = Task(description="Run a structural consistency check on the modified modules to ensure no unresolved symbols remain.", action_type="analyze")
-                        continue
+                    if config.UCCT_ENABLED:
+                        anchoring_decision = self._evaluate_anchoring(user_request, completed_tasks_log)
+                        if anchoring_decision == AnchoringDecision.RE_SEARCH:
+                            print("\n  [UCCT] Goal may be achieved, but evidence density is low. Forcing one more search.")
+                            forced_next_task = Task(description="Verify the implemented changes by listing the affected files and confirming their content matches the request.", action_type="read")
+                            continue
+                        elif anchoring_decision == AnchoringDecision.DEBATE:
+                            print("\n  [UCCT] High mismatch risk detected. Verifying structural consistency before stopping.")
+                            forced_next_task = Task(description="Run a structural consistency check on the modified modules to ensure no unresolved symbols remain.", action_type="analyze")
+                            continue
 
                     # Grounded Completion Check (Bait Density)
-                    is_grounded, grounding_msg = self._is_completion_grounded(completed_tasks_log)
-                    if not is_grounded:
-                        print(f"\n  {colorize(Symbols.INFO, Colors.BRIGHT_BLUE)} {colorize(grounding_msg + ' Forcing verification.', Colors.BRIGHT_BLACK)}")
-                        forced_next_task = Task(description="Provide concrete evidence of the work completed by running tests and inspecting the modified files.", action_type="test")
-                        continue
+                    if config.UCCT_ENABLED:
+                        is_grounded, grounding_msg = self._is_completion_grounded(completed_tasks_log)
+                        if not is_grounded:
+                            print(f"\n  {colorize(Symbols.INFO, Colors.BRIGHT_BLUE)} {colorize(grounding_msg + ' Forcing verification.', Colors.BRIGHT_BLACK)}")
+                            forced_next_task = Task(description="Provide concrete evidence of the work completed by running tests and inspecting the modified files.", action_type="test")
+                            continue
 
                     print(f"\n{colorize(Symbols.CHECK, Colors.BRIGHT_GREEN)} {colorize('Goal achieved.', Colors.BRIGHT_GREEN, bold=True)}")
                     return True
@@ -2657,6 +2659,19 @@ class Orchestrator:
                 display_entry = base_part + verification_part
 
             print(f"  {'✓' if next_task.status == TaskStatus.COMPLETED else '✗'} {display_entry}")
+
+            # Check for replan requests from agents
+            if self.context and self.context.agent_requests:
+                replan_req = next((r for r in self.context.agent_requests if r.get("type") == "REPLAN_REQUEST"), None)
+                if replan_req:
+                    print(f"\n  🔄 {colorize('Adaptive Replan Triggered', Colors.BRIGHT_YELLOW)}: {replan_req['details'].get('reason')}")
+                    self.context.add_insight("orchestrator", "agent_request_triggered_replan", replan_req["details"])
+                    
+                    # Force replan on next iteration
+                    self.context.plan = None
+                    forced_next_task = None
+                    # Note: agent_requests are cleared in next iteration start
+                    continue
 
             self.context.update_repo_context()
             clear_analysis_caches()
