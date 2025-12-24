@@ -1489,11 +1489,13 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
             if relevant_test_file:
                 hinted_test = _inspect_file_for_command_hints(relevant_test_file, "test")
             
+            # Determine project root early as it is needed for path calculations
+            root = find_project_root(primary_path)
+
             if hinted_test:
                 test_cmd = hinted_test
             else:
                 # Fallback to package.json detection
-                root = find_project_root(primary_path)
                 try:
                     pkg_json = json.loads((root / "package.json").read_text(errors='ignore'))
                     scripts = pkg_json.get("scripts", {})
