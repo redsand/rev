@@ -1149,9 +1149,6 @@ class OrchestratorConfig:
     max_planning_iterations: int = config.MAX_PLANNING_TOOL_ITERATIONS
 
     def __post_init__(self):
-        if self.parallel_workers != 1:
-            self.parallel_workers = 1
-        
         if self.max_retries is not None:
             self.orchestrator_retries = self.max_retries
             self.plan_regen_retries = self.max_retries
@@ -1488,11 +1485,27 @@ class Orchestrator:
             self._update_phase(AgentPhase.REVIEW)
 
         self._update_phase(AgentPhase.EXECUTION)
-        execution_mode(
-            self.context.plan, auto_approve=self.config.auto_approve, tools=get_available_tools(),
-            enable_action_review=self.config.enable_action_review, coding_mode=coding_mode,
-            state_manager=self.context.state_manager, budget=self.context.resource_budget,
-        )
+        if self.config.parallel_workers > 1:
+            concurrent_execution_mode(
+                self.context.plan,
+                max_workers=self.config.parallel_workers,
+                auto_approve=self.config.auto_approve,
+                tools=get_available_tools(),
+                enable_action_review=self.config.enable_action_review,
+                coding_mode=coding_mode,
+                state_manager=self.context.state_manager,
+                budget=self.context.resource_budget,
+            )
+        else:
+            execution_mode(
+                self.context.plan,
+                auto_approve=self.config.auto_approve,
+                tools=get_available_tools(),
+                enable_action_review=self.config.enable_action_review,
+                coding_mode=coding_mode,
+                state_manager=self.context.state_manager,
+                budget=self.context.resource_budget,
+            )
 
         if self.config.enable_validation:
             self._update_phase(AgentPhase.VALIDATION)

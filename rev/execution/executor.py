@@ -13,6 +13,8 @@ Performance optimizations:
 import json
 import re
 import threading
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import OrderedDict
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -2352,7 +2354,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
 
 def concurrent_execution_mode(
     plan: ExecutionPlan,
-    max_workers: int = 2,
+    max_workers: int = 4,
     auto_approve: bool = True,
     tools: list = None,
     enable_action_review: bool = False,
@@ -2360,23 +2362,253 @@ def concurrent_execution_mode(
     state_manager: Optional[StateManager] = None,
     budget: Optional["ResourceBudget"] = None,
 ) -> bool:
-    """Sequential wrapper to comply with single-worker execution only."""
+    """Execute independent tasks in parallel using a thread pool.
 
-    if max_workers <= 0:
-        raise ValueError(f"max_workers must be greater than 0, got {max_workers}")
+    Args:
+        plan: ExecutionPlan with tasks to execute
+        max_workers: Maximum number of parallel workers
+        auto_approve: If True (default), runs autonomously
+        tools: List of available tools
+        enable_action_review: If True, review each action
+        coding_mode: If True, use coding-specific prompts
+        state_manager: Optional state manager for persistence
+        budget: Optional resource budget
 
-    if max_workers != 1:
-        print(f"\n⚠️ Parallel execution is disabled. Forcing sequential mode (requested {max_workers} workers).")
+    Returns:
+        True if all tasks completed successfully, False otherwise
+    """
+    print("\n" + "=" * 60)
+    print(f"CONCURRENT EXECUTION MODE (max_workers={max_workers})")
+    print("=" * 60)
 
-    return execution_mode(
-        plan,
-        auto_approve=auto_approve,
-        tools=tools,
-        enable_action_review=enable_action_review,
-        coding_mode=coding_mode,
-        state_manager=state_manager,
-        budget=budget,
-    )
+    if not auto_approve:
+        print("\nParallel execution requires auto-approval for non-scary operations.")
+        print("Scary operations will still pause all execution to prompt for confirmation.")
+        response = input("Start parallel execution? [y/N]: ").strip().lower()
+        if response not in ["y", "yes"]:
+            return False
+
+    # Get system info once
+    sys_info = get_system_info_cached()
+    system_context = _build_execution_system_context(sys_info, coding_mode)
+    
+    # Global tracking
+    session_tracker = SessionTracker()
+    if state_manager:
+        setattr(state_manager, "session_tracker", session_tracker)
+    
+    debug_logger = get_logger()
+    
+    # For scary operations, we need a lock to prevent multiple threads from prompting at once
+    prompt_lock = threading.Lock()
+    
+    # Track shared state across threads
+    active_tasks = set()
+    
+    def execute_task_thread(task: Task) -> bool:
+        """Worker function to execute a single task in a thread."""
+        try:
+            # Mark as in-progress immediately within the thread
+            with plan.lock:
+                task.status = TaskStatus.IN_PROGRESS
+                active_tasks.add(task.task_id)
+            
+            if state_manager:
+                state_manager.on_task_started(task)
+            
+            print(f"\n[Task {task.task_id + 1}/{len(plan.tasks)}] STARTING: {task.description}")
+            
+            # Isolated context for this task
+            task_context = ExecutionContext(plan)
+            task_messages = [{"role": "system", "content": system_context}]
+            
+            # Add session context from previously completed tasks
+            # Note: Parallel tasks won't see each other's work until complete
+            session_summary = session_tracker.get_summary()
+            
+            task_prompt = f"Task: {task.description}\nAction type: {task.action_type}"
+            if session_summary:
+                task_prompt += f"\n\nRECENT PROGRESS:\n{session_summary}"
+            task_prompt += "\n\nExecute this task completely. When done, respond with TASK_COMPLETE."
+            
+            task_messages.append({"role": "user", "content": task_prompt})
+            
+            # Sub-agent execution loop (simplified version of sequential loop)
+            # Logic here follows the same pattern as execution_mode but thread-safe
+            success = _execute_task_loop_concurrent(
+                task, task_messages, task_context, tools, 
+                enable_action_review, coding_mode, state_manager, 
+                budget, prompt_lock, session_tracker
+            )
+            
+            with plan.lock:
+                active_tasks.remove(task.task_id)
+                if success:
+                    plan.mark_task_completed(task, task.result)
+                    session_tracker.track_task_completed(task.description)
+                else:
+                    # Task already marked failed/stopped in loop
+                    pass
+            
+            return success
+        except Exception as e:
+            print(f"✗ Thread error executing task {task.task_id}: {e}")
+            plan.mark_task_failed(task, str(e))
+            with plan.lock:
+                if task.task_id in active_tasks:
+                    active_tasks.remove(task.task_id)
+            return False
+
+    # Main coordination loop
+    iteration = 0
+    max_total_iterations = MAX_EXECUTION_ITERATIONS * 2 
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {}
+        
+        while not plan.is_complete() and iteration < max_total_iterations:
+            # Check for ready tasks
+            ready_tasks = plan.get_executable_tasks(max_count=max_workers - len(futures))
+            
+            for task in ready_tasks:
+                if task.task_id not in futures:
+                    # Skip if already in progress or completed
+                    if task.status != TaskStatus.PENDING and task.status != TaskStatus.STOPPED:
+                        continue
+                        
+                    future = executor.submit(execute_task_thread, task)
+                    futures[future] = task
+            
+            if not futures:
+                # No tasks in flight and no tasks ready - check if deadlocked or finished
+                if plan.is_complete():
+                    break
+                # Wait for something to change
+                time.sleep(0.5)
+                iteration += 1
+                continue
+            
+            # Wait for at least one task to complete
+            done, _ = as_completed(futures, timeout=1.0)
+            for future in done:
+                task = futures.pop(future)
+                try:
+                    success = future.result()
+                    status_symbol = "✓" if success else "✗"
+                    print(f"\n[{status_symbol}] Task {task.task_id + 1} finished: {task.description[:60]}...")
+                except Exception as e:
+                    print(f"✗ Future error for task {task.task_id}: {e}")
+            
+            # Small delay to prevent tight loop
+            time.sleep(0.1)
+            iteration += 1
+
+    return plan.is_complete() and all(t.status == TaskStatus.COMPLETED for t in plan.tasks)
+
+
+def _execute_task_loop_concurrent(
+    task: Task,
+    messages: List[Dict],
+    exec_context: "ExecutionContext",
+    tools: list,
+    enable_action_review: bool,
+    coding_mode: bool,
+    state_manager: Optional[StateManager],
+    budget: Optional["ResourceBudget"],
+    prompt_lock: threading.Lock,
+    session_tracker: SessionTracker,
+) -> bool:
+    """Internal task loop for concurrent execution."""
+    model_name = config.EXECUTION_MODEL
+    model_supports_tools = config.EXECUTION_SUPPORTS_TOOLS
+    debug_logger = get_logger()
+    
+    task_iterations = 0
+    max_task_iterations = MAX_TASK_ITERATIONS
+    task_complete = False
+    
+    while task_iterations < max_task_iterations and not task_complete:
+        # Check for interrupt
+        if get_escape_interrupt():
+            task.status = TaskStatus.STOPPED
+            return False
+            
+        task_iterations += 1
+        
+        # Prepare LLM call
+        call_tools = tools if model_supports_tools else None
+        llm_messages = _prepare_llm_messages(messages, exec_context, session_tracker)
+        response = ollama_chat(llm_messages, tools=call_tools, model=model_name, supports_tools=model_supports_tools)
+        
+        if "error" in response:
+            task.error = response["error"]
+            task.status = TaskStatus.FAILED
+            if state_manager:
+                state_manager.on_task_failed(task)
+            return False
+            
+        if "usage" in response and budget:
+            budget.update_tokens(response.get("usage", {}).get("total", 0))
+            
+        msg = response.get("message", {})
+        content = msg.get("content", "")
+        tool_calls = msg.get("tool_calls", [])
+        
+        messages.append(msg)
+        
+        if tool_calls:
+            for tool_call in tool_calls:
+                func = tool_call.get("function", {})
+                tool_name = func.get("name")
+                tool_args = func.get("arguments", {})
+                
+                if isinstance(tool_args, str):
+                    try: tool_args = json.loads(tool_args)
+                    except: tool_args = {}
+                
+                # Check for scary operations - need lock for prompting
+                is_scary, reason = is_scary_operation(tool_name, tool_args, task.action_type)
+                if is_scary:
+                    with prompt_lock:
+                        # Re-check after acquiring lock in case another thread already handled it
+                        desc = format_operation_description(tool_name, tool_args)
+                        if not prompt_scary_operation(desc, reason):
+                            task.status = TaskStatus.FAILED
+                            task.error = "User cancelled destructive operation"
+                            return False
+                
+                # Execute tool
+                # Note: execute_tool needs to be thread-safe (most file/git tools are)
+                result = execute_tool(tool_name, tool_args, agent_name="executor")
+                
+                # Update context based on tool result
+                if tool_name == "write_file" and not _has_error_result(result):
+                    exec_context.invalidate_code(tool_args.get("path"))
+                elif tool_name == "apply_patch" and not _has_error_result(result):
+                    exec_context.clear_code_cache()
+                
+                # Record result
+                messages.append({
+                    "role": "tool",
+                    "name": tool_name,
+                    "content": _tool_message_content(tool_name, tool_args, result, session_tracker, task_id=task.task_id, current_task=task)
+                })
+                
+                if "TASK_COMPLETE" in content or "task complete" in content.lower():
+                    task.status = TaskStatus.COMPLETED
+                    task.result = content
+                    task_complete = True
+                    break
+        elif content:
+            if "TASK_COMPLETE" in content or "task complete" in content.lower():
+                task.status = TaskStatus.COMPLETED
+                task.result = content
+                task_complete = True
+            else:
+                # Text fallback logic or analysis
+                _apply_text_fallbacks(content, task.action_type, messages, session_tracker, exec_context, debug_logger, current_task=task)
+        
+    return task.status == TaskStatus.COMPLETED
 
 
 def fix_validation_failures(
