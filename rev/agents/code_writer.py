@@ -478,6 +478,13 @@ class CodeWriterAgent(BaseAgent):
             except Exception:
                 print(str(rules)[:4000])
 
+        elif tool_name == "apply_patch":
+            patch_content = arguments.get("patch", "")
+            print(f"\nAction: {self._COLOR_GREEN}APPLY PATCH{self._COLOR_RESET}")
+            print(f"\n{self._COLOR_CYAN}Patch Content:{self._COLOR_RESET}")
+            for line in patch_content.splitlines():
+                print(self._color_diff_line(line))
+
         elif tool_name == "write_file":
             file_path = arguments.get("path", "unknown")
             content = arguments.get("content", "")
@@ -491,7 +498,8 @@ class CodeWriterAgent(BaseAgent):
             preview_lines = content.splitlines()[:20]
             print(f"\n{self._COLOR_CYAN}Preview (first {min(20, len(preview_lines))} lines):{self._COLOR_RESET}")
             for i, line in enumerate(preview_lines, 1):
-                print(f"  {i:3d}  {line[:66]}")  # Limit line width
+                # Color new content green
+                print(f"{self._COLOR_GREEN}  {i:3d}  {line[:66]}{self._COLOR_RESET}")  # Limit line width
             if len(content.splitlines()) > 20:
                 print(f"  ... ({len(content.splitlines()) - 20} more lines)")
 

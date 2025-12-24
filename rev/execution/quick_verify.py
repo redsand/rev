@@ -140,14 +140,24 @@ def _read_file_with_fallback_encoding(file_path: Path) -> Optional[str]:
 
 @dataclass
 class VerificationResult:
-    """Result of verifying a task's execution."""
+    """Result of verifying a task's execution.
+
+    P0-6: Added inconclusive field to distinguish between:
+    - passed=True: Task definitely succeeded
+    - passed=False, inconclusive=False: Task definitely failed
+    - passed=False, inconclusive=True: Cannot determine if task succeeded (needs proper validation)
+    """
     passed: bool
     message: str
     details: Dict[str, Any]
     should_replan: bool = False
+    inconclusive: bool = False  # P0-6: True when verification can't determine success/failure
 
     def __str__(self) -> str:
-        status = '[OK]' if self.passed else '[FAIL]'
+        if self.inconclusive:
+            status = '[INCONCLUSIVE]'
+        else:
+            status = '[OK]' if self.passed else '[FAIL]'
         # Remove any Unicode characters that might cause encoding issues on Windows
         safe_message = self.message.replace('[OK]', '[OK]').replace('[FAIL]', '[FAIL]').replace('[FAIL]', '[FAIL]')
         return f"{status} {safe_message}"
@@ -1924,12 +1934,17 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
             should_replan=True
         )
 
-    # File exists, assume edit was successful
-    # (Without knowing original content, we can't fully verify the edit)
+    # P0-6: File exists but we can't verify the edit actually succeeded without proper validation
+    # Return INCONCLUSIVE instead of passed=True to force proper verification
     return VerificationResult(
-        passed=True,
-        message=f"File exists and can be edited: {file_path.name}",
-        details={"file_path": str(file_path), "note": "Full edit verification requires content comparison"}
+        passed=False,
+        inconclusive=True,
+        message=f"Cannot verify edit to {file_path.name} - file exists but no validation was performed. Run tests or syntax checks to confirm the edit is correct.",
+        details={
+            "file_path": str(file_path),
+            "suggestion": "Run pytest/npm test to verify changes, or use python -m py_compile for syntax check"
+        },
+        should_replan=True
     )
 
 
