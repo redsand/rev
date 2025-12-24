@@ -2681,7 +2681,7 @@ class Orchestrator:
                     self.context.add_insight("orchestrator", "agent_request_triggered_replan", replan_req["details"])
                     
                     # Force replan on next iteration
-                    self.context.plan = None
+                    self.context.plan = ExecutionPlan(tasks=[])
                     forced_next_task = None
                     # Note: agent_requests are cleared in next iteration start
                     continue
