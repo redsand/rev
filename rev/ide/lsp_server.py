@@ -48,9 +48,8 @@ except ImportError:
     LSP_AVAILABLE = False
     LanguageServer = None
 
-from ..execution.orchestrator import Orchestrator
-from ..core.context import RevContext
-from ..config import Config
+from ..execution.orchestrator import Orchestrator, OrchestratorConfig
+from .. import config as rev_config
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +57,7 @@ logger = logging.getLogger(__name__)
 class RevLSPServer:
     """Language Server Protocol server for Rev integration"""
 
-    def __init__(self, config: Optional[Config] = None):
+    def __init__(self, config: Optional[Any] = None):
         """
         Initialize the Rev LSP server
 
@@ -70,7 +69,7 @@ class RevLSPServer:
                 "LSP support requires 'pygls'. Install with: pip install pygls"
             )
 
-        self.config = config or Config()
+        self.config = config or rev_config
         self.server = LanguageServer('rev-lsp', 'v0.1')
         self.orchestrator = None
         self._setup_handlers()
@@ -198,11 +197,10 @@ class RevLSPServer:
     async def _get_orchestrator(self) -> Orchestrator:
         """Get or create orchestrator instance"""
         if self.orchestrator is None:
-            context = RevContext(
+            self.orchestrator = Orchestrator(
                 project_root=Path.cwd(),
-                config=self.config
+                config=OrchestratorConfig(),
             )
-            self.orchestrator = Orchestrator(context)
         return self.orchestrator
 
     async def _analyze_code(self, uri: Optional[str]) -> Dict[str, Any]:
