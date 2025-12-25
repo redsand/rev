@@ -76,6 +76,16 @@
         "command": "rev.startAPI",
         "title": "Rev: Start API Server",
         "category": "Rev"
+      },
+      {
+        "command": "rev.selectModel",
+        "title": "Rev: Select Model",
+        "category": "Rev"
+      },
+      {
+        "command": "rev.showCurrentModel",
+        "title": "Rev: Show Current Model",
+        "category": "Rev"
       }
     ],
     "menus": {
@@ -153,6 +163,32 @@
           "type": "string",
           "default": "python",
           "description": "Path to Python executable for running Rev"
+        },
+        "rev.provider": {
+          "type": "string",
+          "default": "ollama",
+          "enum": ["ollama", "openai", "anthropic", "google"],
+          "description": "LLM provider to use (ollama, openai, anthropic, google)"
+        },
+        "rev.openaiApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI API key (leave empty to use environment variable)"
+        },
+        "rev.anthropicApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Anthropic API key (leave empty to use environment variable)"
+        },
+        "rev.googleApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Google AI API key (leave empty to use environment variable)"
+        },
+        "rev.defaultModel": {
+          "type": "string",
+          "default": "",
+          "description": "Default model to use (e.g., qwen2.5-coder:32b, gpt-4, claude-3-opus)"
         }
       }
     },

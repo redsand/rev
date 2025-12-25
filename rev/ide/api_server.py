@@ -60,6 +60,9 @@ class RevAPIServer:
         self.app.router.add_get('/api/v1/status/{task_id}', self.handle_status)
         self.app.router.add_get('/api/v1/tasks', self.handle_list_tasks)
         self.app.router.add_delete('/api/v1/task/{task_id}', self.handle_cancel_task)
+        self.app.router.add_get('/api/v1/models', self.handle_list_models)
+        self.app.router.add_get('/api/v1/models/current', self.handle_get_current_model)
+        self.app.router.add_post('/api/v1/models/select', self.handle_select_model)
         self.app.router.add_get('/ws', self.handle_websocket)
         self.app.router.add_post('/rpc', self.handle_jsonrpc)
 
@@ -370,6 +373,94 @@ class RevAPIServer:
 
         except Exception as e:
             logger.error(f"Error handling cancel task request: {e}", exc_info=True)
+            return web.json_response(
+                {'status': 'error', 'message': str(e)},
+                status=500
+            )
+
+    async def handle_list_models(self, request: web.Request) -> web.Response:
+        """List available models from Rev"""
+        try:
+            # Import here to avoid circular dependencies
+            from ..llm.client import query_ollama_models
+
+            try:
+                # Get models from Ollama
+                models = query_ollama_models()
+
+                return web.json_response({
+                    'status': 'success',
+                    'models': models,
+                    'provider': 'ollama'
+                })
+            except Exception as e:
+                logger.warning(f"Could not fetch Ollama models: {e}")
+                # Return default/configured models if Ollama query fails
+                return web.json_response({
+                    'status': 'success',
+                    'models': [self.config.ollama_model] if hasattr(self.config, 'ollama_model') else [],
+                    'provider': 'config',
+                    'note': 'Using configured model (Ollama unavailable)'
+                })
+
+        except Exception as e:
+            logger.error(f"Error listing models: {e}", exc_info=True)
+            return web.json_response(
+                {'status': 'error', 'message': str(e)},
+                status=500
+            )
+
+    async def handle_get_current_model(self, request: web.Request) -> web.Response:
+        """Get currently selected model"""
+        try:
+            from .. import config
+
+            current_model = {
+                'execution_model': config.EXECUTION_MODEL,
+                'planning_model': config.PLANNING_MODEL,
+                'research_model': config.RESEARCH_MODEL,
+                'provider': config.LLM_PROVIDER,
+            }
+
+            return web.json_response({
+                'status': 'success',
+                'current_model': current_model
+            })
+
+        except Exception as e:
+            logger.error(f"Error getting current model: {e}", exc_info=True)
+            return web.json_response(
+                {'status': 'error', 'message': str(e)},
+                status=500
+            )
+
+    async def handle_select_model(self, request: web.Request) -> web.Response:
+        """Select a model to use"""
+        try:
+            data = await request.json()
+            model_name = data.get('model_name', '')
+
+            if not model_name:
+                return web.json_response(
+                    {'status': 'error', 'message': 'No model_name specified'},
+                    status=400
+                )
+
+            # Update the active model
+            from ..config import update_active_model
+            update_active_model(model_name)
+
+            # Clear orchestrator to use new model
+            self.orchestrator = None
+
+            return web.json_response({
+                'status': 'success',
+                'message': f'Model changed to {model_name}',
+                'model': model_name
+            })
+
+        except Exception as e:
+            logger.error(f"Error selecting model: {e}", exc_info=True)
             return web.json_response(
                 {'status': 'error', 'message': str(e)},
                 status=500

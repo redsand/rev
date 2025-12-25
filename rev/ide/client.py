@@ -258,6 +258,61 @@ class RevIDEClient:
             logger.error(f"Error cancelling task: {e}")
             return {'status': 'error', 'message': str(e)}
 
+    def list_models(self) -> Dict[str, Any]:
+        """
+        List available models
+
+        Returns:
+            List of available models from Rev/Ollama
+        """
+        url = f"{self.api_url}/api/v1/models"
+
+        try:
+            response = requests.get(url, timeout=self.timeout)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            logger.error(f"Error listing models: {e}")
+            return {'status': 'error', 'message': str(e)}
+
+    def get_current_model(self) -> Dict[str, Any]:
+        """
+        Get currently selected model
+
+        Returns:
+            Current model information
+        """
+        url = f"{self.api_url}/api/v1/models/current"
+
+        try:
+            response = requests.get(url, timeout=self.timeout)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            logger.error(f"Error getting current model: {e}")
+            return {'status': 'error', 'message': str(e)}
+
+    def select_model(self, model_name: str) -> Dict[str, Any]:
+        """
+        Select a model to use
+
+        Args:
+            model_name: Name of the model to select
+
+        Returns:
+            Selection result
+        """
+        url = f"{self.api_url}/api/v1/models/select"
+        data = {'model_name': model_name}
+
+        try:
+            response = requests.post(url, json=data, timeout=self.timeout)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            logger.error(f"Error selecting model: {e}")
+            return {'status': 'error', 'message': str(e)}
+
     def jsonrpc_call(
         self,
         method: str,

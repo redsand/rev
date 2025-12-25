@@ -33,7 +33,9 @@ function activate(context) {
         vscode.commands.registerCommand('rev.addDocumentation', addDocumentation),
         vscode.commands.registerCommand('rev.executeTask', executeTask),
         vscode.commands.registerCommand('rev.startLSP', startLSPServer),
-        vscode.commands.registerCommand('rev.startAPI', startAPIServer)
+        vscode.commands.registerCommand('rev.startAPI', startAPIServer),
+        vscode.commands.registerCommand('rev.selectModel', selectModel),
+        vscode.commands.registerCommand('rev.showCurrentModel', showCurrentModel)
     );
 
     // Auto-start servers if configured
@@ -400,6 +402,88 @@ function startAPIServer() {
     } catch (error) {
         vscode.window.showErrorMessage(`Failed to start API server: ${error.message}`);
         outputChannel.appendLine(`API Error: ${error.message}`);
+    }
+}
+
+/**
+ * Select model command
+ */
+async function selectModel() {
+    try {
+        const config = vscode.workspace.getConfiguration('rev');
+        const apiUrl = config.get('apiUrl');
+
+        // Fetch available models
+        const modelsResponse = await axios.get(`${apiUrl}/api/v1/models`);
+
+        if (modelsResponse.data.status === 'error') {
+            vscode.window.showErrorMessage(`Rev: ${modelsResponse.data.message}`);
+            return;
+        }
+
+        const models = modelsResponse.data.models || [];
+
+        if (models.length === 0) {
+            vscode.window.showWarningMessage('Rev: No models available');
+            return;
+        }
+
+        // Show quick pick with available models
+        const selectedModel = await vscode.window.showQuickPick(models, {
+            placeHolder: 'Select a model to use',
+            title: 'Rev: Select Model'
+        });
+
+        if (!selectedModel) {
+            return;
+        }
+
+        // Select the model
+        const selectResponse = await axios.post(
+            `${apiUrl}/api/v1/models/select`,
+            { model_name: selectedModel }
+        );
+
+        if (selectResponse.data.status === 'success') {
+            vscode.window.showInformationMessage(`Rev: Model changed to ${selectedModel}`);
+            outputChannel.appendLine(`Model changed to: ${selectedModel}`);
+        } else {
+            vscode.window.showErrorMessage(`Rev: ${selectResponse.data.message}`);
+        }
+
+    } catch (error) {
+        vscode.window.showErrorMessage(`Rev: ${error.message}`);
+        outputChannel.appendLine(`Error selecting model: ${error.message}`);
+    }
+}
+
+/**
+ * Show current model command
+ */
+async function showCurrentModel() {
+    try {
+        const config = vscode.workspace.getConfiguration('rev');
+        const apiUrl = config.get('apiUrl');
+
+        const response = await axios.get(`${apiUrl}/api/v1/models/current`);
+
+        if (response.data.status === 'success') {
+            const currentModel = response.data.current_model;
+            const message = `Current Rev Configuration:\n` +
+                `Execution Model: ${currentModel.execution_model}\n` +
+                `Planning Model: ${currentModel.planning_model}\n` +
+                `Research Model: ${currentModel.research_model}\n` +
+                `Provider: ${currentModel.provider}`;
+
+            vscode.window.showInformationMessage(message);
+            outputChannel.appendLine(message);
+        } else {
+            vscode.window.showErrorMessage(`Rev: ${response.data.message}`);
+        }
+
+    } catch (error) {
+        vscode.window.showErrorMessage(`Rev: ${error.message}`);
+        outputChannel.appendLine(`Error getting current model: ${error.message}`);
     }
 }
 
