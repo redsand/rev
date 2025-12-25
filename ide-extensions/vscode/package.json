@@ -2,7 +2,7 @@
   "name": "rev-vscode",
   "displayName": "Rev - AI Development Assistant",
   "description": "Integrate Rev autonomous AI development system with VSCode",
-  "version": "0.1.0",
+  "version": "2.1.0",
   "publisher": "rev",
   "engines": {
     "vscode": "^1.75.0"

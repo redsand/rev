@@ -129,7 +129,7 @@ rev --ide-lsp --ide-lsp-host 0.0.0.0 --ide-lsp-port 3000
 ```bash
 cd ide-extensions/vscode
 npm install
-code --install-extension rev-vscode-0.1.0.vsix
+code --install-extension rev-vscode-*.vsix
 ```
 
 **Visual Studio:**

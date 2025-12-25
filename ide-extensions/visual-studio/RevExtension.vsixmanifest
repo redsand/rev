@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
   <Metadata>
-    <Identity Id="Rev.VisualStudio.Extension" Version="0.1.0" Language="en-US" Publisher="Rev" />
+    <Identity Id="Rev.VisualStudio.Extension" Version="2.1.0" Language="en-US" Publisher="Rev" />
     <DisplayName>Rev - AI Development Assistant</DisplayName>
     <Description xml:space="preserve">Integrate Rev autonomous AI development system with Visual Studio</Description>
     <MoreInfo>https://github.com/redsand/rev</MoreInfo>
