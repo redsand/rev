@@ -8,11 +8,17 @@ const vscode = require('vscode');
 const axios = require('axios');
 const path = require('path');
 const { spawn } = require('child_process');
+const WebSocket = require('ws');
 
 let lspClient = null;
 let apiServerProcess = null;
 let lspServerProcess = null;
 let outputChannel = null;
+let apiWebSocket = null;
+let apiWebSocketUrl = null;
+let apiWebSocketReconnectTimer = null;
+let apiWebSocketReconnectAttempts = 0;
+let apiWebSocketManualClose = false;
 
 /**
  * Activate the extension
@@ -60,6 +66,7 @@ function deactivate() {
     if (lspServerProcess) {
         lspServerProcess.kill();
     }
+    closeApiWebSocket();
     if (outputChannel) {
         outputChannel.dispose();
     }
@@ -99,6 +106,7 @@ function getSelectedRange() {
  * Make API request to Rev
  */
 async function makeAPIRequest(endpoint, data) {
+    connectApiWebSocket();
     const config = vscode.workspace.getConfiguration('rev');
     const apiUrl = config.get('apiUrl');
     const timeout = config.get('timeout') * 1000;
@@ -118,6 +126,144 @@ async function makeAPIRequest(endpoint, data) {
         } else {
             throw new Error(`Request error: ${error.message}`);
         }
+    }
+}
+
+function buildApiWebSocketUrl() {
+    const config = vscode.workspace.getConfiguration('rev');
+    const apiUrl = config.get('apiUrl');
+    if (!apiUrl) {
+        return null;
+    }
+
+    try {
+        const url = new URL(apiUrl);
+        url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+        url.pathname = '/ws';
+        url.search = '';
+        url.hash = '';
+        return url.toString();
+    } catch (error) {
+        if (outputChannel) {
+            outputChannel.appendLine(`API Error: Invalid apiUrl '${apiUrl}'`);
+        }
+        return null;
+    }
+}
+
+function connectApiWebSocket() {
+    if (!outputChannel) {
+        return;
+    }
+
+    const wsUrl = buildApiWebSocketUrl();
+    if (!wsUrl) {
+        return;
+    }
+
+    if (apiWebSocket &&
+        (apiWebSocket.readyState === WebSocket.OPEN || apiWebSocket.readyState === WebSocket.CONNECTING) &&
+        apiWebSocketUrl === wsUrl) {
+        return;
+    }
+
+    if (apiWebSocket) {
+        apiWebSocketManualClose = true;
+        apiWebSocket.close();
+        apiWebSocket = null;
+    }
+
+    apiWebSocketUrl = wsUrl;
+    apiWebSocketManualClose = false;
+
+    try {
+        apiWebSocket = new WebSocket(wsUrl);
+    } catch (error) {
+        outputChannel.appendLine(`API log stream error: ${error.message}`);
+        scheduleApiWebSocketReconnect();
+        return;
+    }
+
+    apiWebSocket.on('open', () => {
+        apiWebSocketReconnectAttempts = 0;
+        outputChannel.appendLine('API log stream connected');
+    });
+
+    apiWebSocket.on('message', (data) => {
+        const text = data ? data.toString() : '';
+        if (!text) {
+            return;
+        }
+        try {
+            const payload = JSON.parse(text);
+            handleApiStreamMessage(payload);
+        } catch (error) {
+            outputChannel.appendLine(text);
+        }
+    });
+
+    apiWebSocket.on('close', (code, reason) => {
+        const detail = reason ? ` (${reason.toString()})` : '';
+        outputChannel.appendLine(`API log stream disconnected (code ${code}${detail})`);
+        apiWebSocket = null;
+        if (!apiWebSocketManualClose) {
+            scheduleApiWebSocketReconnect();
+        }
+    });
+
+    apiWebSocket.on('error', (error) => {
+        outputChannel.appendLine(`API log stream error: ${error.message}`);
+    });
+}
+
+function scheduleApiWebSocketReconnect() {
+    if (apiWebSocketReconnectTimer) {
+        return;
+    }
+    const delay = Math.min(5000, 500 * Math.pow(2, apiWebSocketReconnectAttempts));
+    apiWebSocketReconnectTimer = setTimeout(() => {
+        apiWebSocketReconnectTimer = null;
+        apiWebSocketReconnectAttempts += 1;
+        connectApiWebSocket();
+    }, delay);
+}
+
+function closeApiWebSocket() {
+    if (apiWebSocketReconnectTimer) {
+        clearTimeout(apiWebSocketReconnectTimer);
+        apiWebSocketReconnectTimer = null;
+    }
+    if (apiWebSocket) {
+        apiWebSocketManualClose = true;
+        apiWebSocket.close();
+        apiWebSocket = null;
+    }
+}
+
+function handleApiStreamMessage(payload) {
+    if (!payload || typeof payload !== 'object') {
+        return;
+    }
+
+    if (payload.type === 'log') {
+        const stream = payload.stream ? payload.stream.toUpperCase() : 'LOG';
+        const message = payload.message ?? '';
+        if (message === '') {
+            outputChannel.appendLine('');
+            return;
+        }
+        outputChannel.appendLine(`[${stream}] ${message}`);
+        return;
+    }
+
+    if (payload.type === 'task_completed') {
+        outputChannel.appendLine(`Task completed: ${payload.task_id || 'unknown'}`);
+        return;
+    }
+
+    if (payload.type === 'task_failed') {
+        outputChannel.appendLine(`Task failed: ${payload.task_id || 'unknown'} - ${payload.error || 'unknown error'}`);
+        return;
     }
 }
 
@@ -148,7 +294,7 @@ async function analyzeCode() {
     if (!filePath) return;
 
     try {
-        vscode.window.withProgress(
+        await vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
                 title: 'Rev: Analyzing code...',
@@ -174,7 +320,7 @@ async function generateTests() {
     if (!filePath) return;
 
     try {
-        vscode.window.withProgress(
+        await vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
                 title: 'Rev: Generating tests...',
@@ -202,7 +348,7 @@ async function refactorCode() {
     const range = getSelectedRange();
 
     try {
-        vscode.window.withProgress(
+        await vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
                 title: 'Rev: Refactoring code...',
@@ -240,7 +386,7 @@ async function debugCode() {
     });
 
     try {
-        vscode.window.withProgress(
+        await vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
                 title: 'Rev: Debugging code...',
@@ -273,7 +419,7 @@ async function addDocumentation() {
     const range = getSelectedRange();
 
     try {
-        vscode.window.withProgress(
+        await vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
                 title: 'Rev: Adding documentation...',
@@ -311,7 +457,7 @@ async function executeTask() {
     }
 
     try {
-        vscode.window.withProgress(
+        await vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
                 title: 'Rev: Executing task...',
@@ -383,6 +529,8 @@ function startAPIServer() {
         apiServerProcess = spawn(pythonPath, ['-m', 'rev.ide.api_server'], {
             cwd: vscode.workspace.rootPath
         });
+
+        connectApiWebSocket();
 
         apiServerProcess.stdout.on('data', (data) => {
             outputChannel.appendLine(`API: ${data.toString()}`);

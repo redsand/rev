@@ -84,9 +84,40 @@ class TestExecutorAgent(BaseAgent):
 
         try:
             response = ollama_chat(messages, tools=selected_tools)
-            
+
             if not response or "message" not in response or "tool_calls" not in response["message"]:
-                # Fallback to heuristics if LLM fails to provide tool call
+                # Try to recover tool call from text content before falling back to heuristics
+                from rev.core.tool_call_recovery import recover_tool_call_from_text
+
+                text_content = response.get("message", {}).get("content", "") if response else ""
+                if text_content:
+                    recovered = recover_tool_call_from_text(
+                        text_content,
+                        allowed_tools=['run_tests', 'run_cmd', 'file_exists', 'list_dir']
+                    )
+                    if recovered:
+                        print(f"  -> Recovered tool call from text: {recovered.name}")
+                        raw_result = execute_tool(recovered.name, recovered.arguments, agent_name="test_executor")
+
+                        # Record test iteration for skip logic
+                        if recovered.name in ("run_tests", "run_cmd") and ("test" in str(recovered.arguments).lower() or "pytest" in str(recovered.arguments).lower()):
+                            context.set_agent_state("last_test_iteration", context.get_agent_state("current_iteration", 0))
+                            try:
+                                res_data = json.loads(raw_result)
+                                if isinstance(res_data, dict) and "rc" in res_data:
+                                    context.set_agent_state("last_test_rc", res_data["rc"])
+                            except: pass
+
+                        return build_subagent_output(
+                            agent_name="TestExecutorAgent",
+                            tool_name=recovered.name,
+                            tool_args=recovered.arguments,
+                            tool_output=raw_result,
+                            context=context,
+                            task_id=task.task_id,
+                        )
+
+                # Only fall back to heuristics if recovery also failed
                 return self._execute_fallback_heuristic(task, context)
 
             tool_call = response["message"]["tool_calls"][0]
@@ -131,12 +162,17 @@ class TestExecutorAgent(BaseAgent):
 
         last_edit_iteration = context.get_agent_state("last_code_change_iteration", 0)
         last_test_iteration = context.get_agent_state("last_test_iteration", 0)
-        
+        last_test_rc = context.get_agent_state("last_test_rc", None)
+
         # Never skip first run
         if last_test_iteration == 0:
             return False
-            
-        # Only skip if no edits happened since last test run
+
+        # Never skip if last test failed (rc != 0) - need to retry with correct command
+        if last_test_rc is not None and last_test_rc != 0:
+            return False
+
+        # Only skip if no edits happened since last SUCCESSFUL test run
         return last_test_iteration >= last_edit_iteration
 
     def _execute_fallback_heuristic(self, task: Task, context: RevContext) -> str:
@@ -180,7 +216,24 @@ class TestExecutorAgent(BaseAgent):
                 elif "go test" in desc_lower:
                     cmd = "go test ./..."
                 else:
-                    cmd = "pytest"
+                    # Detect project type before defaulting to pytest
+                    from pathlib import Path
+                    workspace_root = context.workspace_root if hasattr(context, 'workspace_root') else Path.cwd()
+                    root = Path(workspace_root) if workspace_root else Path.cwd()
+
+                    if (root / "package.json").exists():
+                        cmd = "npm test"
+                    elif (root / "yarn.lock").exists():
+                        cmd = "yarn test"
+                    elif (root / "pnpm-lock.yaml").exists():
+                        cmd = "pnpm test"
+                    elif (root / "go.mod").exists():
+                        cmd = "go test ./..."
+                    elif (root / "Cargo.toml").exists():
+                        cmd = "cargo test"
+                    else:
+                        # Final fallback to pytest for Python projects
+                        cmd = "pytest"
 
         workdir = self._extract_workdir_hint(desc)
         cmd = self._apply_workdir(cmd, workdir)

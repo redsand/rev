@@ -11,9 +11,10 @@ Provides universal IDE integration through LSP, supporting:
 - JetBrains IDEs
 """
 
+import asyncio
 import json
 import logging
-import asyncio
+import os
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 
@@ -105,6 +106,8 @@ class RevLSPServer:
         self.config = config or rev_config
         self.server = LanguageServer('rev-lsp', 'v0.1')
         self.orchestrator = None
+        self._execution_mode_locked = False
+        self._ensure_ide_execution_mode()
         self._setup_handlers()
 
     def _setup_handlers(self):
@@ -232,9 +235,24 @@ class RevLSPServer:
         if self.orchestrator is None:
             self.orchestrator = Orchestrator(
                 project_root=Path.cwd(),
-                config=OrchestratorConfig(),
+                config=self._build_orchestrator_config(),
             )
         return self.orchestrator
+
+    def _ensure_ide_execution_mode(self) -> None:
+        if self._execution_mode_locked:
+            return
+        if getattr(rev_config, "EXECUTION_MODE", "").lower() != "sub-agent":
+            rev_config.EXECUTION_MODE = "sub-agent"
+            os.environ["REV_EXECUTION_MODE"] = "sub-agent"
+        self._execution_mode_locked = True
+
+    @staticmethod
+    def _build_orchestrator_config() -> OrchestratorConfig:
+        return OrchestratorConfig(
+            enable_context_guard=True,
+            context_guard_interactive=False,
+        )
 
     async def _analyze_code(self, uri: Optional[str]) -> Dict[str, Any]:
         """Analyze code using Rev"""

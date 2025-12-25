@@ -5,9 +5,12 @@ Provides a REST API and JSON-RPC interface for remote IDE integration.
 Supports WebSocket connections for real-time updates.
 """
 
+import asyncio
 import json
 import logging
-import asyncio
+import os
+import sys
+import threading
 from typing import Dict, List, Optional, Any, Callable
 from pathlib import Path
 from datetime import datetime
@@ -46,6 +49,13 @@ class RevAPIServer:
         self.orchestrator = None
         self.active_tasks: Dict[str, Any] = {}
         self.websockets: List[web.WebSocketResponse] = []
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._stdout_original = None
+        self._stderr_original = None
+        self._stream_installed = False
+        self._execution_mode_locked = False
+        self._ensure_ide_execution_mode()
+        self._setup_lifecycle_hooks()
         self._setup_routes()
 
     def _setup_routes(self):
@@ -65,14 +75,119 @@ class RevAPIServer:
         self.app.router.add_get('/ws', self.handle_websocket)
         self.app.router.add_post('/rpc', self.handle_jsonrpc)
 
+    def _setup_lifecycle_hooks(self) -> None:
+        self.app.on_startup.append(self._on_startup)
+        self.app.on_cleanup.append(self._on_cleanup)
+
     async def _get_orchestrator(self) -> Orchestrator:
         """Get or create orchestrator instance"""
         if self.orchestrator is None:
             self.orchestrator = Orchestrator(
                 project_root=Path.cwd(),
-                config=OrchestratorConfig(),
+                config=self._build_orchestrator_config(),
             )
         return self.orchestrator
+
+    def _ensure_ide_execution_mode(self) -> None:
+        if self._execution_mode_locked:
+            return
+        if getattr(rev_config, "EXECUTION_MODE", "").lower() != "sub-agent":
+            rev_config.EXECUTION_MODE = "sub-agent"
+            os.environ["REV_EXECUTION_MODE"] = "sub-agent"
+        self._execution_mode_locked = True
+
+    @staticmethod
+    def _build_orchestrator_config() -> OrchestratorConfig:
+        return OrchestratorConfig(
+            enable_context_guard=True,
+            context_guard_interactive=False,
+        )
+
+    async def _on_startup(self, _app: web.Application) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._install_stream_taps()
+
+    async def _on_cleanup(self, _app: web.Application) -> None:
+        self._restore_streams()
+
+    def _install_stream_taps(self) -> None:
+        if self._stream_installed:
+            return
+        self._stdout_original = sys.stdout
+        self._stderr_original = sys.stderr
+        sys.stdout = _StreamTap("stdout", self._stdout_original, self._handle_stream_output)
+        sys.stderr = _StreamTap("stderr", self._stderr_original, self._handle_stream_output)
+        self._stream_installed = True
+
+    def _restore_streams(self) -> None:
+        if not self._stream_installed:
+            return
+        if self._stdout_original:
+            sys.stdout = self._stdout_original
+        if self._stderr_original:
+            sys.stderr = self._stderr_original
+        self._stream_installed = False
+
+    def _handle_stream_output(self, stream: str, message: str) -> None:
+        if message is None:
+            return
+        payload = {
+            "type": "log",
+            "stream": stream,
+            "message": message,
+        }
+        self._schedule_ws_broadcast(payload)
+
+    def _schedule_ws_broadcast(self, payload: Dict[str, Any]) -> bool:
+        if not self.websockets or not self._loop or self._loop.is_closed():
+            return False
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop is not None and running_loop == self._loop:
+            asyncio.create_task(self._broadcast_to_websockets(payload))
+            return True
+
+        if self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._broadcast_to_websockets(payload), self._loop)
+            return True
+
+        return False
+
+
+class _StreamTap:
+    def __init__(self, name: str, original, on_line):
+        self._name = name
+        self._original = original
+        self._on_line = on_line
+        self._buffer = ""
+        self._lock = threading.Lock()
+
+    def write(self, data):
+        if data is None:
+            return 0
+        if not isinstance(data, str):
+            data = str(data)
+        with self._lock:
+            self._original.write(data)
+            self._original.flush()
+            self._buffer += data
+            while "\n" in self._buffer:
+                line, self._buffer = self._buffer.split("\n", 1)
+                self._on_line(self._name, line)
+        return len(data)
+
+    def flush(self):
+        with self._lock:
+            if self._buffer:
+                self._on_line(self._name, self._buffer)
+                self._buffer = ""
+            self._original.flush()
+
+    def __getattr__(self, item):
+        return getattr(self._original, item)
 
     async def _broadcast_to_websockets(self, message: Dict[str, Any]):
         """Broadcast message to all connected WebSocket clients"""
@@ -93,6 +208,63 @@ class RevAPIServer:
         for ws in dead_sockets:
             self.websockets.remove(ws)
 
+    async def _submit_task(self, task: str, task_id: Optional[str] = None) -> web.Response:
+        """Submit a task string to the orchestrator and return a response."""
+        if not task:
+            return web.json_response(
+                {'status': 'error', 'message': 'No task specified'},
+                status=400
+            )
+
+        if not task_id:
+            task_id = f"task_{len(self.active_tasks)}"
+
+        orchestrator = await self._get_orchestrator()
+
+        # Store task info
+        self.active_tasks[task_id] = {
+            'id': task_id,
+            'task': task,
+            'status': 'running',
+            'started_at': datetime.now().isoformat(),
+            'result': None
+        }
+
+        # Execute task asynchronously
+        async def execute_task():
+            try:
+                result = await asyncio.to_thread(orchestrator.execute, task)
+                self.active_tasks[task_id]['status'] = 'completed'
+                self.active_tasks[task_id]['result'] = result
+                self.active_tasks[task_id]['completed_at'] = datetime.now().isoformat()
+
+                # Broadcast completion
+                await self._broadcast_to_websockets({
+                    'type': 'task_completed',
+                    'task_id': task_id,
+                    'result': result
+                })
+            except Exception as e:
+                logger.error(f"Error executing task {task_id}: {e}", exc_info=True)
+                self.active_tasks[task_id]['status'] = 'failed'
+                self.active_tasks[task_id]['error'] = str(e)
+                self.active_tasks[task_id]['completed_at'] = datetime.now().isoformat()
+
+                # Broadcast failure
+                await self._broadcast_to_websockets({
+                    'type': 'task_failed',
+                    'task_id': task_id,
+                    'error': str(e)
+                })
+
+        asyncio.create_task(execute_task())
+
+        return web.json_response({
+            'status': 'success',
+            'task_id': task_id,
+            'message': 'Task started'
+        })
+
     async def handle_execute(self, request: web.Request) -> web.Response:
         """Execute a Rev task"""
         try:
@@ -100,57 +272,7 @@ class RevAPIServer:
             task = data.get('task', '')
             task_id = data.get('task_id', f"task_{len(self.active_tasks)}")
 
-            if not task:
-                return web.json_response(
-                    {'status': 'error', 'message': 'No task specified'},
-                    status=400
-                )
-
-            orchestrator = await self._get_orchestrator()
-
-            # Store task info
-            self.active_tasks[task_id] = {
-                'id': task_id,
-                'task': task,
-                'status': 'running',
-                'started_at': datetime.now().isoformat(),
-                'result': None
-            }
-
-            # Execute task asynchronously
-            async def execute_task():
-                try:
-                    result = await asyncio.to_thread(orchestrator.execute, task)
-                    self.active_tasks[task_id]['status'] = 'completed'
-                    self.active_tasks[task_id]['result'] = result
-                    self.active_tasks[task_id]['completed_at'] = datetime.now().isoformat()
-
-                    # Broadcast completion
-                    await self._broadcast_to_websockets({
-                        'type': 'task_completed',
-                        'task_id': task_id,
-                        'result': result
-                    })
-                except Exception as e:
-                    logger.error(f"Error executing task {task_id}: {e}", exc_info=True)
-                    self.active_tasks[task_id]['status'] = 'failed'
-                    self.active_tasks[task_id]['error'] = str(e)
-                    self.active_tasks[task_id]['completed_at'] = datetime.now().isoformat()
-
-                    # Broadcast failure
-                    await self._broadcast_to_websockets({
-                        'type': 'task_failed',
-                        'task_id': task_id,
-                        'error': str(e)
-                    })
-
-            asyncio.create_task(execute_task())
-
-            return web.json_response({
-                'status': 'success',
-                'task_id': task_id,
-                'message': 'Task started'
-            })
+            return await self._submit_task(task, task_id)
 
         except Exception as e:
             logger.error(f"Error handling execute request: {e}", exc_info=True)
@@ -172,17 +294,7 @@ class RevAPIServer:
                 )
 
             task = f"Analyze the code in {file_path} for potential issues, improvements, and best practices"
-            return await self.handle_execute(
-                web.Request(
-                    message=request._message,
-                    payload=web.StreamReader(None),
-                    protocol=request.protocol,
-                    payload_writer=request._payload_writer,
-                    task=request.task,
-                    loop=request.loop,
-                    client_max_size=request._client_max_size
-                )
-            )
+            return await self._submit_task(task)
 
         except Exception as e:
             logger.error(f"Error handling analyze request: {e}", exc_info=True)
@@ -204,13 +316,7 @@ class RevAPIServer:
                 )
 
             task = f"Generate comprehensive tests for {file_path}"
-
-            # Create new request with task
-            request_data = {'task': task}
-            new_request = request.clone()
-            new_request._read_bytes = json.dumps(request_data).encode()
-
-            return await self.handle_execute(new_request)
+            return await self._submit_task(task)
 
         except Exception as e:
             logger.error(f"Error handling test request: {e}", exc_info=True)
@@ -237,11 +343,7 @@ class RevAPIServer:
             if start_line and end_line:
                 task += f" (lines {start_line}-{end_line})"
 
-            request_data = {'task': task}
-            new_request = request.clone()
-            new_request._read_bytes = json.dumps(request_data).encode()
-
-            return await self.handle_execute(new_request)
+            return await self._submit_task(task)
 
         except Exception as e:
             logger.error(f"Error handling refactor request: {e}", exc_info=True)
@@ -267,11 +369,7 @@ class RevAPIServer:
             if error_message:
                 task += f". Error: {error_message}"
 
-            request_data = {'task': task}
-            new_request = request.clone()
-            new_request._read_bytes = json.dumps(request_data).encode()
-
-            return await self.handle_execute(new_request)
+            return await self._submit_task(task)
 
         except Exception as e:
             logger.error(f"Error handling debug request: {e}", exc_info=True)
@@ -298,11 +396,7 @@ class RevAPIServer:
             if start_line and end_line:
                 task += f" (lines {start_line}-{end_line})"
 
-            request_data = {'task': task}
-            new_request = request.clone()
-            new_request._read_bytes = json.dumps(request_data).encode()
-
-            return await self.handle_execute(new_request)
+            return await self._submit_task(task)
 
         except Exception as e:
             logger.error(f"Error handling document request: {e}", exc_info=True)

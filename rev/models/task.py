@@ -575,8 +575,8 @@ class ExecutionPlan:
         """
         steps = []
         
-        from rev.execution.quick_verify import _detect_project_type
-        project_type = _detect_project_type(config.ROOT)
+        from rev.tools.project_types import detect_project_type
+        project_type = detect_project_type(config.ROOT)
         
         test_cmd = "pytest / npm test"
         if project_type == "python":

@@ -1,4 +1,5 @@
 import asyncio
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,9 +21,13 @@ def test_api_server_get_orchestrator_uses_project_root(monkeypatch) -> None:
     class DummyApp:
         def __init__(self):
             self.router = DummyRouter()
+            self.on_startup = []
+            self.on_cleanup = []
 
     monkeypatch.setattr(api_mod, "AIOHTTP_AVAILABLE", True)
     monkeypatch.setattr(api_mod, "web", SimpleNamespace(Application=DummyApp))
+    monkeypatch.setattr(api_mod.rev_config, "EXECUTION_MODE", "linear")
+    monkeypatch.setenv("REV_EXECUTION_MODE", "linear")
 
     captured = {}
 
@@ -38,6 +43,9 @@ def test_api_server_get_orchestrator_uses_project_root(monkeypatch) -> None:
 
     assert isinstance(orchestrator, DummyOrchestrator)
     assert captured["project_root"] == Path.cwd()
+    assert captured["config"].context_guard_interactive is False
+    assert api_mod.rev_config.EXECUTION_MODE == "sub-agent"
+    assert os.environ["REV_EXECUTION_MODE"] == "sub-agent"
 
 
 def test_lsp_server_get_orchestrator_uses_project_root(monkeypatch) -> None:
@@ -48,6 +56,8 @@ def test_lsp_server_get_orchestrator_uses_project_root(monkeypatch) -> None:
     monkeypatch.setattr(lsp_mod, "LSP_AVAILABLE", True)
     monkeypatch.setattr(lsp_mod, "LanguageServer", DummyLanguageServer)
     monkeypatch.setattr(lsp_mod.RevLSPServer, "_setup_handlers", lambda self: None)
+    monkeypatch.setattr(lsp_mod.rev_config, "EXECUTION_MODE", "linear")
+    monkeypatch.setenv("REV_EXECUTION_MODE", "linear")
 
     captured = {}
 
@@ -63,3 +73,6 @@ def test_lsp_server_get_orchestrator_uses_project_root(monkeypatch) -> None:
 
     assert isinstance(orchestrator, DummyOrchestrator)
     assert captured["project_root"] == Path.cwd()
+    assert captured["config"].context_guard_interactive is False
+    assert lsp_mod.rev_config.EXECUTION_MODE == "sub-agent"
+    assert os.environ["REV_EXECUTION_MODE"] == "sub-agent"
