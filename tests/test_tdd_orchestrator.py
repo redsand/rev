@@ -2,12 +2,14 @@ from rev import config
 from rev.core.context import RevContext
 from rev.execution.orchestrator import Orchestrator, OrchestratorConfig
 from rev.execution.quick_verify import VerificationResult
-from rev.models.task import TaskStatus
+from rev.models.task import Task, TaskStatus
 
 
 def test_orchestrator_forces_test_after_tdd(monkeypatch) -> None:
     monkeypatch.setattr(config, "EXECUTION_MODE", "sub-agent")
     monkeypatch.setattr(config, "UCCT_ENABLED", False)
+    monkeypatch.setattr(config, "TDD_ENABLED", True)
+    monkeypatch.setattr(config, "TDD_DEFER_TEST_EXECUTION", True)
 
     orch_config = OrchestratorConfig(
         enable_research=False,
@@ -47,3 +49,47 @@ def test_orchestrator_forces_test_after_tdd(monkeypatch) -> None:
 
     assert orchestrator._continuous_sub_agent_execution("tdd flow", coding_mode=True) is True
     assert any(task.action_type == "test" for task in executed)
+
+
+def test_orchestrator_defers_test_before_implementation(monkeypatch) -> None:
+    monkeypatch.setattr(config, "EXECUTION_MODE", "sub-agent")
+    monkeypatch.setattr(config, "UCCT_ENABLED", False)
+    monkeypatch.setattr(config, "TDD_ENABLED", True)
+    monkeypatch.setattr(config, "TDD_DEFER_TEST_EXECUTION", True)
+
+    orch_config = OrchestratorConfig(
+        enable_research=False,
+        enable_review=False,
+        enable_validation=False,
+        enable_learning=False,
+        enable_prompt_optimization=False,
+        enable_context_guard=False,
+    )
+
+    orchestrator = Orchestrator(project_root=config.ROOT, config=orch_config)
+    orchestrator.context = RevContext(user_request="tdd flow")
+    orchestrator.context.work_history = ["[COMPLETED] initial workspace examination"]
+    orchestrator.context.load_history = lambda: ["[COMPLETED] initial workspace examination"]
+    orchestrator.context.agent_state["tdd_pending_green"] = True
+
+    tasks = [Task(description="Run tests for new feature", action_type="test"), None]
+
+    def fake_determine_next_action(*_args, **_kwargs):
+        return tasks.pop(0)
+
+    dispatched = []
+
+    def fake_dispatch(context, task=None):
+        if task is None:
+            return False
+        dispatched.append(task)
+        task.status = TaskStatus.COMPLETED
+        return True
+
+    monkeypatch.setattr(orchestrator, "_determine_next_action", fake_determine_next_action)
+    monkeypatch.setattr(orchestrator, "_dispatch_to_sub_agents", fake_dispatch)
+    monkeypatch.setattr("rev.execution.orchestrator.verify_task_execution", lambda *args, **kwargs: VerificationResult(passed=True, message="ok", details={}))
+
+    assert orchestrator._continuous_sub_agent_execution("tdd flow", coding_mode=True) is True
+    assert all(task.action_type != "test" for task in dispatched)
+    assert orchestrator.context.agent_state.get("tdd_deferred_test") is True

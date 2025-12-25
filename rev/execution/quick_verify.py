@@ -231,7 +231,7 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
     verification_mode = _get_verification_mode()
     test_only_change = False
     non_test_change = False
-    if action_type in {"add", "create", "edit", "refactor"}:
+    if config.TDD_ENABLED and action_type in {"add", "create", "edit", "refactor"}:
         test_only_change = _task_changes_tests_only(task)
         non_test_change = _task_changes_non_tests(task)
 
@@ -276,7 +276,7 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
         )
 
     # TDD: allow "red" test failures before implementation.
-    if action_type == "test":
+    if config.TDD_ENABLED and action_type == "test":
         if (
             not result.passed
             and context.agent_state.get("tdd_pending_green")
@@ -299,7 +299,7 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
                 task, result.details, getattr(task, "tool_events", None)
             )
             if isinstance(validation_outcome, VerificationResult):
-                if test_only_change and _is_test_failure(validation_outcome):
+                if config.TDD_ENABLED and test_only_change and _is_test_failure(validation_outcome):
                     return _apply_tdd_red_override(
                         validation_outcome,
                         context,
@@ -314,7 +314,7 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
             )
             strict_outcome = _maybe_run_strict_verification(action_type, strict_paths, mode=verification_mode, task=task)
             if isinstance(strict_outcome, VerificationResult):
-                if test_only_change and _is_test_failure(strict_outcome):
+                if config.TDD_ENABLED and test_only_change and _is_test_failure(strict_outcome):
                     return _apply_tdd_red_override(
                         strict_outcome,
                         context,
@@ -324,7 +324,7 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
             if strict_outcome:
                 result.details["strict"] = strict_outcome
 
-    if action_type in {"add", "create", "edit", "refactor"} and result.passed:
+    if config.TDD_ENABLED and action_type in {"add", "create", "edit", "refactor"} and result.passed:
         if test_only_change:
             context.agent_state["tdd_pending_green"] = True
         if non_test_change and context.agent_state.get("tdd_pending_green"):

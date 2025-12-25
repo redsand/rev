@@ -5,6 +5,7 @@ from rev.core.context import RevContext
 from rev.execution import quick_verify
 from rev.execution.quick_verify import VerificationResult
 from rev.models.task import Task, TaskStatus
+from rev import config
 
 
 def _make_root(name: str) -> Path:
@@ -14,6 +15,7 @@ def _make_root(name: str) -> Path:
 
 
 def test_test_only_change_allows_tdd_red(monkeypatch) -> None:
+    monkeypatch.setattr(config, "TDD_ENABLED", True)
     root = _make_root("red")
     test_dir = root / "tests"
     test_dir.mkdir()
@@ -43,6 +45,7 @@ def test_test_only_change_allows_tdd_red(monkeypatch) -> None:
 
 
 def test_non_test_change_sets_tdd_require_test(monkeypatch) -> None:
+    monkeypatch.setattr(config, "TDD_ENABLED", True)
     root = _make_root("green")
     src_dir = root / "src"
     src_dir.mkdir()
@@ -65,6 +68,7 @@ def test_non_test_change_sets_tdd_require_test(monkeypatch) -> None:
 
 
 def test_test_task_failure_allowed_in_tdd_red(monkeypatch) -> None:
+    monkeypatch.setattr(config, "TDD_ENABLED", True)
     task = Task(description="Run tests", action_type="test")
     task.status = TaskStatus.COMPLETED
 
@@ -83,6 +87,7 @@ def test_test_task_failure_allowed_in_tdd_red(monkeypatch) -> None:
 
 
 def test_test_task_pass_clears_tdd_require_test(monkeypatch) -> None:
+    monkeypatch.setattr(config, "TDD_ENABLED", True)
     task = Task(description="Run tests", action_type="test")
     task.status = TaskStatus.COMPLETED
 

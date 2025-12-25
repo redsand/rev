@@ -2296,7 +2296,11 @@ class Orchestrator:
                 # self.context.add_error(f"Resource budget exceeded: {exceeded_str}")
                 # return False
 
-            if not forced_next_task and self.context.agent_state.get("tdd_require_test"):
+            if (
+                not forced_next_task
+                and config.TDD_ENABLED
+                and self.context.agent_state.get("tdd_require_test")
+            ):
                 forced_next_task = Task(
                     description="Run the test suite to verify the new feature (TDD green must pass).",
                     action_type="test",
@@ -2808,11 +2812,38 @@ class Orchestrator:
                     pass
 
             # STEP 2: EXECUTE
-            execution_success = self._dispatch_to_sub_agents(self.context, next_task)
+            execution_success = False
+            verification_result = None
+            deferred_tdd_test = False
+            action_type_normalized = (next_task.action_type or "").strip().lower()
+            if (
+                config.TDD_ENABLED
+                and config.TDD_DEFER_TEST_EXECUTION
+                and action_type_normalized == "test"
+                and self.context.agent_state.get("tdd_pending_green")
+                and not self.context.agent_state.get("tdd_require_test")
+            ):
+                deferred_tdd_test = True
+                self.context.agent_state["tdd_deferred_test"] = True
+                next_task.status = TaskStatus.COMPLETED
+                next_task.result = json.dumps(
+                    {
+                        "skipped": True,
+                        "kind": "tdd_deferred_test",
+                        "reason": "Tests deferred until implementation is completed.",
+                    }
+                )
+                verification_result = VerificationResult(
+                    passed=True,
+                    message="TDD: deferred test execution until implementation.",
+                    details={"tdd_deferred": True},
+                )
+                execution_success = True
+            else:
+                execution_success = self._dispatch_to_sub_agents(self.context, next_task)
 
             # STEP 3: VERIFY - This is the critical addition
-            verification_result = None
-            if execution_success:
+            if execution_success and not deferred_tdd_test:
                 # Only verify actions we have a handler for; otherwise skip verification noise.
                 verifiable_actions = {
                     "refactor",
@@ -3004,7 +3035,6 @@ class Orchestrator:
                             raw_result = ev.get("raw_result")
                             if isinstance(raw_result, str):
                                 try:
-                                    import json
                                     payload = json.loads(raw_result)
                                     if isinstance(payload, dict):
                                         # Check if no actual changes were made
