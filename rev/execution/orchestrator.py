@@ -2296,6 +2296,12 @@ class Orchestrator:
                 # self.context.add_error(f"Resource budget exceeded: {exceeded_str}")
                 # return False
 
+            if not forced_next_task and self.context.agent_state.get("tdd_require_test"):
+                forced_next_task = Task(
+                    description="Run the test suite to verify the new feature (TDD green must pass).",
+                    action_type="test",
+                )
+
             if not forced_next_task:
                 diagnostic_task = _pop_diagnostic_task(self.context)
                 if diagnostic_task:
