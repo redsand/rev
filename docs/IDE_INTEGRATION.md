@@ -742,6 +742,6 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md) for details.
 
 ## Support
 
-- GitHub Issues: https://github.com/yourusername/rev/issues
-- Documentation: https://github.com/yourusername/rev/docs
-- Discussions: https://github.com/yourusername/rev/discussions
+- GitHub Issues: https://github.com/redsand/rev/issues
+- Documentation: https://github.com/redsand/rev/blob/main/docs
+- Repository: https://github.com/redsand/rev
