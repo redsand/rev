@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from rev.core.context import RevContext
@@ -15,6 +16,62 @@ from rev import config
 
 
 _BUILDER: ContextBuilder | None = None
+
+_PATH_STRIP_CHARS = "\"'`.,;:)]}>"
+
+
+def _extract_target_paths(description: str) -> List[str]:
+    if not description:
+        return []
+    patterns = [
+        r'`([^`]+)`',
+        r'"([^"]+)"',
+        r"'([^']+)'",
+        r'\b([A-Za-z]:\\[^\s]+)\b',
+        r'\b(/[^\s]+)\b',
+        r'\b([A-Za-z0-9_./\\-]+\.[A-Za-z0-9]{1,8})\b',
+        r'\b(\.[A-Za-z0-9_.-]+)\b',
+    ]
+    candidates: List[str] = []
+    for pattern in patterns:
+        for match in re.findall(pattern, description):
+            if not match:
+                continue
+            token = str(match).strip(_PATH_STRIP_CHARS)
+            if not token:
+                continue
+            if " " in token:
+                continue
+            candidates.append(token)
+    # Deduplicate while preserving order
+    seen = set()
+    deduped: List[str] = []
+    for token in candidates:
+        if token in seen:
+            continue
+        seen.add(token)
+        deduped.append(token)
+    return deduped
+
+
+def _resolve_existing_paths(root: Path, paths: Iterable[str]) -> List[Path]:
+    resolved: List[Path] = []
+    seen: set[str] = set()
+    for raw in paths:
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = root / raw
+        if not candidate.exists() or not candidate.is_file():
+            continue
+        try:
+            key = str(candidate.resolve())
+        except Exception:
+            key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved.append(candidate)
+    return resolved
 
 
 def get_context_builder(root: Optional[Path] = None) -> ContextBuilder:
@@ -86,14 +143,27 @@ def build_context_and_tools(
 
     builder = get_context_builder()
     query = f"{context.user_request}\n\n{task.action_type}: {task.description}".strip()
+    target_paths = _resolve_existing_paths(builder.root, _extract_target_paths(task.description or ""))
 
-    bundle = builder.build(
-        query=query,
-        tool_universe=tool_universe,
-        tool_candidates=candidate_tool_names,
-        top_k_tools=max_tools,
-        memory_items=_collect_memory_items(context),
-    )
+    if target_paths:
+        config_paths = builder.discover_config_files(target_paths)
+        bundle = builder.build_minimal(
+            query=query,
+            tool_universe=tool_universe,
+            tool_candidates=candidate_tool_names,
+            target_paths=target_paths,
+            config_paths=config_paths,
+            top_k_tools=max_tools,
+            memory_items=_collect_memory_items(context),
+        )
+    else:
+        bundle = builder.build(
+            query=query,
+            tool_universe=tool_universe,
+            tool_candidates=candidate_tool_names,
+            top_k_tools=max_tools,
+            memory_items=_collect_memory_items(context),
+        )
 
     rendered = builder.render(bundle)
     selected_tool_schemas = [t.schema for t in bundle.selected_tool_schemas]

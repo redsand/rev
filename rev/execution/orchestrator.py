@@ -570,7 +570,7 @@ def _queue_diagnostic_tasks(context: RevContext, tasks: list[Task]) -> Optional[
     queue = context.agent_state.get("diagnostic_queue")
     if not isinstance(queue, list):
         queue = []
-    for task in tasks:
+    for task in tasks[1:]:
         queue.append({"description": task.description, "action_type": task.action_type})
     context.agent_state["diagnostic_queue"] = queue
     return tasks[0] if tasks else None
@@ -2296,6 +2296,11 @@ class Orchestrator:
                 # self.context.add_error(f"Resource budget exceeded: {exceeded_str}")
                 # return False
 
+            if not forced_next_task:
+                diagnostic_task = _pop_diagnostic_task(self.context)
+                if diagnostic_task:
+                    forced_next_task = diagnostic_task
+
             if forced_next_task:
                 next_task = forced_next_task
                 forced_next_task = None
@@ -2887,6 +2892,18 @@ class Orchestrator:
                     failure_sig = f"{(next_task.action_type or '').lower()}::{first_line}"
                     failure_counts[failure_sig] += 1
 
+                    if failure_counts[failure_sig] == 2:
+                        diag_key = f"diagnostic::{failure_sig}"
+                        already_injected = self.context.agent_state.get(diag_key, False)
+                        if not already_injected:
+                            diagnostic_tasks = _build_diagnostic_tasks_for_failure(next_task, verification_result)
+                            injected = _queue_diagnostic_tasks(self.context, diagnostic_tasks)
+                            if injected:
+                                self.context.agent_state[diag_key] = True
+                                forced_next_task = injected
+                                iteration -= 1
+                                continue
+
                     # Track syntax repair attempts separately
                     syntax_repair_key = f"syntax_repair::{failure_sig}"
                     syntax_repair_attempts = self.context.agent_state.get(syntax_repair_key, 0)
@@ -2925,10 +2942,17 @@ class Orchestrator:
                             else:
                                 print(f"  {colorize(Symbols.CROSS, Colors.BRIGHT_RED)} {colorize('Auto-revert failed. Manual intervention required.', Colors.BRIGHT_RED)}")
 
-                        # Non-syntax errors or revert failed - use original circuit breaker
+                        # Non-syntax errors or revert failed - use summary fast-exit
+                        summary = _summarize_repeated_failure(
+                            next_task,
+                            verification_result,
+                            failure_sig,
+                            failure_counts[failure_sig],
+                        )
                         self.context.set_agent_state("no_retry", True)
-                        self.context.add_error("Circuit breaker: repeating verification failure")
+                        self.context.add_error(summary)
                         print(f"  {colorize(Symbols.CROSS, Colors.BRIGHT_RED)} {colorize('Circuit Breaker: repeated failure ' + str(failure_counts[failure_sig]) + 'x. Stopping loop.', Colors.BRIGHT_RED)}")
+                        print(f"  {colorize(Symbols.INFO, Colors.BRIGHT_BLUE)} {summary}")
                         return False
 
                     # Try to decompose the failed task into more granular steps.

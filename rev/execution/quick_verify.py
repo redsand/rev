@@ -61,6 +61,7 @@ _TEST_FILE_EXTENSIONS = {
 }
 _TEST_DIR_TOKENS = {"test", "tests", "spec", "specs", "__tests__", "__specs__"}
 _INSTALL_GUARD_STATE: Dict[Tuple[str, str], Dict[str, Any]] = {}
+_TEST_FILE_DISCOVERY_LIMIT = 12
 
 
 def _extract_tool_noop(tool: str, raw_result: Any) -> Optional[str]:
@@ -1407,6 +1408,48 @@ def _output_indicates_no_tests(stdout: str, stderr: str) -> bool:
     return any(pat in combined for pat in patterns)
 
 
+def _looks_like_test_file(path: Path) -> bool:
+    name = path.name.lower()
+    suffix = path.suffix.lower()
+    if suffix not in _TEST_FILE_EXTENSIONS:
+        return False
+    if "test" in name or "spec" in name:
+        return True
+    if name.startswith("test_") or name.endswith("_test" + suffix):
+        return True
+    return False
+
+
+def _discover_test_files(root: Path, limit: int = _TEST_FILE_DISCOVERY_LIMIT) -> list[str]:
+    candidates: list[str] = []
+    roots: list[Path] = []
+    for token in _TEST_DIR_TOKENS:
+        candidate = root / token
+        if candidate.exists() and candidate.is_dir():
+            roots.append(candidate)
+    if not roots:
+        roots = [root]
+
+    max_depth = 5
+    for base in roots:
+        for dirpath, dirnames, filenames in os.walk(base):
+            rel = Path(dirpath).relative_to(root)
+            if any(part in config.EXCLUDE_DIRS for part in rel.parts):
+                dirnames[:] = []
+                continue
+            if len(rel.parts) > max_depth:
+                dirnames[:] = []
+                continue
+            for filename in filenames:
+                path = Path(dirpath) / filename
+                if _looks_like_test_file(path):
+                    rel_path = path.relative_to(root)
+                    candidates.append(rel_path.as_posix())
+                    if len(candidates) >= limit:
+                        return candidates
+    return candidates
+
+
 def _normalized_tokens(cmd_parts: list[str]) -> list[str]:
     tokens: list[str] = []
     for part in cmd_parts:
@@ -1774,6 +1817,13 @@ def _append_test_paths(cmd_parts: list[str], test_paths: list[str]) -> Optional[
 
 def _attempt_no_tests_fallback(cmd_parts: list[str], stdout: str, stderr: str, cwd: Optional[Path | str]) -> Optional[list[str]]:
     test_paths = _extract_test_paths_from_cmd(cmd_parts)
+    if not test_paths:
+        root = Path(cwd) if cwd else config.ROOT
+        try:
+            root = root.resolve()
+        except Exception:
+            root = Path.cwd().resolve()
+        test_paths = _discover_test_files(root)
     if not test_paths:
         return None
     runner = _detect_test_runner(cmd_parts, stdout, stderr)
