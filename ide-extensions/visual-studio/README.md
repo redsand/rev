@@ -16,7 +16,6 @@ Integrate Rev autonomous AI development system with Visual Studio 2022.
 - Visual Studio 2022 (Community, Professional, or Enterprise)
 - .NET Framework 4.7.2 or higher
 - Python 3.8+ with Rev installed
-- Rev API server running
 
 ## Installation
 
@@ -35,15 +34,14 @@ Integrate Rev autonomous AI development system with Visual Studio 2022.
 
 ## Setup
 
-1. Install Rev and dependencies:
+1. **Install Rev:**
    ```bash
-   pip install -e /path/to/rev
-   pip install aiohttp requests
+   pip install rev-agentic
    ```
 
-2. Start the Rev API server:
+2. **Start the Rev API server:**
    ```bash
-   python -m rev.ide.api_server
+   rev --ide-api
    ```
 
 ## Usage
@@ -142,9 +140,10 @@ visual-studio/
 - Check Output window for errors
 
 ### API Server Not Responding
-- Ensure Rev API server is running: `python -m rev.ide.api_server`
-- Verify API URL in Tools → Options → Rev
+- Start Rev API server: `rev --ide-api`
+- Verify API URL in Tools → Options → Rev (default: http://127.0.0.1:8765)
 - Check firewall settings
+- Ensure Rev is installed: `pip install rev-agentic`
 
 ### Commands Not Appearing
 - Rebuild extension

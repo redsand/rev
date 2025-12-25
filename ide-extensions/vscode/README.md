@@ -9,31 +9,35 @@ Integrate Rev autonomous AI development system with Visual Studio Code.
 - **Code Refactoring**: Improve code quality and maintainability
 - **Debugging**: Fix bugs and errors automatically
 - **Documentation**: Add comprehensive documentation to code
+- **Model Selection**: Choose from available AI models (Ollama, GPT-4, Claude, etc.)
 - **Custom Tasks**: Execute any Rev task from VSCode
 
 ## Installation
 
-1. Install the extension from VSCode Marketplace or manually:
+1. **Install Rev:**
+   ```bash
+   pip install rev-agentic
+   ```
+
+2. **Install VSCode Extension:**
    ```bash
    cd ide-extensions/vscode
    npm install
-   code --install-extension rev-vscode-0.1.0.vsix
+   code --install-extension rev-vscode-*.vsix
    ```
 
-2. Install Rev dependencies:
-   ```bash
-   pip install pygls aiohttp requests
-   ```
+   Or install from VSCode Marketplace (when published)
 
 ## Usage
 
 ### Quick Start
 
-1. Start the Rev API server:
-   - Open Command Palette (`Ctrl+Shift+P` or `Cmd+Shift+P`)
-   - Run `Rev: Start API Server`
+1. **Start the Rev API server:**
+   ```bash
+   rev --ide-api
+   ```
 
-2. Use Rev commands:
+2. **Use Rev commands:**
    - Right-click in editor → Select Rev command
    - Use Command Palette → Search for "Rev:"
    - Use keyboard shortcuts (see below)
@@ -48,8 +52,8 @@ Integrate Rev autonomous AI development system with Visual Studio Code.
 | `Rev: Debug Code` | Debug and fix issues | - |
 | `Rev: Add Documentation` | Add documentation | - |
 | `Rev: Execute Custom Task` | Execute any Rev task | - |
-| `Rev: Start LSP Server` | Start LSP server (optional) | - |
-| `Rev: Start API Server` | Start API server | - |
+| `Rev: Select Model` | Choose AI model | - |
+| `Rev: Show Current Model` | View active model | - |
 
 ### Context Menu
 
@@ -78,16 +82,14 @@ Configure Rev in VSCode settings:
 
 ### Manual Server Start
 
-If auto-start is disabled, start servers manually:
+Start the Rev API server in a terminal:
 
-**API Server:**
 ```bash
-python -m rev.ide.api_server
-```
+# Start API server (default: http://127.0.0.1:8765)
+rev --ide-api
 
-**LSP Server (optional):**
-```bash
-python -m rev.ide.lsp_server
+# Or with custom port
+rev --ide-api --ide-api-port 9000
 ```
 
 ## Examples
@@ -116,21 +118,15 @@ python -m rev.ide.lsp_server
 
 - VSCode 1.75.0 or higher
 - Python 3.8+
-- Rev installed (`pip install -e .` from Rev directory)
-- Optional: `pygls` for LSP support
-- Optional: `aiohttp` for API server
+- Rev installed: `pip install rev-agentic`
 
 ## Troubleshooting
 
 ### API Server Not Responding
-- Check if Rev API server is running
-- Verify `rev.apiUrl` in settings
+- Start Rev API server: `rev --ide-api`
+- Verify `rev.apiUrl` in settings (default: http://127.0.0.1:8765)
 - Check Rev output panel for errors
-
-### LSP Not Working
-- Ensure `pygls` is installed: `pip install pygls`
-- Start LSP server manually: `python -m rev.ide.lsp_server`
-- Check `rev.lspHost` and `rev.lspPort` settings
+- Ensure Rev is installed: `pip install rev-agentic`
 
 ### Commands Not Appearing
 - Reload VSCode window

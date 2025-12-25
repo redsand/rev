@@ -88,39 +88,39 @@ Rev IDE integration uses a multi-layered architecture:
 
 ## Quick Start
 
-### 1. Install Dependencies
+### 1. Install Rev
 
 ```bash
-# Install Rev
-cd /path/to/rev
-pip install -e .
-
-# Install IDE integration dependencies
-pip install pygls aiohttp requests
+# Install Rev with all features
+pip install rev-agentic
 ```
 
-### 2. Start Servers
+That's it! All IDE integration features are included.
 
-**Option A: Start Both Servers**
+### 2. Start IDE Servers
+
+**Start API Server (HTTP/WebSocket):**
 ```bash
-# Terminal 1: Start API server
-python -m rev.ide.api_server
-
-# Terminal 2: Start LSP server (optional)
-python -m rev.ide.lsp_server
+rev --ide-api
 ```
 
-**Option B: Start via Python**
-```python
-from rev.ide import RevAPIServer, RevLSPServer
+**Start LSP Server (for universal IDE support):**
+```bash
+rev --ide-lsp
+```
 
-# Start API server
-api_server = RevAPIServer()
-api_server.start()  # Runs on http://127.0.0.1:8765
+**Or use stdio mode for LSP (direct IDE integration):**
+```bash
+rev --ide-lsp --ide-lsp-stdio
+```
 
-# Or start LSP server
-lsp_server = RevLSPServer()
-lsp_server.start_io()  # For stdio communication
+**Custom host/port:**
+```bash
+# API server on custom port
+rev --ide-api --ide-api-port 9000
+
+# LSP server on custom host
+rev --ide-lsp --ide-lsp-host 0.0.0.0 --ide-lsp-port 3000
 ```
 
 ### 3. Install IDE Extension
@@ -137,13 +137,19 @@ code --install-extension rev-vscode-0.1.0.vsix
 
 ## Installation
 
+### Prerequisites
+
+```bash
+# Install Rev with all IDE features included
+pip install rev-agentic
+```
+
 ### VSCode Extension
 
 1. **Install from VSIX:**
    ```bash
    cd ide-extensions/vscode
    npm install
-   npm run package  # Creates .vsix file
    code --install-extension rev-vscode-*.vsix
    ```
 
@@ -153,13 +159,17 @@ code --install-extension rev-vscode-0.1.0.vsix
    - Search for "Rev"
    - Click Install
 
-3. **Configure settings** (Ctrl+,):
+3. **Start Rev API Server:**
+   ```bash
+   rev --ide-api
+   ```
+
+4. **Configure settings** (Ctrl+,):
    ```json
    {
      "rev.apiUrl": "http://127.0.0.1:8765",
-     "rev.enableLSP": true,
-     "rev.autoStartServers": false,
-     "rev.pythonPath": "python"
+     "rev.provider": "ollama",
+     "rev.defaultModel": "qwen2.5-coder:32b"
    }
    ```
 
@@ -170,21 +180,33 @@ code --install-extension rev-vscode-0.1.0.vsix
    - Double-click to install
    - Restart Visual Studio
 
-2. **Configure** (Tools → Options → Rev):
-   - Set API URL
-   - Set Python path
+2. **Start Rev API Server:**
+   ```bash
+   rev --ide-api
+   ```
+
+3. **Configure** (Tools → Options → Rev):
+   - Set API URL (default: http://127.0.0.1:8765)
    - Configure timeout
+   - Set default model
 
 ### LSP-Compatible IDEs
 
 #### Vim/Neovim with vim-lsp
 
+**Start Rev LSP Server:**
+```bash
+# In a separate terminal
+rev --ide-lsp --ide-lsp-stdio
+```
+
+**Configure vim-lsp:**
 ```vim
 " Add to .vimrc or init.vim
-if executable('python')
+if executable('rev')
   au User lsp_setup call lsp#register_server({
     \ 'name': 'rev-lsp',
-    \ 'cmd': {server_info->['python', '-m', 'rev.ide.lsp_server']},
+    \ 'cmd': {server_info->['rev', '--ide-lsp', '--ide-lsp-stdio']},
     \ 'allowlist': ['python', 'javascript', 'typescript'],
     \ })
 endif
@@ -198,7 +220,7 @@ endif
 (add-to-list 'lsp-language-id-configuration '(python-mode . "python"))
 (lsp-register-client
  (make-lsp-client :new-connection (lsp-stdio-connection
-                                   '("python" "-m" "rev.ide.lsp_server"))
+                                   '("rev" "--ide-lsp" "--ide-lsp-stdio"))
                   :major-modes '(python-mode)
                   :server-id 'rev-lsp))
 ```
@@ -211,7 +233,7 @@ endif
   "clients": {
     "rev-lsp": {
       "enabled": true,
-      "command": ["python", "-m", "rev.ide.lsp_server"],
+      "command": ["rev", "--ide-lsp", "--ide-lsp-stdio"],
       "selector": "source.python | source.js | source.ts"
     }
   }
@@ -220,33 +242,40 @@ endif
 
 ## Configuration
 
-### API Server Configuration
+### Starting IDE Servers
+
+**API Server (HTTP/WebSocket):**
+```bash
+# Default (localhost:8765)
+rev --ide-api
+
+# Custom host/port
+rev --ide-api --ide-api-host 0.0.0.0 --ide-api-port 9000
+```
+
+**LSP Server:**
+```bash
+# TCP mode (default localhost:2087)
+rev --ide-lsp
+
+# Custom host/port
+rev --ide-lsp --ide-lsp-host 0.0.0.0 --ide-lsp-port 3000
+
+# Stdio mode (for direct IDE integration)
+rev --ide-lsp --ide-lsp-stdio
+```
+
+### Programmatic Configuration
 
 ```python
-from rev.ide import RevAPIServer
+# For advanced use cases, you can still use the Python API
+from rev.ide import RevAPIServer, RevLSPServer
 from rev.config import Config
 
 # Custom configuration
 config = Config()
-server = RevAPIServer(config=config)
-
-# Start on custom host/port
-server.start(host='0.0.0.0', port=9000)
-```
-
-### LSP Server Configuration
-
-```python
-from rev.ide import RevLSPServer
-
-# Start LSP server
-lsp_server = RevLSPServer()
-
-# TCP mode (for remote IDEs)
-lsp_server.start(host='127.0.0.1', port=2087)
-
-# Or stdio mode (for local IDEs)
-lsp_server.start_io()
+api_server = RevAPIServer(config=config)
+api_server.start(host='0.0.0.0', port=9000)
 ```
 
 ### Client Configuration
@@ -472,8 +501,8 @@ client.jsonrpc_call(method: str, params: Dict = None, request_id: str = None) ->
 **Problem:** IDE extension shows "Rev API server is not responding"
 
 **Solutions:**
-- Check if API server is running: `ps aux | grep "rev.ide.api_server"`
-- Start API server: `python -m rev.ide.api_server`
+- Check if API server is running: `ps aux | grep "rev --ide-api"`
+- Start API server: `rev --ide-api`
 - Verify API URL in IDE settings matches server (default: `http://127.0.0.1:8765`)
 - Check firewall settings
 - Try accessing API directly: `curl http://127.0.0.1:8765/api/v1/tasks`
@@ -483,8 +512,8 @@ client.jsonrpc_call(method: str, params: Dict = None, request_id: str = None) ->
 **Problem:** LSP features not working in IDE
 
 **Solutions:**
-- Ensure `pygls` is installed: `pip install pygls`
-- Start LSP server: `python -m rev.ide.lsp_server`
+- Ensure Rev is installed: `pip install rev-agentic`
+- Start LSP server: `rev --ide-lsp`
 - Check LSP settings in IDE
 - Verify port 2087 is not in use
 - Check IDE LSP client configuration
@@ -526,12 +555,14 @@ client.jsonrpc_call(method: str, params: Dict = None, request_id: str = None) ->
 
 **API Server:**
 ```bash
-python -m rev.ide.api_server --log-level DEBUG
+# Enable Rev debug mode
+rev --ide-api --debug
 ```
 
 **LSP Server:**
 ```bash
-python -m rev.ide.lsp_server --log-level DEBUG
+# Enable Rev debug mode
+rev --ide-lsp --debug
 ```
 
 **VSCode Extension:**
@@ -591,7 +622,7 @@ For remote development, expose Rev API server:
 
 ```bash
 # Start on all interfaces
-python -m rev.ide.api_server --host 0.0.0.0 --port 8765
+rev --ide-api --ide-api-host 0.0.0.0 --ide-api-port 8765
 
 # Configure IDE to use remote URL
 # In IDE settings: "rev.apiUrl": "http://remote-host:8765"
