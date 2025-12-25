@@ -477,6 +477,116 @@ def _attempt_git_revert_for_syntax_errors(task: "Task") -> list[str]:
     return reverted
 
 
+def _extract_task_paths(task: Task) -> list[str]:
+    paths: list[str] = []
+    if not task:
+        return paths
+    if task.description:
+        from_desc = _extract_file_path_from_description(task.description)
+        if from_desc:
+            paths.append(from_desc)
+    if getattr(task, "tool_events", None):
+        for event in task.tool_events:
+            args = event.get("args", {})
+            if not isinstance(args, dict):
+                continue
+            for key in ("path", "file_path", "target", "source"):
+                val = args.get(key)
+                if isinstance(val, str) and val.strip():
+                    paths.append(val.strip())
+    # Deduplicate while preserving order
+    seen = set()
+    deduped = []
+    for path in paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        deduped.append(path)
+    return deduped
+
+
+def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optional[VerificationResult]) -> list[Task]:
+    targets = _extract_task_paths(task)
+    target_path = targets[0] if targets else ""
+    tasks: list[Task] = []
+
+    if target_path:
+        tasks.append(
+            Task(
+                description=(
+                    f"Use get_file_info on {target_path} to confirm the target exists and "
+                    "capture its current state."
+                ),
+                action_type="review",
+            )
+        )
+        parent = str(Path(target_path).parent) if target_path else "."
+    else:
+        parent = "."
+        tasks.append(
+            Task(
+                description="Use list_dir on . to locate the target file or directory referenced by the failed task.",
+                action_type="review",
+            )
+        )
+
+    tasks.append(
+        Task(
+            description=(
+                f"Use list_dir on {parent}/tests/** (or {parent}/test/** if none) to check test discovery. "
+                "Report which test files exist and whether the expected test path is present."
+            ),
+            action_type="review",
+        )
+    )
+
+    return tasks
+
+
+def _summarize_repeated_failure(
+    task: Task,
+    verification_result: Optional[VerificationResult],
+    failure_sig: str,
+    count: int,
+) -> str:
+    message = verification_result.message if verification_result and verification_result.message else "Unknown error"
+    tool_summary = ""
+    if getattr(task, "tool_events", None):
+        last_event = task.tool_events[-1]
+        tool_name = last_event.get("tool")
+        summary = last_event.get("summary") or ""
+        if tool_name:
+            tool_summary = f" Last tool: {tool_name}. {summary}".strip()
+    return (
+        f"Repeated failure signature '{failure_sig}' after {count} attempts. "
+        f"Last verification: {message}.{tool_summary} "
+        "Please advise on the expected behavior, correct command/path, or missing setup."
+    )
+
+
+def _queue_diagnostic_tasks(context: RevContext, tasks: list[Task]) -> Optional[Task]:
+    if not tasks:
+        return None
+    queue = context.agent_state.get("diagnostic_queue")
+    if not isinstance(queue, list):
+        queue = []
+    for task in tasks:
+        queue.append({"description": task.description, "action_type": task.action_type})
+    context.agent_state["diagnostic_queue"] = queue
+    return tasks[0] if tasks else None
+
+
+def _pop_diagnostic_task(context: RevContext) -> Optional[Task]:
+    queue = context.agent_state.get("diagnostic_queue")
+    if not isinstance(queue, list) or not queue:
+        return None
+    entry = queue.pop(0)
+    context.agent_state["diagnostic_queue"] = queue
+    if not isinstance(entry, dict):
+        return None
+    return Task(description=entry.get("description", ""), action_type=entry.get("action_type", "review"))
+
+
 def _check_goal_likely_achieved(user_request: str, completed_tasks_log: List[str]) -> bool:
     """Check if the original goal appears to have been achieved based on completed tasks.
 
@@ -1728,7 +1838,9 @@ class Orchestrator:
             "  import from the package exports (e.g., `from package import ExportedSymbol`).\n"
             "- Do NOT expand `from pkg import *` into dozens of per-module imports.\n\n"
             f"Important: Be specific about what concrete action the next task should take. "
-            f"Use [ACTION_TYPE] format like [CREATE] or [EDIT] or [REFACTOR]."
+            f"Use [ACTION_TYPE] format like [CREATE] or [EDIT] or [REFACTOR].\n"
+            "ACTIONABILITY: Include a specific tool and artifact in the description "
+            "(e.g., \"Use read_file on src/app.py\" or \"Use create_directory to create src/components\")."
         )
 
         response_data = ollama_chat([{"role": "user", "content": decomposition_prompt}])

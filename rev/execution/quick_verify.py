@@ -60,6 +60,7 @@ _TEST_FILE_EXTENSIONS = {
     ".rs", ".scala", ".swift", ".ts", ".tsx",
 }
 _TEST_DIR_TOKENS = {"test", "tests", "spec", "specs", "__tests__", "__specs__"}
+_INSTALL_GUARD_STATE: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
 
 def _extract_tool_noop(tool: str, raw_result: Any) -> Optional[str]:
@@ -1049,6 +1050,111 @@ def _repair_environment_for_runner(runner: str, args: List[str]) -> None:
         pass
 
 
+def _install_guard_key(root: Path, install_cmd: list[str]) -> tuple[str, str]:
+    try:
+        root_key = str(root.resolve())
+    except Exception:
+        root_key = str(root)
+    cmd_key = " ".join(str(part).lower() for part in install_cmd if part is not None)
+    return (root_key, cmd_key)
+
+
+def _dependency_files_for_install(install_cmd: list[str]) -> list[str]:
+    if not install_cmd:
+        return []
+    tokens = [str(part).lower() for part in install_cmd if part is not None]
+    if not tokens:
+        return []
+    base = Path(tokens[0]).name
+    if base in {"python", "python3"} and "-m" in tokens:
+        idx = tokens.index("-m")
+        if idx + 1 < len(tokens) and tokens[idx + 1] == "pip":
+            base = "pip"
+    if base in {"pip", "pip3"}:
+        return [
+            "pyproject.toml",
+            "poetry.lock",
+            "pdm.lock",
+            "Pipfile.lock",
+            "requirements.txt",
+            "requirements-dev.txt",
+            "requirements.in",
+            "setup.cfg",
+            "setup.py",
+        ]
+    if base in {"npm", "yarn", "pnpm"}:
+        return [
+            "package.json",
+            "package-lock.json",
+            "npm-shrinkwrap.json",
+            "yarn.lock",
+            "pnpm-lock.yaml",
+        ]
+    if base == "composer":
+        return ["composer.json", "composer.lock"]
+    if base in {"bundle", "bundler"}:
+        return ["Gemfile", "Gemfile.lock"]
+    if base == "cargo":
+        return ["Cargo.toml", "Cargo.lock"]
+    if base == "go":
+        return ["go.mod", "go.sum"]
+    if base in {"mvn", "mvnw"}:
+        return ["pom.xml"]
+    if base in {"gradle", "gradlew"}:
+        return ["build.gradle", "build.gradle.kts", "gradle.lockfile"]
+    if base == "dotnet":
+        return ["packages.lock.json", "Directory.Packages.props"]
+    return []
+
+
+def _lockfile_snapshot(root: Path, dependency_files: list[str]) -> tuple[tuple[str, int, int], ...]:
+    if not dependency_files:
+        return tuple()
+    entries: list[tuple[str, int, int]] = []
+    for name in dependency_files:
+        path = root / name
+        if not path.exists():
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        entries.append((name, int(stat.st_mtime_ns), int(stat.st_size)))
+    return tuple(sorted(entries))
+
+
+def _should_attempt_install(install_cmd: list[str], *, root: Optional[Path], missing_deps: bool) -> bool:
+    if not missing_deps:
+        return False
+    root_path = root or config.ROOT
+    snapshot = _lockfile_snapshot(root_path, _dependency_files_for_install(install_cmd))
+    key = _install_guard_key(root_path, install_cmd)
+    state = _INSTALL_GUARD_STATE.get(key)
+    if state:
+        if snapshot != state.get("snapshot"):
+            state["snapshot"] = snapshot
+            state["attempts"] = 0
+            return True
+        if state.get("attempts", 0) >= 1:
+            return False
+        return True
+    _INSTALL_GUARD_STATE[key] = {"snapshot": snapshot, "attempts": 0}
+    return True
+
+
+def _record_install_attempt(install_cmd: list[str], *, root: Optional[Path]) -> None:
+    root_path = root or config.ROOT
+    key = _install_guard_key(root_path, install_cmd)
+    state = _INSTALL_GUARD_STATE.get(key)
+    if not state:
+        state = {
+            "snapshot": _lockfile_snapshot(root_path, _dependency_files_for_install(install_cmd)),
+            "attempts": 0,
+        }
+        _INSTALL_GUARD_STATE[key] = state
+    state["attempts"] = int(state.get("attempts", 0)) + 1
+
+
 def _try_auto_install(base_cmd: str) -> bool:
     """Attempt to install a missing tool based on its name."""
     pkg_map = {
@@ -1060,7 +1166,11 @@ def _try_auto_install(base_cmd: str) -> bool:
 
     if base_cmd in pkg_map:
         install_cmd = pkg_map[base_cmd]
+        if not _should_attempt_install(install_cmd, root=config.ROOT, missing_deps=True):
+            print(f"  [i] Skipping auto-install for {base_cmd}: dependency state unchanged.")
+            return False
         print(f"  [i] Tool '{base_cmd}' not found, attempting auto-install: {install_cmd}...")
+        _record_install_attempt(install_cmd, root=config.ROOT)
         install_res = execute_tool("run_cmd", {"cmd": install_cmd, "timeout": 300})
         try:
             if json.loads(install_res).get("rc") == 0:
@@ -1087,6 +1197,11 @@ def _try_npm_repair(pkg: str) -> bool:
         
         if pkg in deps or pkg_name in deps:
             print(f"  [i] package '{pkg}' missing from node_modules, attempting repair...")
+            install_cmd = ["npm", "install"]
+            if not _should_attempt_install(install_cmd, root=config.ROOT, missing_deps=True):
+                print("  [i] Skipping npm install: dependency state unchanged.")
+                return False
+            _record_install_attempt(install_cmd, root=config.ROOT)
             execute_tool("run_cmd", {"cmd": ["npm", "install"], "timeout": 600})
             return (config.ROOT / "node_modules" / pkg_name).exists()
     except:

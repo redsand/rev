@@ -34,6 +34,7 @@ from pathlib import Path
 
 from rev import config
 from rev.config import ensure_escape_is_cleared, get_escape_interrupt
+from rev.tools.workspace_resolver import normalize_path
 
 
 # Security: Forbidden patterns that indicate shell injection attempts
@@ -42,6 +43,9 @@ FORBIDDEN_RE = re.compile(r"[;&|><`]|(\$\()|\r|\n")
 # Security: Forbidden tokens that should never appear in command arguments
 FORBIDDEN_TOKENS = {"&&", "||", ";", "|", "&", ">", "<", ">>", "2>", "1>", "<<",
                     "2>&1", "1>&2", "`", "$(", "${"}
+
+_PATH_TOKEN_RE = re.compile(r"[\\/]|^\.\.?[\\/]|^[A-Za-z]:[\\/]|^~[\\/]")
+_PATH_EXTENSION_RE = re.compile(r"\.[A-Za-z0-9]{1,8}$")
 
 
 def _resolve_command(cmd_name: str) -> Optional[str | List[str]]:
@@ -100,6 +104,69 @@ def _parse_and_validate(cmd: str) -> Tuple[bool, str, List[str]]:
     return True, "", args
 
 
+def _resolve_cwd(cwd: Optional[Path]) -> Path:
+    if cwd is None:
+        return config.ROOT
+    if not isinstance(cwd, Path):
+        cwd = Path(cwd)
+    if not cwd.is_absolute():
+        cwd = config.ROOT / cwd
+    return cwd.resolve(strict=False)
+
+
+def _looks_like_path_token(token: str) -> bool:
+    if not token:
+        return False
+    if token.startswith("-"):
+        return False
+    if _PATH_TOKEN_RE.search(token):
+        return True
+    if _PATH_EXTENSION_RE.search(token):
+        return True
+    return False
+
+
+def _normalize_path_value(value: str, cwd: Path) -> str:
+    raw = value.strip()
+    if not raw:
+        return value
+    if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
+        raw = raw[1:-1].strip()
+    raw = os.path.expanduser(raw)
+    normalized = normalize_path(raw)
+    path = Path(normalized.replace("/", os.sep))
+    if not path.is_absolute():
+        path = (cwd / path).resolve(strict=False)
+    try:
+        rel = path.relative_to(cwd)
+    except Exception:
+        return str(path)
+    rel_str = str(rel)
+    return rel_str if rel_str else "."
+
+
+def _normalize_command_args(args: list[str], cwd: Path) -> list[str]:
+    normalized_args: list[str] = []
+    for idx, token in enumerate(args):
+        if idx == 0:
+            normalized_args.append(token)
+            continue
+        if not isinstance(token, str):
+            normalized_args.append(str(token))
+            continue
+        if token.startswith("-") and "=" in token:
+            flag, value = token.split("=", 1)
+            if _looks_like_path_token(value):
+                value = _normalize_path_value(value, cwd)
+            normalized_args.append(f"{flag}={value}")
+            continue
+        if _looks_like_path_token(token):
+            normalized_args.append(_normalize_path_value(token, cwd))
+            continue
+        normalized_args.append(token)
+    return normalized_args
+
+
 def run_command_safe(
     cmd: str | List[str],
     *,
@@ -133,12 +200,13 @@ def run_command_safe(
     """
     if cwd is None:
         cwd = config.ROOT
+    resolved_cwd = _resolve_cwd(cwd)
 
     # Validate command before execution
     if isinstance(cmd, list):
         # Already split, validate each part
         if not cmd:
-            return {"blocked": True, "error": "empty command", "cmd": str(cmd), "rc": -1}
+            return {"blocked": True, "error": "empty command", "cmd": str(cmd), "cwd": str(resolved_cwd), "rc": -1}
         
         args = [str(arg) for arg in cmd]
         
@@ -152,6 +220,7 @@ def run_command_safe(
                 "blocked": True,
                 "error": "dangerous shell operators not allowed as standalone arguments",
                 "cmd": " ".join(args),
+                "cwd": str(resolved_cwd),
                 "rc": -1,
             }
         
@@ -163,9 +232,13 @@ def run_command_safe(
                 "blocked": True,
                 "error": error_msg,
                 "cmd": cmd,
+                "cwd": str(resolved_cwd),
                 "rc": -1,
             }
         original_cmd_str = cmd
+
+    args = _normalize_command_args(args, resolved_cwd)
+    normalized_cmd_str = " ".join(args)
 
     # Resolve command just before execution
     executable = args[0]
@@ -180,12 +253,12 @@ def run_command_safe(
     # Execute safely with shell=False
     try:
         if os.getenv("REV_DEBUG_CMD"):
-            print(f"  [DEBUG_CMD] Executing: {args} (cwd={cwd})")
+            print(f"  [DEBUG_CMD] Executing: {args} (cwd={resolved_cwd})")
             
         proc = subprocess.Popen(
             args,
             shell=False,  # CRITICAL: Never use shell=True
-            cwd=str(cwd),
+            cwd=str(resolved_cwd),
             stdout=subprocess.PIPE if capture_output else None,
             stderr=subprocess.PIPE if capture_output else None,
             text=True,
@@ -207,6 +280,8 @@ def run_command_safe(
                 return {
                     "timeout": timeout,
                     "cmd": original_cmd_str,
+                    "cmd_normalized": normalized_cmd_str,
+                    "cwd": str(resolved_cwd),
                     "rc": -1,
                     "error": f"command exceeded {timeout}s timeout",
                 }
@@ -219,6 +294,8 @@ def run_command_safe(
             "stdout": stdout_data or "",
             "stderr": stderr_data or "",
             "cmd": original_cmd_str,
+            "cmd_normalized": normalized_cmd_str,
+            "cwd": str(resolved_cwd),
             "interrupted": interrupted,
         }
 
@@ -226,12 +303,16 @@ def run_command_safe(
         return {
             "error": f"command not found: {args[0]}",
             "cmd": original_cmd_str,
+            "cmd_normalized": normalized_cmd_str,
+            "cwd": str(resolved_cwd),
             "rc": -1,
         }
     except OSError as e:
         return {
             "error": f"OS error: {e}",
             "cmd": original_cmd_str,
+            "cmd_normalized": normalized_cmd_str,
+            "cwd": str(resolved_cwd),
             "rc": -1,
         }
 
@@ -318,11 +399,12 @@ def run_command_streamed(
     """
     if cwd is None:
         cwd = config.ROOT
+    resolved_cwd = _resolve_cwd(cwd)
 
     # Validate command before execution
     if isinstance(cmd, list):
         if not cmd:
-            return {"blocked": True, "error": "empty command", "cmd": str(cmd), "rc": -1}
+            return {"blocked": True, "error": "empty command", "cmd": str(cmd), "cwd": str(resolved_cwd), "rc": -1}
         
         args = [str(arg) for arg in cmd]
         
@@ -336,6 +418,7 @@ def run_command_streamed(
                 "blocked": True,
                 "error": "dangerous shell operators not allowed as standalone arguments",
                 "cmd": " ".join(args),
+                "cwd": str(resolved_cwd),
                 "rc": -1,
             }
         
@@ -347,9 +430,13 @@ def run_command_streamed(
                 "blocked": True,
                 "error": error_msg,
                 "cmd": cmd,
+                "cwd": str(resolved_cwd),
                 "rc": -1,
             }
         original_cmd_str = cmd
+
+    args = _normalize_command_args(args, resolved_cwd)
+    normalized_cmd_str = " ".join(args)
 
     # Resolve command just before execution
     executable = args[0]
@@ -370,7 +457,7 @@ def run_command_streamed(
         proc = subprocess.Popen(
             args,
             shell=False,  # CRITICAL: Never use shell=True
-            cwd=str(cwd),
+            cwd=str(resolved_cwd),
             stdout=stdout_file,
             stderr=stderr_file,
             text=True,
@@ -437,6 +524,8 @@ def run_command_streamed(
             "stdout": stdout_data,
             "stderr": stderr_data,
             "cmd": original_cmd_str,
+            "cmd_normalized": normalized_cmd_str,
+            "cwd": str(resolved_cwd),
             "interrupted": get_escape_interrupt(),
         }
 
