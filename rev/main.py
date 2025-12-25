@@ -258,6 +258,43 @@ def main():
         action="store_true",
         help="Show rev version information and exit",
     )
+    parser.add_argument(
+        "--ide-api",
+        action="store_true",
+        help="Start IDE API server (HTTP/WebSocket server for IDE integration)",
+    )
+    parser.add_argument(
+        "--ide-lsp",
+        action="store_true",
+        help="Start IDE LSP server (Language Server Protocol for universal IDE support)",
+    )
+    parser.add_argument(
+        "--ide-api-host",
+        default="127.0.0.1",
+        help="IDE API server host (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--ide-api-port",
+        type=int,
+        default=8765,
+        help="IDE API server port (default: 8765)",
+    )
+    parser.add_argument(
+        "--ide-lsp-host",
+        default="127.0.0.1",
+        help="IDE LSP server host (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--ide-lsp-port",
+        type=int,
+        default=2087,
+        help="IDE LSP server port (default: 2087)",
+    )
+    parser.add_argument(
+        "--ide-lsp-stdio",
+        action="store_true",
+        help="Use stdio for LSP communication instead of TCP (for direct IDE integration)",
+    )
 
 
     args = parser.parse_args()
@@ -374,6 +411,63 @@ def main():
             print(f"Removed {config.REV_DIR}")
         print("Clean complete.")
         sys.exit(0)
+
+    # Handle IDE server startup
+    if args.ide_api:
+        try:
+            from .ide.api_server import RevAPIServer
+            print(f"Starting Rev IDE API server on http://{args.ide_api_host}:{args.ide_api_port}")
+            print("IDE Features:")
+            print("  - HTTP REST API for code analysis, testing, refactoring")
+            print("  - WebSocket support for real-time updates")
+            print("  - Model selection and configuration")
+            print("\nAPI Endpoints:")
+            print(f"  - http://{args.ide_api_host}:{args.ide_api_port}/api/v1/execute")
+            print(f"  - http://{args.ide_api_host}:{args.ide_api_port}/api/v1/analyze")
+            print(f"  - http://{args.ide_api_host}:{args.ide_api_port}/api/v1/models")
+            print(f"  - ws://{args.ide_api_host}:{args.ide_api_port}/ws (WebSocket)")
+            print("\nPress Ctrl+C to stop the server")
+
+            server = RevAPIServer(config=config)
+            server.start(host=args.ide_api_host, port=args.ide_api_port)
+        except ImportError as e:
+            print(f"Error: IDE API server dependencies not installed: {e}")
+            print("Install with: pip install rev-agentic")
+            sys.exit(1)
+        except KeyboardInterrupt:
+            print("\nIDE API server stopped")
+            sys.exit(0)
+
+    if args.ide_lsp:
+        try:
+            from .ide.lsp_server import RevLSPServer
+            if args.ide_lsp_stdio:
+                print("Starting Rev IDE LSP server on stdio")
+                print("LSP Features:")
+                print("  - Universal IDE support (VSCode, Vim, Emacs, Sublime, etc.)")
+                print("  - Code actions for analysis, testing, refactoring")
+                print("  - Documentation generation")
+                print("\nPress Ctrl+C to stop the server")
+
+                server = RevLSPServer(config=config)
+                server.start_io()
+            else:
+                print(f"Starting Rev IDE LSP server on {args.ide_lsp_host}:{args.ide_lsp_port}")
+                print("LSP Features:")
+                print("  - Universal IDE support (VSCode, Vim, Emacs, Sublime, etc.)")
+                print("  - Code actions for analysis, testing, refactoring")
+                print("  - Documentation generation")
+                print("\nPress Ctrl+C to stop the server")
+
+                server = RevLSPServer(config=config)
+                server.start(host=args.ide_lsp_host, port=args.ide_lsp_port)
+        except ImportError as e:
+            print(f"Error: IDE LSP server dependencies not installed: {e}")
+            print("Install with: pip install rev-agentic")
+            sys.exit(1)
+        except KeyboardInterrupt:
+            print("\nIDE LSP server stopped")
+            sys.exit(0)
 
     # Log configuration
     debug_logger.log("main", "CONFIGURATION", {

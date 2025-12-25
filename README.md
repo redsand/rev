@@ -10,6 +10,7 @@ Rev isn't just another AI coding assistant — it's a **complete agentic develop
 - **🤖 Specialized Sub-Agent Architecture** — Dedicated agents for code writing, refactoring, testing, debugging, documentation, research, and analysis
 - **✅ Workflow Verification Loop** — Plan → Execute → **Verify** → Report → Re-plan (ensures tasks actually complete)
 - **💬 Interactive REPL Mode** — Session-persistent development with real-time guidance and context retention across multiple prompts
+- **🖥️ Universal IDE Integration** — Native support for VSCode, Visual Studio, Vim, Emacs, and all LSP-compatible editors
 - **🔍 RAG (Retrieval-Augmented Generation)** — Semantic code search using TF-IDF + hybrid symbolic search for intelligent context gathering
 - **🛡️ ContextGuard/ClarityEngine** — Validates context sufficiency before planning, preventing "hallucinations" from insufficient context
 - **🧠 21 Agentic Design Patterns** — Built on proven research patterns (Goal Setting, Routing, RAG, Recovery, Resource Budgets, etc.)
@@ -299,6 +300,8 @@ cd rev
 pip install -e .
 ```
 
+**Includes:** All IDE integration features (LSP server, HTTP API, VSCode/Visual Studio extensions)
+
 ### 1. Install Ollama
 
 ```bash
@@ -405,6 +408,88 @@ rev "Generate API documentation from code comments"
 
 The orchestrator automatically routes to the appropriate agent!
 
+## 🖥️ IDE Integration
+
+Rev provides comprehensive IDE integration for VSCode, Visual Studio, and all LSP-compatible editors (Vim, Emacs, Sublime Text, JetBrains IDEs).
+
+### Quick Start
+
+```bash
+# Install Rev (all IDE features included)
+pip install rev-agentic
+
+# Start IDE API server
+rev --ide-api
+
+# Or start LSP server for universal IDE support
+rev --ide-lsp
+```
+
+### Features
+
+- **Code Analysis** - Analyze code for issues and improvements
+- **Test Generation** - Automatically generate comprehensive tests
+- **Code Refactoring** - Improve code quality and maintainability
+- **Debugging** - Fix bugs and errors with AI assistance
+- **Documentation** - Add comprehensive documentation
+- **Model Selection** - Choose from Ollama, GPT-4, Claude, etc.
+- **Custom Tasks** - Execute any Rev task from your IDE
+
+### VSCode Extension
+
+```bash
+# Install extension
+cd ide-extensions/vscode
+npm install
+code --install-extension rev-vscode-*.vsix
+
+# Start Rev API server
+rev --ide-api
+```
+
+**Commands:**
+- `Ctrl+Alt+A` - Analyze code
+- `Ctrl+Alt+T` - Generate tests
+- `Ctrl+Alt+R` - Refactor code
+- Command Palette: "Rev: Select Model"
+
+### LSP-Compatible IDEs
+
+Rev LSP server works with Vim, Neovim, Emacs, Sublime Text, and JetBrains IDEs.
+
+**Vim/Neovim:**
+```vim
+" .vimrc or init.vim
+if executable('rev')
+  au User lsp_setup call lsp#register_server({
+    \ 'name': 'rev-lsp',
+    \ 'cmd': {server_info->['rev', '--ide-lsp', '--ide-lsp-stdio']},
+    \ 'allowlist': ['python', 'javascript', 'typescript'],
+    \ })
+endif
+```
+
+**Emacs:**
+```elisp
+;; .emacs or init.el
+(lsp-register-client
+ (make-lsp-client :new-connection (lsp-stdio-connection
+                                   '("rev" "--ide-lsp" "--ide-lsp-stdio"))
+                  :major-modes '(python-mode)
+                  :server-id 'rev-lsp))
+```
+
+### CLI Arguments
+
+```bash
+rev --ide-api                    # Start HTTP API server (default: :8765)
+rev --ide-lsp                    # Start LSP server (default: :2087)
+rev --ide-lsp --ide-lsp-stdio    # LSP stdio mode
+rev --ide-api --ide-api-port 9000  # Custom port
+```
+
+**Full documentation:** [docs/IDE_INTEGRATION.md](docs/IDE_INTEGRATION.md)
+
 ## Configuration
 
 ### Environment Variables
@@ -428,12 +513,21 @@ export OLLAMA_NUM_CTX=16384             # Context window
 ```bash
 rev [OPTIONS] "task description"
 
-Options:
+Core Options:
   --repl                       Interactive REPL mode
   --model MODEL                Ollama model to use
   --base-url URL               Ollama API URL
   --execution-mode MODE        sub-agent (default) or linear
-  -h, --help                   Show help message
+
+IDE Integration:
+  --ide-api                    Start IDE API server
+  --ide-lsp                    Start IDE LSP server
+  --ide-api-port PORT          API server port (default: 8765)
+  --ide-lsp-port PORT          LSP server port (default: 2087)
+  --ide-lsp-stdio              Use stdio for LSP
+
+Other:
+  -h, --help                   Show all options
 ```
 
 ## Troubleshooting
@@ -497,10 +591,10 @@ python -m pytest tests --cov=rev --cov-report=term-missing
 
 ## Key Documents
 
-- **[docs/WORKFLOW_VERIFICATION_FIX.md](docs/WORKFLOW_VERIFICATION_FIX.md)** — New verification loop implementation
+- **[docs/IDE_INTEGRATION.md](docs/IDE_INTEGRATION.md)** — IDE integration guide (VSCode, Visual Studio, Vim, Emacs, etc.)
+- **[docs/WORKFLOW_VERIFICATION_FIX.md](docs/WORKFLOW_VERIFICATION_FIX.md)** — Verification loop implementation
 - **[docs/README.md](docs/README.md)** — Complete feature documentation
 - **[docs/IMPLEMENTATION_SUMMARY.md](docs/IMPLEMENTATION_SUMMARY.md)** — Agentic patterns reference
-- **[docs/RECOMMENDATIONS.md](docs/RECOMMENDATIONS.md)** — Future improvements
 
 ## Architecture Highlights
 
@@ -543,30 +637,32 @@ User Request → Router → Specialized Agent → Optimized Tool Calls → Verif
 ```
 .
 ├── README.md                  # Main documentation (you are here)
-├── docs/                      # All detailed documentation
-│   ├── WORKFLOW_VERIFICATION_FIX.md    # NEW: Verification implementation
+├── docs/
+│   ├── IDE_INTEGRATION.md     # IDE integration guide
+│   ├── WORKFLOW_VERIFICATION_FIX.md    # Verification implementation
 │   ├── IMPLEMENTATION_SUMMARY.md       # Agentic patterns reference
-│   ├── RECOMMENDATIONS.md              # Future improvements
-│   ├── QUICK_START_DEV.md              # Developer quick start
 │   ├── ARCHITECTURE.md                 # System architecture
-│   ├── EXECUTION_MODES.md              # Execution modes guide
 │   └── ... (40+ documentation files)
 ├── rev/                       # Main package (CLI entry: `rev`)
 │   ├── execution/
 │   │   ├── orchestrator.py    # Sub-agent coordinator (with verification)
-│   │   ├── quick_verify.py    # NEW: Task verification module
+│   │   ├── quick_verify.py    # Task verification module
 │   │   └── ...
 │   ├── agents/
-│   │   ├── base.py            # Agent base class
 │   │   ├── code_writer.py     # CodeWriterAgent
 │   │   ├── refactoring.py     # RefactoringAgent
 │   │   ├── test_executor.py   # TestExecutorAgent
 │   │   └── ...
+│   ├── ide/                   # IDE integration
+│   │   ├── lsp_server.py      # LSP server
+│   │   ├── api_server.py      # HTTP/WebSocket API
+│   │   └── client.py          # Python client library
 │   └── ...
+├── ide-extensions/
+│   ├── vscode/                # VSCode extension
+│   └── visual-studio/         # Visual Studio extension
 ├── tests/
-│   ├── test_quick_verify.py                      # Verification tests (14 tests)
-│   ├── test_refactoring_extraction_workflow.py   # Extraction tests (6 tests)
-│   ├── test_orchestrator_verification_workflow.py # Integration tests
+│   ├── test_ide_integration.py  # IDE integration tests
 │   └── ... (comprehensive test suite)
 └── requirements.txt           # Project dependencies
 ```

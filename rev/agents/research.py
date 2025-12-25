@@ -230,7 +230,7 @@ class ResearchAgent(BaseAgent):
             context,
             tool_universe=all_tools,
             candidate_tool_names=research_tool_names,
-            max_tools=7,
+            max_tools=30,  # Increased from 7 to allow more comprehensive research
         )
         available_tools = selected_tools
 

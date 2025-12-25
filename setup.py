@@ -94,6 +94,17 @@ setup(
     author="Rev Team",
     python_requires=">=3.8",
     install_requires=requirements,
+    extras_require={
+        # Development extras
+        'dev': [
+            'pytest>=7.0.0',
+            'pytest-asyncio>=0.21.0',
+            'pytest-cov>=4.0.0',
+            'black>=23.0.0',
+            'mypy>=1.0.0',
+            'pylint>=2.16.0',
+        ],
+    },
     packages=find_packages(
         exclude=["tests", "tests.*", "examples", "examples.*", "build", "build.*"]
     ),
