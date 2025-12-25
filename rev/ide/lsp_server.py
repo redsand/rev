@@ -19,30 +19,54 @@ from pathlib import Path
 
 try:
     from pygls.server import LanguageServer
-    from pygls.lsp.methods import (
-        TEXT_DOCUMENT_DID_OPEN,
-        TEXT_DOCUMENT_DID_CHANGE,
-        TEXT_DOCUMENT_DID_SAVE,
-        TEXT_DOCUMENT_CODE_ACTION,
-        TEXT_DOCUMENT_COMPLETION,
-        WORKSPACE_EXECUTE_COMMAND,
-    )
-    from pygls.lsp.types import (
-        CodeAction,
-        CodeActionKind,
-        CodeActionParams,
-        Command,
-        CompletionItem,
-        CompletionList,
-        CompletionParams,
-        DidOpenTextDocumentParams,
-        DidChangeTextDocumentParams,
-        DidSaveTextDocumentParams,
-        ExecuteCommandParams,
-        Position,
-        Range,
-        TextEdit,
-    )
+    try:
+        from lsprotocol.types import (
+            TEXT_DOCUMENT_DID_OPEN,
+            TEXT_DOCUMENT_DID_CHANGE,
+            TEXT_DOCUMENT_DID_SAVE,
+            TEXT_DOCUMENT_CODE_ACTION,
+            TEXT_DOCUMENT_COMPLETION,
+            WORKSPACE_EXECUTE_COMMAND,
+            CodeAction,
+            CodeActionKind,
+            CodeActionParams,
+            Command,
+            CompletionItem,
+            CompletionList,
+            CompletionParams,
+            DidOpenTextDocumentParams,
+            DidChangeTextDocumentParams,
+            DidSaveTextDocumentParams,
+            ExecuteCommandParams,
+            Position,
+            Range,
+            TextEdit,
+        )
+    except ImportError:
+        from pygls.lsp.methods import (
+            TEXT_DOCUMENT_DID_OPEN,
+            TEXT_DOCUMENT_DID_CHANGE,
+            TEXT_DOCUMENT_DID_SAVE,
+            TEXT_DOCUMENT_CODE_ACTION,
+            TEXT_DOCUMENT_COMPLETION,
+            WORKSPACE_EXECUTE_COMMAND,
+        )
+        from pygls.lsp.types import (
+            CodeAction,
+            CodeActionKind,
+            CodeActionParams,
+            Command,
+            CompletionItem,
+            CompletionList,
+            CompletionParams,
+            DidOpenTextDocumentParams,
+            DidChangeTextDocumentParams,
+            DidSaveTextDocumentParams,
+            ExecuteCommandParams,
+            Position,
+            Range,
+            TextEdit,
+        )
     LSP_AVAILABLE = True
 except ImportError:
     LSP_AVAILABLE = False

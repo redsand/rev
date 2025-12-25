@@ -15,6 +15,6 @@ google-generativeai
 windows-curses; platform_system == "Windows"
 
 # IDE Integration dependencies
-pygls>=1.0.0  # Language Server Protocol
-aiohttp>=3.8.0  # HTTP/WebSocket API server
-aiohttp-cors>=0.7.0  # CORS support for API server
+pygls >= 1.0.0  # Language Server Protocol
+aiohttp >= 3.8.0  # HTTP/WebSocket API server
+aiohttp-cors >= 0.7.0  # CORS support for API server
