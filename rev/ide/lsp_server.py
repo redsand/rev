@@ -17,6 +17,8 @@ import asyncio
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 
+LSP_IMPORT_ERROR: Optional[Exception] = None
+
 try:
     from pygls.server import LanguageServer
     try:
@@ -68,9 +70,10 @@ try:
             TextEdit,
         )
     LSP_AVAILABLE = True
-except ImportError:
+except Exception as exc:
     LSP_AVAILABLE = False
     LanguageServer = None
+    LSP_IMPORT_ERROR = exc
 
 from ..execution.orchestrator import Orchestrator, OrchestratorConfig
 from .. import config as rev_config
@@ -89,9 +92,12 @@ class RevLSPServer:
             config: Rev configuration object
         """
         if not LSP_AVAILABLE:
-            raise ImportError(
-                "LSP support requires 'pygls'. Install with: pip install pygls"
-            )
+            import sys
+            base_msg = "LSP support requires 'pygls' (and lsprotocol for pygls>=2). Install with: pip install pygls"
+            if LSP_IMPORT_ERROR:
+                detail = f"{type(LSP_IMPORT_ERROR).__name__}: {LSP_IMPORT_ERROR}"
+                base_msg += f" (import error: {detail}; python={sys.executable})"
+            raise ImportError(base_msg)
 
         self.config = config or rev_config
         self.server = LanguageServer('rev-lsp', 'v0.1')
