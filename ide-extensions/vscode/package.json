@@ -1,0 +1,194 @@
+{
+  "name": "rev-vscode",
+  "displayName": "Rev - AI Development Assistant",
+  "description": "Integrate Rev autonomous AI development system with VSCode",
+  "version": "0.1.0",
+  "publisher": "rev",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Machine Learning",
+    "Testing",
+    "Linters",
+    "Formatters"
+  ],
+  "keywords": [
+    "ai",
+    "automation",
+    "testing",
+    "refactoring",
+    "code-generation"
+  ],
+  "activationEvents": [
+    "onCommand:rev.analyzeCode",
+    "onCommand:rev.generateTests",
+    "onCommand:rev.refactorCode",
+    "onCommand:rev.debugCode",
+    "onCommand:rev.addDocumentation",
+    "onCommand:rev.executeTask",
+    "onCommand:rev.startLSP",
+    "onCommand:rev.startAPI",
+    "onLanguage:python",
+    "onLanguage:javascript",
+    "onLanguage:typescript"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "rev.analyzeCode",
+        "title": "Rev: Analyze Code",
+        "category": "Rev"
+      },
+      {
+        "command": "rev.generateTests",
+        "title": "Rev: Generate Tests",
+        "category": "Rev"
+      },
+      {
+        "command": "rev.refactorCode",
+        "title": "Rev: Refactor Code",
+        "category": "Rev"
+      },
+      {
+        "command": "rev.debugCode",
+        "title": "Rev: Debug Code",
+        "category": "Rev"
+      },
+      {
+        "command": "rev.addDocumentation",
+        "title": "Rev: Add Documentation",
+        "category": "Rev"
+      },
+      {
+        "command": "rev.executeTask",
+        "title": "Rev: Execute Custom Task",
+        "category": "Rev"
+      },
+      {
+        "command": "rev.startLSP",
+        "title": "Rev: Start LSP Server",
+        "category": "Rev"
+      },
+      {
+        "command": "rev.startAPI",
+        "title": "Rev: Start API Server",
+        "category": "Rev"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "when": "editorHasSelection",
+          "command": "rev.refactorCode",
+          "group": "rev@1"
+        },
+        {
+          "when": "editorHasSelection",
+          "command": "rev.addDocumentation",
+          "group": "rev@2"
+        },
+        {
+          "command": "rev.analyzeCode",
+          "group": "rev@3"
+        },
+        {
+          "command": "rev.generateTests",
+          "group": "rev@4"
+        },
+        {
+          "command": "rev.debugCode",
+          "group": "rev@5"
+        }
+      ],
+      "explorer/context": [
+        {
+          "when": "resourceLangId",
+          "command": "rev.analyzeCode",
+          "group": "rev@1"
+        },
+        {
+          "when": "resourceLangId",
+          "command": "rev.generateTests",
+          "group": "rev@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Rev",
+      "properties": {
+        "rev.apiUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8765",
+          "description": "Rev API server URL"
+        },
+        "rev.lspHost": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Rev LSP server host"
+        },
+        "rev.lspPort": {
+          "type": "number",
+          "default": 2087,
+          "description": "Rev LSP server port"
+        },
+        "rev.timeout": {
+          "type": "number",
+          "default": 300,
+          "description": "Request timeout in seconds"
+        },
+        "rev.enableLSP": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable LSP integration"
+        },
+        "rev.autoStartServers": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically start Rev servers on activation"
+        },
+        "rev.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Path to Python executable for running Rev"
+        }
+      }
+    },
+    "keybindings": [
+      {
+        "command": "rev.analyzeCode",
+        "key": "ctrl+alt+a",
+        "mac": "cmd+alt+a",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "rev.generateTests",
+        "key": "ctrl+alt+t",
+        "mac": "cmd+alt+t",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "rev.refactorCode",
+        "key": "ctrl+alt+r",
+        "mac": "cmd+alt+r",
+        "when": "editorTextFocus && editorHasSelection"
+      }
+    ]
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "pretest": "npm run lint",
+    "test": "node ./test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.75.0",
+    "@types/node": "16.x",
+    "eslint": "^8.0.0",
+    "@vscode/test-electron": "^2.2.0"
+  },
+  "dependencies": {
+    "axios": "^1.4.0"
+  }
+}

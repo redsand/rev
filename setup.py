@@ -94,12 +94,38 @@ setup(
     author="Rev Team",
     python_requires=">=3.8",
     install_requires=requirements,
+    extras_require={
+        # IDE Integration extras
+        'lsp': ['pygls>=1.0.0'],  # Language Server Protocol support
+        'api': ['aiohttp>=3.8.0', 'aiohttp-cors>=0.7.0'],  # HTTP API server
+        'ide': ['pygls>=1.0.0', 'aiohttp>=3.8.0', 'aiohttp-cors>=0.7.0'],  # All IDE features
+        # Development extras
+        'dev': [
+            'pytest>=7.0.0',
+            'pytest-asyncio>=0.21.0',
+            'pytest-cov>=4.0.0',
+            'black>=23.0.0',
+            'mypy>=1.0.0',
+            'pylint>=2.16.0',
+        ],
+        # All extras
+        'all': [
+            'pygls>=1.0.0',
+            'aiohttp>=3.8.0',
+            'aiohttp-cors>=0.7.0',
+            'pytest>=7.0.0',
+            'pytest-asyncio>=0.21.0',
+            'pytest-cov>=4.0.0',
+        ],
+    },
     packages=find_packages(
         exclude=["tests", "tests.*", "examples", "examples.*", "build", "build.*"]
     ),
     entry_points={
         "console_scripts": [
             "rev=rev.main:main",
+            "rev-lsp=rev.ide.lsp_server:main",  # LSP server entry point
+            "rev-api=rev.ide.api_server:main",  # API server entry point
         ],
     },
     cmdclass={
