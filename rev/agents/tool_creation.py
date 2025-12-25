@@ -5,6 +5,7 @@ from rev.tools.registry import execute_tool, get_available_tools
 from rev.llm.client import ollama_chat
 from rev.core.context import RevContext
 from rev.core.tool_call_recovery import recover_tool_call_from_text
+from rev.core.tool_call_retry import retry_tool_call_with_response_format
 from rev.agents.context_provider import build_context_and_tools
 
 TOOL_CREATION_SYSTEM_PROMPT = """You are a specialized Tool Creation agent. Your purpose is to propose and generate new tools when existing ones are insufficient for a task.
@@ -14,15 +15,16 @@ You will be given a task that requires a new tool, and context about the reposit
 CRITICAL RULES:
 1. You MUST respond with a single tool call in JSON format. Do NOT provide any other text, explanations, or markdown.
 2. Analyze the task to determine what new tool is needed.
-3. Create a Python tool file following this template:
+3. Use the provided 'System Information' (OS, Platform, Shell Type) to ensure the tool is compatible with the current environment.
+4. Create a Python tool file following this template:
    - Function with clear name and docstring
    - Type hints for all parameters
    - Proper error handling
    - Return value documentation
-4. Use `write_file` to create the new tool in the appropriate location (rev/tools/).
-5. Your response MUST be a single, valid JSON object representing the tool call.
+5. Use `write_file` to create the new tool in the appropriate location (.rev/tools/).
+6. Your response MUST be a single, valid JSON object representing the tool call.
 
-TOOL CREATION TEMPLATE:
+TOOL_CREATION_TEMPLATE:
 ```python
 from typing import Dict, Any, List
 
@@ -67,8 +69,8 @@ Example for creating a new tool:
 {
   "tool_name": "write_file",
   "arguments": {
-    "file_path": "rev/tools/custom_analyzer.py",
-    "content": "from typing import Dict, Any\\n\\ndef analyze_complexity(file_path: str) -> Dict[str, Any]:\\n    \\\"\\\"\\\"Analyze code complexity.\\n\\n    Args:\\n        file_path: Path to file to analyze\\n\\n    Returns:\\n        Complexity metrics\\n    \\\"\\\"\\\"\\n    # Implementation\\n    return {\\\"complexity\\\": 5}"
+    "file_path": ".rev/tools/custom_analyzer.py",
+    "content": "from typing import Dict, Any\n\ndef analyze_complexity(file_path: str) -> Dict[str, Any]:\n    \"\"\"Analyze code complexity.\n\n    Args:\n        file_path: Path to file to analyze\n\n    Returns:\n        Complexity metrics\n    \"\"\"\n    # Implementation\n    return {\"complexity\": 5}"
   }
 }
 
@@ -86,7 +88,6 @@ class ToolCreationAgent(BaseAgent):
         Executes a tool creation task by calling an LLM to generate a tool file.
         Implements error recovery with intelligent retry logic.
         """
-        print(f"ToolCreationAgent executing task: {task.description}")
 
         # Track recovery attempts
         recovery_attempts = self.increment_recovery_attempts(task, context)
@@ -151,22 +152,37 @@ class ToolCreationAgent(BaseAgent):
 
                         # Store info about created tool
                         if tool_name == "write_file" and "file_path" in arguments:
-                            context.add_insight("tool_creation_agent", f"task_{task.task_id}_created", {
+                            context.add_insight("tool_creation_agent", f"task_{task.task_id}_created", {{
                                 "tool_file": arguments["file_path"],
                                 "created": True
-                            })
+                            }})
 
                         return result
 
             # Error handling
             if error_type:
                 if error_type in {"text_instead_of_tool_call", "empty_tool_calls", "missing_tool_calls"}:
-                    recovered = recover_tool_call_from_text(
-                        response.get("message", {}).get("content", ""),
+                    retried = False
+                    recovered = retry_tool_call_with_response_format(
+                        messages,
+                        available_tools,
                         allowed_tools=[t["function"]["name"] for t in available_tools],
                     )
                     if recovered:
-                        print(f"  -> Recovered tool call from text output: {recovered.name}")
+                        retried = True
+                        print(f"  -> Retried tool call with JSON format: {recovered.name}")
+                    else:
+                        recovered = recover_tool_call_from_text(
+                            response.get("message", {}).get("content", ""),
+                            allowed_tools=[t["function"]["name"] for t in available_tools],
+                        )
+                    if recovered:
+                        if not recovered.name:
+                            return self.make_failure_signal("missing_tool", "Recovered tool call missing name")
+                        if not recovered.arguments:
+                            return self.make_failure_signal("missing_tool_args", "Recovered tool call missing arguments")
+                        if not retried:
+                            print(f"  -> Recovered tool call from text output: {recovered.name}")
                         return execute_tool(recovered.name, recovered.arguments)
 
                 print(f"  [WARN] ToolCreationAgent: {error_detail}")

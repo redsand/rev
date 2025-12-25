@@ -60,6 +60,9 @@ class OpenAIProvider(LLMProvider):
             request_params["tools"] = tools
             request_params["tool_choice"] = "auto"
 
+        if "response_format" in kwargs and kwargs["response_format"] is not None:
+            request_params["response_format"] = kwargs["response_format"]
+
         # Log request
         debug_logger.log_llm_request(model_name, messages, tools if tools and supports_tools else None)
 
@@ -133,6 +136,9 @@ class OpenAIProvider(LLMProvider):
         if tools and supports_tools:
             request_params["tools"] = tools
             request_params["tool_choice"] = "auto"
+
+        if "response_format" in kwargs and kwargs["response_format"] is not None:
+            request_params["response_format"] = kwargs["response_format"]
 
         debug_logger.log_llm_request(model_name, messages, tools if tools and supports_tools else None)
 

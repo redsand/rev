@@ -7,7 +7,7 @@ import re
 import os
 
 from rev.execution import planning_mode, execution_mode, streaming_execution_mode
-from rev.execution.orchestrator import run_orchestrated
+from rev.execution.orchestrator import run_orchestrated, push_user_feedback
 from rev.models.task import TaskStatus
 from rev import config
 from rev.config import EscapeInterrupt, set_escape_interrupt
@@ -46,8 +46,6 @@ def repl_mode(
             from rev.terminal.tui import TUI, TuiStream
             import rev.terminal.formatting as fmt
             from rev.run_log import wrap_stream
-            # Disable ANSI colors inside curses UI to avoid escape artifacts on Windows.
-            fmt._COLORS_ENABLED = False
             tui = TUI(prompt="rev> ")
             if init_logs:
                 for line in init_logs:
@@ -187,7 +185,7 @@ def repl_mode(
         tui.log(f"{colorize('[i] Running in autonomous mode - destructive operations will prompt', Colors.BRIGHT_YELLOW)}")
         tui.log(f"{colorize(f'[!] Press ESC to submit input immediately', Colors.BRIGHT_GREEN)}")
         try:
-            tui.run(_handle_input_line, initial_input=initial_command)
+            tui.run(_handle_input_line, initial_input=initial_command, on_feedback=push_user_feedback)
         except SystemExit:
             pass
         except Exception as e:

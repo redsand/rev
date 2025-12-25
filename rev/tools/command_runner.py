@@ -34,6 +34,7 @@ from pathlib import Path
 
 from rev import config
 from rev.config import ensure_escape_is_cleared, get_escape_interrupt
+from rev.tools.workspace_resolver import normalize_path
 
 
 # Security: Forbidden patterns that indicate shell injection attempts
@@ -43,14 +44,27 @@ FORBIDDEN_RE = re.compile(r"[;&|><`]|(\$\()|\r|\n")
 FORBIDDEN_TOKENS = {"&&", "||", ";", "|", "&", ">", "<", ">>", "2>", "1>", "<<",
                     "2>&1", "1>&2", "`", "$(", "${"}
 
+_PATH_TOKEN_RE = re.compile(r"[\\/]|^\.\.?[\\/]|^[A-Za-z]:[\\/]|^~[\\/]")
+_PATH_EXTENSION_RE = re.compile(r"\.[A-Za-z0-9]{1,8}$")
 
-def _resolve_command(cmd_name: str) -> Optional[str]:
-    """Resolve a command name to its full path.
+
+def _resolve_command(cmd_name: str) -> Optional[str | List[str]]:
+    """Resolve a command name to its full path or execution wrapper.
     
     On Windows, this correctly finds .cmd, .bat, and .exe files.
+    If a .cmd or .bat file is found, it returns a list prefixed with cmd /c
+    to ensure it can be executed with shell=False.
     """
-    # shutil.which handles PATH and PATHEXT correctly on all platforms
-    return shutil.which(cmd_name)
+    resolved = shutil.which(cmd_name)
+    if not resolved:
+        return None
+        
+    if os.name == 'nt':
+        # If it's a batch file, we need cmd /c to run it with shell=False
+        if resolved.lower().endswith(('.cmd', '.bat')):
+            return ["cmd.exe", "/c", resolved]
+            
+    return resolved
 
 
 def _parse_and_validate(cmd: str) -> Tuple[bool, str, List[str]]:
@@ -83,21 +97,78 @@ def _parse_and_validate(cmd: str) -> Tuple[bool, str, List[str]]:
     if not args:
         return False, "empty command", []
 
-    # Check 3: Resolve command to absolute path (handles Windows .cmd/.bat)
-    cmd_name = args[0]
-    resolved = _resolve_command(cmd_name)
-    if resolved:
-        args[0] = resolved
-
-    # Check 4: Validate no forbidden tokens in arguments
+    # Check 3: Validate no forbidden tokens in arguments
     if any(tok in FORBIDDEN_TOKENS for tok in args):
         return False, "shell operators not allowed in arguments", []
 
     return True, "", args
 
 
+def _resolve_cwd(cwd: Optional[Path]) -> Path:
+    if cwd is None:
+        return config.ROOT
+    if not isinstance(cwd, Path):
+        cwd = Path(cwd)
+    if not cwd.is_absolute():
+        cwd = config.ROOT / cwd
+    return cwd.resolve(strict=False)
+
+
+def _looks_like_path_token(token: str) -> bool:
+    if not token:
+        return False
+    if token.startswith("-"):
+        return False
+    if _PATH_TOKEN_RE.search(token):
+        return True
+    if _PATH_EXTENSION_RE.search(token):
+        return True
+    return False
+
+
+def _normalize_path_value(value: str, cwd: Path) -> str:
+    raw = value.strip()
+    if not raw:
+        return value
+    if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
+        raw = raw[1:-1].strip()
+    raw = os.path.expanduser(raw)
+    normalized = normalize_path(raw)
+    path = Path(normalized.replace("/", os.sep))
+    if not path.is_absolute():
+        path = (cwd / path).resolve(strict=False)
+    try:
+        rel = path.relative_to(cwd)
+    except Exception:
+        return str(path)
+    rel_str = str(rel)
+    return rel_str if rel_str else "."
+
+
+def _normalize_command_args(args: list[str], cwd: Path) -> list[str]:
+    normalized_args: list[str] = []
+    for idx, token in enumerate(args):
+        if idx == 0:
+            normalized_args.append(token)
+            continue
+        if not isinstance(token, str):
+            normalized_args.append(str(token))
+            continue
+        if token.startswith("-") and "=" in token:
+            flag, value = token.split("=", 1)
+            if _looks_like_path_token(value):
+                value = _normalize_path_value(value, cwd)
+            normalized_args.append(f"{flag}={value}")
+            continue
+        if _looks_like_path_token(token):
+            normalized_args.append(_normalize_path_value(token, cwd))
+            continue
+        normalized_args.append(token)
+    return normalized_args
+
+
 def run_command_safe(
-    cmd: str,
+    cmd: str | List[str],
     *,
     timeout: int = 300,
     cwd: Optional[Path] = None,
@@ -107,7 +178,7 @@ def run_command_safe(
     """Execute a command safely with security validation.
 
     Args:
-        cmd: Command string to execute
+        cmd: Command string or list of arguments to execute
         timeout: Maximum execution time in seconds
         cwd: Working directory (defaults to config.ROOT)
         capture_output: Whether to capture stdout/stderr
@@ -129,24 +200,65 @@ def run_command_safe(
     """
     if cwd is None:
         cwd = config.ROOT
+    resolved_cwd = _resolve_cwd(cwd)
 
     # Validate command before execution
-    is_valid, error_msg, args = _parse_and_validate(cmd)
+    if isinstance(cmd, list):
+        # Already split, validate each part
+        if not cmd:
+            return {"blocked": True, "error": "empty command", "cmd": str(cmd), "cwd": str(resolved_cwd), "rc": -1}
+        
+        args = [str(arg) for arg in cmd]
+        
+        # For list-based commands (shell=False), we only block the most dangerous
+        # tokens if they are standalone arguments, to prevent accidental shell-like
+        # behavior if the executable itself is a shell (like cmd.exe or sh).
+        # We allow these characters within arguments (e.g. in paths).
+        danger_tokens = {"&&", "||", "|", ">>", "<<", "`", "$("}
+        if any(tok in danger_tokens for tok in args):
+            return {
+                "blocked": True,
+                "error": "dangerous shell operators not allowed as standalone arguments",
+                "cmd": " ".join(args),
+                "cwd": str(resolved_cwd),
+                "rc": -1,
+            }
+        
+        original_cmd_str = " ".join(cmd)
+    else:
+        is_valid, error_msg, args = _parse_and_validate(cmd)
+        if not is_valid:
+            return {
+                "blocked": True,
+                "error": error_msg,
+                "cmd": cmd,
+                "cwd": str(resolved_cwd),
+                "rc": -1,
+            }
+        original_cmd_str = cmd
 
-    if not is_valid:
-        return {
-            "blocked": True,
-            "error": error_msg,
-            "cmd": cmd,
-            "rc": -1,
-        }
+    args = _normalize_command_args(args, resolved_cwd)
+    normalized_cmd_str = " ".join(args)
+
+    # Resolve command just before execution
+    executable = args[0]
+    resolved = _resolve_command(executable)
+    if resolved:
+        if isinstance(resolved, list):
+            # Command needs a wrapper (e.g. cmd /c for Windows batch files)
+            args = resolved + args[1:]
+        else:
+            args[0] = resolved
 
     # Execute safely with shell=False
     try:
+        if os.getenv("REV_DEBUG_CMD"):
+            print(f"  [DEBUG_CMD] Executing: {args} (cwd={resolved_cwd})")
+            
         proc = subprocess.Popen(
             args,
             shell=False,  # CRITICAL: Never use shell=True
-            cwd=str(cwd),
+            cwd=str(resolved_cwd),
             stdout=subprocess.PIPE if capture_output else None,
             stderr=subprocess.PIPE if capture_output else None,
             text=True,
@@ -167,29 +279,40 @@ def run_command_safe(
                 stdout_data, stderr_data = proc.communicate()
                 return {
                     "timeout": timeout,
-                    "cmd": cmd,
+                    "cmd": original_cmd_str,
+                    "cmd_normalized": normalized_cmd_str,
+                    "cwd": str(resolved_cwd),
                     "rc": -1,
                     "error": f"command exceeded {timeout}s timeout",
                 }
+
+        if os.getenv("REV_DEBUG_CMD"):
+            print(f"  [DEBUG_CMD] Result: rc={proc.returncode}, stdout_len={len(stdout_data or '')}, stderr_len={len(stderr_data or '')}")
 
         return {
             "rc": proc.returncode,
             "stdout": stdout_data or "",
             "stderr": stderr_data or "",
-            "cmd": cmd,
+            "cmd": original_cmd_str,
+            "cmd_normalized": normalized_cmd_str,
+            "cwd": str(resolved_cwd),
             "interrupted": interrupted,
         }
 
     except FileNotFoundError:
         return {
             "error": f"command not found: {args[0]}",
-            "cmd": cmd,
+            "cmd": original_cmd_str,
+            "cmd_normalized": normalized_cmd_str,
+            "cwd": str(resolved_cwd),
             "rc": -1,
         }
     except OSError as e:
         return {
             "error": f"OS error: {e}",
-            "cmd": cmd,
+            "cmd": original_cmd_str,
+            "cmd_normalized": normalized_cmd_str,
+            "cwd": str(resolved_cwd),
             "rc": -1,
         }
 
@@ -250,7 +373,7 @@ def _communicate_with_interrupt(
 
 
 def run_command_streamed(
-    cmd: str,
+    cmd: str | List[str],
     *,
     timeout: int = 300,
     cwd: Optional[Path] = None,
@@ -264,7 +387,7 @@ def run_command_streamed(
     Output is written to temporary files, then the last N lines are returned.
 
     Args:
-        cmd: Command string to execute
+        cmd: Command string or list of arguments to execute
         timeout: Maximum execution time in seconds
         cwd: Working directory (defaults to config.ROOT)
         stdout_limit: Maximum characters to return from stdout
@@ -276,17 +399,54 @@ def run_command_streamed(
     """
     if cwd is None:
         cwd = config.ROOT
+    resolved_cwd = _resolve_cwd(cwd)
 
     # Validate command before execution
-    is_valid, error_msg, args = _parse_and_validate(cmd)
+    if isinstance(cmd, list):
+        if not cmd:
+            return {"blocked": True, "error": "empty command", "cmd": str(cmd), "cwd": str(resolved_cwd), "rc": -1}
+        
+        args = [str(arg) for arg in cmd]
+        
+        # For list-based commands (shell=False), we only block the most dangerous
+        # tokens if they are standalone arguments, to prevent accidental shell-like
+        # behavior if the executable itself is a shell (like cmd.exe or sh).
+        # We allow these characters within arguments (e.g. in paths).
+        danger_tokens = {"&&", "||", "|", ">>", "<<", "`", "$("}
+        if any(tok in danger_tokens for tok in args):
+            return {
+                "blocked": True,
+                "error": "dangerous shell operators not allowed as standalone arguments",
+                "cmd": " ".join(args),
+                "cwd": str(resolved_cwd),
+                "rc": -1,
+            }
+        
+        original_cmd_str = " ".join(cmd)
+    else:
+        is_valid, error_msg, args = _parse_and_validate(cmd)
+        if not is_valid:
+            return {
+                "blocked": True,
+                "error": error_msg,
+                "cmd": cmd,
+                "cwd": str(resolved_cwd),
+                "rc": -1,
+            }
+        original_cmd_str = cmd
 
-    if not is_valid:
-        return {
-            "blocked": True,
-            "error": error_msg,
-            "cmd": cmd,
-            "rc": -1,
-        }
+    args = _normalize_command_args(args, resolved_cwd)
+    normalized_cmd_str = " ".join(args)
+
+    # Resolve command just before execution
+    executable = args[0]
+    resolved = _resolve_command(executable)
+    if resolved:
+        if isinstance(resolved, list):
+            # Command needs a wrapper (e.g. cmd /c for Windows batch files)
+            args = resolved + args[1:]
+        else:
+            args[0] = resolved
 
     # Create temporary files for output streaming
     import tempfile
@@ -297,7 +457,7 @@ def run_command_streamed(
         proc = subprocess.Popen(
             args,
             shell=False,  # CRITICAL: Never use shell=True
-            cwd=str(cwd),
+            cwd=str(resolved_cwd),
             stdout=stdout_file,
             stderr=stderr_file,
             text=True,
@@ -363,7 +523,9 @@ def run_command_streamed(
             "rc": proc.returncode,
             "stdout": stdout_data,
             "stderr": stderr_data,
-            "cmd": cmd,
+            "cmd": original_cmd_str,
+            "cmd_normalized": normalized_cmd_str,
+            "cwd": str(resolved_cwd),
             "interrupted": get_escape_interrupt(),
         }
 
@@ -377,33 +539,39 @@ def run_command_streamed(
 
 
 # Backwards compatibility: Provide run_cmd and run_tests interfaces
-def run_cmd(cmd: str, timeout: int = 300) -> str:
+def run_cmd(cmd: str | list[str], timeout: int = 300, cwd: Optional[Path] = None) -> str:
     """Run a shell command (backwards compatible interface).
 
     Returns:
         JSON string with execution results
     """
-    result = run_command_streamed(
+    if cwd is not None and not isinstance(cwd, Path):
+        cwd = Path(cwd)
+
+    result = run_command_safe(
         cmd,
         timeout=timeout,
-        stdout_limit=8000,
-        stderr_limit=8000,
+        cwd=cwd,
+        capture_output=True,
         check_interrupt=True,
     )
     return json.dumps(result)
 
 
-def run_tests(cmd: str = "pytest -q", timeout: int = 600) -> str:
+def run_tests(cmd: str | list[str] = "pytest -q", timeout: int = 600, cwd: Optional[Path] = None) -> str:
     """Run test suite (backwards compatible interface).
 
     Returns:
         JSON string with execution results
     """
-    result = run_command_streamed(
+    if cwd is not None and not isinstance(cwd, Path):
+        cwd = Path(cwd)
+
+    result = run_command_safe(
         cmd,
         timeout=timeout,
-        stdout_limit=12000,
-        stderr_limit=4000,
+        cwd=cwd,
+        capture_output=True,
         check_interrupt=True,
     )
     return json.dumps(result)

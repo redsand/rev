@@ -191,118 +191,127 @@ class SessionTracker:
             session_id=self.session_id,
             start_time=time.time()
         )
+        self._lock = threading.Lock()
 
     def track_task_started(self, task_description: str):
         """Track when a task starts."""
-        self.summary.total_tasks += 1
+        with self._lock:
+            self.summary.total_tasks += 1
 
     def track_task_completed(self, task_description: str):
         """Track when a task completes successfully."""
-        if task_description not in self.summary.tasks_completed:
-            self.summary.tasks_completed.append(task_description)
-        self.summary.open_threads = [t for t in self.summary.open_threads if t != task_description]
+        with self._lock:
+            if task_description not in self.summary.tasks_completed:
+                self.summary.tasks_completed.append(task_description)
+            self.summary.open_threads = [t for t in self.summary.open_threads if t != task_description]
 
     def track_task_failed(self, task_description: str, error: str):
         """Track when a task fails."""
-        if task_description not in self.summary.tasks_failed:
-            self.summary.tasks_failed.append(task_description)
-        if task_description not in self.summary.open_threads:
-            self.summary.open_threads.append(task_description)
-        if error not in self.summary.error_messages:
-            self.summary.error_messages.append(error)
-        self.summary.success = False
+        with self._lock:
+            if task_description not in self.summary.tasks_failed:
+                self.summary.tasks_failed.append(task_description)
+            if task_description not in self.summary.open_threads:
+                self.summary.open_threads.append(task_description)
+            if error not in self.summary.error_messages:
+                self.summary.error_messages.append(error)
+            self.summary.success = False
 
     def track_tool_call(self, tool_name: str, tool_args: Dict[str, Any]):
         """Track tool usage."""
-        self.summary.total_tool_calls += 1
-        self.summary.tools_used[tool_name] = self.summary.tools_used.get(tool_name, 0) + 1
+        with self._lock:
+            self.summary.total_tool_calls += 1
+            self.summary.tools_used[tool_name] = self.summary.tools_used.get(tool_name, 0) + 1
 
-        # Track specific file operations
-        if tool_name == "write_file":
-            path = tool_args.get("path", "")
-            if path and path not in self.summary.files_created:
-                self.summary.files_created.append(path)
+            # Track specific file operations
+            if tool_name == "write_file":
+                path = tool_args.get("path", "")
+                if path and path not in self.summary.files_created:
+                    self.summary.files_created.append(path)
 
-        elif tool_name in ["replace_in_file", "append_to_file"]:
-            path = tool_args.get("path", "")
-            if path and path not in self.summary.files_modified:
-                self.summary.files_modified.append(path)
+            elif tool_name in ["replace_in_file", "append_to_file"]:
+                path = tool_args.get("path", "")
+                if path and path not in self.summary.files_modified:
+                    self.summary.files_modified.append(path)
 
-        elif tool_name == "delete_file":
-            path = tool_args.get("path", "")
-            if path and path not in self.summary.files_deleted:
-                self.summary.files_deleted.append(path)
+            elif tool_name == "delete_file":
+                path = tool_args.get("path", "")
+                if path and path not in self.summary.files_deleted:
+                    self.summary.files_deleted.append(path)
 
-        # Track git commits
-        elif tool_name == "git_commit":
-            msg = tool_args.get("message", "")
-            if msg:
-                self.summary.commits_made.append(msg)
+            # Track git commits
+            elif tool_name == "git_commit":
+                msg = tool_args.get("message", "")
+                if msg:
+                    self.summary.commits_made.append(msg)
 
     def track_test_results(self, result: str):
         """Track test execution results."""
         try:
             result_data = json.loads(result)
-            self.summary.tests_run += 1
+            with self._lock:
+                self.summary.tests_run += 1
 
-            if result_data.get("rc", 0) == 0:
-                self.summary.tests_passed += 1
-            else:
-                self.summary.tests_failed += 1
-                thread = "Fix failing tests"
-                if thread not in self.summary.open_threads:
-                    self.summary.open_threads.append(thread)
+                if result_data.get("rc", 0) == 0:
+                    self.summary.tests_passed += 1
+                else:
+                    self.summary.tests_failed += 1
+                    thread = "Fix failing tests"
+                    if thread not in self.summary.open_threads:
+                        self.summary.open_threads.append(thread)
         except (json.JSONDecodeError, KeyError, TypeError) as e:
             # Log malformed test results but don't fail
             pass
 
     def track_evidence(self, evidence: Dict[str, Any], cap: int = 40):
         """Track a compact evidence summary (token-stable)."""
-        self.summary.evidence_summaries.append(evidence)
-        if len(self.summary.evidence_summaries) > cap:
-            self.summary.evidence_summaries = self.summary.evidence_summaries[-cap:]
+        with self._lock:
+            self.summary.evidence_summaries.append(evidence)
+            if len(self.summary.evidence_summaries) > cap:
+                self.summary.evidence_summaries = self.summary.evidence_summaries[-cap:]
 
     def update_running_summary(self):
         """Update running_summary from tracked signals (no LLM required)."""
-        # Hard sections to prevent drift into vague mush:
-        # 1) What changed
-        # 2) Evidence
-        # 3) Open threads
-        sections = []
+        with self._lock:
+            # Hard sections to prevent drift into vague mush:
+            # 1) What changed
+            # 2) Evidence
+            # 3) Open threads
+            sections = []
 
-        changed = []
-        if self.summary.files_created:
-            changed.append(f"created: {', '.join(self.summary.files_created[-5:])}")
-        if self.summary.files_modified:
-            changed.append(f"modified: {', '.join(self.summary.files_modified[-5:])}")
-        if self.summary.files_deleted:
-            changed.append(f"deleted: {', '.join(self.summary.files_deleted[-5:])}")
-        if changed:
-            sections.append("What changed: " + " | ".join(changed))
+            changed = []
+            if self.summary.files_created:
+                changed.append(f"created: {', '.join(self.summary.files_created[-5:])}")
+            if self.summary.files_modified:
+                changed.append(f"modified: {', '.join(self.summary.files_modified[-5:])}")
+            if self.summary.files_deleted:
+                changed.append(f"deleted: {', '.join(self.summary.files_deleted[-5:])}")
+            if changed:
+                sections.append("What changed: " + " | ".join(changed))
 
-        evidence = []
-        if self.summary.tests_run:
-            evidence.append(f"tests: {self.summary.tests_run} (pass={self.summary.tests_passed}, fail={self.summary.tests_failed})")
-        # Keep only a couple of artifact handles for quick re-hydration.
-        for ev in self.summary.evidence_summaries[-3:]:
-            ref = ev.get("artifact_ref")
-            tool = ev.get("tool")
-            if ref and tool:
-                evidence.append(f"{tool}: {ref}")
-        if evidence:
-            sections.append("Evidence: " + " | ".join(evidence))
+            evidence = []
+            if self.summary.tests_run:
+                evidence.append(f"tests: {self.summary.tests_run} (pass={self.summary.tests_passed}, fail={self.summary.tests_failed})")
+            # Keep only a couple of artifact handles for quick re-hydration.
+            for ev in self.summary.evidence_summaries[-3:]:
+                ref = ev.get("artifact_ref")
+                tool = ev.get("tool")
+                if ref and tool:
+                    evidence.append(f"{tool}: {ref}")
+            if evidence:
+                sections.append("Evidence: " + " | ".join(evidence))
 
-        if self.summary.open_threads:
-            sections.append("Open threads: " + " | ".join(self.summary.open_threads[:6]))
+            if self.summary.open_threads:
+                sections.append("Open threads: " + " | ".join(self.summary.open_threads[:6]))
 
-        # Cap size hard.
-        self.summary.running_summary = "\n".join(sections)[:800]
+            # Cap size hard.
+            self.summary.running_summary = "\n".join(sections)[:800]
 
     def track_messages(self, message_count: int, estimated_tokens: Optional[int] = None):
         """Track message statistics."""
-        self.summary.message_count = message_count
-        if estimated_tokens is not None:
-            self.summary.tokens_estimated = estimated_tokens
+        with self._lock:
+            self.summary.message_count = message_count
+            if estimated_tokens is not None:
+                self.summary.tokens_estimated = estimated_tokens
 
     def estimate_tokens(self, messages: List[Dict]) -> int:
         """Estimate token count from messages (rough approximation)."""
@@ -316,14 +325,16 @@ class SessionTracker:
     def get_summary(self, detailed: bool = False) -> str:
         """Get current session summary."""
         self.update_running_summary()
-        if detailed:
-            return self.summary.get_detailed_summary()
-        return self.summary.get_concise_summary()
+        with self._lock:
+            if detailed:
+                return self.summary.get_detailed_summary()
+            return self.summary.get_concise_summary()
 
     def finalize(self) -> SessionSummary:
         """Finalize and return the session summary."""
-        self.summary.finalize()
-        return self.summary
+        with self._lock:
+            self.summary.finalize()
+            return self.summary
 
     def save_to_file(self, path: Optional[Path] = None) -> Path:
         """Save session summary to a file.

@@ -32,6 +32,53 @@ _STOP_WORDS = {
     "to", "was", "will", "with", "into", "within", "each",
 }
 
+_CONFIG_FILENAMES = {
+    "package.json",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "pyproject.toml",
+    "requirements.txt",
+    "requirements-dev.txt",
+    "setup.py",
+    "setup.cfg",
+    "tox.ini",
+    "pytest.ini",
+    "mypy.ini",
+    "ruff.toml",
+    ".ruff.toml",
+    "go.mod",
+    "go.sum",
+    "Cargo.toml",
+    "Cargo.lock",
+    "Gemfile",
+    "Gemfile.lock",
+    "Rakefile",
+    "composer.json",
+    "composer.lock",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "gradle.properties",
+    "gradlew",
+    "jest.config.js",
+    "jest.config.cjs",
+    "jest.config.mjs",
+    "vitest.config.ts",
+    "vitest.config.js",
+    "vite.config.ts",
+    "vite.config.js",
+    "tsconfig.json",
+    "tsconfig.base.json",
+    "tsconfig.app.json",
+    "tsconfig.build.json",
+    ".eslintrc.json",
+    ".eslintrc.js",
+    "eslint.config.js",
+    "eslint.config.mjs",
+    ".editorconfig",
+}
+
 
 def _tokenize(text: str) -> List[str]:
     terms = re.findall(r"\b\w+\b", (text or "").lower())
@@ -65,6 +112,51 @@ def _rerank_chunks(query: str, chunks: Sequence[RetrievedChunk]) -> List[Retriev
         boosted.append(RetrievedChunk(**{**c.__dict__, "score": base + bonus}))
     boosted.sort(key=lambda x: x.score, reverse=True)
     return boosted
+
+
+def _infer_language(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if not suffix:
+        return "text"
+    return suffix.lstrip(".")
+
+
+def _read_file_excerpt(path: Path, max_lines: int = 200) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return ""
+    lines = text.splitlines()
+    if len(lines) <= max_lines * 2:
+        return "\n".join(lines)
+    head = "\n".join(lines[:max_lines])
+    tail = "\n".join(lines[-max_lines:])
+    return "\n".join([head, "... (truncated) ...", tail])
+
+
+def _build_file_chunks(root: Path, paths: Sequence[Path], *, score: float) -> List["RetrievedChunk"]:
+    chunks: List[RetrievedChunk] = []
+    for path in paths:
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            rel = path.relative_to(root).as_posix()
+        except Exception:
+            rel = str(path)
+        content = _read_file_excerpt(path)
+        if not content.strip():
+            continue
+        chunks.append(
+            RetrievedChunk(
+                corpus="code",
+                source=rel,
+                location=f"{rel}:1",
+                score=score,
+                content=content,
+                metadata={"file": rel, "language": _infer_language(path)},
+            )
+        )
+    return chunks
 
 @dataclass(frozen=True)
 class RetrievedChunk:
@@ -539,6 +631,34 @@ class ContextBuilder:
         self.memory = MemoryCorpus()
         self.project_memory = ProjectMemoryCorpus(config.PROJECT_MEMORY_FILE)
 
+    def discover_config_files(self, target_paths: Sequence[Path], max_files: int = 6) -> List[Path]:
+        configs: List[Path] = []
+        seen: set[str] = set()
+        roots: List[Path] = []
+        for target in target_paths:
+            current = target if target.is_dir() else target.parent
+            while True:
+                roots.append(current)
+                if current == self.root or current.parent == current:
+                    break
+                current = current.parent
+        if self.root not in roots:
+            roots.append(self.root)
+
+        for base in roots:
+            for name in _CONFIG_FILENAMES:
+                candidate = base / name
+                if not candidate.exists() or not candidate.is_file():
+                    continue
+                key = str(candidate.resolve())
+                if key in seen:
+                    continue
+                seen.add(key)
+                configs.append(candidate)
+                if len(configs) >= max_files:
+                    return configs
+        return configs
+
     def build(
         self,
         *,
@@ -588,6 +708,64 @@ class ContextBuilder:
         return ContextBundle(
             selected_code_chunks=selected_code,
             selected_docs_chunks=selected_docs,
+            selected_tool_schemas=selected_tools,
+            selected_memory_items=selected_mem,
+        )
+
+    def build_minimal(
+        self,
+        *,
+        query: str,
+        tool_universe: Sequence[Dict[str, Any]],
+        tool_candidates: Optional[Sequence[str]] = None,
+        target_paths: Sequence[Path],
+        config_paths: Optional[Sequence[Path]] = None,
+        top_k_tools: int = 5,
+        top_k_memory: int = 3,
+        memory_items: Optional[Sequence[Tuple[str, str]]] = None,
+    ) -> ContextBundle:
+        self.tools.build(tool_universe)
+
+        tools_ranked = self.tools.query(query, k=max(top_k_tools, 12))
+        if tool_candidates is not None:
+            allowed = set(tool_candidates)
+            tools_ranked = [t for t in tools_ranked if t.name in allowed]
+        selected_tools = tools_ranked[:top_k_tools]
+
+        config_paths = list(config_paths or [])
+        selected_code = _build_file_chunks(self.root, target_paths, score=1.0)
+        selected_code.extend(_build_file_chunks(self.root, config_paths, score=0.7))
+        if selected_code:
+            deduped_code: List[RetrievedChunk] = []
+            seen_code = set()
+            for chunk in selected_code:
+                key = chunk.source
+                if key in seen_code:
+                    continue
+                seen_code.add(key)
+                deduped_code.append(chunk)
+            selected_code = deduped_code
+
+        mem_items = list(memory_items or [])
+        mem_candidates: List[RetrievedChunk] = []
+        mem_candidates.extend(self.project_memory.query(query, k=max(top_k_memory * 3, top_k_memory)))
+        if mem_items:
+            mem_candidates.extend(self.memory.query(query, mem_items, k=max(top_k_memory * 2, top_k_memory)))
+
+        deduped: List[RetrievedChunk] = []
+        seen = set()
+        for c in mem_candidates:
+            key = (c.location or c.source or "")[:200]
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(c)
+
+        selected_mem = _rerank_chunks(query, deduped)[:top_k_memory]
+
+        return ContextBundle(
+            selected_code_chunks=selected_code,
+            selected_docs_chunks=[],
             selected_tool_schemas=selected_tools,
             selected_memory_items=selected_mem,
         )

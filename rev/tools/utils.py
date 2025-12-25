@@ -47,25 +47,33 @@ def _safe_path(rel: str) -> pathlib.Path:
 
 
 def _run_shell(cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:
-    """Execute shell command in repository root.
+    """Execute shell command safely with security validation."""
+    from rev.tools.command_runner import run_command_safe
 
-    Args:
-        cmd: Shell command to execute
-        timeout: Command timeout in seconds (default: 300)
+    try:
+        result = run_command_safe(cmd, timeout=timeout, check_interrupt=False)
 
-    Returns:
-        CompletedProcess with returncode, stdout, stderr
-    """
-    return subprocess.run(
-        cmd,
-        shell=True,
-        cwd=str(get_workspace().root),
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-        encoding="utf-8",
-        errors="replace",
-    )
+        if result.get("blocked"):
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=-1,
+                stdout="",
+                stderr=f"BLOCKED: {result.get('error', 'security violation')}"
+            )
+
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=result.get("rc", -1),
+            stdout=result.get("stdout", ""),
+            stderr=result.get("stderr", "")
+        )
+    except Exception as exc:
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=1,
+            stdout="",
+            stderr=str(exc),
+        )
 
 
 def quote_cmd_arg(arg: str) -> str:

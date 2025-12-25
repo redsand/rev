@@ -113,7 +113,7 @@ def main():
         type=int,
         default=1,
         metavar="N",
-        help="Number of concurrent tasks to run in parallel (forced to 1; parallel execution is disabled)"
+        help="Number of concurrent tasks to run in parallel (default: 1)"
     )
     parser.add_argument(
         "--review",
@@ -336,11 +336,6 @@ def main():
     _log(f"allowed_roots={[str(p) for p in config.get_allowed_roots()]}")
     if run_log_path:
         _log(f"run_log={run_log_path}")
-
-    # Enforce single-worker execution regardless of CLI input
-    if args.parallel != 1:
-        _log(f"⚠️ Parallel execution is disabled. Forcing --parallel=1 (requested {args.parallel}).")
-        args.parallel = 1
 
     # Enable LLM transaction logging if debug mode is requested
     if args.debug:

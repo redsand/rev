@@ -43,7 +43,7 @@ from rev.execution.state_manager import StateManager
 from rev.execution.prompt_optimizer import optimize_prompt_if_needed
 from rev.execution.quick_verify import verify_task_execution, VerificationResult
 from rev.execution.anchoring_scorer import AnchoringScorer, AnchoringDecision
-from rev.tools.registry import get_available_tools, get_repo_context
+from rev.tools.registry import execute_tool, get_available_tools, get_repo_context
 from rev.debug_logger import DebugLogger
 from rev.config import (
     MAX_PLAN_TASKS,
@@ -56,6 +56,7 @@ from rev.config import (
     MAX_PLAN_REGEN_RETRIES,
     MAX_ADAPTIVE_REPLANS,
     MAX_VALIDATION_RETRIES,
+    EXCLUDE_DIRS,
 )
 from rev.llm.client import get_token_usage, ollama_chat
 from rev.core.context import RevContext, ResourceBudget
@@ -67,21 +68,39 @@ import re
 from rev.retrieval.context_builder import ContextBuilder
 from rev.memory.project_memory import ensure_project_memory_file, maybe_record_known_failure_from_error
 from rev.tools.workspace_resolver import resolve_workspace_path
+from rev.workspace import get_workspace
 from rev.core.text_tool_shim import maybe_execute_tool_call_from_text
 from rev.agents.subagent_io import build_subagent_output
 from rev.execution.action_normalizer import normalize_action_type
+from rev.execution.tool_constraints import allowed_tools_for_action, has_write_tool, WRITE_ACTIONS
+from rev.terminal.formatting import colorize, Colors, Symbols
 from difflib import SequenceMatcher
+
+# Global reference to the currently active context for real-time feedback
+_active_context: Optional[RevContext] = None
+
+def push_user_feedback(feedback: str) -> bool:
+    """Push user feedback to the currently active orchestrator context.
+    
+    Returns True if feedback was successfully delivered, False otherwise.
+    """
+    global _active_context
+    if _active_context:
+        _active_context.add_user_feedback(feedback)
+        return True
+    return False
 
 
 def _format_verification_feedback(result: VerificationResult) -> str:
     """Format verification result for LLM feedback."""
-    feedback = result.message or "Verification failed"
+    feedback = f"VERIFICATION FAILED: {result.message or 'Check environment.'}"
     
     details = result.details or {}
     
     # Extract validation command outputs if present (from quick_verify.py)
     validation = details.get("validation") or details.get("strict")
     if isinstance(validation, dict):
+        feedback += "\n\nDETAILED OUTPUTS:"
         for label, res in validation.items():
             if not isinstance(res, dict):
                 continue
@@ -89,15 +108,13 @@ def _format_verification_feedback(result: VerificationResult) -> str:
             if rc is not None and rc != 0:
                 stdout = (res.get("stdout") or "").strip()
                 stderr = (res.get("stderr") or "").strip()
-                feedback += f"\n\n--- {label} failure (exit code: {rc}) ---"
+                feedback += f"\n- {label} (rc={rc})"
                 if stderr:
-                    # Take last 20 lines of stderr for context
-                    stderr_lines = stderr.splitlines()
-                    feedback += "\nstderr:\n" + "\n".join(stderr_lines[-20:])
+                    feedback += "\n  stderr: " + " ".join(stderr.splitlines()[-3:]) # Last 3 lines
                 elif stdout:
-                    # Take last 20 lines of stdout
-                    stdout_lines = stdout.splitlines()
-                    feedback += "\nstdout:\n" + "\n".join(stdout_lines[-20:])
+                    feedback += "\n  stdout: " + " ".join(stdout.splitlines()[-3:])
+                else:
+                    feedback += "\n(No stdout or stderr output captured from command)"
     
     # Extract debug info if present
     if "debug" in details:
@@ -460,6 +477,116 @@ def _attempt_git_revert_for_syntax_errors(task: "Task") -> list[str]:
     return reverted
 
 
+def _extract_task_paths(task: Task) -> list[str]:
+    paths: list[str] = []
+    if not task:
+        return paths
+    if task.description:
+        from_desc = _extract_file_path_from_description(task.description)
+        if from_desc:
+            paths.append(from_desc)
+    if getattr(task, "tool_events", None):
+        for event in task.tool_events:
+            args = event.get("args", {})
+            if not isinstance(args, dict):
+                continue
+            for key in ("path", "file_path", "target", "source"):
+                val = args.get(key)
+                if isinstance(val, str) and val.strip():
+                    paths.append(val.strip())
+    # Deduplicate while preserving order
+    seen = set()
+    deduped = []
+    for path in paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        deduped.append(path)
+    return deduped
+
+
+def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optional[VerificationResult]) -> list[Task]:
+    targets = _extract_task_paths(task)
+    target_path = targets[0] if targets else ""
+    tasks: list[Task] = []
+
+    if target_path:
+        tasks.append(
+            Task(
+                description=(
+                    f"Use get_file_info on {target_path} to confirm the target exists and "
+                    "capture its current state."
+                ),
+                action_type="review",
+            )
+        )
+        parent = str(Path(target_path).parent) if target_path else "."
+    else:
+        parent = "."
+        tasks.append(
+            Task(
+                description="Use list_dir on . to locate the target file or directory referenced by the failed task.",
+                action_type="review",
+            )
+        )
+
+    tasks.append(
+        Task(
+            description=(
+                f"Use list_dir on {parent}/tests/** (or {parent}/test/** if none) to check test discovery. "
+                "Report which test files exist and whether the expected test path is present."
+            ),
+            action_type="review",
+        )
+    )
+
+    return tasks
+
+
+def _summarize_repeated_failure(
+    task: Task,
+    verification_result: Optional[VerificationResult],
+    failure_sig: str,
+    count: int,
+) -> str:
+    message = verification_result.message if verification_result and verification_result.message else "Unknown error"
+    tool_summary = ""
+    if getattr(task, "tool_events", None):
+        last_event = task.tool_events[-1]
+        tool_name = last_event.get("tool")
+        summary = last_event.get("summary") or ""
+        if tool_name:
+            tool_summary = f" Last tool: {tool_name}. {summary}".strip()
+    return (
+        f"Repeated failure signature '{failure_sig}' after {count} attempts. "
+        f"Last verification: {message}.{tool_summary} "
+        "Please advise on the expected behavior, correct command/path, or missing setup."
+    )
+
+
+def _queue_diagnostic_tasks(context: RevContext, tasks: list[Task]) -> Optional[Task]:
+    if not tasks:
+        return None
+    queue = context.agent_state.get("diagnostic_queue")
+    if not isinstance(queue, list):
+        queue = []
+    for task in tasks[1:]:
+        queue.append({"description": task.description, "action_type": task.action_type})
+    context.agent_state["diagnostic_queue"] = queue
+    return tasks[0] if tasks else None
+
+
+def _pop_diagnostic_task(context: RevContext) -> Optional[Task]:
+    queue = context.agent_state.get("diagnostic_queue")
+    if not isinstance(queue, list) or not queue:
+        return None
+    entry = queue.pop(0)
+    context.agent_state["diagnostic_queue"] = queue
+    if not isinstance(entry, dict):
+        return None
+    return Task(description=entry.get("description", ""), action_type=entry.get("action_type", "review"))
+
+
 def _check_goal_likely_achieved(user_request: str, completed_tasks_log: List[str]) -> bool:
     """Check if the original goal appears to have been achieved based on completed tasks.
 
@@ -572,6 +699,23 @@ def _append_task_tool_event(task: Task, result_payload: Any) -> None:
             "summary": summary,
         }
     )
+
+
+def _enforce_action_tool_constraints(task: Task) -> tuple[bool, Optional[str]]:
+    """Ensure write actions actually execute a write tool."""
+    action = (task.action_type or "").lower()
+    if action not in WRITE_ACTIONS:
+        return True, None
+
+    events = getattr(task, "tool_events", None) or []
+    if not events:
+        return False, "Write action completed without tool execution"
+
+    tool_names = [str(ev.get("tool") or "").lower() for ev in events]
+    if not has_write_tool(tool_names):
+        return False, "Write action completed without write tool execution"
+
+    return True, None
 
 
 def _find_workspace_matches_by_basename(*, root: Path, basename: str, limit: int = 25) -> List[str]:
@@ -1135,9 +1279,6 @@ class OrchestratorConfig:
     max_planning_iterations: int = config.MAX_PLANNING_TOOL_ITERATIONS
 
     def __post_init__(self):
-        if self.parallel_workers != 1:
-            self.parallel_workers = 1
-        
         if self.max_retries is not None:
             self.orchestrator_retries = self.max_retries
             self.plan_regen_retries = self.max_retries
@@ -1185,6 +1326,7 @@ class Orchestrator:
         self.learning_agent = LearningAgent(project_root) if self.config.enable_learning else None
         self.debug_logger = DebugLogger.get_instance()
         self._context_builder: Optional[ContextBuilder] = None
+        self._project_roots_cache: Optional[List[Path]] = None
 
     def _update_phase(self, new_phase: AgentPhase):
         if self.context:
@@ -1217,6 +1359,13 @@ class Orchestrator:
                     action_type="analyze"
                 )
         
+        if task.action_type == "edit" and file_path:
+            print(f"  → Transforming stuck EDIT to READ for re-synchronization: {file_path}")
+            return Task(
+                description=f"Read the current content of {file_path} to identify why previous edits failed to match. Pay close attention to exact whitespace and indentation.",
+                action_type="read"
+            )
+        
         if task.action_type == "test":
             print(f"  → Transforming to build/compile check")
             return Task(
@@ -1230,6 +1379,175 @@ class Orchestrator:
             description=f"Search for patterns related to: {task.description[:50]}",
             action_type="analyze"
         )
+
+    def _discover_project_roots(self) -> List[Path]:
+        if self._project_roots_cache is not None:
+            return self._project_roots_cache
+
+        markers = {
+            "package.json",
+            "pyproject.toml",
+            "requirements.txt",
+            "setup.py",
+            "go.mod",
+            "Cargo.toml",
+            "Gemfile",
+            "composer.json",
+            "pom.xml",
+            "build.gradle",
+            "build.gradle.kts",
+            "CMakeLists.txt",
+            "Makefile",
+            ".git",
+            ".rev",
+        }
+
+        max_depth = 4
+        roots: set[Path] = set()
+        root_path = self.project_root.resolve()
+
+        for dirpath, dirnames, filenames in os.walk(root_path):
+            current = Path(dirpath)
+            try:
+                rel = current.relative_to(root_path)
+            except Exception:
+                rel = Path(".")
+
+            depth = len(rel.parts)
+            dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS]
+            if depth > max_depth:
+                dirnames[:] = []
+                continue
+
+            if any(marker in filenames for marker in markers):
+                roots.add(current)
+
+        if not roots:
+            roots.add(root_path)
+
+        self._project_roots_cache = sorted(roots, key=lambda p: len(p.parts))
+        return self._project_roots_cache
+
+    def _find_root_for_path(self, path: Path, roots: List[Path]) -> Optional[Path]:
+        if not roots:
+            return None
+        candidates = []
+        for root in roots:
+            try:
+                if path.is_relative_to(root):
+                    candidates.append(root)
+            except Exception:
+                if str(path).startswith(str(root)):
+                    candidates.append(root)
+        if not candidates:
+            return None
+        return max(candidates, key=lambda p: len(p.parts))
+
+    def _select_project_root_for_task(self, task: Task) -> Optional[Path]:
+        if not task or not task.description:
+            return None
+
+        roots = self._discover_project_roots()
+        if not roots:
+            return None
+
+        desc = task.description.lower()
+        workspace = get_workspace()
+        workspace_root = workspace.root.resolve()
+
+        # Prefer explicit relative directory references in the description.
+        best_match: Optional[Path] = None
+        best_len = 0
+        for root in roots:
+            try:
+                rel = root.relative_to(workspace_root)
+            except Exception:
+                continue
+            rel_str = str(rel).replace("\\", "/").lower()
+            if rel_str and rel_str != "." and rel_str in desc:
+                if len(rel_str) > best_len:
+                    best_match = root
+                    best_len = len(rel_str)
+
+        if best_match:
+            return best_match
+
+        # Match by project root name if a single token maps to one root.
+        tokens = set(re.findall(r"[a-z0-9_-]+", desc))
+        name_matches = [root for root in roots if root.name.lower() in tokens]
+        if len(name_matches) == 1:
+            return name_matches[0]
+
+        # If a file path is mentioned, use it only when it is unambiguous.
+        file_hint = _extract_file_path_from_description(task.description)
+        if file_hint:
+            hint_path = Path(file_hint)
+            if hint_path.is_absolute():
+                return self._find_root_for_path(hint_path, roots)
+
+            # Avoid changing workdir when the description already includes a scoped path.
+            if len(hint_path.parts) > 1:
+                return None
+
+            if workspace.current_working_dir.resolve() == workspace_root:
+                candidate = workspace_root / hint_path
+                return self._find_root_for_path(candidate, roots)
+
+        return None
+
+    def _should_autoset_workdir(self, task: Task) -> bool:
+        if not task or not task.description:
+            return False
+        action_type = (task.action_type or "").lower()
+        if action_type in {"read", "analyze", "research", "review", "set_workdir"}:
+            return False
+        if action_type in {"test", "general"}:
+            return True
+        desc = task.description.lower()
+        keywords = (
+            "install",
+            "test",
+            "lint",
+            "build",
+            "compile",
+            "run",
+            "npm",
+            "yarn",
+            "pnpm",
+            "pip",
+            "pytest",
+            "gradle",
+            "mvn",
+            "cargo",
+            "dotnet",
+        )
+        return any(keyword in desc for keyword in keywords)
+
+    def _maybe_set_workdir_for_task(self, task: Task) -> Optional[Path]:
+        if not self._should_autoset_workdir(task):
+            return None
+
+        file_hint = _extract_file_path_from_description(task.description)
+        if file_hint:
+            hint_path = Path(file_hint)
+            if not hint_path.is_absolute() and len(hint_path.parts) > 1:
+                return None
+
+        root = self._select_project_root_for_task(task)
+        if not root:
+            return None
+
+        workspace = get_workspace()
+        current = workspace.current_working_dir.resolve()
+        target = root.resolve()
+        if current == target:
+            return None
+
+        try:
+            execute_tool("set_workdir", {"path": str(target)})
+        except Exception:
+            return None
+        return target
 
     def _display_prompt_optimization(self, original: str, optimized: str) -> None:
         """Display original vs improved prompts for transparency."""
@@ -1295,42 +1613,47 @@ class Orchestrator:
 
     def execute(self, user_request: str, resume: bool = False) -> OrchestratorResult:
         """Execute a task through the full agent pipeline."""
+        global _active_context
         aggregate_errors: List[str] = []
         last_result: Optional[OrchestratorResult] = None
         self.context = RevContext(user_request=user_request, resume=resume)
+        _active_context = self.context
         ensure_project_memory_file()
         # Keep repo_context minimal; sub-agents will retrieve focused context via ContextBuilder.
         self.context.repo_context = ""
 
-        for attempt in range(self.config.orchestrator_retries + 1):
-            if attempt > 0:
-                print(f"\n\n🔄 Orchestrator retry {attempt}/{self.config.orchestrator_retries}")
-                self.context.plan = None
-                self.context.state_manager = None
-                self.context.errors = []
+        try:
+            for attempt in range(self.config.orchestrator_retries + 1):
+                if attempt > 0:
+                    print(f"\n\n🔄 Orchestrator retry {attempt}/{self.config.orchestrator_retries}")
+                    self.context.plan = None
+                    self.context.state_manager = None
+                    self.context.errors = []
 
-            result = self._run_single_attempt(user_request)
-            aggregate_errors.extend([f"Attempt {attempt + 1}: {err}" for err in self.context.errors])
+                result = self._run_single_attempt(user_request)
+                aggregate_errors.extend([f"Attempt {attempt + 1}: {err}" for err in self.context.errors])
 
-            if result.success or result.no_retry:
-                result.errors = aggregate_errors
-                result.agent_insights = self.context.agent_insights
-                return result
+                if result.success or result.no_retry:
+                    result.errors = aggregate_errors
+                    result.agent_insights = self.context.agent_insights
+                    return result
 
-            last_result = result
-            last_result.errors.extend(self.context.errors)
+                last_result = result
+                last_result.errors.extend(self.context.errors)
 
-        if last_result:
-            last_result.errors = aggregate_errors
-            last_result.agent_insights = self.context.agent_insights
-            return last_result
+            if last_result:
+                last_result.errors = aggregate_errors
+                last_result.agent_insights = self.context.agent_insights
+                return last_result
 
-        return OrchestratorResult(
-            success=False,
-            phase_reached=AgentPhase.FAILED,
-            errors=["Unknown orchestrator failure"],
-            agent_insights=self.context.agent_insights
-        )
+            return OrchestratorResult(
+                success=False,
+                phase_reached=AgentPhase.FAILED,
+                errors=["Unknown orchestrator failure"],
+                agent_insights=self.context.agent_insights
+            )
+        finally:
+            _active_context = None
         
     def _run_single_attempt(self, user_request: str) -> OrchestratorResult:
         """Run a single orchestration attempt."""
@@ -1462,11 +1785,27 @@ class Orchestrator:
             self._update_phase(AgentPhase.REVIEW)
 
         self._update_phase(AgentPhase.EXECUTION)
-        execution_mode(
-            self.context.plan, auto_approve=self.config.auto_approve, tools=get_available_tools(),
-            enable_action_review=self.config.enable_action_review, coding_mode=coding_mode,
-            state_manager=self.context.state_manager, budget=self.context.resource_budget,
-        )
+        if self.config.parallel_workers > 1:
+            concurrent_execution_mode(
+                self.context.plan,
+                max_workers=self.config.parallel_workers,
+                auto_approve=self.config.auto_approve,
+                tools=get_available_tools(),
+                enable_action_review=self.config.enable_action_review,
+                coding_mode=coding_mode,
+                state_manager=self.context.state_manager,
+                budget=self.context.resource_budget,
+            )
+        else:
+            execution_mode(
+                self.context.plan,
+                auto_approve=self.config.auto_approve,
+                tools=get_available_tools(),
+                enable_action_review=self.config.enable_action_review,
+                coding_mode=coding_mode,
+                state_manager=self.context.state_manager,
+                budget=self.context.resource_budget,
+            )
 
         if self.config.enable_validation:
             self._update_phase(AgentPhase.VALIDATION)
@@ -1499,7 +1838,9 @@ class Orchestrator:
             "  import from the package exports (e.g., `from package import ExportedSymbol`).\n"
             "- Do NOT expand `from pkg import *` into dozens of per-module imports.\n\n"
             f"Important: Be specific about what concrete action the next task should take. "
-            f"Use [ACTION_TYPE] format like [CREATE] or [EDIT] or [REFACTOR]."
+            f"Use [ACTION_TYPE] format like [CREATE] or [EDIT] or [REFACTOR].\n"
+            "ACTIONABILITY: Include a specific tool and artifact in the description "
+            "(e.g., \"Use read_file on src/app.py\" or \"Use create_directory to create src/components\")."
         )
 
         response_data = ollama_chat([{"role": "user", "content": decomposition_prompt}])
@@ -1570,8 +1911,18 @@ class Orchestrator:
                 "Instead, perform a [READ] or [ANALYZE] step to verify that the work from the previous session is still correct and consistent with the current filesystem state.\n\n"
             )
 
+        feedback_note = ""
+        if self.context and self.context.user_feedback:
+            feedback_note = "\nDIRECT USER GUIDANCE (Priority - follow these instructions now):\n"
+            for fb in self.context.user_feedback:
+                feedback_note += f"- {fb}\n"
+            feedback_note += "\n"
+            # Clear feedback after incorporating it into the prompt
+            self.context.user_feedback = []
+
         prompt = (
             f"Original Request: {user_request}\n\n"
+            f"{feedback_note}"
             f"{work_summary}\n\n"
             f"{path_hints}\n"
             f"{agent_notes}\n"
@@ -1586,10 +1937,14 @@ class Orchestrator:
             "- Use [EDIT]/[ADD]/[CREATE_DIRECTORY]/[REFACTOR] only when you will perform a repo-changing tool call in this step.\n"
             "- Use [TOOL] only to execute an existing built-in tool (e.g., `split_python_module_classes`).\n"
             "- Use [CREATE_TOOL] only when no existing tool can do the job and you must create a new tool.\n"
-            "- If unsure whether a path exists, choose [READ] first to locate the correct file path(s).\n"
-            "\n"
-             "Constraints to avoid duplicating work:\n"
-             "- CRITICAL: Check the file tree in the history. If the project is already organized into subdirectories, USE THEM. Do NOT create duplicate files or project roots in the top-level directory.\n"
+                         "- If unsure whether a path exists, choose [READ] first to locate the correct file path(s).\n"
+                         "\n"
+                         "TASK SPECIFICITY (CRITICAL):\n"
+                         "- Be extremely specific in your task description. Include file paths and specific functions/features.\n"
+                         "- If a previous task partially completed a goal (e.g. added 1 of 3 endpoints), the next task description MUST reflect the remaining work (e.g. 'add the REMAINING PUT and DELETE endpoints...').\n"
+                         "- Avoid using the exact same description for multiple consecutive steps; this triggers circuit breakers.\n"
+                         "\n"
+                         "Constraints to avoid duplicating work:\n"             "- CRITICAL: Check the file tree in the history. If the project is already organized into subdirectories, USE THEM. Do NOT create duplicate files or project roots in the top-level directory.\n"
              "- Do not propose repeating a step that is already complete (e.g., do not re-create a directory that exists).\n"
              "- CRITICAL: If you have already completed 2+ READ/ANALYZE steps on the same file, you MUST now use [EDIT] to make changes. Do NOT propose another read.\n"
              "- If the same file/lines have been inspected multiple times, transition to [EDIT] immediately.\n"
@@ -1599,7 +1954,21 @@ class Orchestrator:
              "- If the code was split into a package with __init__.py exports, prefer package-export imports at call sites.\n"
              "- Avoid replacing `from pkg import *` with dozens of per-module imports; only import names actually used.\n"
              "- Prefer `from package import ExportedSymbol` over `from package.module import ExportedSymbol` when the package exports it.\n"
-             "- CRITICAL: ONLY declare GOAL_ACHIEVED if you have verified that the current filesystem state matches all parts of the request. If history shows work but you haven't inspected it in this run, VERIFY IT FIRST.\n"
+             "- SECURITY: Always propose security-minded actions. Never store secrets in plain text. Use proper input validation.\n"
+             "\n"
+             "TEST-DRIVEN DEVELOPMENT (TDD) PRINCIPLES (MANDATORY):\n"
+             "- Write tests BEFORE implementation code. This is non-negotiable.\n"
+             "- If the request involves new functionality, your first few actions must be to [ADD] test files and [TEST] them (expecting failure).\n"
+             "- Only after tests are written and verified as failing should you [EDIT] implementation code.\n"
+             "- Use [TEST] frequently to verify progress. If a test fails, your next action should be to [ANALYZE] the failure or [EDIT] the code to fix it.\n"
+             "\n"
+             "FAILURE RECOVERY GUIDANCE:\n"
+             "- If an [EDIT] or [REFACTOR] action failed because a tool (like replace_in_file) made no changes (replaced=0), do NOT repeat the same action.\n"
+             "- Instead, use [READ] to inspect the file again and identify why the match failed (check whitespace, indentation, or if the code has changed).\n"
+             "- If a [TEST] fails, read the test output carefully and use [ANALYZE] or [READ] to find the bug before attempting another [EDIT].\n"
+             "\n"
+             "- If history shows work but you haven't inspected it in this run, VERIFY IT FIRST.\n"
+             "- DEPENDENCIES: If you modify a dependency file (e.g. `package.json`, `requirements.txt`), your very next step should be a [TEST] or [ADD] task to INSTALL the dependencies (e.g. `npm install`).\n"
              f"You MUST choose one of the following action types: {available_actions}\n"
              "\n"
              "RESPONSE FORMAT (CRITICAL - follow exactly):\n"
@@ -1795,6 +2164,12 @@ class Orchestrator:
         has_research = evidence_found["search"]
         has_action = evidence_found["files"] or evidence_found["tests"] or evidence_found["runtime"]
         
+        # TDD Check: If the request mentioned "test" or "application", require test evidence
+        request_lower = user_request.lower()
+        needs_tests = any(kw in request_lower for kw in ["test", "verify", "check", "application", "tdd"])
+        if needs_tests and not evidence_found["tests"]:
+            return False, "Completion rejected: The request implies test-driven development, but no test execution evidence was found."
+
         if not has_research:
             return False, "Completion rejected: No research/search evidence found. Agent acted without reading."
         if not has_action:
@@ -1812,9 +2187,7 @@ class Orchestrator:
         4. Report results
         5. Re-plan if needed
         """
-        print("\n" + "=" * 60)
-        print("CONTINUOUS SUB-AGENT MODE (REPL-Style with Verification)")
-        print("=" * 60)
+        print(f"\n◈ {colorize('Sub-agent Orchestrator', Colors.BRIGHT_CYAN, bold=True)} active")
 
         from rev.execution.ledger import get_ledger
         ledger = get_ledger()
@@ -1827,13 +2200,61 @@ class Orchestrator:
         # Track completed Task objects (separate from string-based logs)
         completed_tasks: List[Task] = []
 
-        iteration = 0
+        # Ensure we have a persistent plan and state manager for checkpoints
+        if not self.context.plan:
+            if self.context.resume:
+                latest = StateManager.find_latest_checkpoint()
+                if latest:
+                    try:
+                        self.context.plan = StateManager.load_from_checkpoint(latest)
+                        print(f"  ✓ Loaded cumulative plan from checkpoint: {latest}")
+                        # Populate completed_tasks from the plan
+                        for task in self.context.plan.tasks:
+                            if task.status == TaskStatus.COMPLETED:
+                                completed_tasks.append(task)
+                                # If history log is empty, reconstruct it from plan
+                                if not completed_tasks_log:
+                                    status_tag = f"[{task.status.name}]"
+                                    log_entry = f"{status_tag} {task.description}"
+                                    if task.result and isinstance(task.result, str):
+                                        try:
+                                            res = json.loads(task.result)
+                                            if isinstance(res, dict) and "summary" in res:
+                                                log_entry += f" | Output: {res['summary']}"
+                                        except: pass
+                                    completed_tasks_log.append(log_entry)
+                            elif task.status == TaskStatus.FAILED and not completed_tasks_log:
+                                completed_tasks_log.append(f"[{task.status.name}] {task.description} | Reason: {task.error}")
+                        
+                        if completed_tasks_log:
+                            self.context.work_history = completed_tasks_log
+                    except Exception as e:
+                        print(f"  ⚠️  Failed to load checkpoint: {e}")
+                        self.context.plan = ExecutionPlan(tasks=[])
+                else:
+                    self.context.plan = ExecutionPlan(tasks=[])
+            else:
+                self.context.plan = ExecutionPlan(tasks=[])
+
+        if not self.context.state_manager:
+            self.context.set_state_manager(StateManager(self.context.plan))
+
+        iteration = len(self.context.plan.tasks)
         action_counts: Dict[str, int] = defaultdict(int)
+        # Re-populate action counts from history
+        for task in self.context.plan.tasks:
+            action_sig = f"{(task.action_type or '').strip().lower()}::{task.description.strip().lower()}"
+            action_counts[action_sig] += 1
+
         failure_counts: Dict[str, int] = defaultdict(int)
         last_task_signature: Optional[str] = None
         repeat_same_action: int = 0
         forced_next_task: Optional[Task] = None
         budget_warning_shown: bool = False
+
+        # PERFORMANCE FIX 1: Track consecutive research tasks to prevent endless loops
+        consecutive_reads: int = 0
+        MAX_CONSECUTIVE_READS: int = 5  # Allow max 5 consecutive READ tasks
 
         while True:
             iteration += 1
@@ -1857,13 +2278,7 @@ class Orchestrator:
                         action_type="read"
                     )
                     forced_next_task.task_id = 0
-                    print("\n" + "="*70)
-                    print("  🔍 MANDATORY INITIAL WORKSPACE EXAMINATION")
-                    print("="*70)
-                    print("  The agent must first understand what exists in the workspace")
-                    print("  before planning any actions. This prevents blindly creating")
-                    print("  directories or files that may already exist.")
-                    print("="*70 + "\n")
+                    print(f"  {colorize(Symbols.INFO, Colors.BRIGHT_BLUE)} {colorize('Analyzing workspace structure...', Colors.BRIGHT_BLACK)}")
 
             if self.context.resource_budget.is_exceeded() and not budget_warning_shown:
                 exceeded = self.context.resource_budget.get_exceeded_resources()
@@ -1880,6 +2295,11 @@ class Orchestrator:
                 # self.context.set_agent_state("no_retry", True)
                 # self.context.add_error(f"Resource budget exceeded: {exceeded_str}")
                 # return False
+
+            if not forced_next_task:
+                diagnostic_task = _pop_diagnostic_task(self.context)
+                if diagnostic_task:
+                    forced_next_task = diagnostic_task
 
             if forced_next_task:
                 next_task = forced_next_task
@@ -1908,12 +2328,16 @@ class Orchestrator:
                             work_summary += "\n"
                         work_summary += "\n"
 
-                    # Then provide last 10 detailed tasks for recent context
-                    if total_tasks > 10:
-                        work_summary += f"Recent Tasks (showing last 10 of {total_tasks}):\n"
+                    # Then provide a condensed view of the history
+                    # Keep the first task (usually workspace examination) and the last 5
+                    if total_tasks > 6:
+                        work_summary += f"\n[History Truncated: showing first task and last 5 of {total_tasks}]\n"
+                        work_summary += f"- {completed_tasks_log[0]}\n"
+                        work_summary += "  ...\n"
+                        work_summary += "\n".join(f"- {log}" for log in completed_tasks_log[-5:])
                     else:
                         work_summary += "All Tasks:\n"
-                    work_summary += "\n".join(f"- {log}" for log in completed_tasks_log[-10:])
+                        work_summary += "\n".join(f"- {log}" for log in completed_tasks_log)
 
                     if hasattr(self, "debug_logger") and self.debug_logger:
                         self.debug_logger.log("orchestrator", "WORK_SUMMARY_GENERATED", {
@@ -1924,6 +2348,14 @@ class Orchestrator:
 
                 # Calculate repetitive failure notes for the planner
                 failure_notes = []
+
+                # Add the most recent failure prominently if the last task failed
+                if completed_tasks_log:
+                    last_entry = completed_tasks_log[-1]
+                    if last_entry.startswith('[FAILED]'):
+                        failure_notes.append("❌ LAST TASK FAILED:")
+                        failure_notes.append(f"  {last_entry}")
+                        failure_notes.append("")
 
                 # P0-2: Add blocked actions to failure notes
                 if self.context:
@@ -1937,7 +2369,7 @@ class Orchestrator:
                 if action_counts:
                     for sig, count in action_counts.items():
                         if count >= 2:
-                            failure_notes.append(f"⚠️ REPETITION WARNING: You have already proposed the action '[{sig}]' {count} times. It is not making forward progress or is failing verification. DO NOT REPEAT IT. Try a different strategy, such as reading the file again to check for subtle syntax errors or using a different tool.")
+                            failure_notes.append(f"⚠️ REPETITION: Action '[{sig}]' proposed {count}x. It is not progressing. DO NOT REPEAT. Try a different tool or inspect code again.")
 
                 failure_notes_str = "\n".join(failure_notes)
                 path_hints = _generate_path_hints(completed_tasks_log)
@@ -1974,30 +2406,34 @@ class Orchestrator:
                         return False
                     
                     # UCCT Anchoring check before declaring victory
-                    anchoring_decision = self._evaluate_anchoring(user_request, completed_tasks_log)
-                    if anchoring_decision == AnchoringDecision.RE_SEARCH:
-                        print("\n  [UCCT] Goal may be achieved, but evidence density is low. Forcing one more search.")
-                        forced_next_task = Task(description="Verify the implemented changes by listing the affected files and confirming their content matches the request.", action_type="read")
-                        continue
-                    elif anchoring_decision == AnchoringDecision.DEBATE:
-                        print("\n  [UCCT] High mismatch risk detected. Verifying structural consistency before stopping.")
-                        forced_next_task = Task(description="Run a structural consistency check on the modified modules to ensure no unresolved symbols remain.", action_type="analyze")
-                        continue
+                    if config.UCCT_ENABLED:
+                        anchoring_decision = self._evaluate_anchoring(user_request, completed_tasks_log)
+                        if anchoring_decision == AnchoringDecision.RE_SEARCH:
+                            print("\n  [UCCT] Goal may be achieved, but evidence density is low. Forcing one more search.")
+                            forced_next_task = Task(description="Verify the implemented changes by listing the affected files and confirming their content matches the request.", action_type="read")
+                            continue
+                        elif anchoring_decision == AnchoringDecision.DEBATE:
+                            print("\n  [UCCT] High mismatch risk detected. Verifying structural consistency before stopping.")
+                            forced_next_task = Task(description="Run a structural consistency check on the modified modules to ensure no unresolved symbols remain.", action_type="analyze")
+                            continue
 
                     # Grounded Completion Check (Bait Density)
-                    is_grounded, grounding_msg = self._is_completion_grounded(completed_tasks_log)
-                    if not is_grounded:
-                        print(f"\n  [UCCT] {grounding_msg} Forcing verification.")
-                        forced_next_task = Task(description="Provide concrete evidence of the work completed by running tests and inspecting the modified files.", action_type="test")
-                        continue
+                    if config.UCCT_ENABLED:
+                        is_grounded, grounding_msg = self._is_completion_grounded(completed_tasks_log)
+                        if not is_grounded:
+                            print(f"\n  {colorize(Symbols.INFO, Colors.BRIGHT_BLUE)} {colorize(grounding_msg + ' Forcing verification.', Colors.BRIGHT_BLACK)}")
+                            forced_next_task = Task(description="Provide concrete evidence of the work completed by running tests and inspecting the modified files.", action_type="test")
+                            continue
 
-                    print("\n✅ Planner determined the goal is achieved.")
+                    print(f"\n{colorize(Symbols.CHECK, Colors.BRIGHT_GREEN)} {colorize('Goal achieved.', Colors.BRIGHT_GREEN, bold=True)}")
                     return True
 
                 # FORWARD PROGRESS RULE: Check for redundant actions
-                action_sig = f"{next_task.action_type}:{next_task.description}"
+                action_sig = f"{(next_task.action_type or '').strip().lower()}::{(next_task.description or '').strip().lower()}"
                 if action_counts[action_sig] >= 2:
                     next_task = self._transform_redundant_action(next_task, action_sig, action_counts[action_sig])
+                    # Update signature after transformation
+                    action_sig = f"{(next_task.action_type or '').strip().lower()}::{(next_task.description or '').strip().lower()}"
 
                 next_task.task_id = iteration
                 try:
@@ -2006,7 +2442,9 @@ class Orchestrator:
                 except Exception:
                     pass
 
-                print(f"  -> Next action: [{next_task.action_type.upper()}] {next_task.description[:80]}")
+                # ACTION LOGGING: Concise and consistent
+                action_type = (next_task.action_type or "general").upper()
+                print(f"\n{colorize(str(iteration), Colors.BRIGHT_BLACK)}. {colorize(action_type, Colors.BRIGHT_CYAN, bold=True)} {next_task.description}")
 
             if config.PREFLIGHT_ENABLED:
                 ok, sem_msgs = _preflight_correct_action_semantics(next_task)
@@ -2064,11 +2502,16 @@ class Orchestrator:
                     next_task.description,
                     next_task.action_type,
                     completed_tasks_log,
-                    threshold=0.65  # 65% similarity threshold
+                    threshold=0.85  # Increased from 0.65 to reduce false positives
                 ):
-                    print("  [semantic-dedup] Warning: similar read already completed.")
+                    print(f"  [semantic-dedup] Warning: highly similar {action_type_lower} already completed.")
 
-            self.context.plan = ExecutionPlan(tasks=[next_task])
+            # Append to cumulative plan instead of overwriting
+            if next_task not in self.context.plan.tasks:
+                self.context.plan.tasks.append(next_task)
+
+            if self.context.state_manager:
+                self.context.state_manager.on_task_started(next_task)
 
             # P0-2 & P0-3: Anti-loop with blocked actions and streak-based circuit breaker
             action_sig = f"{(next_task.action_type or '').strip().lower()}::{next_task.description.strip().lower()}"
@@ -2080,6 +2523,13 @@ class Orchestrator:
             else:
                 repeat_same_action = 1  # Reset streak
                 last_task_signature = action_sig
+
+            # PERFORMANCE FIX 1: Track consecutive research tasks
+            action_type_normalized = (next_task.action_type or '').strip().lower()
+            if action_type_normalized in {'read', 'analyze', 'research', 'investigate', 'review'}:
+                consecutive_reads += 1
+            else:
+                consecutive_reads = 0  # Reset on any non-research action
 
             # Get or initialize blocked_action_sigs from context
             if self.context:
@@ -2103,6 +2553,55 @@ class Orchestrator:
                 # Reset streak since we rewrote the task
                 repeat_same_action = 1
                 last_task_signature = f"analyze::{next_task.description.strip().lower()}"
+
+            # PERFORMANCE FIX 3: Block redundant file reads (same file 2+ times)
+            if action_type_normalized in {'read', 'analyze', 'research'}:
+                target_file = _extract_file_path_from_description(next_task.description)
+                if target_file:
+                    # Count how many times this file has been read
+                    read_count = _count_file_reads(target_file, completed_tasks)
+                    if read_count >= 2:
+                        print(f"  [redundant-read] File '{target_file}' already read {read_count}x - BLOCKING")
+                        # Block this specific action
+                        blocked_sigs.add(action_sig)
+                        if self.context:
+                            self.context.set_agent_state("blocked_action_sigs", blocked_sigs)
+
+                        # Force re-planning with constraint
+                        self.context.add_agent_request(
+                            "REDUNDANT_FILE_READ",
+                            {
+                                "agent": "Orchestrator",
+                                "reason": f"File '{target_file}' already read {read_count} times",
+                                "detailed_reason": (
+                                    f"REDUNDANT READ BLOCKED: File '{target_file}' has already been read {read_count} times. "
+                                    f"Use the cached information from previous reads, or propose an action (EDIT/ADD/TEST) instead of re-reading. "
+                                    f"DO NOT propose reading this file again."
+                                )
+                            }
+                        )
+                        continue  # Skip to next iteration
+
+            # PERFORMANCE FIX 1: Block excessive consecutive research
+            if consecutive_reads >= MAX_CONSECUTIVE_READS and action_type_normalized in {'read', 'analyze', 'research', 'investigate', 'review'}:
+                print(f"  [research-budget-exceeded] {consecutive_reads} consecutive research tasks - forcing action phase")
+                # Force re-planning with constraint
+                forced_next_task = None  # Clear any forced task
+                # Add to failure notes for next planning iteration
+                self.context.add_agent_request(
+                    "RESEARCH_BUDGET_EXHAUSTED",
+                    {
+                        "agent": "Orchestrator",
+                        "reason": f"Research budget exhausted ({consecutive_reads} consecutive READ tasks)",
+                        "detailed_reason": (
+                            "RESEARCH BUDGET EXHAUSTED: You have completed extensive research. "
+                            "You MUST now propose a concrete action task (EDIT/ADD/TEST/DELETE), NOT another READ/ANALYZE/RESEARCH. "
+                            "All necessary context is available in the completed tasks."
+                        )
+                    }
+                )
+                consecutive_reads = 0  # Reset counter
+                continue  # Skip to next iteration with constraint
 
             # P0-3: Circuit breaker based on CONSECUTIVE streak, not total count
             if repeat_same_action >= 3:
@@ -2303,7 +2802,7 @@ class Orchestrator:
                     pass
 
             # STEP 2: EXECUTE
-            execution_success = self._dispatch_to_sub_agents(self.context)
+            execution_success = self._dispatch_to_sub_agents(self.context, next_task)
 
             # STEP 3: VERIFY - This is the critical addition
             verification_result = None
@@ -2323,18 +2822,15 @@ class Orchestrator:
                 }
                 action_type = (next_task.action_type or "").lower()
                 if action_type in verifiable_actions:
-                    print(f"  -> Verifying execution...")
+                    print(f"  {colorize('◌', Colors.BRIGHT_BLACK)} {colorize('Verifying...', Colors.BRIGHT_BLACK)}")
                     verification_result = verify_task_execution(next_task, self.context)
-                    print(f"    {verification_result}")
+                    # Don't print the raw result object, just handle the outcome
                 else:
                     verification_result = VerificationResult(
                         passed=True,
                         message="Verification skipped",
                         details={"action_type": action_type, "skipped": True},
                     )
-                    # Only log skip details when debug logging is enabled.
-                    if self.context and getattr(self.context, "debug", False):
-                        print(f"    {verification_result}")
 
                 # If tests are being skipped because nothing has changed since a failure,
                 # don't treat this as a verification failure (it causes loops). Instead,
@@ -2346,14 +2842,47 @@ class Orchestrator:
                     and verification_result.details.get("blocked") is True
                 ):
                     self.context.set_agent_state("tests_blocked_no_changes", True)
-                    print("  [!] Skipped re-running tests: no code changes since the last failing run.")
+                    print(f"  {colorize(Symbols.WARNING, Colors.BRIGHT_YELLOW)} {colorize('Skipped re-running tests: no code changes detected.', Colors.BRIGHT_BLACK)}")
 
                 if not verification_result.passed:
-                    # Verification failed - mark task as failed and mark for re-planning
+                    # PERFORMANCE FIX 2: Check if verification is inconclusive (P0-6)
+                    if getattr(verification_result, 'inconclusive', False):
+                        print(f"  [inconclusive-verification] Edit completed but needs validation - injecting TEST task")
+
+                        # Display inconclusive warning (already handled by _handle_verification_failure)
+                        self._handle_verification_failure(verification_result)
+
+                        # Determine appropriate test command based on file type
+                        file_path = verification_result.details.get('file_path', '')
+                        suggestion = verification_result.details.get('suggestion', '')
+
+                        # Extract test command from suggestion if available
+                        if 'npm test' in suggestion or 'npm run' in suggestion:
+                            test_description = f"Run npm test to validate the changes to {file_path}"
+                        elif 'pytest' in suggestion:
+                            test_description = f"Run pytest to validate the changes to {file_path}"
+                        elif '.js' in file_path or '.ts' in file_path or '.vue' in file_path:
+                            test_description = f"Run npm test to validate the changes to {file_path}"
+                        else:
+                            test_description = f"Run pytest to validate the changes to {file_path}"
+
+                        # Inject TEST task to validate the edit
+                        forced_next_task = Task(
+                            description=test_description,
+                            action_type="test"
+                        )
+
+                        # Mark current task as completed (edit succeeded, just needs validation)
+                        next_task.status = TaskStatus.COMPLETED
+                        execution_success = True
+
+                        # Continue to next iteration with the TEST task
+                        continue
+
+                    # Verification definitely failed - mark task as failed and mark for re-planning
                     next_task.status = TaskStatus.FAILED
                     next_task.error = _format_verification_feedback(verification_result)
                     execution_success = False
-                    print(f"  [!] Verification failed, marking for re-planning")
 
                     # Display detailed debug information
                     self._handle_verification_failure(verification_result)
@@ -2362,6 +2891,18 @@ class Orchestrator:
                     first_line = verification_result.message.splitlines()[0].strip() if verification_result.message else ""
                     failure_sig = f"{(next_task.action_type or '').lower()}::{first_line}"
                     failure_counts[failure_sig] += 1
+
+                    if failure_counts[failure_sig] == 2:
+                        diag_key = f"diagnostic::{failure_sig}"
+                        already_injected = self.context.agent_state.get(diag_key, False)
+                        if not already_injected:
+                            diagnostic_tasks = _build_diagnostic_tasks_for_failure(next_task, verification_result)
+                            injected = _queue_diagnostic_tasks(self.context, diagnostic_tasks)
+                            if injected:
+                                self.context.agent_state[diag_key] = True
+                                forced_next_task = injected
+                                iteration -= 1
+                                continue
 
                     # Track syntax repair attempts separately
                     syntax_repair_key = f"syntax_repair::{failure_sig}"
@@ -2373,12 +2914,7 @@ class Orchestrator:
 
                         if is_syntax_error and syntax_repair_attempts < 5:
                             # Enter syntax repair mode - give LLM focused attempts to fix
-                            print("\n" + "=" * 70)
-                            print("SYNTAX ERROR RECOVERY MODE")
-                            print("=" * 70)
-                            print(f"Syntax errors detected after {failure_counts[failure_sig]} general attempts.")
-                            print(f"Entering focused syntax repair mode (attempt {syntax_repair_attempts + 1}/5)")
-                            print("=" * 70 + "\n")
+                            print(f"  {colorize(Symbols.WARNING, Colors.BRIGHT_YELLOW)} {colorize('Syntax error detected. Entering focused repair mode (attempt ' + str(syntax_repair_attempts + 1) + '/5)', Colors.BRIGHT_WHITE)}")
 
                             # Increment syntax repair counter
                             self.context.set_agent_state(syntax_repair_key, syntax_repair_attempts + 1)
@@ -2395,38 +2931,28 @@ class Orchestrator:
 
                         elif is_syntax_error and syntax_repair_attempts >= 5:
                             # Exhausted syntax repair attempts - try auto-revert as last resort
-                            print("\n" + "=" * 70)
-                            print("SYNTAX REPAIR EXHAUSTED - ATTEMPTING AUTO-REVERT")
-                            print("=" * 70)
-                            print(f"Failed to fix syntax after {syntax_repair_attempts} focused repair attempts.")
-                            print("Attempting to revert files to restore working state...")
-                            print("=" * 70 + "\n")
+                            print(f"  {colorize(Symbols.CROSS, Colors.BRIGHT_RED)} {colorize('Repair exhausted. Reverting changes...', Colors.BRIGHT_WHITE)}")
 
                             reverted_files = _attempt_git_revert_for_syntax_errors(next_task)
                             if reverted_files:
-                                print("\n" + "=" * 70)
-                                print("SYNTAX ERROR RECOVERY - AUTO REVERT SUCCESSFUL")
-                                print("=" * 70)
-                                print(f"Auto-reverted files to restore working state: {', '.join(reverted_files)}")
-                                print("Code restored to working state. Goal NOT achieved - manual fix required.\n")
+                                print(f"  {colorize(Symbols.CHECK, Colors.BRIGHT_GREEN)} {colorize('Auto-reverted: ' + ', '.join(reverted_files), Colors.BRIGHT_BLACK)}")
                                 # Clear syntax repair counter
                                 self.context.set_agent_state(syntax_repair_key, 0)
                                 return False  # Stop execution, but code is in working state
                             else:
-                                print("\n" + "=" * 70)
-                                print("SYNTAX ERROR RECOVERY - AUTO-REVERT FAILED")
-                                print("=" * 70)
-                                print(f"Auto-revert failed. Manual intervention required.\n")
+                                print(f"  {colorize(Symbols.CROSS, Colors.BRIGHT_RED)} {colorize('Auto-revert failed. Manual intervention required.', Colors.BRIGHT_RED)}")
 
-                        # Non-syntax errors or revert failed - use original circuit breaker
+                        # Non-syntax errors or revert failed - use summary fast-exit
+                        summary = _summarize_repeated_failure(
+                            next_task,
+                            verification_result,
+                            failure_sig,
+                            failure_counts[failure_sig],
+                        )
                         self.context.set_agent_state("no_retry", True)
-                        self.context.add_error("Circuit breaker: repeating verification failure")
-                        print("\n" + "=" * 70)
-                        print("CIRCUIT BREAKER - REPEATED VERIFICATION FAILURE")
-                        print("=" * 70)
-                        print(f"Repeated failure {failure_counts[failure_sig]}x: {first_line}")
-                        print("Blocking issue: verification is failing the same way repeatedly; refusing to loop.")
-                        print("Next step: fix the blocking issue shown above, then re-run.\n")
+                        self.context.add_error(summary)
+                        print(f"  {colorize(Symbols.CROSS, Colors.BRIGHT_RED)} {colorize('Circuit Breaker: repeated failure ' + str(failure_counts[failure_sig]) + 'x. Stopping loop.', Colors.BRIGHT_RED)}")
+                        print(f"  {colorize(Symbols.INFO, Colors.BRIGHT_BLUE)} {summary}")
                         return False
 
                     # Try to decompose the failed task into more granular steps.
@@ -2491,6 +3017,13 @@ class Orchestrator:
                     print(f"  [!] Skipping last_code_change_iteration update - no real changes detected")
 
             # STEP 4: REPORT
+            if next_task.status == TaskStatus.COMPLETED:
+                if self.context.state_manager:
+                    self.context.state_manager.on_task_completed(next_task)
+            elif next_task.status == TaskStatus.FAILED:
+                if self.context.state_manager:
+                    self.context.state_manager.on_task_failed(next_task)
+
             status_tag = f"[{next_task.status.name}]"
             log_entry = f"{status_tag} {next_task.description}"
             
@@ -2560,37 +3093,46 @@ class Orchestrator:
 
             print(f"  {'✓' if next_task.status == TaskStatus.COMPLETED else '✗'} {display_entry}")
 
+            # Check for replan requests from agents
+            if self.context and self.context.agent_requests:
+                replan_req = next((r for r in self.context.agent_requests if r.get("type") == "REPLAN_REQUEST"), None)
+                if replan_req:
+                    print(f"\n  🔄 {colorize('Adaptive Replan Triggered', Colors.BRIGHT_YELLOW)}: {replan_req['details'].get('reason')}")
+                    self.context.add_insight("orchestrator", "agent_request_triggered_replan", replan_req["details"])
+                    
+                    # Force replan on next iteration
+                    self.context.plan = ExecutionPlan(tasks=[])
+                    forced_next_task = None
+                    # Note: agent_requests are cleared in next iteration start
+                    continue
+
             self.context.update_repo_context()
             clear_analysis_caches()
 
         return False
 
     def _handle_verification_failure(self, verification_result: VerificationResult):
-        """Handle and display detailed information about verification failures."""
-        print("\n" + "=" * 70)
-        print("VERIFICATION FAILURE - DEBUG INFORMATION")
-        print("=" * 70)
+        """Handle and display detailed information about verification failures.
+
+        P0-6: Distinguish inconclusive results from actual failures.
+        """
+        # P0-6: Use different colors/symbols for inconclusive vs failed
+        if getattr(verification_result, 'inconclusive', False):
+            print(f"\n{colorize('  ' + Symbols.WARNING + ' Verification Inconclusive', Colors.BRIGHT_YELLOW, bold=True)}")
+            message_color = Colors.BRIGHT_YELLOW
+        else:
+            print(f"\n{colorize('  ' + Symbols.CROSS + ' Verification Details', Colors.BRIGHT_RED, bold=True)}")
+            message_color = Colors.BRIGHT_RED
 
         # Display main message (which includes issue descriptions)
         if verification_result.message:
-            print(f"\n{verification_result.message}")
+            print(f"    {colorize(verification_result.message, message_color)}")
 
         # Display debug information if available
         if verification_result.details and "debug" in verification_result.details:
             debug_info = verification_result.details["debug"]
-            print("\nDebug Information:")
-            print("-" * 70)
             for key, value in debug_info.items():
-                if isinstance(value, list):
-                    print(f"  {key}:")
-                    for item in value:
-                        print(f"    - {item}")
-                elif isinstance(value, dict):
-                    print(f"  {key}:")
-                    for k, v in value.items():
-                        print(f"    {k}: {v}")
-                else:
-                    print(f"  {key}: {value}")
+                print(f"    {colorize(key + ':', Colors.BRIGHT_BLACK)} {value}")
 
         # Display strict/validation command outputs (compileall/pytest/etc)
         details = verification_result.details or {}
@@ -2598,39 +3140,37 @@ class Orchestrator:
             block = details.get(block_key)
             if not isinstance(block, dict) or not block:
                 continue
-            print(f"\n{block_key.upper()} OUTPUTS:")
-            print("-" * 70)
             for label, res in block.items():
                 if not isinstance(res, dict):
                     continue
-                cmd = res.get("cmd")
                 rc = res.get("rc")
                 stdout = (res.get("stdout") or "").strip()
                 stderr = (res.get("stderr") or "").strip()
-                stdout_log = res.get("stdout_log")
-                stderr_log = res.get("stderr_log")
-                print(f"  [{label}] rc={rc} cmd={cmd}")
-                if stdout:
-                    print("    stdout:")
-                    for line in str(stdout).splitlines()[-25:]:
-                        print(f"      {line}")
-                if stderr:
-                    print("    stderr:")
-                    for line in str(stderr).splitlines()[-25:]:
-                        print(f"      {line}")
-                if stdout_log or stderr_log:
-                    print(f"    logs: stdout_log={stdout_log} stderr_log={stderr_log}")
+                
+                if rc is not None and rc != 0:
+                    print(f"    {colorize('[' + label + '] failed (rc=' + str(rc) + ')', Colors.BRIGHT_YELLOW)}")
+                    if stdout:
+                        for line in str(stdout).splitlines()[-5:]: # Only show last 5 lines
+                            print(f"      {colorize('stdout:', Colors.BRIGHT_BLACK)} {line}")
+                    if stderr:
+                        for line in str(stderr).splitlines()[-5:]:
+                            print(f"      {colorize('stderr:', Colors.BRIGHT_BLACK)} {line}")
 
+        # P0-6: Different message for inconclusive vs failed
         print("\n" + "=" * 70)
-        print("NEXT ACTION: Re-planning with different approach...")
+        if getattr(verification_result, 'inconclusive', False):
+            print("NEXT ACTION: Run validation to confirm changes are correct (tests/syntax checks)...")
+        else:
+            print("NEXT ACTION: Re-planning with different approach...")
         print("=" * 70 + "\n")
 
-    def _dispatch_to_sub_agents(self, context: RevContext) -> bool:
+    def _dispatch_to_sub_agents(self, context: RevContext, task: Optional[Task] = None) -> bool:
         """Dispatches tasks to appropriate sub-agents."""
-        if not context.plan or not context.plan.tasks:
-            return False
-            
-        task = context.plan.tasks[0]
+        if task is None:
+            if not context.plan or not context.plan.tasks:
+                return False
+            task = context.plan.tasks[0]
+
         if task.status == TaskStatus.COMPLETED:
             return True
 
@@ -2649,6 +3189,8 @@ class Orchestrator:
             task.status = TaskStatus.FAILED
             task.error = f"No agent available to handle action type: '{task.action_type}'"
             return False
+
+        self._maybe_set_workdir_for_task(task)
 
         task.status = TaskStatus.IN_PROGRESS
         try:
@@ -2681,12 +3223,17 @@ class Orchestrator:
             # structured tool_calls for the runtime adapter.
             if isinstance(result, str):
                 try:
-                    allowed = [
-                        t.get("function", {}).get("name")
-                        for t in get_available_tools()
-                        if isinstance(t, dict)
-                    ]
-                    executed = maybe_execute_tool_call_from_text(result, allowed_tools=[n for n in allowed if isinstance(n, str)])
+                    allowed = allowed_tools_for_action(task.action_type)
+                    if allowed is None:
+                        allowed = [
+                            t.get("function", {}).get("name")
+                            for t in get_available_tools()
+                            if isinstance(t, dict)
+                        ]
+                    executed = maybe_execute_tool_call_from_text(
+                        result,
+                        allowed_tools=[n for n in allowed if isinstance(n, str)],
+                    )
                 except Exception:
                     executed = None
 
@@ -2706,6 +3253,11 @@ class Orchestrator:
                 _append_task_tool_event(task, result)
             except Exception:
                 pass
+            ok, constraint_error = _enforce_action_tool_constraints(task)
+            if not ok:
+                task.status = TaskStatus.FAILED
+                task.error = constraint_error
+                return False
             # If sub-agent reported tool error, fail the task and replan.
             try:
                 if isinstance(result, str):

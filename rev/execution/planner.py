@@ -23,6 +23,7 @@ from rev.config import (
 from rev import config
 from rev.tools.git_ops import get_repo_context
 from rev.tools.registry import get_available_tools, execute_tool
+from rev.tools.project_types import detect_project_type
 
 
 PLANNING_SYSTEM = """You are a planning agent. Produce an execution plan for the user request.
@@ -35,23 +36,24 @@ Priorities:
 TEST-DRIVEN DEVELOPMENT (TDD) CORE PRINCIPLE:
 REV follows TDD as a fundamental practice for all feature development and bug fixes.
 - TESTS MUST BE WRITTEN BEFORE IMPLEMENTATION CODE
-- For new features: create test tasks BEFORE implementation tasks
-- For bug fixes: create failing test that reproduces the bug, THEN fix the bug
-- Test tasks should be specific: "Write test for X in tests/test_y.py" not "add tests"
-- Implementation tasks should reference their corresponding tests
+- For new features: your VERY FIRST implementation tasks MUST be creating test files.
+- NEVER implement a feature (e.g., adding an API endpoint) until a test exists that validates it.
+- If you're building a "test application" or "CRUD capabilities", you MUST architect the API through tests first.
+- Test tasks should be specific: "Write test for POST /api/users in tests/api.test.js"
+- Implementation tasks MUST reference their corresponding tests.
 
-TDD TASK ORDERING:
-1. Review/research existing tests and patterns
-2. Write tests for new functionality (action_type="add" for test files)
-3. Implement the functionality to make tests pass (action_type="edit" or "add")
-4. Run tests to verify (action_type="test")
-5. Refactor if needed while keeping tests green
+TDD TASK ORDERING (STRICT):
+1. [REVIEW] existing code and patterns.
+2. [ADD] Write test file(s) specifying the new behavior.
+3. [TEST] Run tests to confirm they fail (RED).
+4. [ADD/EDIT] Implement code to satisfy the tests (GREEN).
+5. [TEST] Run tests to confirm they pass.
+6. [EDIT] Refactor if needed.
 
 CRITICAL REQUIREMENT:
-- You MUST generate AT LEAST 2 distinct tasks
-- NEVER collapse everything into a single task
-- Break down work into review/analysis + implementation + testing phases
-- If you're unsure, create separate tasks for: review, implementation, and validation
+- If you don't include tests in your plan for a feature request, YOUR PLAN WILL BE REJECTED.
+- You MUST generate AT LEAST 2 distinct tasks.
+- NEVER collapse everything into a single task.
 
 CRITICAL RULE: DO NOT Hallucinate File Paths or Class Names
 - You can ONLY reference file paths, class names, and function names that appear EXPLICITLY in:
@@ -119,12 +121,16 @@ Output format (strict):
 - Return ONLY a JSON array. No prose, no markdown, no code fences.
 - Each item must be an object with exactly:
   - "description": string
-  - "action_type": "review" | "edit" | "add" | "delete" | "test" | "doc"
+  - "action_type": "review" | "edit" | "add" | "delete" | "test" | "doc" | "refactor" | "debug" | "create_tool" | "set_workdir"
   - "complexity": "low" | "medium" | "high"
 
 Guidance:
-- Put review tasks first (find existing implementations and patterns).
+- Put review/read tasks first (find existing implementations and patterns).
+- Use [SET_WORKDIR] if the task is focused on a specific subdirectory to avoid path drift.
+- Use [ADD] to create platform-specific validation or reproduction scripts (e.g., .ps1 for Windows, .sh for Linux/macOS) based on the 'System Information' provided.
+- Use [CREATE_TOOL] if you need a specialized Python tool that doesn't exist yet.
 - For multi-feature work: one implementation task per feature with SPECIFIC names.
+- DEPENDENCY MANAGEMENT: If you add new project dependencies (to `package.json`, `requirements.txt`, `go.mod`, etc.), you MUST add a task to INSTALL them using the appropriate tool (`npm install`, `pip install`, etc.).
 - For code changes: include at least one test task and name the command when possible.
 - If a task creates a new file, the description must say why reuse was not possible.
 - When in doubt, create review tasks instead of calling more tools.
@@ -146,10 +152,12 @@ You are planning a CODE + TEST change to this repository.
 In addition to the general planning rules above, you MUST:
 
 1. Identify the specific files and modules you will touch.
-2. For every non-trivial code change ("edit" or "add"):
+2. If you modify dependency manifests (`package.json`, `requirements.txt`, `setup.py`, `pyproject.toml`, `go.mod`, etc.):
+   - Add a task to INSTALL the new dependencies (e.g., `npm install`, `pip install -r requirements.txt`).
+3. For every non-trivial code change ("edit" or "add"):
    - Add at least one task to CREATE or UPDATE automated tests.
    - Add at least one task to RUN the relevant test command.
-3. Prefer many small, atomic tasks over a few large ones.
+4. Prefer many small, atomic tasks over a few large ones.
 
 TEST-DRIVEN DEVELOPMENT (TDD) MANDATORY WORKFLOW:
 For any new feature or bug fix, your plan MUST follow this order:
@@ -223,6 +231,14 @@ Rules:
 - If the task implies multiple features/items, create one subtask per item WITH SPECIFIC NAMES.
 - For porting/integration work: first IDENTIFY specific items, then implement one at a time, then add tests.
 - Avoid a single subtask that covers the entire original task.
+
+ACTIONABILITY (MANDATORY):
+- Each subtask MUST be directly executable with a specific tool AND a concrete artifact.
+- The description MUST include both:
+  1) The tool to use (e.g., read_file, list_dir, search_code, write_file, replace_in_file, apply_patch, create_directory, delete_file, run_tests, run_cmd, set_workdir)
+  2) The artifact (a specific file path, directory path, or command)
+- Example: "Use create_directory to create src/components" or "Use read_file on src/app.py".
+- Narrative tasks without tool+artifact will be rejected.
 
 MINIMUM BREAKDOWN PATTERN (TDD):
 1. Review/research task (understand existing code/patterns, IDENTIFY specific items, review existing tests)
@@ -635,6 +651,304 @@ def _extract_requirements_from_request(user_request: str) -> List[str]:
     return requirements
 
 
+_ACTIONABILITY_TOOL_HINTS = {
+    "read_file",
+    "read_file_lines",
+    "list_dir",
+    "tree_view",
+    "search_code",
+    "write_file",
+    "append_to_file",
+    "replace_in_file",
+    "apply_patch",
+    "create_directory",
+    "delete_file",
+    "move_file",
+    "copy_file",
+    "run_tests",
+    "run_cmd",
+    "set_workdir",
+    "create_tool",
+    "split_python_module_classes",
+}
+
+_ACTIONABILITY_COMMAND_TOKENS = {
+    "pytest",
+    "python",
+    "python3",
+    "npm",
+    "npx",
+    "yarn",
+    "pnpm",
+    "go",
+    "cargo",
+    "dotnet",
+    "mvn",
+    "gradle",
+    "phpunit",
+    "bundle",
+    "rake",
+    "rspec",
+    "flutter",
+    "ctest",
+}
+
+_ACTIONABILITY_PATH_PATTERNS = [
+    r"[A-Za-z]:\\[^\s)\"']+",
+    r"/[^\s)\"']+",
+    r"[\w./\\-]+\.[A-Za-z0-9]{1,8}",
+    r"[\w./\\-]+[\\/][\w./\\-]+",
+]
+
+_DEFAULT_TEST_COMMANDS = {
+    "python": "pytest -q",
+    "node": "npm test",
+    "vue": "npm test",
+    "react": "npm test",
+    "nextjs": "npm test",
+    "go": "go test ./...",
+    "rust": "cargo test",
+    "csharp": "dotnet test",
+    "java_maven": "mvn test",
+    "java_gradle": "gradle test",
+    "kotlin": "gradle test",
+    "php": "phpunit",
+    "ruby": "bundle exec rspec",
+    "flutter": "flutter test",
+    "cpp_make": "make test",
+    "cpp_cmake": "ctest",
+}
+
+
+_VALIDATION_COMMAND_TOKENS = {
+    "pytest",
+    "python -m pytest",
+    "python -m unittest",
+    "npm test",
+    "npm run test",
+    "yarn test",
+    "pnpm test",
+    "go test",
+    "cargo test",
+    "dotnet test",
+    "mvn test",
+    "gradle test",
+    "phpunit",
+    "bundle exec rspec",
+    "rspec",
+    "ctest",
+    "flutter test",
+}
+
+
+def _looks_like_validation_cmd(cmd: str) -> bool:
+    lowered = cmd.lower()
+    if any(token in lowered for token in _VALIDATION_COMMAND_TOKENS):
+        return True
+    if lowered.startswith("python ") and "pytest" in lowered:
+        return True
+    if lowered.startswith("npm ") or lowered.startswith("yarn ") or lowered.startswith("pnpm "):
+        return "test" in lowered
+    return False
+
+
+def _extract_validation_steps_from_description(description: str, action_type: str) -> tuple[str, list[str]]:
+    if not description or (action_type or "").lower() == "test":
+        return description, []
+
+    steps: list[str] = []
+    spans: list[tuple[int, int]] = []
+
+    patterns = [
+        r"(?:validation|verify|verification|run tests?|tests?)\s*[:\-]\s*`([^`]+)`",
+        r"(?:validation|verify|verification|run tests?|tests?)\s*[:\-]\s*([^\n.;]+)",
+        r"(?:then\s+)?(?:run|rerun|execute)\s+`([^`]+)`",
+    ]
+
+    for pattern in patterns:
+        for match in re.finditer(pattern, description, re.IGNORECASE):
+            candidate = match.group(1).strip()
+            if not candidate:
+                continue
+            if not _looks_like_validation_cmd(candidate):
+                continue
+            steps.append(candidate)
+            spans.append(match.span())
+
+    if not spans:
+        return description, []
+
+    spans.sort(reverse=True)
+    cleaned = description
+    for start, end in spans:
+        cleaned = cleaned[:start] + cleaned[end:]
+
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    cleaned = cleaned.rstrip(" .;,-")
+    return cleaned, steps
+
+
+def _apply_validation_steps(tasks_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    updated: list[Dict[str, Any]] = []
+    for task_data in tasks_data:
+        data = dict(task_data)
+        description = data.get("description") or ""
+        action_type = data.get("action_type") or "review"
+        cleaned, steps = _extract_validation_steps_from_description(description, action_type)
+        if steps:
+            existing = data.get("validation_steps") or []
+            if not isinstance(existing, list):
+                existing = []
+            data["validation_steps"] = existing + steps
+            data["description"] = cleaned
+        updated.append(data)
+    return updated
+
+
+def _mentions_tool(description: str) -> bool:
+    lowered = description.lower()
+    return any(tool in lowered for tool in _ACTIONABILITY_TOOL_HINTS)
+
+
+def _contains_path(description: str) -> bool:
+    for pattern in _ACTIONABILITY_PATH_PATTERNS:
+        if re.search(pattern, description):
+            return True
+    return False
+
+
+def _contains_command(description: str) -> bool:
+    lowered = description.lower()
+    return any(token in lowered for token in _ACTIONABILITY_COMMAND_TOKENS)
+
+
+def _extract_first_path(description: str) -> Optional[str]:
+    for pattern in _ACTIONABILITY_PATH_PATTERNS:
+        match = re.search(pattern, description)
+        if match:
+            return match.group(0)
+    return None
+
+
+def _default_test_command(project_type: str) -> str:
+    return _DEFAULT_TEST_COMMANDS.get(project_type, "pytest -q")
+
+
+def _select_tool_for_action(action_type: str, description: str) -> str:
+    desc_lower = description.lower()
+    if action_type == "set_workdir":
+        return "set_workdir"
+    if action_type == "test":
+        return "run_tests"
+    if action_type in {"review", "debug"}:
+        if any(token in desc_lower for token in ("list", "tree", "dir")):
+            return "list_dir"
+        if any(token in desc_lower for token in ("search", "grep", "find")):
+            return "search_code"
+        return "read_file"
+    if action_type in {"add", "edit", "doc"}:
+        if any(token in desc_lower for token in ("directory", "folder")):
+            return "create_directory"
+        return "write_file" if action_type == "add" else "replace_in_file"
+    if action_type == "delete":
+        return "delete_file"
+    if action_type == "refactor":
+        return "apply_patch"
+    if action_type == "create_tool":
+        return "create_tool"
+    return "read_file"
+
+
+def _coerce_actionable_task(
+    task_data: Dict[str, Any],
+    project_type: str,
+) -> Dict[str, Any]:
+    updated = dict(task_data)
+    description = (updated.get("description") or "").strip()
+    action_type = (updated.get("action_type") or "review").lower()
+
+    if not description:
+        updated["description"] = "Use list_dir on . to identify relevant files"
+        updated["action_type"] = "review"
+        return updated
+
+    has_tool = _mentions_tool(description)
+    has_path = _contains_path(description)
+    has_command = _contains_command(description)
+
+    if action_type == "test":
+        if not has_command:
+            cmd = _default_test_command(project_type)
+            description = f"Run tests using run_tests cmd=\"{cmd}\""
+        if not _mentions_tool(description):
+            description = f"{description} (use run_tests)"
+        updated["description"] = description
+        updated["action_type"] = "test"
+        return updated
+
+    if action_type == "set_workdir":
+        path = _extract_first_path(description)
+        if not path:
+            description = "Set working directory using set_workdir to ."
+        elif not has_tool:
+            description = f"{description} (use set_workdir)"
+        updated["description"] = description
+        updated["action_type"] = "set_workdir"
+        return updated
+
+    if action_type in {"review", "debug"}:
+        if not has_path and not has_command:
+            description = f"Use list_dir on . to locate artifacts for: {description}"
+        elif not has_tool:
+            if has_path:
+                path = _extract_first_path(description) or "."
+                description = f"Use read_file on {path} to review"
+            else:
+                description = f"Use search_code on . to review: {description}"
+        updated["description"] = description
+        updated["action_type"] = action_type
+        return updated
+
+    if action_type in {"add", "edit", "delete", "refactor", "doc", "create_tool"}:
+        if not has_path:
+            description = f"Use search_code on . to locate target files for: {description}"
+            updated["description"] = description
+            updated["action_type"] = "review"
+            return updated
+
+        if not has_tool:
+            tool = _select_tool_for_action(action_type, description)
+            description = f"{description} (use {tool})"
+        updated["description"] = description
+        updated["action_type"] = action_type
+        return updated
+
+    if not has_tool or not (has_path or has_command):
+        description = f"Use list_dir on . to locate artifacts for: {description}"
+        updated["description"] = description
+        updated["action_type"] = "review"
+    return updated
+
+
+def _ensure_actionable_subtasks(
+    tasks_data: List[Dict[str, Any]],
+    user_request: str,
+) -> List[Dict[str, Any]]:
+    if not tasks_data:
+        return tasks_data
+    project_type = detect_project_type(config.ROOT)
+    updated = []
+    coerced_count = 0
+    for task_data in tasks_data:
+        coerced = _coerce_actionable_task(task_data, project_type)
+        if coerced.get("description") != task_data.get("description") or coerced.get("action_type") != task_data.get("action_type"):
+            coerced_count += 1
+        updated.append(coerced)
+    if coerced_count:
+        print(f"  [ACTIONABILITY] Coerced {coerced_count} task(s) to include tool+artifact")
+    return updated
+
+
 def _recursive_breakdown(task_description: str, action_type: str, context: str, max_depth: int = 2, current_depth: int = 0, tools: list = None, force_breakdown: bool = False) -> List[Dict[str, Any]]:
     """Recursively break down a complex task into subtasks.
 
@@ -663,6 +977,7 @@ IMPORTANT: This task was detected as overly broad and MUST be broken down into M
 - Each subtask should be a single, atomic action
 - If this involves multiple features/items, create a SEPARATE subtask for EACH one
 - Do NOT return a single catch-all subtask
+- Each subtask MUST include a specific tool name and a concrete artifact (file path, directory, or command)
 """
 
     messages = [
@@ -704,6 +1019,8 @@ REQUIREMENTS:
 - You MUST return at least 5 subtasks
 - Each subtask must be a SINGLE action (e.g., \"Add SMA indicator\" not \"Add indicators\")
  - If the task mentions multiple items (components, features, etc.), create ONE subtask per item
+- Each subtask MUST include a specific tool name (e.g., read_file, list_dir, search_code, write_file, apply_patch, create_directory, run_tests)
+- Each subtask MUST include a concrete artifact (file path, directory path, or command)
 - Start with review/analysis tasks, then implementation tasks, then test tasks
 
 Example for \"add multiple modules/features\":
@@ -1306,6 +1623,12 @@ Generate a comprehensive execution plan as a JSON array NOW with AT LEAST 2 task
                     expanded_tasks.append(task_data)
             tasks_data = expanded_tasks
 
+        # Extract validation steps from task descriptions before actionability tweaks.
+        tasks_data = _apply_validation_steps(tasks_data)
+
+        # Actionability enforcement: ensure tool + artifact per task
+        tasks_data = _ensure_actionable_subtasks(tasks_data, user_request)
+
         # VAGUE PLACEHOLDER DETECTION: Check for tasks with abstract placeholders
         print("→ Validating task specificity...")
         vague_task_count = 0
@@ -1374,6 +1697,9 @@ Generate a comprehensive execution plan as a JSON array NOW with AT LEAST 2 task
             # Set complexity on the task
             if len(plan.tasks) > 0:
                 plan.tasks[-1].complexity = task_data.get("complexity", "low")
+                validation_steps = task_data.get("validation_steps")
+                if isinstance(validation_steps, list):
+                    plan.tasks[-1].validation_steps = validation_steps
     else:
         print("Warning: Could not generate a valid plan after retries. Creating a default review task.")
         plan.add_task(f"Review existing code and patterns for: {user_request}", "review")

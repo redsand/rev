@@ -124,6 +124,12 @@ class RevContext:
         self.clarification_history: List[Dict[str, Any]] = [] # History of user clarifications
         self.purified_context: Optional[Any] = None # FilteredContext from context_guard phase
         self.work_history: List[str] = [] # History of completed/failed tasks for context and loop detection
+        self.user_feedback: List[str] = [] # Real-time user guidance/comments
+
+    def add_user_feedback(self, feedback: str):
+        """Add user feedback/comment to the context."""
+        self.user_feedback.append(feedback)
+        self.logger.log("context", "USER_FEEDBACK_ADDED", {"feedback": feedback}, "INFO")
 
     def update_plan(self, new_plan: ExecutionPlan):
         """Update the current execution plan."""

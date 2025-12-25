@@ -21,10 +21,13 @@ from rev import config
 from rev.debug_logger import prune_old_logs
 from rev.tools.utils import quote_cmd_arg
 
+# Backward compatibility for tests
+ROOT = config.ROOT
+
 
 # ========== Helper Function ==========
 
-def _run_shell(cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:
+def _run_shell(cmd: str | list[str], timeout: int = 300) -> subprocess.CompletedProcess:
     """Execute shell command (DEPRECATED - use command_runner module instead).
 
     This function is maintained for backward compatibility only.
@@ -39,14 +42,14 @@ def _run_shell(cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:
         if result.get("blocked"):
             # Command was blocked for security reasons
             return subprocess.CompletedProcess(
-                args=cmd,
+                args=str(cmd),
                 returncode=-1,
                 stdout="",
                 stderr=f"BLOCKED: {result.get('error', 'security violation')}"
             )
 
         return subprocess.CompletedProcess(
-            args=cmd,
+            args=str(cmd),
             returncode=result.get("rc", -1),
             stdout=result.get("stdout", ""),
             stderr=result.get("stderr", "")
@@ -55,7 +58,7 @@ def _run_shell(cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:
         # On Windows low-memory/paging-file failures (e.g., WinError 1455), return a CompletedProcess-like
         # object so callers can surface a clear message instead of crashing.
         return subprocess.CompletedProcess(
-            args=cmd,
+            args=str(cmd),
             returncode=1,
             stdout="",
             stderr=str(exc),
@@ -88,84 +91,6 @@ def _tail_file(path: pathlib.Path, limit: int) -> str:
         else:
             handle.seek(0)
         return handle.read()
-
-
-def _run_shell_streamed(
-    cmd: str,
-    *,
-    timeout: int,
-    stdout_limit: int,
-    stderr_limit: int,
-) -> dict:
-    """Run a command while streaming output to disk to avoid memory spikes."""
-
-    stdout_path = _create_log_file("stdout_")
-    stderr_path = _create_log_file("stderr_")
-
-    with (
-        stdout_path.open("w", encoding="utf-8", errors="replace") as stdout_handle,
-        stderr_path.open("w", encoding="utf-8", errors="replace") as stderr_handle,
-    ):
-        proc = subprocess.Popen(
-            cmd,
-            shell=True,
-            cwd=str(config.ROOT),
-            text=True,
-            stdout=stdout_handle,
-            stderr=stderr_handle,
-        )
-
-        try:
-            # Poll for completion or interrupt
-            import time
-            start_time = time.time()
-            while True:
-                if proc.poll() is not None:
-                    break
-                
-                if config.get_escape_interrupt():
-                    proc.terminate()
-                    # Wait a bit for graceful termination
-                    try:
-                        proc.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                    
-                    config.set_escape_interrupt(False)
-                    return {
-                        "cmd": cmd,
-                        "interrupted": True,
-                        "stdout": _tail_file(stdout_path, stdout_limit),
-                        "stderr": _tail_file(stderr_path, stderr_limit),
-                    }
-                
-                if time.time() - start_time > timeout:
-                    proc.kill()
-                    return {
-                        "cmd": cmd,
-                        "timeout": timeout,
-                        "stdout_log": str(stdout_path),
-                        "stderr_log": str(stderr_path),
-                    }
-                
-                time.sleep(0.5)
-        except Exception as e:
-            proc.kill()
-            return {
-                "cmd": cmd,
-                "error": str(e),
-                "stdout": _tail_file(stdout_path, stdout_limit),
-                "stderr": _tail_file(stderr_path, stderr_limit),
-            }
-
-    return {
-        "cmd": cmd,
-        "rc": proc.returncode,
-        "stdout": _tail_file(stdout_path, stdout_limit),
-        "stderr": _tail_file(stderr_path, stderr_limit),
-        "stdout_log": str(stdout_path),
-        "stderr_log": str(stderr_path),
-    }
 
 
 def _working_tree_snapshot() -> str:
@@ -472,7 +397,7 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
         strategies = [
             ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", tfp], False),
             ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", "--3way", tfp], True),
-            ("patch", f"patch --batch --forward --dry-run -p1 < {quote_cmd_arg(tfp)}", False),
+            ("patch", ["patch", "--batch", "--forward", "--dry-run", "-p1", "-i", tfp], False),
         ]
         
         if not is_git_repo():
@@ -484,10 +409,7 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
         apply_mode: Optional[str] = None
 
         for runner, check_args, use_three_way_flag in strategies:
-            if runner == "git":
-                check_proc = _run_shell(" ".join(quote_cmd_arg(a) for a in check_args))
-            else:
-                check_proc = _run_shell(check_args)
+            check_proc = _run_shell(check_args)
 
             combined_output = (check_proc.stdout + check_proc.stderr).lower()
             if "patch already applied" in combined_output or "previously applied" in combined_output:
@@ -499,12 +421,7 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
                 break
         else:
             if is_git_repo():
-                reverse_proc = _run_shell(
-                    " ".join(
-                        quote_cmd_arg(a)
-                        for a in ["git", "apply", "--check", "--reverse", "--inaccurate-eof", tfp]
-                    )
-                )
+                reverse_proc = _run_shell(["git", "apply", "--check", "--reverse", "--inaccurate-eof", tfp])
                 reverse_output = (reverse_proc.stdout + reverse_proc.stderr).lower()
                 if reverse_proc.returncode == 0 or "reversed" in reverse_output:
                     return _result(reverse_proc, success=True, already_applied=True, phase="check")
@@ -536,9 +453,9 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
             if use_three_way:
                 apply_args.append("--3way")
             apply_args.append(tfp)
-            apply_proc = _run_shell(" ".join(quote_cmd_arg(a) for a in apply_args))
+            apply_proc = _run_shell(apply_args)
         else:
-            apply_proc = _run_shell(f"patch --batch --forward -p1 < {quote_cmd_arg(tfp)}")
+            apply_proc = _run_shell(["patch", "--batch", "--forward", "-p1", "-i", tfp])
 
         if apply_proc.returncode == 0:
             post_status = _working_tree_snapshot()
@@ -732,7 +649,7 @@ def git_branch(action: str = "list", branch_name: str = None) -> str:
 
 # ========== Additional Git Operations ==========
 
-def run_cmd(cmd: str, timeout: int = 300) -> str:
+def run_cmd(cmd: str | list[str], timeout: int = 300, cwd: Optional[pathlib.Path] = None) -> str:
     """Run a shell command safely with security validation.
 
     Security:
@@ -742,24 +659,32 @@ def run_cmd(cmd: str, timeout: int = 300) -> str:
     Returns:
         JSON string with execution results
     """
-    from rev.tools.command_runner import run_command_streamed
-
     # Short-circuit repeated git clones to an existing destination
     try:
-        tokens = shlex.split(cmd)
+        if isinstance(cmd, str):
+            tokens = shlex.split(cmd)
+        else:
+            tokens = cmd
+
         if len(tokens) >= 2 and tokens[0] == "git" and tokens[1] == "clone":
             # Identify destination directory if explicitly provided
-            dest_tokens = [t for t in tokens[2:] if not t.startswith("-")]
+            # git clone <url> [directory]
+            # Ignore options/flags
+            args = [t for t in tokens[2:] if not t.startswith("-")]
             dest: Optional[str] = None
-            if len(dest_tokens) >= 2:
-                dest = dest_tokens[-1]
-            elif len(dest_tokens) == 1 and "://" not in dest_tokens[0]:
-                dest = dest_tokens[0]
+            if len(args) >= 2:
+                # directory was provided after url
+                dest = args[1]
+            elif len(args) == 1:
+                # only url was provided, dest is basename of url
+                url = args[0]
+                dest = url.rstrip("/").split("/")[-1].replace(".git", "")
 
             if dest:
                 dest_path = pathlib.Path(dest)
                 if not dest_path.is_absolute():
-                    dest_path = config.ROOT / dest_path
+                    # Use module-level ROOT to respect monkeypatching in tests
+                    dest_path = ROOT / dest_path
 
                 if dest_path.exists():
                     return json.dumps({
@@ -774,17 +699,21 @@ def run_cmd(cmd: str, timeout: int = 300) -> str:
         pass
 
     # Use safe command runner
-    result = run_command_streamed(
+    from rev.tools.command_runner import run_command_safe
+    if cwd is not None and not isinstance(cwd, pathlib.Path):
+        cwd = pathlib.Path(cwd)
+
+    result = run_command_safe(
         cmd,
         timeout=timeout,
-        stdout_limit=8000,
-        stderr_limit=8000,
+        cwd=cwd,
+        capture_output=True,
         check_interrupt=True,
     )
     return json.dumps(result)
 
 
-def run_tests(cmd: str = "pytest -q", timeout: int = 600) -> str:
+def run_tests(cmd: str | list[str] = "pytest -q", timeout: int = 600, cwd: Optional[pathlib.Path] = None) -> str:
     """Run test suite safely with security validation.
 
     Security:
@@ -794,13 +723,16 @@ def run_tests(cmd: str = "pytest -q", timeout: int = 600) -> str:
     Returns:
         JSON string with execution results
     """
-    from rev.tools.command_runner import run_command_streamed
+    from rev.tools.command_runner import run_command_safe
 
-    result = run_command_streamed(
+    if cwd is not None and not isinstance(cwd, pathlib.Path):
+        cwd = pathlib.Path(cwd)
+
+    result = run_command_safe(
         cmd,
         timeout=timeout,
-        stdout_limit=12000,
-        stderr_limit=4000,
+        cwd=cwd,
+        capture_output=True,
         check_interrupt=True,
     )
     return json.dumps(result)

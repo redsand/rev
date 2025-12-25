@@ -7,13 +7,17 @@ from __future__ import annotations
 import json
 import os
 import time
+import importlib
+import inspect
+import pkgutil
 from pathlib import Path
-from typing import Dict, Any, TYPE_CHECKING
+from typing import Dict, Any, TYPE_CHECKING, List, Callable, Optional
 
 from rev import config
 from rev.debug_logger import get_logger
 from rev.tools.permissions import get_permission_manager
 from rev.workspace import get_workspace
+from rev.tools.workspace_resolver import resolve_workspace_path, WorkspacePathError
 
 if TYPE_CHECKING:  # pragma: no cover - used only for type hints
     from rev.execution.timeout_manager import TimeoutManager, TimeoutConfig
@@ -192,6 +196,149 @@ _TIMEOUT_PROTECTED_TOOLS = {
     "split_python_module_classes",
 }
 
+_COMMAND_TOKENS = {
+    "npm",
+    "npx",
+    "yarn",
+    "pnpm",
+    "pytest",
+    "py.test",
+    "python",
+    "python3",
+    "pip",
+    "pip3",
+    "node",
+    "go",
+    "cargo",
+    "mvn",
+    "gradle",
+    "gradlew",
+    "dotnet",
+    "bundle",
+    "rake",
+    "phpunit",
+    "flutter",
+    "java",
+    "ruby",
+    "perl",
+    "bash",
+    "sh",
+    "pwsh",
+    "powershell",
+    "cmd",
+    "make",
+    "cmake",
+    "git",
+}
+
+_PATH_TOOLS = {"read_file", "read_file_lines", "get_file_info", "file_exists"}
+
+
+def _looks_like_command(value: str) -> bool:
+    text = (value or "").strip()
+    if not text:
+        return False
+    if "\n" in text or "\r" in text:
+        return True
+    parts = text.split()
+    if not parts:
+        return False
+    first = parts[0].lower()
+    if first in _COMMAND_TOKENS:
+        return True
+    return False
+
+
+def _guard_command_like_path(tool: str, args: Dict[str, Any]) -> Optional[str]:
+    if tool not in _PATH_TOOLS:
+        return None
+    path = args.get("path")
+    if not isinstance(path, str):
+        return None
+    text = path.strip()
+    if not text:
+        return None
+    try:
+        resolved = resolve_workspace_path(text, purpose=f"{tool} guard")
+    except WorkspacePathError:
+        resolved = None
+    if resolved and resolved.abs_path.exists():
+        return None
+    if _looks_like_command(text):
+        return json.dumps(
+            {
+                "error": f"Command-like input passed to {tool}. Use run_cmd/run_tests instead.",
+                "blocked": True,
+                "input": text,
+            }
+        )
+    return None
+
+# --- Dynamic Tool Registration ---
+_DYNAMIC_TOOLS: Dict[str, Dict[str, Any]] = {}
+_DYNAMIC_DISPATCH: Dict[str, Callable] = {}
+
+def register_tool(name: str, schema: Dict[str, Any]):
+    """Decorator or function to register a tool at runtime."""
+    def decorator(func: Callable):
+        _DYNAMIC_TOOLS[name] = schema
+        _DYNAMIC_DISPATCH[name] = func
+        return func
+    return decorator
+
+def _discover_custom_tools():
+    """Scan both core and workspace tools directories for custom tools."""
+    # 1. Core tools
+    core_tools_dir = Path(__file__).parent
+    _scan_directory_for_tools(core_tools_dir, "rev.tools")
+    
+    # 2. Workspace tools (.rev/tools)
+    try:
+        workspace_tools_dir = config.ROOT / ".rev" / "tools"
+        if workspace_tools_dir.exists():
+            # Add to sys.path if not present so we can import them
+            import sys
+            ws_path = str(workspace_tools_dir.parent.parent) # The project root
+            if ws_path not in sys.path:
+                sys.path.insert(0, ws_path)
+            
+            # Scan .rev/tools files
+            for file in workspace_tools_dir.glob("*.py"):
+                if file.name.startswith('_'): continue
+                module_name = f".rev.tools.{file.stem}"
+                try:
+                    # We might need to handle absolute imports for files in .rev/tools
+                    # For simplicity, we assume they are discoverable via the root
+                    spec = importlib.util.spec_from_file_location(module_name, file)
+                    if spec and spec.loader:
+                        module = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(module)
+                        _register_from_module(module)
+                except Exception as e:
+                    logger.debug(f"Failed to load workspace tool {file.name}: {e}")
+    except Exception:
+        pass
+
+def _scan_directory_for_tools(directory: Path, package_prefix: str):
+    """Helper to scan a directory for tool modules."""
+    for _, name, is_pkg in pkgutil.iter_modules([str(directory)]):
+        if is_pkg or name.startswith('_') or name in ('registry', 'permissions', 'workspace_resolver'):
+            continue
+        try:
+            module = importlib.import_module(f"{package_prefix}.{name}")
+            _register_from_module(module)
+        except Exception as e:
+            logger.debug(f"Failed to import dynamic tool module {name}: {e}")
+
+def _register_from_module(module):
+    """Register tool functions from an imported module."""
+    for attr_name in dir(module):
+        attr = getattr(module, attr_name)
+        if callable(attr) and hasattr(attr, "tool_schema"):
+            tool_name = getattr(attr, "tool_name", attr_name)
+            _DYNAMIC_TOOLS[tool_name] = attr.tool_schema
+            _DYNAMIC_DISPATCH[tool_name] = attr
+
 def _get_timeout_manager() -> TimeoutManager | None:
     """Get or create the global timeout manager."""
     global _TIMEOUT_MANAGER
@@ -334,8 +481,8 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         "git_status": lambda args: git_status(),
         "git_log": lambda args: git_log(args.get("count", 10), args.get("oneline", False)),
         "git_branch": lambda args: git_branch(args.get("action", "list"), args.get("branch_name")),
-        "run_cmd": lambda args: run_cmd(args["cmd"], args.get("timeout", 300)),
-        "run_tests": lambda args: run_tests(args.get("cmd", "pytest -q"), args.get("timeout", 600)),
+        "run_cmd": lambda args: run_cmd(args["cmd"], args.get("timeout", 300), args.get("cwd")),
+        "run_tests": lambda args: run_tests(args.get("cmd", "pytest -q"), args.get("timeout", 600), args.get("cwd")),
         "get_repo_context": lambda args: get_repo_context(args.get("commits", 6)),
 
         # Utility tools
@@ -505,82 +652,82 @@ def _format_description(name: str, args: Dict[str, Any]) -> str:
         "convert_env_to_json": f"Converting .env to JSON: {args.get('env_path', '')}",
 
         # Git operations
-        "git_diff": f"Showing git diff: {args.get('pathspec', '.')}",
-        "apply_patch": f"Applying patch{' (dry run)' if args.get('dry_run') else ''}",
-        "git_add": f"Adding files to staging: {args.get('files', '.')}",
-        "git_commit": f"Creating git commit{' (with auto-add)' if args.get('add_files') else ''}: {args.get('message', '')[:50]}{'...' if len(args.get('message', '')) > 50 else ''}",
-        "git_status": "Getting git status",
-        "git_log": f"Viewing git log ({args.get('count', 10)} commits)",
-        "git_branch": f"Git branch: {args.get('action', 'list')}" + (f" {args.get('branch_name', '')}" if args.get('branch_name') else ""),
-        "run_cmd": f"Running command: {args.get('cmd', '')}",
-        "run_tests": f"Running tests: {args.get('cmd', 'pytest -q')}",
-        "get_repo_context": f"Getting repository context ({args.get('commits', 6)} commits)",
+        "git_diff": f"diff {args.get('pathspec', '.')}",
+        "apply_patch": f"apply patch{' (dry run)' if args.get('dry_run') else ''}",
+        "git_add": f"add {args.get('files', '.')}",
+        "git_commit": f"commit: {args.get('message', '')[:40]}{'...' if len(args.get('message', '')) > 40 else ''}",
+        "git_status": "git status",
+        "git_log": f"git log ({args.get('count', 10)})",
+        "git_branch": f"branch: {args.get('action', 'list')}" + (f" {args.get('branch_name', '')}" if args.get('branch_name') else ""),
+        "run_cmd": f"run: {args.get('cmd', '')[:60]}...",
+        "run_tests": f"test: {args.get('cmd', 'pytest')[:60]}...",
+        "get_repo_context": "repo context",
 
         # Utility tools
-        "install_package": f"Installing package: {args.get('package', '')}",
-        "web_fetch": f"Fetching URL: {args.get('url', '')}",
-        "execute_python": "Executing Python code",
-        "run_python_diagnostic": f"Running Python diagnostic: {args.get('description', 'runtime test')}",
-        "inspect_module_hierarchy": f"Inspecting module hierarchy: {args.get('module_path', '')}",
-        "get_system_info": "Getting system information",
+        "install_package": f"install {args.get('package', '')}",
+        "web_fetch": f"fetch {args.get('url', '')[:50]}...",
+        "execute_python": "exec python",
+        "run_python_diagnostic": f"diag: {args.get('description', 'runtime test')}",
+        "inspect_module_hierarchy": f"inspect: {args.get('module_path', '')}",
+        "get_system_info": "sys info",
 
         # SSH operations
-        "ssh_connect": f"Connecting via SSH: {args.get('username', '')}@{args.get('host', '')}",
-        "ssh_exec": f"Executing SSH command on {args.get('connection_id', '')}: {args.get('command', '')}",
-        "ssh_copy_to": f"Copying to SSH server: {args.get('local_path', '')} → {args.get('remote_path', '')}",
-        "ssh_copy_from": f"Copying from SSH server: {args.get('remote_path', '')} → {args.get('local_path', '')}",
-        "ssh_disconnect": f"Disconnecting SSH: {args.get('connection_id', '')}",
-        "ssh_list_connections": "Listing SSH connections",
+        "ssh_connect": f"ssh connect: {args.get('username', '')}@{args.get('host', '')}",
+        "ssh_exec": f"ssh exec: {args.get('command', '')[:50]}...",
+        "ssh_copy_to": f"ssh upload: {args.get('local_path', '')}",
+        "ssh_copy_from": f"ssh download: {args.get('remote_path', '')}",
+        "ssh_disconnect": "ssh disconnect",
+        "ssh_list_connections": "ssh list",
 
         # MCP tools
-        "mcp_add_server": f"Adding MCP server: {args.get('name', '')}",
-        "mcp_list_servers": "Listing MCP servers",
-        "mcp_call_tool": f"Calling MCP tool: {args.get('server', '')}.{args.get('tool', '')}",
+        "mcp_add_server": f"mcp add: {args.get('name', '')}",
+        "mcp_list_servers": "mcp list",
+        "mcp_call_tool": f"mcp call: {args.get('server', '')}.{args.get('tool', '')}",
 
         # Static analysis tools
-        "analyze_ast_patterns": f"Analyzing AST patterns: {args.get('path', '.')}",
-        "run_pylint": f"Running pylint on: {args.get('path', '.')}",
-        "run_mypy": f"Running mypy type check on: {args.get('path', '.')}",
-        "analyze_static_types": f"Running static type checks on: {args.get('paths', args.get('path', '.'))}",
-        "run_linters": f"Running aggregated linters on: {args.get('paths', args.get('path', '.'))}",
-        "run_type_checks": f"Running aggregated type checks on: {args.get('paths', args.get('path', '.'))}",
-        "run_property_tests": f"Running property tests on: {args.get('test_paths', args.get('path', '.'))}",
-        "generate_property_tests": f"Generating property tests for: {args.get('targets', [])}",
-        "check_contracts": f"Checking contracts in: {args.get('paths', args.get('path', '.'))}",
-        "detect_flaky_tests": f"Detecting flaky tests (pattern: {args.get('pattern', '')})",
-        "compare_behavior_with_baseline": f"Comparing behavior vs {args.get('baseline_ref', 'origin/main')} on {args.get('test_selector', 'selected tests')}",
-        "analyze_runtime_logs": f"Analyzing runtime logs: {args.get('log_paths', [])}",
-        "analyze_performance_regression": f"Analyzing performance vs baseline using: {args.get('benchmark_cmd', '')}",
-        "analyze_error_traces": f"Analyzing error traces from: {args.get('log_paths', [])}",
-        "check_dependency_vulnerabilities": f"Scanning dependency vulnerabilities ({args.get('language', 'auto')})",
-        "check_dependency_updates": f"Checking dependency updates ({args.get('language', 'auto')})",
-        "update_dependencies": f"Updating dependencies ({args.get('language', 'auto')})",
-        "scan_dependencies_vulnerabilities": f"Scanning dependency vulnerabilities ({args.get('language', 'auto')})",
-        "bisect_test_failure": f"Bisecting failing test: {args.get('test_command', '')}",
-        "generate_repro_case": f"Generating repro case at: {args.get('target_path', 'tests/regressions/test_repro_case.py')}",
-        "validate_ci_config": f"Validating CI configs: {args.get('paths', [])}",
-        "verify_migrations": f"Verifying migrations at: {args.get('path', 'migrations')}",
-        "run_radon_complexity": f"Analyzing code complexity: {args.get('path', '.')}",
-        "find_dead_code": f"Finding dead code in: {args.get('path', '.')}",
-        "run_all_analysis": f"Running full analysis suite on: {args.get('path', '.')}",
-        "analyze_code_structures": f"Analyzing code structures: {args.get('path', '.')}",
-        "check_structural_consistency": f"Checking structural consistency: {args.get('path', '.')}",
-        "scan_security_issues": f"Scanning security issues in: {args.get('paths', args.get('path', '.'))}",
-        "detect_secrets": f"Detecting secrets in: {args.get('path', '.')}",
-        "check_license_compliance": f"Checking license compliance in: {args.get('path', '.')}",
-        "split_python_module_classes": f"Splitting classes from {args.get('source_path', '')} into package: {args.get('target_directory', '')}",
+        "analyze_ast_patterns": f"ast: {args.get('path', '.')}",
+        "run_pylint": f"pylint: {args.get('path', '.')}",
+        "run_mypy": f"mypy: {args.get('path', '.')}",
+        "analyze_static_types": f"types: {args.get('paths', args.get('path', '.'))}",
+        "run_linters": f"lint: {args.get('paths', args.get('path', '.'))}",
+        "run_type_checks": f"type check: {args.get('paths', args.get('path', '.'))}",
+        "run_property_tests": f"prop test: {args.get('test_paths', args.get('path', '.'))}",
+        "generate_property_tests": f"gen prop test: {args.get('targets', [])}",
+        "check_contracts": f"contracts: {args.get('paths', args.get('path', '.'))}",
+        "detect_flaky_tests": f"flaky: {args.get('pattern', '')}",
+        "compare_behavior_with_baseline": f"diff behavior: {args.get('baseline_ref', 'origin/main')}",
+        "analyze_runtime_logs": f"logs: {args.get('log_paths', [])}",
+        "analyze_performance_regression": f"perf: {args.get('benchmark_cmd', '')}",
+        "analyze_error_traces": f"traces: {args.get('log_paths', [])}",
+        "check_dependency_vulnerabilities": f"audit: {args.get('language', 'auto')}",
+        "check_dependency_updates": f"updates: {args.get('language', 'auto')}",
+        "update_dependencies": f"update deps: {args.get('language', 'auto')}",
+        "scan_dependencies_vulnerabilities": f"audit: {args.get('language', 'auto')}",
+        "bisect_test_failure": f"bisect: {args.get('test_command', '')}",
+        "generate_repro_case": f"repro: {args.get('target_path', 'tests/regressions/test_repro_case.py')}",
+        "validate_ci_config": f"ci config: {args.get('paths', [])}",
+        "verify_migrations": f"migrations: {args.get('path', 'migrations')}",
+        "run_radon_complexity": f"complexity: {args.get('path', '.')}",
+        "find_dead_code": f"dead code: {args.get('path', '.')}",
+        "run_all_analysis": f"analysis suite: {args.get('path', '.')}",
+        "analyze_code_structures": f"structures: {args.get('path', '.')}",
+        "check_structural_consistency": f"consistency: {args.get('path', '.')}",
+        "scan_security_issues": f"security: {args.get('paths', args.get('path', '.'))}",
+        "detect_secrets": f"secrets: {args.get('path', '.')}",
+        "check_license_compliance": f"license: {args.get('path', '.')}",
+        "split_python_module_classes": f"split: {args.get('source_path', '')}",
 
         # Advanced analysis tools
-        "analyze_test_coverage": f"Analyzing test coverage: {args.get('path', '.')}",
-        "analyze_code_context": f"Analyzing code context: {args.get('file_path', '')}",
-        "find_symbol_usages": f"Finding usages of symbol: {args.get('symbol', '')}",
-        "analyze_dependencies": f"Analyzing dependencies: {args.get('target', '')}",
-        "analyze_semantic_diff": f"Analyzing semantic diff: {args.get('file_path', '')}",
+        "analyze_test_coverage": f"coverage: {args.get('path', '.')}",
+        "analyze_code_context": f"context: {args.get('file_path', '')}",
+        "find_symbol_usages": f"usages: {args.get('symbol', '')}",
+        "analyze_dependencies": f"deps: {args.get('target', '')}",
+        "analyze_semantic_diff": f"semantic diff: {args.get('file_path', '')}",
 
         # Cache operations
-        "get_cache_stats": "Inspecting cache statistics",
-        "clear_caches": f"Clearing caches: {args.get('cache_name', 'all')}",
-        "persist_caches": "Persisting caches to disk",
+        "get_cache_stats": "cache stats",
+        "clear_caches": f"clear cache: {args.get('cache_name', 'all')}",
+        "persist_caches": "persist cache",
     }
 
     # Return the friendly description or fall back to technical format
@@ -689,7 +836,41 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
                 # Default to False - let LLM handle the original source file
                 normalized_args["delete_source"] = False
 
+        if tool in {"run_cmd", "run_tests"}:
+            if "cmd" not in normalized_args:
+                for alt in ("command", "cmdline", "run", "shell_command"):
+                    if isinstance(normalized_args.get(alt), (str, list)):
+                        normalized_args["cmd"] = normalized_args[alt]
+                        break
+            if "cwd" not in normalized_args:
+                for alt in ("workdir", "working_dir", "workingdir"):
+                    if isinstance(normalized_args.get(alt), str):
+                        normalized_args["cwd"] = normalized_args[alt]
+                        break
+
         args = normalized_args
+
+    # Guard against passing command-like strings to file path tools.
+    tool_lower = (name or "").lower()
+    guard_error = _guard_command_like_path(tool_lower, args)
+    if guard_error:
+        logger.log_transaction_event("TOOL_BLOCKED", {
+            "tool": name,
+            "arguments": args,
+            "reason": "command-like input to path tool",
+        })
+        return guard_error
+
+    if tool_lower in {"run_cmd", "run_tests"} and isinstance(args, dict):
+        cwd = args.get("cwd")
+        if isinstance(cwd, (str, Path)) and str(cwd).strip():
+            try:
+                resolved = resolve_workspace_path(cwd, purpose="run command")
+                args["cwd"] = resolved.abs_path
+            except WorkspacePathError as path_error:
+                return json.dumps({"error": str(path_error), "blocked": True, "cwd": str(cwd)})
+        elif "cwd" in args:
+            args.pop("cwd", None)
 
     # CHECK PERMISSIONS before execution
     # Only enforce permissions if tool_policy.yaml exists
@@ -772,12 +953,12 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
     from rev.execution.ledger import get_ledger
     ledger = get_ledger()
 
+    from rev.terminal.formatting import colorize, Colors, Symbols
     friendly_desc = _get_friendly_description(name, args)
-    try:
-        print(f"  → {friendly_desc}")
-    except UnicodeEncodeError:
-        # Windows console encoding issue - fallback to ASCII arrow
-        print(f"  -> {friendly_desc}")
+    
+    # Professional tool execution line
+    tool_tag = colorize(f" {Symbols.ARROW} {name}", Colors.BRIGHT_BLACK)
+    print(f"  {tool_tag} {colorize(friendly_desc, Colors.BRIGHT_BLACK)}")
 
     # Get debug logger
     debug_logger = get_logger()
@@ -805,7 +986,7 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "unknown") -
             return result
 
         # O(1) dictionary lookup
-        handler = _TOOL_DISPATCH.get(name)
+        handler = _DYNAMIC_DISPATCH.get(name) or _TOOL_DISPATCH.get(name)
         if handler is None:
             error_msg = f"Unknown tool: {name}"
             debug_logger.log_tool_execution(name, args, error=error_msg)
@@ -1493,8 +1674,15 @@ def get_available_tools() -> list:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "cmd": {"type": "string", "description": "Command to execute"},
-                        "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 300}
+                        "cmd": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {"type": "array", "items": {"type": "string"}}
+                            ],
+                            "description": "Command to execute"
+                        },
+                        "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 300},
+                        "cwd": {"type": "string", "description": "Working directory (relative to workspace)"}
                     },
                     "required": ["cmd"]
                 }
@@ -1508,8 +1696,16 @@ def get_available_tools() -> list:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "cmd": {"type": "string", "description": "Test command", "default": "pytest -q"},
-                        "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 600}
+                        "cmd": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {"type": "array", "items": {"type": "string"}}
+                            ],
+                            "description": "Test command",
+                            "default": "pytest -q"
+                        },
+                        "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 600},
+                        "cwd": {"type": "string", "description": "Working directory (relative to workspace)"}
                     }
                 }
             }

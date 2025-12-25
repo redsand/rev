@@ -5,6 +5,7 @@ from rev.tools.registry import execute_tool, get_available_tools
 from rev.llm.client import ollama_chat
 from rev.core.context import RevContext
 from rev.core.tool_call_recovery import recover_tool_call_from_text
+from rev.core.tool_call_retry import retry_tool_call_with_response_format
 from rev.agents.context_provider import build_context_and_tools
 from rev.agents.subagent_io import build_subagent_output
 
@@ -62,13 +63,8 @@ class DebuggingAgent(BaseAgent):
     """
 
     def execute(self, task: Task, context: RevContext) -> str:
-        """
-        Executes a debugging task by calling an LLM to generate a tool call.
-        Implements error recovery with intelligent retry logic.
-        """
-        print(f"DebuggingAgent executing task: {task.description}")
-
-        # Track recovery attempts
+        """Execute a debugging task."""
+        # Focus on identifying root cause and proposing a fix
         recovery_attempts = self.increment_recovery_attempts(task, context)
 
         allowed_tool_names = ['write_file', 'replace_in_file', 'read_file', 'search_code', 'rag_search']
@@ -140,12 +136,27 @@ class DebuggingAgent(BaseAgent):
             # Error handling
             if error_type:
                 if error_type in {"text_instead_of_tool_call", "empty_tool_calls", "missing_tool_calls"}:
-                    recovered = recover_tool_call_from_text(
-                        response.get("message", {}).get("content", ""),
+                    retried = False
+                    recovered = retry_tool_call_with_response_format(
+                        messages,
+                        available_tools,
                         allowed_tools=[t["function"]["name"] for t in available_tools],
                     )
                     if recovered:
-                        print(f"  -> Recovered tool call from text output: {recovered.name}")
+                        retried = True
+                        print(f"  -> Retried tool call with JSON format: {recovered.name}")
+                    else:
+                        recovered = recover_tool_call_from_text(
+                            response.get("message", {}).get("content", ""),
+                            allowed_tools=[t["function"]["name"] for t in available_tools],
+                        )
+                    if recovered:
+                        if not recovered.name:
+                            return self.make_failure_signal("missing_tool", "Recovered tool call missing name")
+                        if not recovered.arguments:
+                            return self.make_failure_signal("missing_tool_args", "Recovered tool call missing arguments")
+                        if not retried:
+                            print(f"  -> Recovered tool call from text output: {recovered.name}")
                         raw_result = execute_tool(recovered.name, recovered.arguments)
                         return build_subagent_output(
                             agent_name="DebuggingAgent",

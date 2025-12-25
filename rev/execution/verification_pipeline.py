@@ -12,8 +12,10 @@ from pathlib import Path
 from enum import Enum
 import subprocess
 import re
+import json
 
 from rev.models.task import Task
+from rev.tools.command_runner import run_command_safe
 
 
 class VerificationStage(Enum):
@@ -181,15 +183,14 @@ class VerificationPipeline:
                 continue
 
             try:
-                result = subprocess.run(
+                result = run_command_safe(
                     ["python", "-m", "compileall", str(full_path)],
-                    capture_output=True,
-                    text=True,
-                    timeout=10
+                    timeout=10,
+                    cwd=self.workspace_root
                 )
 
-                if result.returncode != 0:
-                    errors.append(f"{file_path}: {result.stderr}")
+                if result.get("rc") != 0:
+                    errors.append(f"{file_path}: {result.get('stderr') or result.get('error')}")
 
             except Exception as e:
                 errors.append(f"{file_path}: {e}")
@@ -222,35 +223,34 @@ class VerificationPipeline:
             )
 
         # Run pytest on test files
-        test_paths = " ".join(str(self.workspace_root / f) for f in test_files)
+        test_paths = [str(self.workspace_root / f) for f in test_files]
+        cmd = ["pytest"] + test_paths + ["-q", "--tb=short"]
 
         try:
-            result = subprocess.run(
-                f"pytest {test_paths} -q --tb=short",
-                shell=True,
+            result = run_command_safe(
+                cmd,
                 cwd=self.workspace_root,
-                capture_output=True,
-                text=True,
                 timeout=60
             )
 
+            rc = result.get("rc", -1)
             # Pytest exit codes: 0=pass, 1=fail, 2=interrupted, 3=internal error, 4=usage error, 5=no tests collected
-            if result.returncode == 0:
+            if rc == 0:
                 return StageResult(
                     stage=VerificationStage.UNIT,
                     passed=True,
                     message=f"Unit tests passed ({len(test_files)} test file(s))",
-                    details={"stdout": result.stdout[:500]}
+                    details={"stdout": (result.get("stdout") or "")[:500]}
                 )
-            elif result.returncode in (4, 5):
+            elif rc in (4, 5):
                 # Exit code 5 = no tests collected (pytest 7+), exit code 4 = usage error / no tests (older versions)
                 # This is NOT a failure - it means no tests were applicable
                 return StageResult(
                     stage=VerificationStage.UNIT,
                     passed=True,
-                    message=f"No tests collected (exit code: {result.returncode}) - treated as pass",
+                    message=f"No tests collected (exit code: {rc}) - treated as pass",
                     details={
-                        "stdout": result.stdout[:500],
+                        "stdout": (result.get("stdout") or "")[:500],
                         "note": "No tests ran, which is acceptable when editing non-test files"
                     }
                 )
@@ -258,19 +258,13 @@ class VerificationPipeline:
                 return StageResult(
                     stage=VerificationStage.UNIT,
                     passed=False,
-                    message=f"Unit tests failed (exit code: {result.returncode})",
+                    message=f"Unit tests failed (exit code: {rc})",
                     details={
-                        "stdout": result.stdout[:500],
-                        "stderr": result.stderr[:500]
+                        "stdout": (result.get("stdout") or "")[:500],
+                        "stderr": (result.get("stderr") or result.get("error") or "")[:500]
                     }
                 )
 
-        except subprocess.TimeoutExpired:
-            return StageResult(
-                stage=VerificationStage.UNIT,
-                passed=False,
-                message="Unit tests timed out (60s)"
-            )
         except Exception as e:
             return StageResult(
                 stage=VerificationStage.UNIT,
@@ -303,32 +297,31 @@ class VerificationPipeline:
             )
 
         try:
-            test_paths = " ".join(str(t) for t in relevant_tests)
-            result = subprocess.run(
-                f"pytest {test_paths} -q --tb=short",
-                shell=True,
+            test_paths = [str(t) for t in relevant_tests]
+            cmd = ["pytest"] + test_paths + ["-q", "--tb=short"]
+            result = run_command_safe(
+                cmd,
                 cwd=self.workspace_root,
-                capture_output=True,
-                text=True,
                 timeout=120
             )
 
+            rc = result.get("rc", -1)
             # Pytest exit codes: 0=pass, 1=fail, 2=interrupted, 3=internal error, 4=usage error, 5=no tests collected
-            if result.returncode == 0:
+            if rc == 0:
                 return StageResult(
                     stage=VerificationStage.INTEGRATION,
                     passed=True,
                     message=f"Integration tests passed ({len(relevant_tests)} test(s))",
-                    details={"stdout": result.stdout[:500]}
+                    details={"stdout": (result.get("stdout") or "")[:500]}
                 )
-            elif result.returncode in (4, 5):
+            elif rc in (4, 5):
                 # Exit code 5 = no tests collected (pytest 7+), exit code 4 = usage error / no tests (older versions)
                 return StageResult(
                     stage=VerificationStage.INTEGRATION,
                     passed=True,
-                    message=f"No integration tests collected (exit code: {result.returncode}) - treated as pass",
+                    message=f"No integration tests collected (exit code: {rc}) - treated as pass",
                     details={
-                        "stdout": result.stdout[:500],
+                        "stdout": (result.get("stdout") or "")[:500],
                         "note": "No tests ran, which is acceptable"
                     }
                 )
@@ -336,19 +329,13 @@ class VerificationPipeline:
                 return StageResult(
                     stage=VerificationStage.INTEGRATION,
                     passed=False,
-                    message=f"Integration tests failed (exit code: {result.returncode})",
+                    message=f"Integration tests failed (exit code: {rc})",
                     details={
-                        "stdout": result.stdout[:500],
-                        "stderr": result.stderr[:500]
+                        "stdout": (result.get("stdout") or "")[:500],
+                        "stderr": (result.get("stderr") or result.get("error") or "")[:500]
                     }
                 )
 
-        except subprocess.TimeoutExpired:
-            return StageResult(
-                stage=VerificationStage.INTEGRATION,
-                passed=False,
-                message="Integration tests timed out (120s)"
-            )
         except Exception as e:
             return StageResult(
                 stage=VerificationStage.INTEGRATION,
@@ -373,39 +360,31 @@ class VerificationPipeline:
             )
 
         try:
-            result = subprocess.run(
+            result = run_command_safe(
                 behavioral_cmd,
-                shell=True,
                 cwd=self.workspace_root,
-                capture_output=True,
-                text=True,
                 timeout=180
             )
 
-            if result.returncode == 0:
+            rc = result.get("rc", -1)
+            if rc == 0:
                 return StageResult(
                     stage=VerificationStage.BEHAVIORAL,
                     passed=True,
                     message="Behavioral tests passed",
-                    details={"stdout": result.stdout[:500]}
+                    details={"stdout": (result.get("stdout") or "")[:500]}
                 )
             else:
                 return StageResult(
                     stage=VerificationStage.BEHAVIORAL,
                     passed=False,
-                    message=f"Behavioral tests failed (exit code: {result.returncode})",
+                    message=f"Behavioral tests failed (exit code: {rc})",
                     details={
-                        "stdout": result.stdout[:500],
-                        "stderr": result.stderr[:500]
+                        "stdout": (result.get("stdout") or "")[:500],
+                        "stderr": (result.get("stderr") or result.get("error") or "")[:500]
                     }
                 )
 
-        except subprocess.TimeoutExpired:
-            return StageResult(
-                stage=VerificationStage.BEHAVIORAL,
-                passed=False,
-                message="Behavioral tests timed out (180s)"
-            )
         except Exception as e:
             return StageResult(
                 stage=VerificationStage.BEHAVIORAL,

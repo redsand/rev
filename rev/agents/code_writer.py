@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 
 from rev.core.tool_call_recovery import recover_tool_call_from_text
+from rev.core.tool_call_retry import retry_tool_call_with_response_format
 from rev.agents.context_provider import build_context_and_tools
 from rev.agents.subagent_io import build_subagent_output
 from rev.tools.registry import execute_tool as execute_registry_tool
@@ -87,6 +88,10 @@ CODE_WRITER_SYSTEM_PROMPT = """You are a specialized Code Writer agent. Your sol
 
 You will be given a task description, action_type, and repository context. Analyze them carefully.
 
+SYSTEM CONTEXT:
+- Use the provided 'System Information' (OS, Platform, Shell Type) to choose correct path syntax and commands.
+- For complex validation or reproduction, you are encouraged to CREATE scripts (.ps1 for Windows, .sh for POSIX) using `write_file`.
+
 TEST-DRIVEN DEVELOPMENT (TDD) AWARENESS:
 - If implementing new functionality, tests should already exist (created in prior tasks)
 - Your implementation should make existing tests pass, not create new features without tests
@@ -125,6 +130,16 @@ CRITICAL RULES FOR CODE EXTRACTION:
     - All imports and dependencies included
     - Proper error handling and validation
     - Docstrings explaining non-obvious logic
+
+SECURITY-MINDED CODING (CRITICAL):
+- Never store passwords, secrets, or API keys as plain strings in code.
+- Use environment variables or secure configuration managers for sensitive data.
+- Ensure proper input validation and sanitization.
+- Avoid insecure practices like `eval()`, `exec()`, or unsanitized shell command execution.
+- If creating a "password" field, it should be treated as sensitive (e.g., hashed/salted if for storage, or masked/secure-typed if for UI).
+
+DEPENDENCY MANAGEMENT:
+- If you modify `package.json`, `requirements.txt`, or other manifest files, ensure the plan includes an installation step. If it doesn't, mention it in your task completion summary.
 
 IMPORT STRATEGY (CRITICAL):
 - If you have just split a module into a package (a directory with `__init__.py` exporting symbols), STOP and THINK.
@@ -464,6 +479,13 @@ class CodeWriterAgent(BaseAgent):
             except Exception:
                 print(str(rules)[:4000])
 
+        elif tool_name == "apply_patch":
+            patch_content = arguments.get("patch", "")
+            print(f"\nAction: {self._COLOR_GREEN}APPLY PATCH{self._COLOR_RESET}")
+            print(f"\n{self._COLOR_CYAN}Patch Content:{self._COLOR_RESET}")
+            for line in patch_content.splitlines():
+                print(self._color_diff_line(line))
+
         elif tool_name == "write_file":
             file_path = arguments.get("path", "unknown")
             content = arguments.get("content", "")
@@ -477,7 +499,8 @@ class CodeWriterAgent(BaseAgent):
             preview_lines = content.splitlines()[:20]
             print(f"\n{self._COLOR_CYAN}Preview (first {min(20, len(preview_lines))} lines):{self._COLOR_RESET}")
             for i, line in enumerate(preview_lines, 1):
-                print(f"  {i:3d}  {line[:66]}")  # Limit line width
+                # Color new content green
+                print(f"{self._COLOR_GREEN}  {i:3d}  {line[:66]}{self._COLOR_RESET}")  # Limit line width
             if len(content.splitlines()) > 20:
                 print(f"  ... ({len(content.splitlines()) - 20} more lines)")
 
@@ -785,14 +808,29 @@ class CodeWriterAgent(BaseAgent):
             # If we reach here, there was an error
             if error_type:
                 if error_type in {"text_instead_of_tool_call", "empty_tool_calls", "missing_tool_calls"}:
-                    recovered = recover_tool_call_from_text(
-                        response.get("message", {}).get("content", ""),
+                    retried = False
+                    recovered = retry_tool_call_with_response_format(
+                        messages,
+                        available_tools,
                         allowed_tools=[t["function"]["name"] for t in available_tools],
                     )
                     if recovered:
+                        retried = True
+                        print(f"  -> Retried tool call with JSON format: {recovered.name}")
+                    else:
+                        recovered = recover_tool_call_from_text(
+                            response.get("message", {}).get("content", ""),
+                            allowed_tools=[t["function"]["name"] for t in available_tools],
+                        )
+                    if recovered:
                         tool_name = recovered.name
                         arguments = recovered.arguments
-                        print(f"  -> Recovered tool call from text output: {tool_name}")
+                        if not tool_name:
+                            return self.make_failure_signal("missing_tool", "Recovered tool call missing name")
+                        if not arguments:
+                            return self.make_failure_signal("missing_tool_args", "Recovered tool call missing arguments")
+                        if not retried:
+                            print(f"  -> Recovered tool call from text output: {tool_name}")
 
                         if tool_name in ["write_file", "replace_in_file", "create_directory", "move_file", "copy_file"]:
                             self._display_change_preview(tool_name, arguments)

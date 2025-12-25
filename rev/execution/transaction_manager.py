@@ -17,6 +17,8 @@ import subprocess
 from datetime import datetime
 import uuid
 
+from rev.tools.command_runner import run_command_safe
+
 
 class TransactionStatus(Enum):
     """Status of a transaction."""
@@ -333,13 +335,12 @@ class TransactionManager:
         # Checkout each file from git
         for file_path in affected_files:
             try:
-                subprocess.run(
+                run_command_safe(
                     ["git", "checkout", ref, "--", file_path],
                     cwd=self.workspace_root,
-                    capture_output=True,
-                    check=True
+                    timeout=30
                 )
-            except subprocess.CalledProcessError as e:
+            except Exception as e:
                 print(f"Warning: Failed to rollback {file_path}: {e}")
 
     def _rollback_file_restore(self, transaction: Transaction):
@@ -373,20 +374,24 @@ class TransactionManager:
         """Prepare git rollback data."""
         try:
             # Get current HEAD
-            result = subprocess.run(
+            result = run_command_safe(
                 ["git", "rev-parse", "HEAD"],
                 cwd=self.workspace_root,
-                capture_output=True,
-                text=True,
-                check=True
+                timeout=5
             )
-            head_ref = result.stdout.strip()
+            head_ref = (result.get("stdout") or "").strip()
+
+            if result.get("rc") != 0 or not head_ref:
+                return {
+                    "ref": "HEAD",
+                    "method": "git_checkout"
+                }
 
             return {
                 "ref": head_ref,
                 "method": "git_checkout"
             }
-        except subprocess.CalledProcessError:
+        except Exception:
             # Fallback to HEAD if we can't get current ref
             return {
                 "ref": "HEAD",
