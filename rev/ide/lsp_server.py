@@ -20,7 +20,10 @@ from pathlib import Path
 LSP_IMPORT_ERROR: Optional[Exception] = None
 
 try:
-    from pygls.server import LanguageServer
+    try:
+        from pygls.lsp.server import LanguageServer
+    except ImportError:
+        from pygls.server import LanguageServer
     try:
         from lsprotocol.types import (
             TEXT_DOCUMENT_DID_OPEN,
