@@ -136,7 +136,9 @@ rev --ide-api --ide-api-port 9000
 ## Support
 
 For issues and feature requests, visit:
-https://github.com/yourusername/rev/issues
+https://github.com/redsand/rev/issues
+
+Documentation: https://github.com/redsand/rev/blob/main/docs/IDE_INTEGRATION.md
 
 ## License
 

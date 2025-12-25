@@ -173,8 +173,9 @@ visual-studio/
 ## Support
 
 For issues and feature requests:
-- GitHub Issues: https://github.com/yourusername/rev/issues
-- Documentation: https://github.com/yourusername/rev/docs
+- GitHub Issues: https://github.com/redsand/rev/issues
+- Documentation: https://github.com/redsand/rev/blob/main/docs/IDE_INTEGRATION.md
+- Repository: https://github.com/redsand/rev
 
 ## License
 
@@ -183,7 +184,7 @@ MIT License
 ## Contributing
 
 Contributions welcome! Please:
-1. Fork the repository
+1. Fork the repository at https://github.com/redsand/rev
 2. Create a feature branch
 3. Make your changes
 4. Submit a pull request
