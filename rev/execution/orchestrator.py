@@ -857,6 +857,14 @@ def _preflight_correct_action_semantics(task: Task) -> tuple[bool, List[str]]:
     # Heuristic intent detection (word-boundary based to avoid false positives like
     # matching "analy" inside "analysis").
     desc_l = desc.lower()
+    command_intent = bool(
+        re.search(
+            r"\b(run_cmd|run_terminal_command|run_tests|execute command|install|npm install|npm ci|yarn install|"
+            r"pnpm install|pip install|pipenv install|poetry install|pipx install|conda install|bundle install|composer install|"
+            r"apt-get|apt install|brew install|choco install|winget install|yum install|dnf install|apk add|pacman -S|zypper install)\b",
+            desc_l,
+        )
+    )
     read_intent = bool(
         re.search(
             r"\b(read|inspect|review|analyze|analysis|understand|locate|find|search|inventory|identify|list|show|explain)\b",
@@ -872,6 +880,13 @@ def _preflight_correct_action_semantics(task: Task) -> tuple[bool, List[str]]:
     )
 
     messages: List[str] = []
+
+    # If task is explicitly about running a command (install/tests), route to test executor.
+    if command_intent and action not in {"test", "tool"}:
+        prev = action
+        task.action_type = "test"
+        messages.append(f"coerced action '{prev}' -> 'test' (command execution task)")
+        return True, messages
 
     # If action says mutate but description is clearly inspection-only, coerce to READ.
     if action in mutate_actions and read_intent and not write_intent:
@@ -1611,12 +1626,21 @@ class Orchestrator:
             "has_examples_dir": os.path.isdir(self.project_root / "examples"),
         }
 
-    def execute(self, user_request: str, resume: bool = False) -> OrchestratorResult:
+    def execute(
+        self,
+        user_request: str,
+        resume: bool = False,
+        resume_plan: bool = True,
+    ) -> OrchestratorResult:
         """Execute a task through the full agent pipeline."""
         global _active_context
         aggregate_errors: List[str] = []
         last_result: Optional[OrchestratorResult] = None
-        self.context = RevContext(user_request=user_request, resume=resume)
+        self.context = RevContext(
+            user_request=user_request,
+            resume=resume,
+            resume_plan=resume_plan,
+        )
         _active_context = self.context
         ensure_project_memory_file()
         # Keep repo_context minimal; sub-agents will retrieve focused context via ContextBuilder.
@@ -2202,7 +2226,7 @@ class Orchestrator:
 
         # Ensure we have a persistent plan and state manager for checkpoints
         if not self.context.plan:
-            if self.context.resume:
+            if self.context.resume and self.context.resume_plan:
                 latest = StateManager.find_latest_checkpoint()
                 if latest:
                     try:
@@ -2946,6 +2970,50 @@ class Orchestrator:
                     syntax_repair_attempts = self.context.agent_state.get(syntax_repair_key, 0)
 
                     if failure_counts[failure_sig] >= 3:
+                        # PRIORITY 2 FIX: ESCALATION for repeated replace_in_file failures
+                        # Check if this is a replace_in_file failure that should escalate to write_file
+                        tool_events = getattr(next_task, "tool_events", None) or []
+                        used_replace_in_file = any(
+                            str(ev.get("tool") or "").lower() == "replace_in_file"
+                            for ev in tool_events
+                        )
+
+                        escalation_key = f"edit_escalation::{failure_sig}"
+                        already_escalated = self.context.agent_state.get(escalation_key, False)
+
+                        if used_replace_in_file and not already_escalated and (next_task.action_type or "").lower() == "edit":
+                            # Third failure using replace_in_file - escalate to write_file strategy
+                            print(f"  {colorize(Symbols.WARNING, Colors.BRIGHT_YELLOW)} {colorize('ESCALATION: replace_in_file failed 3x - suggesting write_file strategy', Colors.BRIGHT_WHITE)}")
+
+                            # Mark that we've escalated this specific failure
+                            self.context.set_agent_state(escalation_key, True)
+
+                            # Add agent request to guide planner toward write_file
+                            self.context.add_agent_request(
+                                "EDIT_STRATEGY_ESCALATION",
+                                {
+                                    "agent": "Orchestrator",
+                                    "reason": f"replace_in_file failed {failure_counts[failure_sig]} times - switch to write_file",
+                                    "detailed_reason": (
+                                        f"EDIT STRATEGY ESCALATION: The 'replace_in_file' approach has failed {failure_counts[failure_sig]} times "
+                                        f"for this task. This usually means the 'find' string cannot match the actual file content.\n\n"
+                                        "REQUIRED NEXT STEPS:\n"
+                                        "1. Use 'read_file' to get the complete current content of the target file\n"
+                                        "2. Manually construct the desired new content by modifying what you read\n"
+                                        "3. Use 'write_file' to completely rewrite the file with the new content\n"
+                                        "4. Do NOT use 'replace_in_file' again - it has proven unreliable for this file\n\n"
+                                        "This approach is more reliable than trying to match exact substrings."
+                                    )
+                                }
+                            )
+
+                            # Reset failure count to give write_file strategy a chance
+                            failure_counts[failure_sig] = 0
+
+                            # Continue planning with the new constraint
+                            iteration -= 1  # Don't count this as a regular iteration
+                            continue
+
                         # SYNTAX RECOVERY: Check if this is a syntax error
                         is_syntax_error = _check_syntax_error_in_verification(verification_result)
 
@@ -3398,6 +3466,7 @@ def run_orchestrated(
     context_guard_interactive: bool = True,
     context_guard_threshold: float = 0.3,
     resume: bool = False,
+    resume_plan: bool = True,
 ) -> OrchestratorResult:
     config_obj = OrchestratorConfig(
         enable_learning=enable_learning,
@@ -3422,5 +3491,5 @@ def run_orchestrated(
     )
 
     orchestrator = Orchestrator(project_root, config_obj)
-    return orchestrator.execute(user_request, resume=resume)
+    return orchestrator.execute(user_request, resume=resume, resume_plan=resume_plan)
 

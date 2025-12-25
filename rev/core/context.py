@@ -103,7 +103,14 @@ class RevContext:
     and share during an execution run.
     """
 
-    def __init__(self, user_request: str, initial_plan: Optional[ExecutionPlan] = None, auto_approve: bool = True, resume: bool = False):
+    def __init__(
+        self,
+        user_request: str,
+        initial_plan: Optional[ExecutionPlan] = None,
+        auto_approve: bool = True,
+        resume: bool = False,
+        resume_plan: bool = True,
+    ):
         self.run_id: str = str(uuid.uuid4())  # Unique ID for each orchestration run
         self.user_request: str = user_request
         self.plan: Optional[ExecutionPlan] = initial_plan
@@ -119,6 +126,7 @@ class RevContext:
         self.session_id: str = "" # Will be set by StateManager
         self.auto_approve: bool = auto_approve # Whether to auto-approve changes without prompting
         self.resume: bool = resume # Whether we are resuming a previous session
+        self.resume_plan: bool = resume_plan # Whether to resume the prior execution plan
         # ContextGuard phase support
         self.context_sufficiency: Optional[Any] = None # ContextSufficiency from context_guard phase
         self.clarification_history: List[Dict[str, Any]] = [] # History of user clarifications

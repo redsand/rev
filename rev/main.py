@@ -168,7 +168,7 @@ def main():
         "--execution-mode",
         choices=["linear", "sub-agent", "inline"],
         default=None,
-        help="Execution mode: 'linear' (traditional sequential), 'sub-agent' (dispatch to specialized agents). 'inline' is alias for 'linear'. Default: from REV_EXECUTION_MODE env var or 'linear'"
+        help="Execution mode: 'linear' (traditional sequential), 'sub-agent' (dispatch to specialized agents). 'inline' is alias for 'linear'. Default: from REV_EXECUTION_MODE env var or 'sub-agent'"
     )
     parser.add_argument(
         "--research",
@@ -192,7 +192,12 @@ def main():
         nargs="?",
         const="latest",
         metavar="CHECKPOINT",
-        help="Resume execution from a checkpoint file (defaults to latest if no path provided)"
+        help="Load session context from a checkpoint (defaults to latest if no path provided). Does not auto-continue; use --resume-continue to resume the prior plan."
+    )
+    parser.add_argument(
+        "--resume-continue",
+        action="store_true",
+        help="Continue the prior plan after loading a checkpoint (requires --resume)"
     )
     parser.add_argument(
         "--list-checkpoints",
@@ -520,9 +525,15 @@ def main():
     _log("")
 
     state_manager: Optional[StateManager] = None
+    resume_checkpoint: Optional[str] = None
+    resume_context: bool = False
+    resume_plan: bool = True
 
     try:
         # Handle resume command
+        if args.resume_continue and not args.resume:
+            print("? --resume-continue requires --resume")
+            sys.exit(1)
         if args.resume:
             # If resume is True (flag without value) or empty string, find latest checkpoint
             checkpoint_path = args.resume
@@ -536,7 +547,7 @@ def main():
                 print(f"Using latest checkpoint: {checkpoint_path}\n")
 
             debug_logger.log_workflow_phase("resume", {"checkpoint": checkpoint_path})
-            print(f"Resuming from checkpoint: {checkpoint_path}\n")
+            print(f"Loading checkpoint: {checkpoint_path}\n")
             try:
                 plan = ExecutionPlan.load_checkpoint(checkpoint_path)
                 state_manager = StateManager(plan)
@@ -547,66 +558,110 @@ def main():
                     "task_count": len(plan.tasks),
                     "summary": plan.get_summary()
                 })
+                resume_checkpoint = checkpoint_path
+                resume_context = True
+                resume_plan = args.resume_continue
 
-                # Reset stopped tasks to pending so they can be executed
-                for task in plan.tasks:
-                    if task.status == TaskStatus.STOPPED:
-                        task.status = TaskStatus.PENDING
+                if args.resume_continue and config.get_execution_mode() == "sub-agent":
+                    def _load_last_request() -> str:
+                        try:
+                            from rev.execution.session import SessionTracker
+                            last_session_path = config.SESSIONS_DIR / "last_session.json"
+                            if last_session_path.exists():
+                                tracker = SessionTracker.load_from_file(last_session_path)
+                                initial = (tracker.summary.initial_request or "").strip()
+                                if initial:
+                                    return initial
+                        except Exception:
+                            pass
+                        return "Resume previous session"
 
-                # Use concurrent execution if parallel > 1, otherwise sequential
-                debug_logger.log_workflow_phase("execution", {
-                    "mode": "concurrent" if args.parallel > 1 else "sequential",
-                    "workers": args.parallel,
-                    "task_count": len(plan.tasks)
-                })
-                tools = get_available_tools()
-                if args.parallel > 1:
-                    concurrent_execution_mode(
-                        plan,
-                        max_workers=args.parallel,
-                        auto_approve=args.yes or not args.prompt,
-                        tools=tools,
+                    resume_request = _load_last_request()
+                    result = run_orchestrated(
+                        resume_request,
+                        config.ROOT,
+                        enable_learning=args.learn,
+                        enable_research=args.research,
+                        enable_review=args.review and not args.no_review,
+                        enable_validation=args.validate and not args.no_validate,
+                        review_strictness=args.review_strictness,
                         enable_action_review=args.action_review,
-                        state_manager=state_manager,
-                    )
-                else:
-                    execution_mode(
-                        plan,
+                        enable_auto_fix=args.auto_fix,
+                        parallel_workers=args.parallel,
                         auto_approve=args.yes or not args.prompt,
-                        tools=tools,
-                        enable_action_review=args.action_review,
-                        state_manager=state_manager,
+                        research_depth=args.research_depth,
+                        enable_prompt_optimization=enable_prompt_optimization,
+                        auto_optimize_prompt=auto_optimize_prompt,
+                        enable_context_guard=enable_context_guard,
+                        context_guard_interactive=context_guard_interactive,
+                        context_guard_threshold=context_guard_threshold,
+                        resume=True,
+                        resume_plan=True,
                     )
-
-                # Validation phase
-                enable_validation = args.validate and not args.no_validate
-                if enable_validation:
-                    debug_logger.log_workflow_phase("validation", {"resumed": True})
-                    validation_report = validate_execution(
-                        plan,
-                        "Resumed execution",
-                        run_tests=True,
-                        run_linter=True,
-                        check_syntax=True,
-                        enable_auto_fix=args.auto_fix
-                    )
-
-                    debug_logger.log("main", "VALIDATION_RESULT", {
-                        "status": validation_report.overall_status.value,
-                        "rollback_recommended": validation_report.rollback_recommended
-                    })
-
-                    if validation_report.overall_status == ValidationStatus.FAILED:
-                        print("\n❌ Validation failed. Review issues above.")
-                        if validation_report.rollback_recommended:
-                            print("   Consider: git checkout -- . (to revert changes)")
+                    if not result.success:
                         sys.exit(1)
-                    elif validation_report.overall_status == ValidationStatus.PASSED_WITH_WARNINGS:
-                        print("\n[!] Validation passed with warnings.")
-                    else:
-                        print("\n✅ Validation passed successfully.")
+                    sys.exit(0)
 
-                sys.exit(0)
+                if args.resume_continue:
+                    # Reset stopped tasks to pending so they can be executed
+                    for task in plan.tasks:
+                        if task.status == TaskStatus.STOPPED:
+                            task.status = TaskStatus.PENDING
+    
+                    # Use concurrent execution if parallel > 1, otherwise sequential
+                    debug_logger.log_workflow_phase("execution", {
+                        "mode": "concurrent" if args.parallel > 1 else "sequential",
+                        "workers": args.parallel,
+                        "task_count": len(plan.tasks)
+                    })
+                    tools = get_available_tools()
+                    if args.parallel > 1:
+                        concurrent_execution_mode(
+                            plan,
+                            max_workers=args.parallel,
+                            auto_approve=args.yes or not args.prompt,
+                            tools=tools,
+                            enable_action_review=args.action_review,
+                            state_manager=state_manager,
+                        )
+                    else:
+                        execution_mode(
+                            plan,
+                            auto_approve=args.yes or not args.prompt,
+                            tools=tools,
+                            enable_action_review=args.action_review,
+                            state_manager=state_manager,
+                        )
+    
+                    # Validation phase
+                    enable_validation = args.validate and not args.no_validate
+                    if enable_validation:
+                        debug_logger.log_workflow_phase("validation", {"resumed": True})
+                        validation_report = validate_execution(
+                            plan,
+                            "Resumed execution",
+                            run_tests=True,
+                            run_linter=True,
+                            check_syntax=True,
+                            enable_auto_fix=args.auto_fix
+                        )
+    
+                        debug_logger.log("main", "VALIDATION_RESULT", {
+                            "status": validation_report.overall_status.value,
+                            "rollback_recommended": validation_report.rollback_recommended
+                        })
+    
+                        if validation_report.overall_status == ValidationStatus.FAILED:
+                            print("\n❌ Validation failed. Review issues above.")
+                            if validation_report.rollback_recommended:
+                                print("   Consider: git checkout -- . (to revert changes)")
+                            sys.exit(1)
+                        elif validation_report.overall_status == ValidationStatus.PASSED_WITH_WARNINGS:
+                            print("\n[!] Validation passed with warnings.")
+                        else:
+                            print("\n✅ Validation passed successfully.")
+    
+                    sys.exit(0)
 
             except FileNotFoundError:
                 print(f"✗ Checkpoint file not found: {args.resume}")
@@ -628,6 +683,8 @@ def main():
                 force_tui=args.tui,
                 init_logs=buffered_logs if use_tui_main else None,
                 initial_command=initial_command,
+                resume=resume_context,
+                resume_plan=resume_plan,
             )
         else:
             task_description = " ".join(args.task)
@@ -662,7 +719,8 @@ def main():
                     enable_context_guard=enable_context_guard,
                     context_guard_interactive=context_guard_interactive,
                     context_guard_threshold=context_guard_threshold,
-                    resume=args.resume is not None
+                    resume=resume_context,
+                    resume_plan=resume_plan,
                 )
                 if not result.success:
                     sys.exit(1)

@@ -33,7 +33,7 @@ def test_api_server_stream_output_broadcast(monkeypatch) -> None:
 
     monkeypatch.setattr(server, "_schedule_ws_broadcast", fake_schedule)
 
-    server._handle_stream_output("stdout", "hello")
+    server._handle_stream_output("stdout", "\x1b[90mhello\x1b[0m")
 
     assert captured["payload"]["type"] == "log"
     assert captured["payload"]["stream"] == "stdout"

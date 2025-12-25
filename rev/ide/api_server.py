@@ -9,6 +9,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+import signal
 import sys
 import threading
 from typing import Dict, List, Optional, Any, Callable
@@ -27,6 +29,22 @@ from ..execution.orchestrator import Orchestrator, OrchestratorConfig
 from .. import config as rev_config
 
 logger = logging.getLogger(__name__)
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def _strip_ansi(value: str) -> str:
+    return _ANSI_ESCAPE_RE.sub("", value)
+
+
+def _sanitize_payload(payload: Any) -> Any:
+    if isinstance(payload, str):
+        return _strip_ansi(payload)
+    if isinstance(payload, list):
+        return [_sanitize_payload(item) for item in payload]
+    if isinstance(payload, dict):
+        return {key: _sanitize_payload(val) for key, val in payload.items()}
+    return payload
 
 
 class RevAPIServer:
@@ -48,8 +66,12 @@ class RevAPIServer:
         self.app = web.Application()
         self.orchestrator = None
         self.active_tasks: Dict[str, Any] = {}
+        self._task_futures: Dict[str, asyncio.Task] = {}
         self.websockets: List[web.WebSocketResponse] = []
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._shutdown_event: Optional[asyncio.Event] = None
+        self._shutdown_requested = False
+        self._workspace_root: Optional[Path] = Path.cwd().resolve()
         self._stdout_original = None
         self._stderr_original = None
         self._stream_installed = False
@@ -87,6 +109,45 @@ class RevAPIServer:
                 config=self._build_orchestrator_config(),
             )
         return self.orchestrator
+
+    def _maybe_set_workspace(self, cwd: Optional[str], file_path: Optional[str]) -> None:
+        target: Optional[Path] = None
+        if cwd:
+            target = Path(cwd)
+        elif file_path:
+            file_target = Path(file_path)
+            target = file_target if file_target.is_dir() else file_target.parent
+
+        if not target:
+            return
+
+        try:
+            target = target.expanduser()
+        except Exception:
+            pass
+
+        if target.exists() and not target.is_dir():
+            target = target.parent
+
+        if not target.exists():
+            logger.warning("Workspace root does not exist: %s", target)
+            return
+
+        target = target.resolve()
+        if self._workspace_root == target:
+            return
+
+        try:
+            rev_config.set_workspace_root(target, allow_external=True)
+        except Exception as exc:
+            logger.warning("Failed to set workspace root: %s", exc)
+        try:
+            os.chdir(str(target))
+        except Exception as exc:
+            logger.warning("Failed to chdir to %s: %s", target, exc)
+
+        self._workspace_root = target
+        self.orchestrator = None
 
     def _ensure_ide_execution_mode(self) -> None:
         if self._execution_mode_locked:
@@ -134,7 +195,7 @@ class RevAPIServer:
         payload = {
             "type": "log",
             "stream": stream,
-            "message": message,
+            "message": _strip_ansi(message),
         }
         self._schedule_ws_broadcast(payload)
 
@@ -156,45 +217,12 @@ class RevAPIServer:
 
         return False
 
-
-class _StreamTap:
-    def __init__(self, name: str, original, on_line):
-        self._name = name
-        self._original = original
-        self._on_line = on_line
-        self._buffer = ""
-        self._lock = threading.Lock()
-
-    def write(self, data):
-        if data is None:
-            return 0
-        if not isinstance(data, str):
-            data = str(data)
-        with self._lock:
-            self._original.write(data)
-            self._original.flush()
-            self._buffer += data
-            while "\n" in self._buffer:
-                line, self._buffer = self._buffer.split("\n", 1)
-                self._on_line(self._name, line)
-        return len(data)
-
-    def flush(self):
-        with self._lock:
-            if self._buffer:
-                self._on_line(self._name, self._buffer)
-                self._buffer = ""
-            self._original.flush()
-
-    def __getattr__(self, item):
-        return getattr(self._original, item)
-
     async def _broadcast_to_websockets(self, message: Dict[str, Any]):
         """Broadcast message to all connected WebSocket clients"""
         if not self.websockets:
             return
 
-        data = json.dumps(message)
+        data = json.dumps(_sanitize_payload(message))
         dead_sockets = []
 
         for ws in self.websockets:
@@ -208,7 +236,13 @@ class _StreamTap:
         for ws in dead_sockets:
             self.websockets.remove(ws)
 
-    async def _submit_task(self, task: str, task_id: Optional[str] = None) -> web.Response:
+    async def _submit_task(
+        self,
+        task: str,
+        task_id: Optional[str] = None,
+        cwd: Optional[str] = None,
+        file_path: Optional[str] = None,
+    ) -> web.Response:
         """Submit a task string to the orchestrator and return a response."""
         if not task:
             return web.json_response(
@@ -219,6 +253,7 @@ class _StreamTap:
         if not task_id:
             task_id = f"task_{len(self.active_tasks)}"
 
+        self._maybe_set_workspace(cwd, file_path)
         orchestrator = await self._get_orchestrator()
 
         # Store task info
@@ -234,30 +269,34 @@ class _StreamTap:
         async def execute_task():
             try:
                 result = await asyncio.to_thread(orchestrator.execute, task)
+                sanitized_result = _sanitize_payload(result)
                 self.active_tasks[task_id]['status'] = 'completed'
-                self.active_tasks[task_id]['result'] = result
+                self.active_tasks[task_id]['result'] = sanitized_result
                 self.active_tasks[task_id]['completed_at'] = datetime.now().isoformat()
 
                 # Broadcast completion
                 await self._broadcast_to_websockets({
                     'type': 'task_completed',
                     'task_id': task_id,
-                    'result': result
+                    'result': sanitized_result
                 })
             except Exception as e:
                 logger.error(f"Error executing task {task_id}: {e}", exc_info=True)
                 self.active_tasks[task_id]['status'] = 'failed'
-                self.active_tasks[task_id]['error'] = str(e)
+                self.active_tasks[task_id]['error'] = _strip_ansi(str(e))
                 self.active_tasks[task_id]['completed_at'] = datetime.now().isoformat()
 
                 # Broadcast failure
                 await self._broadcast_to_websockets({
                     'type': 'task_failed',
                     'task_id': task_id,
-                    'error': str(e)
+                    'error': _strip_ansi(str(e))
                 })
+            finally:
+                self._task_futures.pop(task_id, None)
 
-        asyncio.create_task(execute_task())
+        task_handle = asyncio.create_task(execute_task())
+        self._task_futures[task_id] = task_handle
 
         return web.json_response({
             'status': 'success',
@@ -271,8 +310,9 @@ class _StreamTap:
             data = await request.json()
             task = data.get('task', '')
             task_id = data.get('task_id', f"task_{len(self.active_tasks)}")
+            cwd = data.get('cwd')
 
-            return await self._submit_task(task, task_id)
+            return await self._submit_task(task, task_id, cwd=cwd)
 
         except Exception as e:
             logger.error(f"Error handling execute request: {e}", exc_info=True)
@@ -286,6 +326,8 @@ class _StreamTap:
         try:
             data = await request.json()
             file_path = data.get('file_path', '')
+            cwd = data.get('cwd')
+            cwd = data.get('cwd')
 
             if not file_path:
                 return web.json_response(
@@ -294,7 +336,7 @@ class _StreamTap:
                 )
 
             task = f"Analyze the code in {file_path} for potential issues, improvements, and best practices"
-            return await self._submit_task(task)
+            return await self._submit_task(task, cwd=cwd, file_path=file_path)
 
         except Exception as e:
             logger.error(f"Error handling analyze request: {e}", exc_info=True)
@@ -316,7 +358,7 @@ class _StreamTap:
                 )
 
             task = f"Generate comprehensive tests for {file_path}"
-            return await self._submit_task(task)
+            return await self._submit_task(task, cwd=cwd, file_path=file_path)
 
         except Exception as e:
             logger.error(f"Error handling test request: {e}", exc_info=True)
@@ -332,6 +374,8 @@ class _StreamTap:
             file_path = data.get('file_path', '')
             start_line = data.get('start_line')
             end_line = data.get('end_line')
+            cwd = data.get('cwd')
+            cwd = data.get('cwd')
 
             if not file_path:
                 return web.json_response(
@@ -343,7 +387,7 @@ class _StreamTap:
             if start_line and end_line:
                 task += f" (lines {start_line}-{end_line})"
 
-            return await self._submit_task(task)
+            return await self._submit_task(task, cwd=cwd, file_path=file_path)
 
         except Exception as e:
             logger.error(f"Error handling refactor request: {e}", exc_info=True)
@@ -358,6 +402,7 @@ class _StreamTap:
             data = await request.json()
             file_path = data.get('file_path', '')
             error_message = data.get('error_message', '')
+            cwd = data.get('cwd')
 
             if not file_path:
                 return web.json_response(
@@ -369,7 +414,7 @@ class _StreamTap:
             if error_message:
                 task += f". Error: {error_message}"
 
-            return await self._submit_task(task)
+            return await self._submit_task(task, cwd=cwd, file_path=file_path)
 
         except Exception as e:
             logger.error(f"Error handling debug request: {e}", exc_info=True)
@@ -396,7 +441,7 @@ class _StreamTap:
             if start_line and end_line:
                 task += f" (lines {start_line}-{end_line})"
 
-            return await self._submit_task(task)
+            return await self._submit_task(task, cwd=cwd, file_path=file_path)
 
         except Exception as e:
             logger.error(f"Error handling document request: {e}", exc_info=True)
@@ -418,7 +463,7 @@ class _StreamTap:
 
             return web.json_response({
                 'status': 'success',
-                'task': self.active_tasks[task_id]
+                'task': _sanitize_payload(self.active_tasks[task_id])
             })
 
         except Exception as e:
@@ -433,7 +478,7 @@ class _StreamTap:
         try:
             return web.json_response({
                 'status': 'success',
-                'tasks': list(self.active_tasks.values())
+                'tasks': _sanitize_payload(list(self.active_tasks.values()))
             })
 
         except Exception as e:
@@ -651,9 +696,10 @@ class _StreamTap:
         if not task:
             raise ValueError('No task specified')
 
+        self._maybe_set_workspace(params.get("cwd"), params.get("file_path"))
         orchestrator = await self._get_orchestrator()
         result = await asyncio.to_thread(orchestrator.execute, task)
-        return {'status': 'success', 'result': result}
+        return {'status': 'success', 'result': _sanitize_payload(result)}
 
     async def _rpc_analyze(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """JSON-RPC analyze method"""
@@ -662,7 +708,7 @@ class _StreamTap:
             raise ValueError('No file_path specified')
 
         task = f"Analyze the code in {file_path}"
-        return await self._rpc_execute({'task': task})
+        return await self._rpc_execute({'task': task, 'cwd': params.get('cwd'), 'file_path': file_path})
 
     async def _rpc_test(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """JSON-RPC test method"""
@@ -671,7 +717,7 @@ class _StreamTap:
             raise ValueError('No file_path specified')
 
         task = f"Generate comprehensive tests for {file_path}"
-        return await self._rpc_execute({'task': task})
+        return await self._rpc_execute({'task': task, 'cwd': params.get('cwd'), 'file_path': file_path})
 
     async def _rpc_refactor(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """JSON-RPC refactor method"""
@@ -680,7 +726,7 @@ class _StreamTap:
             raise ValueError('No file_path specified')
 
         task = f"Refactor the code in {file_path}"
-        return await self._rpc_execute({'task': task})
+        return await self._rpc_execute({'task': task, 'cwd': params.get('cwd'), 'file_path': file_path})
 
     async def _rpc_debug(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """JSON-RPC debug method"""
@@ -694,7 +740,7 @@ class _StreamTap:
         if error:
             task += f". Error: {error}"
 
-        return await self._rpc_execute({'task': task})
+        return await self._rpc_execute({'task': task, 'cwd': params.get('cwd'), 'file_path': file_path})
 
     async def _rpc_document(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """JSON-RPC document method"""
@@ -703,7 +749,7 @@ class _StreamTap:
             raise ValueError('No file_path specified')
 
         task = f"Add comprehensive documentation to {file_path}"
-        return await self._rpc_execute({'task': task})
+        return await self._rpc_execute({'task': task, 'cwd': params.get('cwd'), 'file_path': file_path})
 
     async def _rpc_status(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """JSON-RPC status method"""
@@ -726,6 +772,45 @@ class _StreamTap:
         self.active_tasks[task_id]['status'] = 'cancelled'
         return {'status': 'success', 'message': 'Task cancelled'}
 
+    def _request_shutdown(self, reason: str = "signal") -> None:
+        if self._shutdown_requested:
+            return
+        self._shutdown_requested = True
+        try:
+            from rev.config import set_escape_interrupt
+            set_escape_interrupt(True)
+        except Exception:
+            pass
+        for task_id, task in self.active_tasks.items():
+            if task.get("status") == "running":
+                task["status"] = "cancelled"
+                task["completed_at"] = datetime.now().isoformat()
+            async_task = self._task_futures.get(task_id)
+            if async_task and not async_task.done():
+                async_task.cancel()
+        if self._task_futures:
+            self._task_futures.clear()
+        if self._loop and self._shutdown_event:
+            self._loop.call_soon_threadsafe(self._shutdown_event.set)
+        logger.info("Shutdown requested (%s).", reason)
+
+    async def _run_app(self, host: str, port: int) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._shutdown_event = asyncio.Event()
+        runner = web.AppRunner(self.app)
+        await runner.setup()
+        site = web.TCPSite(runner, host, port)
+        await site.start()
+        try:
+            await self._shutdown_event.wait()
+        finally:
+            try:
+                for ws in list(self.websockets):
+                    await ws.close()
+            except Exception:
+                pass
+            await runner.cleanup()
+
     def start(self, host: str = '127.0.0.1', port: int = 8765):
         """
         Start the API server
@@ -735,7 +820,46 @@ class _StreamTap:
             port: Port to listen on
         """
         logger.info(f"Starting Rev API server on http://{host}:{port}")
-        web.run_app(self.app, host=host, port=port)
+        previous_handler = signal.signal(signal.SIGINT, lambda *_args: self._request_shutdown("sigint"))
+        try:
+            asyncio.run(self._run_app(host, port))
+        except KeyboardInterrupt:
+            self._request_shutdown("keyboard")
+        finally:
+            signal.signal(signal.SIGINT, previous_handler)
+
+
+class _StreamTap:
+    def __init__(self, name: str, original, on_line):
+        self._name = name
+        self._original = original
+        self._on_line = on_line
+        self._buffer = ""
+        self._lock = threading.Lock()
+
+    def write(self, data):
+        if data is None:
+            return 0
+        if not isinstance(data, str):
+            data = str(data)
+        with self._lock:
+            self._original.write(data)
+            self._original.flush()
+            self._buffer += data
+            while "\n" in self._buffer:
+                line, self._buffer = self._buffer.split("\n", 1)
+                self._on_line(self._name, line)
+        return len(data)
+
+    def flush(self):
+        with self._lock:
+            if self._buffer:
+                self._on_line(self._name, self._buffer)
+                self._buffer = ""
+            self._original.flush()
+
+    def __getattr__(self, item):
+        return getattr(self._original, item)
 
 
 def main():

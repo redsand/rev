@@ -643,7 +643,12 @@ class ExecutionPlan:
     def from_dict(cls, data: Dict[str, Any]) -> 'ExecutionPlan':
         """Create an ExecutionPlan from a dictionary."""
         plan = cls()
-        plan.tasks = [Task.from_dict(t) for t in data["tasks"]]
+        tasks_data = data.get("tasks", [])
+        if isinstance(tasks_data, dict):
+            tasks_data = list(tasks_data.values())
+        if not isinstance(tasks_data, list):
+            tasks_data = []
+        plan.tasks = [Task.from_dict(t) for t in tasks_data if isinstance(t, dict)]
         plan.current_index = data.get("current_index", 0)
 
         # Load goals if present (lazy import to avoid circular dependency)

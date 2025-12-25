@@ -106,7 +106,16 @@ setup(
         ],
     },
     packages=find_packages(
-        exclude=["tests", "tests.*", "examples", "examples.*", "build", "build.*"]
+        exclude=[
+            "tests",
+            "tests.*",
+            "examples",
+            "examples.*",
+            "build",
+            "build.*",
+            "tmp_test",
+            "tmp_test.*",
+        ]
     ),
     entry_points={
         "console_scripts": [

@@ -84,6 +84,20 @@ def _read_file_content_for_edit(file_path: str, max_lines: int = 500) -> str | N
         pass
     return None
 
+
+def _task_is_command_only(description: str) -> bool:
+    if not description:
+        return False
+    desc = description.lower()
+    return bool(
+        re.search(
+            r"\b(run_cmd|run_terminal_command|run_tests|execute command|install|npm install|npm ci|yarn install|"
+            r"pnpm install|pip install|pipenv install|poetry install|pipx install|conda install|bundle install|composer install|"
+            r"apt-get|apt install|brew install|choco install|winget install|yum install|dnf install|apk add|pacman -S|zypper install)\b",
+            desc,
+        )
+    )
+
 CODE_WRITER_SYSTEM_PROMPT = """You are a specialized Code Writer agent. Your sole purpose is to execute a single coding task by calling the ONLY available tool for this specific task.
 
 You will be given a task description, action_type, and repository context. Analyze them carefully.
@@ -640,21 +654,85 @@ class CodeWriterAgent(BaseAgent):
 - Do NOT use "pass" statements or TODO comments in new code
 - Document any assumptions or changes from original implementation"""
 
+        # PRIORITY 1 FIX: Mandatory file reading for edit/refactor tasks
         # For edit/refactor tasks, read target files and include their content
         # This ensures the LLM has the exact file content for replace_in_file
         file_content_section = ""
-        if task.action_type in ("edit", "refactor"):
+        if task.action_type in ("edit", "refactor") and not _task_is_command_only(task.description or ""):
             target_files = _extract_target_files_from_description(task.description)
-            if target_files:
-                file_contents = []
-                for file_path in target_files[:3]:  # Limit to 3 files to avoid context overflow
-                    content = _read_file_content_for_edit(file_path)
-                    if content:
-                        file_contents.append(f"=== ACTUAL FILE CONTENT: {file_path} ===\n{content}\n=== END OF {file_path} ===")
-                        print(f"  -> Including actual content of {file_path} for edit context")
-                if file_contents:
-                    file_content_section = "\n\nIMPORTANT - ACTUAL FILE CONTENT TO EDIT:\n" + "\n\n".join(file_contents)
-                    file_content_section += "\n\nCRITICAL: When using replace_in_file, the 'find' parameter MUST be an EXACT substring from the ACTUAL FILE CONTENT above. Do NOT guess or fabricate the content."
+
+            # MANDATORY: EDIT tasks must identify target files
+            if not target_files:
+                error_msg = (
+                    f"EDIT task must specify target file path in description. "
+                    f"Task: '{task.description[:100]}...' does not mention any file to edit. "
+                    f"Include file path like 'edit app.js' or 'update package.json'."
+                )
+                print(f"  [ERROR] {error_msg}")
+                if self.should_attempt_recovery(task, context):
+                    self.request_replan(
+                        context,
+                        reason="EDIT task missing target file specification",
+                        detailed_reason=(
+                            f"{error_msg}\n\n"
+                            "RECOVERY: Ensure the task description explicitly mentions the file path to edit. "
+                            "Examples: 'edit src/app.js to add routes', 'update package.json to add lint script'. "
+                            "If creating a new file, use action_type='add' instead of 'edit'."
+                        )
+                    )
+                    return self.make_recovery_request("missing_target_file", error_msg)
+                return self.make_failure_signal("missing_target_file", error_msg)
+
+            # MANDATORY: Read target files (don't proceed without content)
+            file_contents = []
+            files_read_successfully = []
+            files_failed_to_read = []
+
+            for file_path in target_files[:3]:  # Limit to 3 files to avoid context overflow
+                content = _read_file_content_for_edit(file_path)
+                if content:
+                    file_contents.append(f"=== ACTUAL FILE CONTENT: {file_path} ===\n{content}\n=== END OF {file_path} ===")
+                    files_read_successfully.append(file_path)
+                    print(f"  -> Including actual content of {file_path} for edit context")
+                else:
+                    files_failed_to_read.append(file_path)
+                    print(f"  [WARN] Cannot read target file: {file_path}")
+
+            # Fail fast if no files could be read successfully
+            if not files_read_successfully and target_files:
+                primary_file = target_files[0]
+                error_msg = (
+                    f"Cannot read target file '{primary_file}' for EDIT task. "
+                    f"File may not exist or is unreadable."
+                )
+                print(f"  [ERROR] {error_msg}")
+                if self.should_attempt_recovery(task, context):
+                    self.request_replan(
+                        context,
+                        reason="Target file not found for EDIT",
+                        detailed_reason=(
+                            f"{error_msg}\n\n"
+                            f"RECOVERY: If '{primary_file}' does not exist yet, use action_type='add' to create it. "
+                            f"If the file exists but has a different path, verify the correct path using 'read_file' or 'list_dir'. "
+                            f"Do NOT proceed with EDIT action on non-existent files."
+                        )
+                    )
+                    return self.make_recovery_request("file_not_found", error_msg)
+                return self.make_failure_signal("file_not_found", error_msg)
+
+            # Warn if some files couldn't be read
+            if files_failed_to_read:
+                print(f"  [WARN] Could not read {len(files_failed_to_read)} file(s): {', '.join(files_failed_to_read)}")
+                print(f"  [WARN] Proceeding with {len(files_read_successfully)} successfully read file(s)")
+
+            # Include file content in prompt
+            if file_contents:
+                file_content_section = "\n\nIMPORTANT - ACTUAL FILE CONTENT TO EDIT:\n" + "\n\n".join(file_contents)
+                file_content_section += (
+                    "\n\nCRITICAL: When using replace_in_file, the 'find' parameter MUST be an EXACT substring "
+                    "from the ACTUAL FILE CONTENT above. Do NOT guess or fabricate the content. "
+                    "Copy and paste the exact text including all whitespace and indentation."
+                )
 
         messages = [
             {"role": "system", "content": CODE_WRITER_SYSTEM_PROMPT},

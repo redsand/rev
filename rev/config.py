@@ -292,7 +292,7 @@ LLM_PROVIDER = _PRIMARY_PROVIDER
 EXECUTION_PROVIDER = os.getenv("REV_EXECUTION_PROVIDER", LLM_PROVIDER)
 PLANNING_PROVIDER = os.getenv("REV_PLANNING_PROVIDER", LLM_PROVIDER)
 RESEARCH_PROVIDER = os.getenv("REV_RESEARCH_PROVIDER", LLM_PROVIDER)
-EXECUTION_MODE = os.getenv("REV_EXECUTION_MODE", "linear").lower()
+EXECUTION_MODE = os.getenv("REV_EXECUTION_MODE", "sub-agent").lower()
 
 def set_execution_mode(mode: str) -> bool:
     """Set the execution mode for the current session.

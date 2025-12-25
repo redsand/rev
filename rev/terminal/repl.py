@@ -24,6 +24,8 @@ def repl_mode(
     force_tui: bool = False,
     init_logs: list[str] | None = None,
     initial_command: str | None = None,
+    resume: bool = False,
+    resume_plan: bool = True,
 ):
     """Interactive REPL for iterative development with session memory.
 
@@ -90,6 +92,8 @@ def repl_mode(
         "execution_mode": default_mode_name,
         "mode_config": default_mode_config,
         "additional_dirs": [],
+        "resume": resume,
+        "resume_plan": resume_plan,
     }
 
     # Apply saved settings if they exist
@@ -139,6 +143,8 @@ def repl_mode(
                         parallel_workers=mode_cfg.get("parallel", 1),
                         auto_approve=True,
                         research_depth=mode_cfg.get("research_depth", "medium"),
+                        resume=session_context.get("resume", False),
+                        resume_plan=session_context.get("resume_plan", True),
                     )
                     plan = (
                         session_context["last_result"].plan

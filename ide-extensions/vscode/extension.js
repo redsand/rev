@@ -103,6 +103,23 @@ function getSelectedRange() {
 }
 
 /**
+ * Get workspace root for a file (or fallback to first workspace folder)
+ */
+function getWorkspaceRoot(filePath) {
+    const folders = vscode.workspace.workspaceFolders;
+    if (!folders || folders.length === 0) {
+        return null;
+    }
+    if (filePath) {
+        const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath));
+        if (folder) {
+            return folder.uri.fsPath;
+        }
+    }
+    return folders[0].uri.fsPath;
+}
+
+/**
  * Make API request to Rev
  */
 async function makeAPIRequest(endpoint, data) {
@@ -112,6 +129,13 @@ async function makeAPIRequest(endpoint, data) {
     const timeout = config.get('timeout') * 1000;
 
     try {
+        if (data && typeof data === 'object') {
+            const filePath = data.file_path || getActiveFilePath();
+            const workspaceRoot = getWorkspaceRoot(filePath);
+            if (workspaceRoot && !data.cwd) {
+                data.cwd = workspaceRoot;
+            }
+        }
         const response = await axios.post(
             `${apiUrl}${endpoint}`,
             data,
@@ -488,8 +512,9 @@ function startLSPServer() {
     const pythonPath = config.get('pythonPath');
 
     try {
+        const workspaceRoot = getWorkspaceRoot();
         lspServerProcess = spawn(pythonPath, ['-m', 'rev.ide.lsp_server'], {
-            cwd: vscode.workspace.rootPath
+            cwd: workspaceRoot || undefined
         });
 
         lspServerProcess.stdout.on('data', (data) => {
@@ -526,8 +551,9 @@ function startAPIServer() {
     const pythonPath = config.get('pythonPath');
 
     try {
+        const workspaceRoot = getWorkspaceRoot();
         apiServerProcess = spawn(pythonPath, ['-m', 'rev.ide.api_server'], {
-            cwd: vscode.workspace.rootPath
+            cwd: workspaceRoot || undefined
         });
 
         connectApiWebSocket();

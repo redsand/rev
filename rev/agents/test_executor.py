@@ -16,13 +16,38 @@ You will be given a task description and repository context. Your goal is to cho
 
 CRITICAL RULES:
 1. You MUST respond with a single tool call in JSON format. Do NOT provide any other text, explanations, or markdown.
-2. Use the provided 'System Information' (OS, Platform, Shell Type) to choose the correct command syntax.
-3. For complex validation, you are encouraged to run platform-specific scripts (.ps1 for Windows, .sh for POSIX) if they exist or were created.
-4. Prefer `run_tests` for standard test suites (pytest, npm test, etc.) and `run_cmd` for general validation or script execution.
-5. If the task is to "install" something, use `run_cmd`.
-6. Your response MUST be a single, valid JSON object representing the tool call.
+2. COMMAND SELECTION PRIORITY (in order):
+   a) If task description contains an explicit command (npm test, pytest, yarn test, go test, etc.), USE THAT EXACT COMMAND
+   b) If task says to validate/test Node.js/JavaScript files, use npm test (NOT pytest)
+   c) If task says to validate/test Python files, use pytest
+   d) Check workspace context for package.json (use npm test), go.mod (use go test), Cargo.toml (use cargo test)
+3. NEVER use pytest for Node.js/JavaScript projects (files ending in .js, .ts, .jsx, .tsx)
+4. Use the provided 'System Information' (OS, Platform, Shell Type) to choose the correct command syntax.
+5. For complex validation, you are encouraged to run platform-specific scripts (.ps1 for Windows, .sh for POSIX) if they exist or were created.
+6. Prefer `run_tests` for standard test suites (pytest, npm test, etc.) and `run_cmd` for general validation or script execution.
+7. If the task is to "install" something, use `run_cmd`.
+8. Your response MUST be a single, valid JSON object representing the tool call.
 
-Example for running pytest:
+Example 1 - Task says "npm test" explicitly:
+Task: "Run npm test to validate the changes"
+{
+  "tool_name": "run_tests",
+  "arguments": {
+    "cmd": "npm test"
+  }
+}
+
+Example 2 - Task mentions .js file (Node.js project):
+Task: "Run tests to validate changes to app.js"
+{
+  "tool_name": "run_tests",
+  "arguments": {
+    "cmd": "npm test"
+  }
+}
+
+Example 3 - Python project:
+Task: "Run tests to validate auth.py"
 {
   "tool_name": "run_tests",
   "arguments": {
@@ -31,7 +56,7 @@ Example for running pytest:
   }
 }
 
-Example for running a PowerShell script:
+Example 4 - PowerShell script:
 {
   "tool_name": "run_cmd",
   "arguments": {
@@ -97,6 +122,15 @@ class TestExecutorAgent(BaseAgent):
                     )
                     if recovered:
                         print(f"  -> Recovered tool call from text: {recovered.name}")
+
+                        # CRITICAL FIX: Validate command matches project type (recovery path)
+                        if recovered.name in ("run_tests", "run_cmd"):
+                            cmd = recovered.arguments.get("cmd", "")
+                            corrected_cmd = self._validate_and_correct_test_command(cmd, task, context)
+                            if corrected_cmd != cmd:
+                                print(f"  [!] Correcting test command: {cmd} -> {corrected_cmd}")
+                                recovered.arguments["cmd"] = corrected_cmd
+
                         raw_result = execute_tool(recovered.name, recovered.arguments, agent_name="test_executor")
 
                         # Record test iteration for skip logic
@@ -123,10 +157,18 @@ class TestExecutorAgent(BaseAgent):
             tool_call = response["message"]["tool_calls"][0]
             tool_name = tool_call['function']['name']
             arguments = tool_call['function']['arguments']
-            
+
             if isinstance(arguments, str):
                 try: arguments = json.loads(arguments)
                 except: pass
+
+            # CRITICAL FIX: Validate command matches project type
+            if tool_name in ("run_tests", "run_cmd"):
+                cmd = arguments.get("cmd", "")
+                corrected_cmd = self._validate_and_correct_test_command(cmd, task, context)
+                if corrected_cmd != cmd:
+                    print(f"  [!] Correcting test command: {cmd} -> {corrected_cmd}")
+                    arguments["cmd"] = corrected_cmd
 
             print(f"  -> Executing: {tool_name} {arguments}")
             raw_result = execute_tool(tool_name, arguments, agent_name="test_executor")
@@ -283,4 +325,81 @@ class TestExecutorAgent(BaseAgent):
             return f"yarn --cwd {workdir_arg} {cmd[5:]}"
         if cmd.startswith("pnpm "):
             return f"pnpm --dir {workdir_arg} {cmd[5:]}"
+        return cmd
+
+    def _validate_and_correct_test_command(self, cmd: str, task: Task, context: RevContext) -> str:
+        """
+        Validate that the test command matches the project type.
+        Corrects obvious mismatches (e.g., pytest on Node.js projects).
+
+        Priority 1: Check task description for explicit command
+        Priority 2: Check task description for file extensions
+        Priority 3: Check workspace for project type markers
+        """
+        from pathlib import Path
+
+        cmd_lower = cmd.lower().strip()
+        desc = (task.description or "")
+        desc_lower = desc.lower()
+
+        # Priority 1: If task explicitly mentions a command, use it
+        explicit_commands = {
+            "npm test": "npm test",
+            "yarn test": "yarn test",
+            "pnpm test": "pnpm test",
+            "pytest": "pytest",
+            "go test": "go test ./...",
+            "cargo test": "cargo test",
+        }
+        for explicit, corrected in explicit_commands.items():
+            if explicit in desc_lower and explicit not in cmd_lower:
+                # Task says one thing, LLM chose another - trust the task
+                return corrected
+
+        # Priority 2: Check file extensions mentioned in task
+        is_nodejs_task = any(ext in desc_lower for ext in [".js", ".ts", ".jsx", ".tsx", "app.js", "index.js", "package.json"])
+        is_python_task = any(ext in desc_lower for ext in [".py", "pytest", "test_"])
+        is_go_task = ".go" in desc_lower or "go.mod" in desc_lower
+        is_rust_task = ".rs" in desc_lower or "cargo.toml" in desc_lower
+
+        # If task mentions Node.js files but command is pytest, correct it
+        if is_nodejs_task and "pytest" in cmd_lower:
+            workspace_root = context.workspace_root if hasattr(context, 'workspace_root') else Path.cwd()
+            root = Path(workspace_root) if workspace_root else Path.cwd()
+
+            if (root / "package.json").exists():
+                return "npm test"
+            elif (root / "yarn.lock").exists():
+                return "yarn test"
+            elif (root / "pnpm-lock.yaml").exists():
+                return "pnpm test"
+            else:
+                return "npm test"  # Default for Node.js
+
+        # If task mentions Python files but command is npm test, correct it
+        if is_python_task and any(npm_cmd in cmd_lower for npm_cmd in ["npm test", "yarn test", "pnpm test"]):
+            return "pytest"
+
+        # If task mentions Go files but command is wrong
+        if is_go_task and "pytest" in cmd_lower:
+            return "go test ./..."
+
+        # If task mentions Rust files but command is wrong
+        if is_rust_task and "pytest" in cmd_lower:
+            return "cargo test"
+
+        # Priority 3: If no explicit hints, check workspace for project type
+        if "pytest" in cmd_lower:
+            workspace_root = context.workspace_root if hasattr(context, 'workspace_root') else Path.cwd()
+            root = Path(workspace_root) if workspace_root else Path.cwd()
+
+            # If workspace has package.json but command is pytest, likely wrong
+            if (root / "package.json").exists():
+                # Check if there's also a Python project (requirements.txt, setup.py, etc.)
+                has_python = any((root / f).exists() for f in ["requirements.txt", "setup.py", "pyproject.toml", "pytest.ini"])
+                if not has_python:
+                    # Pure Node.js project, pytest is wrong
+                    return "npm test"
+
+        # No correction needed
         return cmd

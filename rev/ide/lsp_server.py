@@ -15,6 +15,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+import signal
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 
@@ -84,6 +86,22 @@ from .. import config as rev_config
 
 logger = logging.getLogger(__name__)
 
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def _strip_ansi(value: str) -> str:
+    return _ANSI_ESCAPE_RE.sub("", value)
+
+
+def _sanitize_payload(payload: Any) -> Any:
+    if isinstance(payload, str):
+        return _strip_ansi(payload)
+    if isinstance(payload, list):
+        return [_sanitize_payload(item) for item in payload]
+    if isinstance(payload, dict):
+        return {key: _sanitize_payload(val) for key, val in payload.items()}
+    return payload
+
 
 class RevLSPServer:
     """Language Server Protocol server for Rev integration"""
@@ -106,6 +124,9 @@ class RevLSPServer:
         self.config = config or rev_config
         self.server = LanguageServer('rev-lsp', 'v0.1')
         self.orchestrator = None
+        self._running_tasks: set[asyncio.Task] = set()
+        self._shutdown_requested = False
+        self._workspace_root: Optional[Path] = Path.cwd().resolve()
         self._execution_mode_locked = False
         self._ensure_ide_execution_mode()
         self._setup_handlers()
@@ -239,6 +260,30 @@ class RevLSPServer:
             )
         return self.orchestrator
 
+    def _maybe_set_workspace(self, file_path: Optional[str]) -> None:
+        if not file_path:
+            return
+        path = Path(file_path)
+        target = path if path.is_dir() else path.parent
+        if target.exists() and not target.is_dir():
+            target = target.parent
+        if not target.exists():
+            logger.warning("Workspace root does not exist: %s", target)
+            return
+        target = target.resolve()
+        if self._workspace_root == target:
+            return
+        try:
+            rev_config.set_workspace_root(target, allow_external=True)
+        except Exception as exc:
+            logger.warning("Failed to set workspace root: %s", exc)
+        try:
+            os.chdir(str(target))
+        except Exception as exc:
+            logger.warning("Failed to chdir to %s: %s", target, exc)
+        self._workspace_root = target
+        self.orchestrator = None
+
     def _ensure_ide_execution_mode(self) -> None:
         if self._execution_mode_locked:
             return
@@ -254,17 +299,50 @@ class RevLSPServer:
             context_guard_interactive=False,
         )
 
+    async def _run_orchestrator_task(self, task: str) -> Any:
+        orchestrator = await self._get_orchestrator()
+        task_handle = asyncio.create_task(asyncio.to_thread(orchestrator.execute, task))
+        self._running_tasks.add(task_handle)
+        try:
+            return _sanitize_payload(await task_handle)
+        finally:
+            self._running_tasks.discard(task_handle)
+
+    def _request_shutdown(self, reason: str = "signal") -> None:
+        if self._shutdown_requested:
+            return
+        self._shutdown_requested = True
+        try:
+            from rev.config import set_escape_interrupt
+            set_escape_interrupt(True)
+        except Exception:
+            pass
+        for task in list(self._running_tasks):
+            if not task.done():
+                task.cancel()
+        self._running_tasks.clear()
+        if hasattr(self.server, "shutdown"):
+            try:
+                self.server.shutdown()
+            except Exception:
+                pass
+        if hasattr(self.server, "stop"):
+            try:
+                self.server.stop()
+            except Exception:
+                pass
+        logger.info("Shutdown requested (%s).", reason)
+
     async def _analyze_code(self, uri: Optional[str]) -> Dict[str, Any]:
         """Analyze code using Rev"""
         if not uri:
             return {"status": "error", "message": "No file specified"}
 
         file_path = self._uri_to_path(uri)
-        orchestrator = await self._get_orchestrator()
-
+        self._maybe_set_workspace(file_path)
         # Execute analysis task
         task = f"Analyze the code in {file_path} for potential issues, improvements, and best practices"
-        result = await asyncio.to_thread(orchestrator.execute, task)
+        result = await self._run_orchestrator_task(task)
 
         return {"status": "success", "result": result}
 
@@ -274,10 +352,9 @@ class RevLSPServer:
             return {"status": "error", "message": "No file specified"}
 
         file_path = self._uri_to_path(uri)
-        orchestrator = await self._get_orchestrator()
-
+        self._maybe_set_workspace(file_path)
         task = f"Generate comprehensive tests for {file_path}"
-        result = await asyncio.to_thread(orchestrator.execute, task)
+        result = await self._run_orchestrator_task(task)
 
         return {"status": "success", "result": result}
 
@@ -287,15 +364,14 @@ class RevLSPServer:
             return {"status": "error", "message": "No file specified"}
 
         file_path = self._uri_to_path(uri)
-        orchestrator = await self._get_orchestrator()
-
+        self._maybe_set_workspace(file_path)
         task = f"Refactor the code in {file_path} to improve readability and maintainability"
         if range_dict:
             start_line = range_dict['start']['line']
             end_line = range_dict['end']['line']
             task += f" (lines {start_line}-{end_line})"
 
-        result = await asyncio.to_thread(orchestrator.execute, task)
+        result = await self._run_orchestrator_task(task)
 
         return {"status": "success", "result": result}
 
@@ -305,10 +381,9 @@ class RevLSPServer:
             return {"status": "error", "message": "No file specified"}
 
         file_path = self._uri_to_path(uri)
-        orchestrator = await self._get_orchestrator()
-
+        self._maybe_set_workspace(file_path)
         task = f"Fix any bugs, errors, or issues in {file_path}"
-        result = await asyncio.to_thread(orchestrator.execute, task)
+        result = await self._run_orchestrator_task(task)
 
         return {"status": "success", "result": result}
 
@@ -318,15 +393,14 @@ class RevLSPServer:
             return {"status": "error", "message": "No file specified"}
 
         file_path = self._uri_to_path(uri)
-        orchestrator = await self._get_orchestrator()
-
+        self._maybe_set_workspace(file_path)
         task = f"Add comprehensive documentation to {file_path}"
         if range_dict:
             start_line = range_dict['start']['line']
             end_line = range_dict['end']['line']
             task += f" (lines {start_line}-{end_line})"
 
-        result = await asyncio.to_thread(orchestrator.execute, task)
+        result = await self._run_orchestrator_task(task)
 
         return {"status": "success", "result": result}
 
@@ -346,12 +420,24 @@ class RevLSPServer:
             port: Port to listen on
         """
         logger.info(f"Starting Rev LSP server on {host}:{port}")
-        self.server.start_tcp(host, port)
+        previous_handler = signal.signal(signal.SIGINT, lambda *_args: self._request_shutdown("sigint"))
+        try:
+            self.server.start_tcp(host, port)
+        except KeyboardInterrupt:
+            self._request_shutdown("keyboard")
+        finally:
+            signal.signal(signal.SIGINT, previous_handler)
 
     def start_io(self):
         """Start the LSP server using stdio (for direct IDE integration)"""
         logger.info("Starting Rev LSP server on stdio")
-        self.server.start_io()
+        previous_handler = signal.signal(signal.SIGINT, lambda *_args: self._request_shutdown("sigint"))
+        try:
+            self.server.start_io()
+        except KeyboardInterrupt:
+            self._request_shutdown("keyboard")
+        finally:
+            signal.signal(signal.SIGINT, previous_handler)
 
 
 def main():

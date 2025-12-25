@@ -62,6 +62,13 @@ def test_execution_plan_serialization():
     assert restored_plan.tasks[2].dependencies == [1]
 
 
+def test_execution_plan_from_dict_with_invalid_tasks():
+    """Non-list tasks in plan data should not raise and should default to empty."""
+    plan = ExecutionPlan.from_dict({"tasks": 1, "current_index": 3})
+    assert plan.tasks == []
+    assert plan.current_index == 3
+
+
 def test_checkpoint_save_and_load():
     """Test that checkpoints can be saved and loaded."""
     plan = ExecutionPlan()

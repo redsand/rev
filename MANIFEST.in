@@ -18,6 +18,7 @@ recursive-exclude __pycache__ *
 recursive-exclude *.pyc *
 recursive-exclude .rev *
 recursive-exclude build *
+recursive-exclude tmp_test *
 recursive-exclude rev_agentic.egg-info *
 recursive-exclude rev *.py~
 recursive-exclude rev *.un~
