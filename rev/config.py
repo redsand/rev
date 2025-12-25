@@ -402,6 +402,8 @@ LLM_TRANSACTION_LOG_PATH = os.getenv(
     "REV_LLM_TRACE_PATH",
     str((REV_DIR / "logs" / "llm_transactions.log").resolve()),
 )
+TDD_ENABLED = os.getenv("REV_TDD_ENABLED", "true").strip().lower() != "false"
+TDD_DEFER_TEST_EXECUTION = os.getenv("REV_TDD_DEFER_TESTS", "true").strip().lower() != "false"
 
 EXCLUDE_DIRS = {
     ".git", ".hg", ".svn", ".idea", ".vscode", "__pycache__", ".pytest_cache",

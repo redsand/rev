@@ -430,6 +430,7 @@ def main():
 
             server = RevAPIServer(config=config)
             server.start(host=args.ide_api_host, port=args.ide_api_port)
+            sys.exit(0)
         except ImportError as e:
             print(f"Error: IDE API server dependencies not installed: {e}")
             print("Install with: pip install rev-agentic")

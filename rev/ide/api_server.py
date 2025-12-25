@@ -20,9 +20,8 @@ except ImportError:
     AIOHTTP_AVAILABLE = False
     web = None
 
-from ..execution.orchestrator import Orchestrator
-from ..core.context import RevContext
-from ..config import Config
+from ..execution.orchestrator import Orchestrator, OrchestratorConfig
+from .. import config as rev_config
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +29,7 @@ logger = logging.getLogger(__name__)
 class RevAPIServer:
     """HTTP/JSON-RPC API server for IDE integration"""
 
-    def __init__(self, config: Optional[Config] = None):
+    def __init__(self, config: Optional[Any] = None):
         """
         Initialize the Rev API server
 
@@ -42,7 +41,7 @@ class RevAPIServer:
                 "API server requires 'aiohttp'. Install with: pip install aiohttp"
             )
 
-        self.config = config or Config()
+        self.config = config or rev_config
         self.app = web.Application()
         self.orchestrator = None
         self.active_tasks: Dict[str, Any] = {}
@@ -69,11 +68,10 @@ class RevAPIServer:
     async def _get_orchestrator(self) -> Orchestrator:
         """Get or create orchestrator instance"""
         if self.orchestrator is None:
-            context = RevContext(
+            self.orchestrator = Orchestrator(
                 project_root=Path.cwd(),
-                config=self.config
+                config=OrchestratorConfig(),
             )
-            self.orchestrator = Orchestrator(context)
         return self.orchestrator
 
     async def _broadcast_to_websockets(self, message: Dict[str, Any]):
@@ -396,12 +394,20 @@ class RevAPIServer:
             except Exception as e:
                 logger.warning(f"Could not fetch Ollama models: {e}")
                 # Return default/configured models if Ollama query fails
-                return web.json_response({
-                    'status': 'success',
-                    'models': [self.config.ollama_model] if hasattr(self.config, 'ollama_model') else [],
-                    'provider': 'config',
-                    'note': 'Using configured model (Ollama unavailable)'
-                })
+                fallback_model = None
+                if hasattr(self.config, "ollama_model"):
+                    fallback_model = getattr(self.config, "ollama_model")
+                elif hasattr(self.config, "OLLAMA_MODEL"):
+                    fallback_model = getattr(self.config, "OLLAMA_MODEL")
+                models = [fallback_model] if fallback_model else []
+                return web.json_response(
+                    {
+                        "status": "success",
+                        "models": models,
+                        "provider": "config",
+                        "note": "Using configured model (Ollama unavailable)",
+                    }
+                )
 
         except Exception as e:
             logger.error(f"Error listing models: {e}", exc_info=True)

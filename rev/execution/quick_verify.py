@@ -62,6 +62,27 @@ _TEST_FILE_EXTENSIONS = {
 _TEST_DIR_TOKENS = {"test", "tests", "spec", "specs", "__tests__", "__specs__"}
 _INSTALL_GUARD_STATE: Dict[Tuple[str, str], Dict[str, Any]] = {}
 _TEST_FILE_DISCOVERY_LIMIT = 12
+_TDD_TEST_RESULT_KEYS = {
+    "pytest",
+    "npm_test",
+    "go_test",
+    "cargo_test",
+    "dotnet_test",
+    "maven_test",
+    "gradle_test",
+    "phpunit",
+    "rspec",
+    "unittest",
+    "jest",
+    "vitest",
+    "mocha",
+    "ava",
+    "tap",
+    "jasmine",
+    "dart_test",
+    "flutter_test",
+    "custom_test",
+}
 
 
 def _extract_tool_noop(tool: str, raw_result: Any) -> Optional[str]:
@@ -208,6 +229,11 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
 
     action_type = task.action_type.lower()
     verification_mode = _get_verification_mode()
+    test_only_change = False
+    non_test_change = False
+    if config.TDD_ENABLED and action_type in {"add", "create", "edit", "refactor"}:
+        test_only_change = _task_changes_tests_only(task)
+        non_test_change = _task_changes_non_tests(task)
 
     # Prevent "looks done vs is done": an edit/refactor task that only read files
     # should not be marked as completed.
@@ -249,6 +275,22 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
             details={"action_type": action_type, "note": "Verification skipped for this action type"}
         )
 
+    # TDD: allow "red" test failures before implementation.
+    if config.TDD_ENABLED and action_type == "test":
+        if (
+            not result.passed
+            and context.agent_state.get("tdd_pending_green")
+            and not context.agent_state.get("tdd_require_test")
+        ):
+            return _apply_tdd_red_override(
+                result,
+                context,
+                reason="TDD red: tests failed as expected before implementation.",
+            )
+        if result.passed and context.agent_state.get("tdd_require_test"):
+            context.agent_state["tdd_require_test"] = False
+            context.agent_state["tdd_green_observed"] = True
+
     # Enforce validation_steps when provided; otherwise fall back to strict verification
     # mode (default: fast compileall).
     if result.passed and action_type in {"add", "create", "edit", "refactor"}:
@@ -257,6 +299,12 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
                 task, result.details, getattr(task, "tool_events", None)
             )
             if isinstance(validation_outcome, VerificationResult):
+                if config.TDD_ENABLED and test_only_change and _is_test_failure(validation_outcome):
+                    return _apply_tdd_red_override(
+                        validation_outcome,
+                        context,
+                        reason="TDD red: tests failed as expected after adding tests.",
+                    )
                 return validation_outcome
             if validation_outcome:
                 result.details["validation"] = validation_outcome
@@ -266,9 +314,22 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
             )
             strict_outcome = _maybe_run_strict_verification(action_type, strict_paths, mode=verification_mode, task=task)
             if isinstance(strict_outcome, VerificationResult):
+                if config.TDD_ENABLED and test_only_change and _is_test_failure(strict_outcome):
+                    return _apply_tdd_red_override(
+                        strict_outcome,
+                        context,
+                        reason="TDD red: tests failed as expected after adding tests.",
+                    )
                 return strict_outcome
             if strict_outcome:
                 result.details["strict"] = strict_outcome
+
+    if config.TDD_ENABLED and action_type in {"add", "create", "edit", "refactor"} and result.passed:
+        if test_only_change:
+            context.agent_state["tdd_pending_green"] = True
+        if non_test_change and context.agent_state.get("tdd_pending_green"):
+            context.agent_state["tdd_pending_green"] = False
+            context.agent_state["tdd_require_test"] = True
 
     return result
 
@@ -1406,6 +1467,118 @@ def _output_indicates_no_tests(stdout: str, stderr: str) -> bool:
         "0 passing",
     )
     return any(pat in combined for pat in patterns)
+
+
+def _path_is_test_like(path: Path) -> bool:
+    try:
+        parts = {part.lower() for part in path.parts}
+    except Exception:
+        parts = set()
+
+    name = path.name.lower()
+    suffix = path.suffix.lower()
+    if suffix in _TEST_FILE_EXTENSIONS:
+        if "test" in name or "spec" in name:
+            return True
+        if name.startswith("test_") or name.endswith("_test" + suffix):
+            return True
+
+    return bool(parts.intersection(_TEST_DIR_TOKENS))
+
+
+def _extract_task_paths_for_tdd(task: Task) -> list[Path]:
+    paths: list[Path] = []
+
+    events = getattr(task, "tool_events", None) or []
+    for ev in events:
+        args = ev.get("args", {})
+        if not isinstance(args, dict):
+            continue
+        for key in ("path", "file_path", "target", "source", "destination", "dest", "new_path", "old_path"):
+            val = args.get(key)
+            if isinstance(val, str) and val.strip():
+                resolved = _resolve_for_verification(val.strip(), purpose="tdd task path")
+                if resolved:
+                    paths.append(resolved)
+
+    result_path = _extract_path_from_task_result(task.result)
+    if result_path:
+        resolved = _resolve_for_verification(result_path, purpose="tdd result path")
+        if resolved:
+            paths.append(resolved)
+
+    if task.description:
+        matches = re.findall(r'([A-Za-z0-9_/\\\.-]+\.[A-Za-z0-9]+)', task.description)
+        for match in matches:
+            resolved = _resolve_for_verification(match, purpose="tdd description path")
+            if resolved:
+                paths.append(resolved)
+
+    # Deduplicate while preserving order
+    seen = set()
+    deduped: list[Path] = []
+    for path in paths:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(path)
+    return deduped
+
+
+def _task_changes_tests_only(task: Task) -> bool:
+    paths = _extract_task_paths_for_tdd(task)
+    if not paths:
+        return False
+    has_test = any(_path_is_test_like(path) for path in paths)
+    has_non_test = any(not _path_is_test_like(path) for path in paths)
+    return has_test and not has_non_test
+
+
+def _task_changes_non_tests(task: Task) -> bool:
+    paths = _extract_task_paths_for_tdd(task)
+    if not paths:
+        return False
+    return any(not _path_is_test_like(path) for path in paths)
+
+
+def _is_test_failure(result: VerificationResult) -> bool:
+    msg = (result.message or "").lower()
+    if any(token in msg for token in ("test", "pytest", "jest", "vitest", "mocha")):
+        return True
+
+    details = result.details or {}
+    for key in ("strict", "validation"):
+        block = details.get(key)
+        if not isinstance(block, dict):
+            continue
+        for label in block:
+            label_lower = str(label).lower()
+            if label_lower in _TDD_TEST_RESULT_KEYS or "test" in label_lower:
+                return True
+    failed_step = str(details.get("failed_step") or "").lower()
+    if "test" in failed_step:
+        return True
+    return False
+
+
+def _apply_tdd_red_override(
+    result: VerificationResult,
+    context: RevContext,
+    *,
+    reason: str,
+) -> VerificationResult:
+    context.agent_state["tdd_pending_green"] = True
+    return VerificationResult(
+        passed=True,
+        message=reason,
+        details={
+            "tdd_expected_failure": True,
+            "tdd_failure": result.details,
+            "tdd_message": result.message,
+        },
+        should_replan=False,
+    )
 
 
 def _looks_like_test_file(path: Path) -> bool:

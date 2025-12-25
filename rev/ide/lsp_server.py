@@ -17,40 +17,69 @@ import asyncio
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 
+LSP_IMPORT_ERROR: Optional[Exception] = None
+
 try:
-    from pygls.server import LanguageServer
-    from pygls.lsp.methods import (
-        TEXT_DOCUMENT_DID_OPEN,
-        TEXT_DOCUMENT_DID_CHANGE,
-        TEXT_DOCUMENT_DID_SAVE,
-        TEXT_DOCUMENT_CODE_ACTION,
-        TEXT_DOCUMENT_COMPLETION,
-        WORKSPACE_EXECUTE_COMMAND,
-    )
-    from pygls.lsp.types import (
-        CodeAction,
-        CodeActionKind,
-        CodeActionParams,
-        Command,
-        CompletionItem,
-        CompletionList,
-        CompletionParams,
-        DidOpenTextDocumentParams,
-        DidChangeTextDocumentParams,
-        DidSaveTextDocumentParams,
-        ExecuteCommandParams,
-        Position,
-        Range,
-        TextEdit,
-    )
+    try:
+        from pygls.lsp.server import LanguageServer
+    except ImportError:
+        from pygls.server import LanguageServer
+    try:
+        from lsprotocol.types import (
+            TEXT_DOCUMENT_DID_OPEN,
+            TEXT_DOCUMENT_DID_CHANGE,
+            TEXT_DOCUMENT_DID_SAVE,
+            TEXT_DOCUMENT_CODE_ACTION,
+            TEXT_DOCUMENT_COMPLETION,
+            WORKSPACE_EXECUTE_COMMAND,
+            CodeAction,
+            CodeActionKind,
+            CodeActionParams,
+            Command,
+            CompletionItem,
+            CompletionList,
+            CompletionParams,
+            DidOpenTextDocumentParams,
+            DidChangeTextDocumentParams,
+            DidSaveTextDocumentParams,
+            ExecuteCommandParams,
+            Position,
+            Range,
+            TextEdit,
+        )
+    except ImportError:
+        from pygls.lsp.methods import (
+            TEXT_DOCUMENT_DID_OPEN,
+            TEXT_DOCUMENT_DID_CHANGE,
+            TEXT_DOCUMENT_DID_SAVE,
+            TEXT_DOCUMENT_CODE_ACTION,
+            TEXT_DOCUMENT_COMPLETION,
+            WORKSPACE_EXECUTE_COMMAND,
+        )
+        from pygls.lsp.types import (
+            CodeAction,
+            CodeActionKind,
+            CodeActionParams,
+            Command,
+            CompletionItem,
+            CompletionList,
+            CompletionParams,
+            DidOpenTextDocumentParams,
+            DidChangeTextDocumentParams,
+            DidSaveTextDocumentParams,
+            ExecuteCommandParams,
+            Position,
+            Range,
+            TextEdit,
+        )
     LSP_AVAILABLE = True
-except ImportError:
+except Exception as exc:
     LSP_AVAILABLE = False
     LanguageServer = None
+    LSP_IMPORT_ERROR = exc
 
-from ..execution.orchestrator import Orchestrator
-from ..core.context import RevContext
-from ..config import Config
+from ..execution.orchestrator import Orchestrator, OrchestratorConfig
+from .. import config as rev_config
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +87,7 @@ logger = logging.getLogger(__name__)
 class RevLSPServer:
     """Language Server Protocol server for Rev integration"""
 
-    def __init__(self, config: Optional[Config] = None):
+    def __init__(self, config: Optional[Any] = None):
         """
         Initialize the Rev LSP server
 
@@ -66,11 +95,14 @@ class RevLSPServer:
             config: Rev configuration object
         """
         if not LSP_AVAILABLE:
-            raise ImportError(
-                "LSP support requires 'pygls'. Install with: pip install pygls"
-            )
+            import sys
+            base_msg = "LSP support requires 'pygls' (and lsprotocol for pygls>=2). Install with: pip install pygls"
+            if LSP_IMPORT_ERROR:
+                detail = f"{type(LSP_IMPORT_ERROR).__name__}: {LSP_IMPORT_ERROR}"
+                base_msg += f" (import error: {detail}; python={sys.executable})"
+            raise ImportError(base_msg)
 
-        self.config = config or Config()
+        self.config = config or rev_config
         self.server = LanguageServer('rev-lsp', 'v0.1')
         self.orchestrator = None
         self._setup_handlers()
@@ -198,11 +230,10 @@ class RevLSPServer:
     async def _get_orchestrator(self) -> Orchestrator:
         """Get or create orchestrator instance"""
         if self.orchestrator is None:
-            context = RevContext(
+            self.orchestrator = Orchestrator(
                 project_root=Path.cwd(),
-                config=self.config
+                config=OrchestratorConfig(),
             )
-            self.orchestrator = Orchestrator(context)
         return self.orchestrator
 
     async def _analyze_code(self, uri: Optional[str]) -> Dict[str, Any]:
