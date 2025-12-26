@@ -79,6 +79,33 @@ _CONFIG_FILENAMES = {
     ".editorconfig",
 }
 
+_CODE_FILE_EXTENSIONS = {
+    ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hh",
+    ".cs", ".fs", ".fsx", ".fsproj",
+    ".go",
+    ".java", ".kt", ".kts", ".scala", ".groovy",
+    ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+    ".py",
+    ".rb",
+    ".rs",
+    ".php",
+    ".swift",
+    ".dart",
+    ".lua",
+    ".pl", ".pm",
+    ".r", ".jl",
+    ".clj", ".cljs", ".cljc",
+    ".hs",
+}
+_NON_TEXT_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg",
+    ".pdf", ".zip", ".tar", ".gz", ".7z", ".rar",
+    ".exe", ".dll", ".so", ".dylib", ".bin",
+    ".mp3", ".mp4", ".mov", ".avi",
+    ".woff", ".woff2", ".ttf", ".otf",
+}
+_MAX_CODE_FILE_BYTES = 512 * 1024
+
 _INSTRUCTION_FILENAMES = {
     "agents.md",
     "claude.md",
@@ -143,6 +170,15 @@ def _read_file_excerpt(path: Path, max_lines: int = 200) -> str:
     head = "\n".join(lines[:max_lines])
     tail = "\n".join(lines[-max_lines:])
     return "\n".join([head, "... (truncated) ...", tail])
+
+
+def _is_binary_file(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            chunk = handle.read(2048)
+        return b"\x00" in chunk
+    except Exception:
+        return True
 
 
 def _discover_instruction_files(root: Path, max_files: int = _INSTRUCTION_MAX_FILES) -> List[Path]:
@@ -236,7 +272,7 @@ class ContextBundle:
 class CodeCorpus:
     """Lightweight code corpus index (token-overlap ranking)."""
 
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self, root: Path):
         self.root = root.resolve()
@@ -250,12 +286,57 @@ class CodeCorpus:
         return cache_dir / f"context_code_{root_id}.json"
 
     def _iter_files(self) -> Iterable[Path]:
-        for file_path in self.root.rglob("*.py"):
+        for file_path in self.root.rglob("*"):
             if any(excluded in file_path.parts for excluded in EXCLUDE_DIRS):
                 continue
             if not file_path.is_file():
                 continue
+            suffix = file_path.suffix.lower()
+            if suffix in _NON_TEXT_EXTENSIONS:
+                continue
+            if suffix in {".md", ".rst", ".adoc", ".txt"}:
+                continue
+            try:
+                if file_path.stat().st_size > _MAX_CODE_FILE_BYTES:
+                    continue
+            except Exception:
+                continue
+            if _is_binary_file(file_path):
+                continue
             yield file_path
+
+    def _chunk_text_file(self, file_path: Path) -> List[RetrievedChunk]:
+        try:
+            text = file_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return []
+
+        lines = text.splitlines()
+        if not lines:
+            return []
+
+        chunks: List[RetrievedChunk] = []
+        chunk_size = 200
+        rel = str(file_path.relative_to(self.root)).replace("\\", "/")
+        for start in range(0, len(lines), chunk_size):
+            end = min(start + chunk_size, len(lines))
+            content = "\n".join(lines[start:end])
+            chunks.append(
+                RetrievedChunk(
+                    corpus="code",
+                    source=rel,
+                    location=f"{rel}:{start + 1}",
+                    score=0.0,
+                    content=content,
+                    metadata={
+                        "file": rel,
+                        "start_line": start + 1,
+                        "end_line": end,
+                        "language": _infer_language(file_path),
+                    },
+                )
+            )
+        return chunks
 
     def _chunk_python_file(self, file_path: Path) -> List[RetrievedChunk]:
         try:
@@ -328,7 +409,10 @@ class CodeCorpus:
         start = time.perf_counter()
         chunks: List[RetrievedChunk] = []
         for fp in self._iter_files():
-            chunks.extend(self._chunk_python_file(fp))
+            if fp.suffix.lower() == ".py":
+                chunks.extend(self._chunk_python_file(fp))
+            else:
+                chunks.extend(self._chunk_text_file(fp))
         self._chunks = chunks
         self._built = True
         self._save()

@@ -575,11 +575,14 @@ class ExecutionPlan:
         """
         steps = []
         
-        from rev.tools.project_types import detect_project_type
+        from rev.tools.project_types import detect_project_type, detect_test_command
         project_type = detect_project_type(config.ROOT)
+        detected_cmd = detect_test_command(config.ROOT)
         
-        test_cmd = "pytest / npm test"
-        if project_type == "python":
+        test_cmd = None
+        if detected_cmd:
+            test_cmd = " ".join(detected_cmd)
+        elif project_type == "python":
             test_cmd = "pytest"
         elif project_type in ("node", "vue", "react", "nextjs"):
             test_cmd = "npm test"
@@ -600,7 +603,10 @@ class ExecutionPlan:
             steps.append("Verify imports and dependencies")
 
         if task.action_type in ["add", "edit", "refactor", "create", "delete", "rename"]:
-            steps.append(f"Run test suite: {test_cmd}")
+            if test_cmd:
+                steps.append(f"Run test suite: {test_cmd}")
+            else:
+                steps.append("Run project test suite (command not detected)")
             steps.append("Check for failing tests")
 
         # Specific validations

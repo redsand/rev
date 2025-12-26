@@ -23,7 +23,7 @@ from rev.config import (
 from rev import config
 from rev.tools.git_ops import get_repo_context
 from rev.tools.registry import get_available_tools, execute_tool
-from rev.tools.project_types import detect_project_type
+from rev.tools.project_types import detect_project_type, detect_test_command
 
 
 PLANNING_SYSTEM = """You are a planning agent. Produce an execution plan for the user request.
@@ -906,7 +906,8 @@ def _coerce_actionable_task(
 
     if action_type == "test":
         if not has_command:
-            cmd = _default_test_command(project_type)
+            detected = detect_test_command(config.ROOT)
+            cmd = " ".join(detected) if detected else _default_test_command(project_type)
             description = f"Run tests using run_tests cmd=\"{cmd}\""
         if not _mentions_tool(description):
             description = f"{description} (use run_tests)"

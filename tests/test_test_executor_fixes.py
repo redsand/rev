@@ -9,16 +9,29 @@ Tests cover:
 
 import pytest
 from pathlib import Path
+import uuid
 from unittest.mock import Mock, MagicMock, patch
 from rev.agents.test_executor import TestExecutorAgent
 from rev.models.task import Task
 from rev.core.context import RevContext
 
 
+def _cmd_str(cmd):
+    if isinstance(cmd, list):
+        return " ".join(cmd)
+    return cmd
+
+
+def _make_root() -> Path:
+    root = Path("tmp_test") / "test_executor" / uuid.uuid4().hex
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 class TestToolCallRecovery:
     """Test that TestExecutorAgent recovers tool calls from text before falling back."""
 
-    def test_recovers_tool_call_from_text_response(self, tmp_path):
+    def test_recovers_tool_call_from_text_response(self):
         """Test that text responses with JSON are recovered before falling back to heuristics."""
         agent = TestExecutorAgent()
         task = Task(description="Run the test suite", action_type="test")
@@ -47,15 +60,16 @@ class TestToolCallRecovery:
             assert call_args[0][0] == "run_tests"
             assert call_args[0][1]["cmd"] == "npm test"
 
-    def test_falls_back_only_when_recovery_fails(self, tmp_path):
+    def test_falls_back_only_when_recovery_fails(self):
         """Test that fallback heuristic is only used when recovery also fails."""
         agent = TestExecutorAgent()
         task = Task(description="Run tests", action_type="test")
         context = RevContext(user_request="Test request")
-        context.workspace_root = tmp_path
+        root = _make_root()
+        context.workspace_root = root
 
         # Create package.json to make it a Node.js project
-        (tmp_path / "package.json").write_text('{"name": "test"}')
+        (root / "package.json").write_text('{"name": "test", "scripts": {"test": "jest"}}')
 
         # Simulate LLM returning unusable content
         mock_response = {
@@ -78,21 +92,29 @@ class TestToolCallRecovery:
             mock_execute.assert_called_once()
             call_args = mock_execute.call_args
             assert call_args[0][0] == "run_cmd"
-            assert "npm test" in str(call_args[0][1])
+            cmd_value = call_args[0][1].get("cmd")
+            cmd_str = _cmd_str(cmd_value)
+            assert "npm test" in cmd_str
 
 
 class TestProjectTypeDetection:
     """Test that fallback heuristic detects project type correctly."""
 
-    def test_detects_nodejs_project_with_package_json(self, tmp_path):
+    def _cmd_str(self, cmd):
+        if isinstance(cmd, list):
+            return " ".join(cmd)
+        return cmd
+
+    def test_detects_nodejs_project_with_package_json(self):
         """Test that package.json → npm test, not pytest."""
         agent = TestExecutorAgent()
         task = Task(description="Run test suite", action_type="test")
         context = RevContext(user_request="Test request")
-        context.workspace_root = tmp_path
+        root = _make_root()
+        context.workspace_root = root
 
         # Create package.json to make it a Node.js project
-        (tmp_path / "package.json").write_text('{"name": "test-app"}')
+        (root / "package.json").write_text('{"name": "test-app", "scripts": {"test": "jest"}}')
 
         with patch('rev.agents.test_executor.ollama_chat') as mock_chat, \
              patch('rev.agents.test_executor.execute_tool') as mock_execute, \
@@ -108,18 +130,20 @@ class TestProjectTypeDetection:
             # Should use npm test, NOT pytest
             mock_execute.assert_called_once()
             call_args = mock_execute.call_args
-            cmd = call_args[0][1]["cmd"]
+            cmd = self._cmd_str(call_args[0][1]["cmd"])
             assert "npm test" in cmd
             assert "pytest" not in cmd
 
-    def test_detects_yarn_project(self, tmp_path):
+    def test_detects_yarn_project(self):
         """Test that yarn.lock → yarn test."""
         agent = TestExecutorAgent()
         task = Task(description="Run test suite", action_type="test")
         context = RevContext(user_request="Test request")
-        context.workspace_root = tmp_path
+        root = _make_root()
+        context.workspace_root = root
 
-        (tmp_path / "yarn.lock").write_text('')
+        (root / "package.json").write_text('{"name": "test-app", "scripts": {"test": "jest"}}')
+        (root / "yarn.lock").write_text('')
 
         with patch('rev.agents.test_executor.ollama_chat') as mock_chat, \
              patch('rev.agents.test_executor.execute_tool') as mock_execute, \
@@ -132,17 +156,19 @@ class TestProjectTypeDetection:
             result = agent.execute(task, context)
 
             call_args = mock_execute.call_args
-            cmd = call_args[0][1]["cmd"]
+            cmd = self._cmd_str(call_args[0][1]["cmd"])
             assert "yarn test" in cmd
 
-    def test_detects_pnpm_project(self, tmp_path):
+    def test_detects_pnpm_project(self):
         """Test that pnpm-lock.yaml → pnpm test."""
         agent = TestExecutorAgent()
         task = Task(description="Run test suite", action_type="test")
         context = RevContext(user_request="Test request")
-        context.workspace_root = tmp_path
+        root = _make_root()
+        context.workspace_root = root
 
-        (tmp_path / "pnpm-lock.yaml").write_text('')
+        (root / "package.json").write_text('{"name": "test-app", "scripts": {"test": "jest"}}')
+        (root / "pnpm-lock.yaml").write_text('')
 
         with patch('rev.agents.test_executor.ollama_chat') as mock_chat, \
              patch('rev.agents.test_executor.execute_tool') as mock_execute, \
@@ -155,17 +181,18 @@ class TestProjectTypeDetection:
             result = agent.execute(task, context)
 
             call_args = mock_execute.call_args
-            cmd = call_args[0][1]["cmd"]
+            cmd = self._cmd_str(call_args[0][1]["cmd"])
             assert "pnpm test" in cmd
 
-    def test_detects_go_project(self, tmp_path):
+    def test_detects_go_project(self):
         """Test that go.mod → go test ./..."""
         agent = TestExecutorAgent()
         task = Task(description="Run test suite", action_type="test")
         context = RevContext(user_request="Test request")
-        context.workspace_root = tmp_path
+        root = _make_root()
+        context.workspace_root = root
 
-        (tmp_path / "go.mod").write_text('module test')
+        (root / "go.mod").write_text('module test')
 
         with patch('rev.agents.test_executor.ollama_chat') as mock_chat, \
              patch('rev.agents.test_executor.execute_tool') as mock_execute, \
@@ -178,17 +205,18 @@ class TestProjectTypeDetection:
             result = agent.execute(task, context)
 
             call_args = mock_execute.call_args
-            cmd = call_args[0][1]["cmd"]
+            cmd = self._cmd_str(call_args[0][1]["cmd"])
             assert "go test" in cmd
 
-    def test_detects_rust_project(self, tmp_path):
+    def test_detects_rust_project(self):
         """Test that Cargo.toml → cargo test."""
         agent = TestExecutorAgent()
         task = Task(description="Run test suite", action_type="test")
         context = RevContext(user_request="Test request")
-        context.workspace_root = tmp_path
+        root = _make_root()
+        context.workspace_root = root
 
-        (tmp_path / "Cargo.toml").write_text('[package]\nname = "test"')
+        (root / "Cargo.toml").write_text('[package]\nname = "test"')
 
         with patch('rev.agents.test_executor.ollama_chat') as mock_chat, \
              patch('rev.agents.test_executor.execute_tool') as mock_execute, \
@@ -201,17 +229,18 @@ class TestProjectTypeDetection:
             result = agent.execute(task, context)
 
             call_args = mock_execute.call_args
-            cmd = call_args[0][1]["cmd"]
+            cmd = self._cmd_str(call_args[0][1]["cmd"])
             assert "cargo test" in cmd
 
-    def test_defaults_to_pytest_for_python_projects(self, tmp_path):
-        """Test that pytest is only used when no other project markers exist."""
+    def test_uses_pytest_when_python_markers_present(self):
+        """Test that pytest is used when Python project markers are present."""
         agent = TestExecutorAgent()
         task = Task(description="Run test suite", action_type="test")
         context = RevContext(user_request="Test request")
-        context.workspace_root = tmp_path
+        root = _make_root()
+        context.workspace_root = root
 
-        # No project markers - should default to pytest
+        (root / "pyproject.toml").write_text("[tool.pytest]\n", encoding="utf-8")
 
         with patch('rev.agents.test_executor.ollama_chat') as mock_chat, \
              patch('rev.agents.test_executor.execute_tool') as mock_execute, \
@@ -224,8 +253,35 @@ class TestProjectTypeDetection:
             result = agent.execute(task, context)
 
             call_args = mock_execute.call_args
+            cmd = self._cmd_str(call_args[0][1]["cmd"])
+            assert "pytest" in cmd
+
+    def test_unknown_project_skips_with_sentinel(self, monkeypatch):
+        agent = TestExecutorAgent()
+        task = Task(description="Run test suite", action_type="test")
+        context = RevContext(user_request="Test request")
+        root = _make_root()
+        context.workspace_root = root
+        import rev.config as rev_config
+        monkeypatch.setattr(rev_config, "ROOT", root)
+
+        with patch('rev.agents.test_executor.ollama_chat') as mock_chat, \
+             patch('rev.agents.test_executor.execute_tool') as mock_execute, \
+             patch('rev.agents.test_executor.build_subagent_output') as mock_output:
+
+            mock_chat.return_value = None
+            mock_execute.return_value = '{"rc": 0, "stdout": "REV_NO_TEST_RUNNER"}'
+            mock_output.return_value = "success"
+
+            agent.execute(task, context)
+
+            mock_execute.assert_called_once()
+            call_args = mock_execute.call_args
             cmd = call_args[0][1]["cmd"]
-            assert cmd == "pytest"
+            if isinstance(cmd, list):
+                assert "REV_NO_TEST_RUNNER" in " ".join(cmd)
+            else:
+                assert "REV_NO_TEST_RUNNER" in cmd
 
 
 class TestNoTestsFoundRetry:
@@ -380,7 +436,7 @@ class TestSkipLogicRespectsFailures:
 class TestIntegrationScenario:
     """Integration test simulating the bug from the user's log."""
 
-    def test_nodejs_project_does_not_run_pytest(self, tmp_path):
+    def test_nodejs_project_does_not_run_pytest(self):
         """
         Simulate the bug: TestExecutorAgent runs pytest on a Node.js project.
         After fix: Should run npm test instead.
@@ -388,12 +444,13 @@ class TestIntegrationScenario:
         agent = TestExecutorAgent()
         task = Task(description="Run the test suite to verify the new feature (TDD green must pass).", action_type="test")
         context = RevContext(user_request="Create test app")
-        context.workspace_root = tmp_path
+        root = _make_root()
+        context.workspace_root = root
 
         # Create Node.js project structure
-        (tmp_path / "package.json").write_text('{"name": "test-app", "scripts": {"test": "jest"}}')
-        (tmp_path / "routes").mkdir()
-        (tmp_path / "routes" / "users.js").write_text('module.exports = {};')
+        (root / "package.json").write_text('{"name": "test-app", "scripts": {"test": "jest"}}')
+        (root / "routes").mkdir()
+        (root / "routes" / "users.js").write_text('module.exports = {};')
 
         with patch('rev.agents.test_executor.ollama_chat') as mock_chat, \
              patch('rev.agents.test_executor.execute_tool') as mock_execute, \
@@ -413,7 +470,7 @@ class TestIntegrationScenario:
             # Verify npm test was called, NOT pytest
             mock_execute.assert_called_once()
             call_args = mock_execute.call_args
-            cmd = call_args[0][1]["cmd"]
+            cmd = _cmd_str(call_args[0][1]["cmd"])
 
             # The critical assertion: must use npm test for Node.js project
             assert "npm test" in cmd, f"Expected 'npm test' but got '{cmd}'"

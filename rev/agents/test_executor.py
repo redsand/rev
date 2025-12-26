@@ -1,6 +1,7 @@
 import json
 import re
 import shlex
+from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 from rev.agents.base import BaseAgent
@@ -10,6 +11,7 @@ from rev.core.context import RevContext
 from rev.llm.client import ollama_chat
 from rev.agents.context_provider import build_context_and_tools
 from rev.agents.subagent_io import build_subagent_output
+from rev.tools.project_types import detect_test_command
 
 TEST_EXECUTOR_SYSTEM_PROMPT = """You are a specialized Test Executor agent. Your purpose is to run tests, validate implementations, and perform execution checks.
 
@@ -381,19 +383,15 @@ class TestExecutorAgent(BaseAgent):
                     workspace_root = context.workspace_root if hasattr(context, 'workspace_root') else Path.cwd()
                     root = Path(workspace_root) if workspace_root else Path.cwd()
 
-                    if (root / "package.json").exists():
-                        cmd = "npm test"
-                    elif (root / "yarn.lock").exists():
-                        cmd = "yarn test"
-                    elif (root / "pnpm-lock.yaml").exists():
-                        cmd = "pnpm test"
-                    elif (root / "go.mod").exists():
-                        cmd = "go test ./..."
-                    elif (root / "Cargo.toml").exists():
-                        cmd = "cargo test"
+                    detected = detect_test_command(root)
+                    if detected:
+                        cmd = detected
                     else:
-                        # Final fallback to pytest for Python projects
-                        cmd = "pytest"
+                        inferred = self._infer_test_command_from_files(root)
+                        if inferred:
+                            cmd = inferred
+                        else:
+                            cmd = ["python", "-c", "print('REV_NO_TEST_RUNNER')"]
 
         workdir = self._extract_workdir_hint(desc)
         cmd = self._apply_workdir(cmd, workdir)
@@ -408,6 +406,33 @@ class TestExecutorAgent(BaseAgent):
             context=context,
             task_id=task.task_id,
         )
+
+    def _infer_test_command_from_files(self, root: Path) -> Optional[str | list[str]]:
+        try:
+            from rev.execution import quick_verify
+        except Exception:
+            return None
+
+        try:
+            test_paths = quick_verify._discover_test_files(root, limit=3)
+        except Exception:
+            test_paths = []
+
+        if not test_paths:
+            return None
+
+        suffix = Path(test_paths[0]).suffix.lower()
+        if suffix in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:
+            return ["npm", "test"]
+        if suffix == ".py":
+            return ["pytest", "-q"]
+        if suffix == ".go":
+            return ["go", "test", "./..."]
+        if suffix == ".rs":
+            return ["cargo", "test"]
+        if suffix == ".cs":
+            return ["dotnet", "test"]
+        return None
 
     def _extract_workdir_hint(self, desc: str) -> Optional[str]:
         """Best-effort guess for a working directory hinted in task text."""
@@ -428,15 +453,27 @@ class TestExecutorAgent(BaseAgent):
                 return known
         return None
 
-    def _apply_workdir(self, cmd: str, workdir: Optional[str]) -> str:
+    def _apply_workdir(self, cmd: str | list[str], workdir: Optional[str]) -> str | list[str]:
         """Inject a working directory flag for supported package managers."""
         if not workdir:
             return cmd
-        if re.search(r"\b(--prefix|--cwd|--dir|-C)\b", cmd):
-            return cmd
+        if isinstance(cmd, list):
+            if any(token in ("--prefix", "--cwd", "--dir", "-C") for token in cmd):
+                return cmd
+        else:
+            if re.search(r"\b(--prefix|--cwd|--dir|-C)\b", cmd):
+                return cmd
         workdir_arg = workdir
         if " " in workdir_arg or "\t" in workdir_arg:
             workdir_arg = f"\"{workdir_arg}\""
+        if isinstance(cmd, list):
+            if cmd and cmd[0] == "npm":
+                return ["npm", "--prefix", workdir_arg] + cmd[1:]
+            if cmd and cmd[0] == "yarn":
+                return ["yarn", "--cwd", workdir_arg] + cmd[1:]
+            if cmd and cmd[0] == "pnpm":
+                return ["pnpm", "--dir", workdir_arg] + cmd[1:]
+            return cmd
         if cmd.startswith("npm "):
             return f"npm --prefix {workdir_arg} {cmd[4:]}"
         if cmd.startswith("yarn "):
@@ -456,7 +493,8 @@ class TestExecutorAgent(BaseAgent):
         """
         from pathlib import Path
 
-        cmd_lower = cmd.lower().strip()
+        cmd_text = " ".join(cmd) if isinstance(cmd, list) else str(cmd or "")
+        cmd_lower = cmd_text.lower().strip()
         desc = (task.description or "")
         desc_lower = desc.lower()
 
@@ -485,14 +523,14 @@ class TestExecutorAgent(BaseAgent):
             workspace_root = context.workspace_root if hasattr(context, 'workspace_root') else Path.cwd()
             root = Path(workspace_root) if workspace_root else Path.cwd()
 
-            if (root / "package.json").exists():
-                return "npm test"
-            elif (root / "yarn.lock").exists():
+            detected = detect_test_command(root)
+            if detected:
+                return " ".join(detected)
+            if (root / "yarn.lock").exists():
                 return "yarn test"
-            elif (root / "pnpm-lock.yaml").exists():
+            if (root / "pnpm-lock.yaml").exists():
                 return "pnpm test"
-            else:
-                return "npm test"  # Default for Node.js
+            return "npm test"  # Default for Node.js
 
         # If task mentions Python files but command is npm test, correct it
         if is_python_task and any(npm_cmd in cmd_lower for npm_cmd in ["npm test", "yarn test", "pnpm test"]):
@@ -517,7 +555,10 @@ class TestExecutorAgent(BaseAgent):
                 has_python = any((root / f).exists() for f in ["requirements.txt", "setup.py", "pyproject.toml", "pytest.ini"])
                 if not has_python:
                     # Pure Node.js project, pytest is wrong
+                    detected = detect_test_command(root)
+                    if detected:
+                        return " ".join(detected)
                     return "npm test"
 
         # No correction needed
-        return cmd
+        return cmd_text
