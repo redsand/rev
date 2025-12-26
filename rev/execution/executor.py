@@ -23,6 +23,7 @@ from rev.models.task import ExecutionPlan, Task, TaskStatus
 from rev.execution.state_manager import StateManager
 from rev.tools.registry import execute_tool
 from rev.llm.client import ollama_chat
+from rev.execution.ultrathink_prompts import get_ultrathink_prompt
 from rev.config import (
     get_system_info_cached,
     get_escape_interrupt,
@@ -1131,9 +1132,15 @@ def _build_execution_system_context(sys_info: Dict[str, Any], coding_mode: bool 
     Returns:
         Formatted system context string
     """
+    from rev import config
+
     base = EXECUTION_SYSTEM
     if coding_mode:
         base += CODING_EXECUTION_SUFFIX
+
+    # Apply ultrathink mode if enabled
+    if config.ULTRATHINK_MODE == "on":
+        base = get_ultrathink_prompt(base, 'execution')
 
     return f"""System Information:
 OS: {sys_info['os']} {sys_info['os_release']}
@@ -2789,9 +2796,15 @@ def fix_validation_failures(
     sys_info = get_system_info_cached()
 
     # Use specialized test-writer prompt in coding mode
+    from rev import config
+
     system_prompt = EXECUTION_SYSTEM
     if coding_mode:
         system_prompt = TEST_WRITER_SYSTEM + "\n\n" + CODING_EXECUTION_SUFFIX
+
+    # Apply ultrathink mode if enabled
+    if config.ULTRATHINK_MODE == "on":
+        system_prompt = get_ultrathink_prompt(system_prompt, 'execution')
 
     system_context = f"""System Information:
 OS: {sys_info['os']} {sys_info['os_release']}

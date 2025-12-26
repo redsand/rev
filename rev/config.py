@@ -278,6 +278,20 @@ LLM_THINKING_MODE = os.getenv("REV_THINKING_MODE", "auto").strip().lower()
 if LLM_THINKING_MODE not in {"auto", "off"}:
     LLM_THINKING_MODE = "auto"
 
+# ---------------------------------------------------------------------------
+# Ultrathink mode - Extended reasoning and craftsmanship
+# ---------------------------------------------------------------------------
+# When enabled, agents use enhanced system prompts that emphasize deeper thinking,
+# elegant solutions, and obsessive attention to detail.
+# Values: "off" (default), "on"
+ULTRATHINK_MODE = os.getenv("REV_ULTRATHINK_MODE", "off").strip().lower()
+if ULTRATHINK_MODE not in {"on", "off"}:
+    ULTRATHINK_MODE = "off"
+
+# Maximum tokens for ultrathink mode (allows for extended reasoning)
+# Higher values enable deeper analysis but use more tokens
+ULTRATHINK_MAX_TOKENS = int(os.getenv("REV_ULTRATHINK_MAX_TOKENS", "15000"))
+
 # ============================================================================
 # Multi-Provider LLM Configuration
 # ============================================================================
