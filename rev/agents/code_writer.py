@@ -15,6 +15,8 @@ from rev.core.tool_call_retry import retry_tool_call_with_response_format
 from rev.agents.context_provider import build_context_and_tools
 from rev.agents.subagent_io import build_subagent_output
 from rev.tools.registry import execute_tool as execute_registry_tool
+from rev import config
+from rev.execution.ultrathink_prompts import ULTRATHINK_CODE_WRITER_PROMPT
 
 
 def _extract_target_files_from_description(description: str) -> list[str]:
@@ -737,8 +739,14 @@ class CodeWriterAgent(BaseAgent):
                     "Copy and paste the exact text including all whitespace and indentation."
                 )
 
+        # Select system prompt based on ultrathink mode
+        system_prompt = CODE_WRITER_SYSTEM_PROMPT
+        if config.ULTRATHINK_MODE == "on":
+            system_prompt = ULTRATHINK_CODE_WRITER_PROMPT
+            print("  🧠 ULTRATHINK MODE ENABLED - Using enhanced reasoning prompt")
+
         messages = [
-            {"role": "system", "content": CODE_WRITER_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"{task_guidance}\n\nSelected Context:\n{rendered_context}{file_content_section}"}
         ]
 

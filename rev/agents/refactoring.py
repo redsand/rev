@@ -12,6 +12,8 @@ from rev.core.tool_call_recovery import recover_tool_call_from_text
 from rev.core.tool_call_retry import retry_tool_call_with_response_format
 from rev.agents.context_provider import build_context_and_tools
 from rev.agents.subagent_io import build_subagent_output
+from rev import config
+from rev.execution.ultrathink_prompts import get_ultrathink_prompt
 
 # Set up logging for RefactoringAgent
 logger = logging.getLogger(__name__)
@@ -60,7 +62,12 @@ class RefactoringAgent(BaseAgent):
 
         # Check if an improved system prompt was provided (for adaptive retry)
         system_prompt = getattr(task, '_override_system_prompt', None) or REFACTORING_SYSTEM_PROMPT
-        if system_prompt != REFACTORING_SYSTEM_PROMPT:
+
+        # Apply ultrathink mode if enabled (unless overridden by retry prompt)
+        if not getattr(task, '_override_system_prompt', None) and config.ULTRATHINK_MODE == "on":
+            system_prompt = get_ultrathink_prompt(REFACTORING_SYSTEM_PROMPT, 'refactoring')
+            logger.info(f"[REFACTORING] 🧠 ULTRATHINK MODE ENABLED - Using enhanced reasoning prompt")
+        elif system_prompt != REFACTORING_SYSTEM_PROMPT:
             logger.info(f"[REFACTORING] Using improved system prompt for retry")
 
         auto_result = self._attempt_structured_split(task, context)

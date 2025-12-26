@@ -24,6 +24,7 @@ from rev import config
 from rev.tools.git_ops import get_repo_context
 from rev.tools.registry import get_available_tools, execute_tool
 from rev.tools.project_types import detect_project_type, detect_test_command
+from rev.execution.ultrathink_prompts import get_ultrathink_prompt
 
 
 PLANNING_SYSTEM = """You are a planning agent. Produce an execution plan for the user request.
@@ -1455,6 +1456,11 @@ def planning_mode(
     system_prompt = PLANNING_SYSTEM
     if coding_mode:
         system_prompt += CODING_PLANNING_SUFFIX
+
+    # Apply ultrathink mode if enabled
+    if config.ULTRATHINK_MODE == "on":
+        system_prompt = get_ultrathink_prompt(system_prompt, 'planning')
+        print("  🧠 ULTRATHINK MODE ENABLED - Using enhanced planning prompt")
 
     # Enhanced system prompt with available tools
     enhanced_system_prompt = f"""{system_prompt}
