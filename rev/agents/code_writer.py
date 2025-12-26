@@ -21,32 +21,35 @@ def _extract_target_files_from_description(description: str) -> list[str]:
     """Extract file paths mentioned in a task description.
 
     Returns a list of potential file paths found in the description.
+
+    SIMPLIFIED: Instead of hardcoding file extensions, accept any path-like string.
+    This catches .prisma, .vue, .tsx, .jsx, .graphql, and any other file type.
     """
     if not description:
         return []
 
     paths = []
 
-    # Match backticked paths like `src/module/__init__.py`
-    backtick_pattern = r'`([^`]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1))`'
+    # Match backticked paths like `src/module/file.ext` (any extension)
+    backtick_pattern = r'`([^`]+\.\w+)`'
     for match in re.finditer(backtick_pattern, description, re.IGNORECASE):
         paths.append(match.group(1))
 
-    # Match quoted paths like "src/module/__init__.py"
-    quote_pattern = r'"([^"]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1))"'
+    # Match quoted paths like "src/module/file.ext" (any extension)
+    quote_pattern = r'"([^"]+\.\w+)"'
     for match in re.finditer(quote_pattern, description, re.IGNORECASE):
         if match.group(1) not in paths:
             paths.append(match.group(1))
 
-    # Match bare paths like src/module/__init__.py or main.py
-    bare_pattern = r'\b([\w./\\-]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1))\b'
+    # Match bare paths like src/module/file.ext or backend/prisma/schema.prisma
+    # Pattern: word chars, slashes, dots, hyphens + dot + extension
+    bare_pattern = r'\b([\w./\\-]+\.\w+)\b'
     for match in re.finditer(bare_pattern, description, re.IGNORECASE):
         candidate = match.group(1)
         # Filter out common false positives
-        # We allow root files (no slash) if they have a recognized extension, 
-        # but avoid simple things like ".py" or just "a.py" unless it's likely a real path
+        # Include if it has a path separator (/ or \) OR if it's a multi-character filename
         if candidate not in paths and not candidate.startswith('.'):
-            # Include if it has a slash OR if it's a multi-character name with extension
+            # Must have a slash (path) or be a meaningful filename (not just ".ext")
             if '/' in candidate or '\\' in candidate or len(candidate.split('.')[0]) > 1:
                 paths.append(candidate)
 

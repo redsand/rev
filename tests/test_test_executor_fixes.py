@@ -228,6 +228,103 @@ class TestProjectTypeDetection:
             assert cmd == "pytest"
 
 
+class TestNoTestsFoundRetry:
+    """Test retry behavior when test runner finds no tests."""
+
+    def test_reruns_jest_with_run_tests_by_path(self):
+        agent = TestExecutorAgent()
+        task = Task(description="Run jest on tests/api/users.test.js", action_type="test")
+        context = RevContext(user_request="Test request")
+
+        mock_response = {
+            "message": {
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "run_tests",
+                            "arguments": {
+                                "cmd": "npx jest tests/api/users.test.js"
+                            },
+                        }
+                    }
+                ]
+            }
+        }
+
+        results = [
+            '{"rc": 1, "stdout": "No tests found"}',
+            '{"rc": 0, "stdout": "1 passed"}',
+        ]
+
+        def fake_execute(_tool, _args, agent_name=None):
+            return results.pop(0)
+
+        with patch('rev.agents.test_executor.ollama_chat') as mock_chat, \
+             patch('rev.agents.test_executor.execute_tool') as mock_execute, \
+             patch('rev.agents.test_executor.build_subagent_output') as mock_output:
+
+            mock_chat.return_value = mock_response
+            mock_execute.side_effect = fake_execute
+            mock_output.return_value = "success"
+
+            agent.execute(task, context)
+
+            assert mock_execute.call_count == 2
+            first_call = mock_execute.call_args_list[0][0]
+            second_call = mock_execute.call_args_list[1][0]
+            assert first_call[0] == "run_tests"
+            assert second_call[0] == "run_tests"
+            assert "--runTestsByPath" in second_call[1]["cmd"]
+
+    def test_reruns_npm_test_with_double_dash(self):
+        agent = TestExecutorAgent()
+        task = Task(description="Run tests to validate tests/user_api.test.js", action_type="test")
+        context = RevContext(user_request="Test request")
+
+        mock_response = {
+            "message": {
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "run_tests",
+                            "arguments": {
+                                "cmd": "npm test tests/user_api.test.js"
+                            },
+                        }
+                    }
+                ]
+            }
+        }
+
+        results = [
+            '{"rc": 1, "stdout": "No tests found, exiting with code 1"}',
+            '{"rc": 0, "stdout": "1 passed"}',
+        ]
+
+        def fake_execute(_tool, _args, agent_name=None):
+            return results.pop(0)
+
+        with patch('rev.agents.test_executor.ollama_chat') as mock_chat, \
+             patch('rev.agents.test_executor.execute_tool') as mock_execute, \
+             patch('rev.agents.test_executor.build_subagent_output') as mock_output:
+
+            mock_chat.return_value = mock_response
+            mock_execute.side_effect = fake_execute
+            mock_output.return_value = "success"
+
+            agent.execute(task, context)
+
+            assert mock_execute.call_count == 2
+            second_call = mock_execute.call_args_list[1][0]
+            rerun_cmd = second_call[1]["cmd"]
+            if isinstance(rerun_cmd, list):
+                normalized = [str(part).replace("\\", "/") for part in rerun_cmd]
+                assert "--" in rerun_cmd
+                assert "tests/user_api.test.js" in normalized
+            else:
+                assert "npm test -- tests/user_api.test.js" in rerun_cmd
+
+
 class TestSkipLogicRespectsFailures:
     """Test that test skip logic doesn't block retries after failures."""
 

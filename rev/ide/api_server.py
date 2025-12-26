@@ -242,6 +242,7 @@ class RevAPIServer:
         task_id: Optional[str] = None,
         cwd: Optional[str] = None,
         file_path: Optional[str] = None,
+        read_only: bool = False,
     ) -> web.Response:
         """Submit a task string to the orchestrator and return a response."""
         if not task:
@@ -268,7 +269,7 @@ class RevAPIServer:
         # Execute task asynchronously
         async def execute_task():
             try:
-                result = await asyncio.to_thread(orchestrator.execute, task)
+                result = await asyncio.to_thread(orchestrator.execute, task, read_only=read_only)
                 sanitized_result = _sanitize_payload(result)
                 self.active_tasks[task_id]['status'] = 'completed'
                 self.active_tasks[task_id]['result'] = sanitized_result
@@ -336,7 +337,7 @@ class RevAPIServer:
                 )
 
             task = f"Analyze the code in {file_path} for potential issues, improvements, and best practices"
-            return await self._submit_task(task, cwd=cwd, file_path=file_path)
+            return await self._submit_task(task, cwd=cwd, file_path=file_path, read_only=True)
 
         except Exception as e:
             logger.error(f"Error handling analyze request: {e}", exc_info=True)
@@ -698,7 +699,11 @@ class RevAPIServer:
 
         self._maybe_set_workspace(params.get("cwd"), params.get("file_path"))
         orchestrator = await self._get_orchestrator()
-        result = await asyncio.to_thread(orchestrator.execute, task)
+        result = await asyncio.to_thread(
+            orchestrator.execute,
+            task,
+            read_only=bool(params.get("read_only")),
+        )
         return {'status': 'success', 'result': _sanitize_payload(result)}
 
     async def _rpc_analyze(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -708,7 +713,7 @@ class RevAPIServer:
             raise ValueError('No file_path specified')
 
         task = f"Analyze the code in {file_path}"
-        return await self._rpc_execute({'task': task, 'cwd': params.get('cwd'), 'file_path': file_path})
+        return await self._rpc_execute({'task': task, 'cwd': params.get('cwd'), 'file_path': file_path, 'read_only': True})
 
     async def _rpc_test(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """JSON-RPC test method"""

@@ -1,5 +1,6 @@
 import json
 import re
+import shlex
 from typing import Optional, Dict, Any, List
 
 from rev.agents.base import BaseAgent
@@ -172,6 +173,9 @@ class TestExecutorAgent(BaseAgent):
 
             print(f"  -> Executing: {tool_name} {arguments}")
             raw_result = execute_tool(tool_name, arguments, agent_name="test_executor")
+            rerun = self._maybe_rerun_no_tests(tool_name, arguments, raw_result, task, context)
+            if rerun:
+                tool_name, arguments, raw_result = rerun
             
             # Record test iteration for skip logic
             if tool_name in ("run_tests", "run_cmd") and ("test" in str(arguments).lower() or "pytest" in str(arguments).lower()):
@@ -195,6 +199,120 @@ class TestExecutorAgent(BaseAgent):
             error_msg = f"Error in TestExecutorAgent: {e}"
             print(f"  [!] {error_msg}")
             return self._execute_fallback_heuristic(task, context)
+
+    def _maybe_rerun_no_tests(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        raw_result: str,
+        task: Task,
+        context: RevContext,
+    ) -> Optional[tuple[str, Dict[str, Any], str]]:
+        if tool_name not in ("run_tests", "run_cmd"):
+            return None
+        payload = self._parse_tool_payload(raw_result)
+        if not payload:
+            return None
+        output = f"{payload.get('stdout', '')}{payload.get('stderr', '')}".lower()
+        if not self._is_no_tests_output(output):
+            return None
+
+        cmd = arguments.get("cmd", "")
+        if not isinstance(cmd, (str, list)):
+            return None
+
+        test_path = self._extract_test_path(cmd if isinstance(cmd, str) else " ".join(cmd))
+        if not test_path:
+            test_path = self._extract_test_path(task.description or "")
+
+        cmd_parts = (
+            [str(part) for part in cmd if part is not None]
+            if isinstance(cmd, list)
+            else shlex.split(cmd)
+        )
+        if test_path and test_path not in cmd_parts:
+            cmd_parts = list(cmd_parts) + [test_path]
+
+        try:
+            from rev.execution import quick_verify
+            fallback_cmd = quick_verify._attempt_no_tests_fallback(
+                cmd_parts,
+                str(payload.get("stdout", "") or ""),
+                str(payload.get("stderr", "") or ""),
+                arguments.get("cwd"),
+            )
+        except Exception:
+            fallback_cmd = None
+
+        if fallback_cmd and fallback_cmd != cmd_parts:
+            print("  [i] No tests found; retrying with explicit test paths")
+            rerun_args = dict(arguments)
+            rerun_args["cmd"] = fallback_cmd
+            rerun_result = execute_tool(tool_name, rerun_args, agent_name="test_executor")
+            return tool_name, rerun_args, rerun_result
+
+        desc_lower = (task.description or "").lower()
+        if "jest" not in str(cmd).lower() and "jest" not in desc_lower:
+            return None
+        if "--runtestsbypath" in str(cmd).lower():
+            return None
+
+        if not test_path:
+            return None
+
+        rerun_cmd = self._build_jest_run_by_path_cmd(str(cmd), test_path)
+        if rerun_cmd == str(cmd):
+            return None
+
+        print("  [i] No tests found; retrying with --runTestsByPath")
+        rerun_args = dict(arguments)
+        rerun_args["cmd"] = rerun_cmd
+        rerun_result = execute_tool(tool_name, rerun_args, agent_name="test_executor")
+        return tool_name, rerun_args, rerun_result
+
+    @staticmethod
+    def _parse_tool_payload(raw_result: str) -> Optional[Dict[str, Any]]:
+        if not isinstance(raw_result, str) or not raw_result.strip():
+            return None
+        try:
+            payload = json.loads(raw_result)
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _is_no_tests_output(output: str) -> bool:
+        if not output:
+            return False
+        return any(
+            token in output
+            for token in (
+                "no tests found",
+                "no tests ran",
+                "no tests collected",
+                "collected 0 items",
+            )
+        )
+
+    @staticmethod
+    def _extract_test_path(text: str) -> Optional[str]:
+        if not text:
+            return None
+        matches = re.findall(
+            r"([A-Za-z0-9_./\\\\-]+\.(?:test|spec)\.[A-Za-z0-9]+)",
+            text,
+        )
+        if not matches:
+            return None
+        return max(matches, key=len)
+
+    @staticmethod
+    def _build_jest_run_by_path_cmd(cmd: str, test_path: str) -> str:
+        cleaned = cmd
+        pattern = re.compile(rf"(\"|')?{re.escape(test_path)}(\\1)?")
+        cleaned = pattern.sub("", cleaned).strip()
+        cleaned = re.sub(r"\\s+", " ", cleaned)
+        return f"{cleaned} --runTestsByPath {test_path}".strip()
 
     def _should_skip_pytest(self, task: Task, context: RevContext) -> bool:
         """Heuristic to skip full pytest suites if nothing changed."""

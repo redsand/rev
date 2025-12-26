@@ -110,6 +110,7 @@ class RevContext:
         auto_approve: bool = True,
         resume: bool = False,
         resume_plan: bool = True,
+        read_only: bool = False,
     ):
         self.run_id: str = str(uuid.uuid4())  # Unique ID for each orchestration run
         self.user_request: str = user_request
@@ -127,6 +128,7 @@ class RevContext:
         self.auto_approve: bool = auto_approve # Whether to auto-approve changes without prompting
         self.resume: bool = resume # Whether we are resuming a previous session
         self.resume_plan: bool = resume_plan # Whether to resume the prior execution plan
+        self.read_only: bool = read_only # Whether execution should be read-only (no edits)
         # ContextGuard phase support
         self.context_sufficiency: Optional[Any] = None # ContextSufficiency from context_guard phase
         self.clarification_history: List[Dict[str, Any]] = [] # History of user clarifications

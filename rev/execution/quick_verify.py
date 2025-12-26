@@ -119,7 +119,7 @@ def _extract_tool_noop(tool: str, raw_result: Any) -> Optional[str]:
             return "tool_noop: list_dir returned 0 files. RECOVERY: Check the path exists and contains files, or broaden the pattern."
 
     elif tool_l == "run_tests":
-        stdout = (payload.get("stdout") or "").lower()
+        stdout = ((payload.get("stdout") or "") + (payload.get("stderr") or "")).lower()
         if "collected 0 items" in stdout or "no tests ran" in stdout or "no tests found" in stdout:
             return "tool_noop: run_tests found 0 tests to run. RECOVERY: Check your test path or test discovery patterns."
             
@@ -214,20 +214,24 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
             should_replan=False
         )
 
+    action_type = task.action_type.lower()
     # Surface tool no-ops clearly (e.g., search with 0 matches) first.
     # This ensures all actions are checked for functional success.
     events = getattr(task, "tool_events", None) or []
     for ev in reversed(list(events)):
-        reason = _extract_tool_noop(str(ev.get("tool") or ""), ev.get("raw_result"))
+        tool_name = str(ev.get("tool") or "").lower()
+        reason = _extract_tool_noop(tool_name, ev.get("raw_result"))
         if reason:
+            if action_type == "test" and tool_name == "run_tests":
+                reason_lower = reason.lower()
+                if any(token in reason_lower for token in ("no tests", "0 tests", "found 0 tests", "tests to run")):
+                    continue
             return VerificationResult(
                 passed=False,
                 message=reason,
                 details={"tool": ev.get("tool"), "artifact_ref": ev.get("artifact_ref")},
                 should_replan=True,
             )
-
-    action_type = task.action_type.lower()
     verification_mode = _get_verification_mode()
     test_only_change = False
     non_test_change = False
@@ -865,6 +869,35 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
                 passed=False,
                 message=f"File created but is empty: {file_path}",
                 details=details,
+                should_replan=True
+            )
+
+        # CRITICAL CHECK: Detect similar/duplicate files and fail verification
+        # This forces replanning to extend existing files instead of creating duplicates
+        payload = _parse_task_result_payload(task.result)
+        if payload and payload.get("is_new_file") and payload.get("similar_files"):
+            similar_list = payload.get("similar_files", [])
+            similar_str = ", ".join(similar_list[:3])
+            context.add_agent_request(
+                "DUPLICATE_FILE_PREVENTION",
+                {
+                    "agent": "VerificationSystem",
+                    "reason": f"Similar files exist: {similar_str}",
+                    "detailed_reason": (
+                        f"DUPLICATE FILE DETECTED: File '{file_path.name}' was created but similar files already exist: {similar_str}. "
+                        f"Instead of creating new files with similar names, EDIT one of the existing files to add the new functionality. "
+                        f"Use action_type='edit' with the most appropriate existing file path."
+                    )
+                }
+            )
+            return VerificationResult(
+                passed=False,
+                message=f"Duplicate file: similar files exist ({similar_str}). Extend existing file instead of creating new one.",
+                details={
+                    **details,
+                    "similar_files": similar_list,
+                    "suggested_action": "extend_existing"
+                },
                 should_replan=True
             )
 
@@ -2978,9 +3011,72 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
 
     if payload and isinstance(payload.get("rc"), int):
         rc = payload.get("rc", 1)
-        output = (payload.get("stdout", "") or "") + (payload.get("stderr", "") or "")
+        stdout = str(payload.get("stdout", "") or "")
+        stderr = str(payload.get("stderr", "") or "")
+        output = stdout + stderr
         context.agent_state["last_test_iteration"] = context.agent_state.get("current_iteration")
         context.agent_state["last_test_rc"] = rc
+        if _output_indicates_no_tests(stdout, stderr) and not _no_tests_expected(task):
+            cmd_value = payload.get("cmd") or payload.get("command") or ""
+            cmd_parts = _split_command_parts(cmd_value)
+            cwd = payload.get("cwd")
+            fallback_cmd = _attempt_no_tests_fallback(cmd_parts, stdout, stderr, cwd)
+            if fallback_cmd:
+                fallback_result = _run_validation_command(
+                    fallback_cmd,
+                    use_tests_tool=True,
+                    timeout=config.VALIDATION_TIMEOUT_SECONDS,
+                    cwd=cwd,
+                )
+                fallback_stdout = str(fallback_result.get("stdout", "") or "")
+                fallback_stderr = str(fallback_result.get("stderr", "") or "")
+                fallback_rc = fallback_result.get("rc")
+                context.agent_state["last_test_iteration"] = context.agent_state.get("current_iteration")
+                context.agent_state["last_test_rc"] = fallback_rc
+                if _output_indicates_no_tests(fallback_stdout, fallback_stderr):
+                    return VerificationResult(
+                        passed=False,
+                        message="No tests found after retrying with explicit test paths",
+                        details={
+                            "rc": fallback_rc,
+                            "output": (fallback_stdout + fallback_stderr)[:500],
+                            "retry_cmd": fallback_result.get("cmd"),
+                        },
+                        should_replan=True,
+                    )
+                if fallback_rc == 0:
+                    return VerificationResult(
+                        passed=True,
+                        message="Tests passed (reran with explicit test paths)",
+                        details={
+                            "rc": fallback_rc,
+                            "output": (fallback_stdout + fallback_stderr)[:200],
+                            "retry_cmd": fallback_result.get("cmd"),
+                        },
+                    )
+                if fallback_rc == 5:
+                    if _no_tests_expected(task):
+                        return VerificationResult(
+                            passed=True,
+                            message="No tests collected (rc=5) - explicitly allowed",
+                            details={"rc": fallback_rc, "output": (fallback_stdout + fallback_stderr)[:200]},
+                        )
+                    return VerificationResult(
+                        passed=False,
+                        message="Verification INCONCLUSIVE: pytest collected 0 tests (rc=5)",
+                        details={"rc": fallback_rc, "output": (fallback_stdout + fallback_stderr)[:500]},
+                        should_replan=True,
+                    )
+                return VerificationResult(
+                    passed=False,
+                    message=f"Tests failed after retry (rc={fallback_rc})",
+                    details={
+                        "rc": fallback_rc,
+                        "output": (fallback_stdout + fallback_stderr)[:500],
+                        "retry_cmd": fallback_result.get("cmd"),
+                    },
+                    should_replan=True,
+                )
         if rc == 0:
             cmd = payload.get("cmd") or payload.get("command")
             if isinstance(cmd, str) and cmd.strip() and "pytest" not in cmd.lower():

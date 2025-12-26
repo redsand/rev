@@ -299,9 +299,11 @@ class RevLSPServer:
             context_guard_interactive=False,
         )
 
-    async def _run_orchestrator_task(self, task: str) -> Any:
+    async def _run_orchestrator_task(self, task: str, read_only: bool = False) -> Any:
         orchestrator = await self._get_orchestrator()
-        task_handle = asyncio.create_task(asyncio.to_thread(orchestrator.execute, task))
+        task_handle = asyncio.create_task(
+            asyncio.to_thread(orchestrator.execute, task, read_only=read_only)
+        )
         self._running_tasks.add(task_handle)
         try:
             return _sanitize_payload(await task_handle)
@@ -342,7 +344,7 @@ class RevLSPServer:
         self._maybe_set_workspace(file_path)
         # Execute analysis task
         task = f"Analyze the code in {file_path} for potential issues, improvements, and best practices"
-        result = await self._run_orchestrator_task(task)
+        result = await self._run_orchestrator_task(task, read_only=True)
 
         return {"status": "success", "result": result}
 
