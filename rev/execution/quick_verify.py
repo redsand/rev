@@ -252,6 +252,22 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
         )
 
     action_type = task.action_type.lower()
+    verifiable_read_actions = {"read", "analyze", "research", "investigate", "general", "verify"}
+    if action_type in verifiable_read_actions:
+        read_events = getattr(task, "tool_events", None) or []
+        if not read_events:
+            return VerificationResult(
+                passed=False,
+                message="Read task executed no tools",
+                details={},
+                should_replan=True,
+            )
+        return VerificationResult(
+            passed=True,
+            message="Read-only task completed (verification skipped)",
+            details={"tools": [ev.get("tool") for ev in read_events]},
+        )
+
     # Surface tool no-ops clearly (e.g., search with 0 matches) first.
     # This ensures all actions are checked for functional success.
     events = getattr(task, "tool_events", None) or []
@@ -295,7 +311,6 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
         return _verify_directory_creation(task, context)
 
     # Route to appropriate verification handler
-    verifiable_read_actions = {"read", "analyze", "research", "investigate", "general", "verify"}
     if action_type == "refactor":
         result = _verify_refactoring(task, context)
     elif action_type == "add" or action_type == "create":
@@ -306,8 +321,6 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
         result = _verify_directory_creation(task, context)
     elif action_type == "test":
         result = _verify_test_execution(task, context)
-    elif action_type in verifiable_read_actions:
-        result = _verify_read_task(task, context)
     else:
         # For unknown action types, return a passing result but flag for caution
         return VerificationResult(
