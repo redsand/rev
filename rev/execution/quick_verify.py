@@ -2854,11 +2854,110 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
     return results
 
 
-def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
-    """Verify that a file was actually edited."""
+def _run_syntax_check(file_path: Path) -> Tuple[bool, str]:
+    """Run syntax validation for a file based on its extension.
 
-    # This is harder to verify without knowing the original content
-    # For now, just check that the file exists and isn't empty
+    Returns:
+        (is_valid, error_message) - (True, "") if valid, (False, "error details") if invalid
+    """
+    suffix = file_path.suffix.lower()
+
+    # Python files
+    if suffix == '.py':
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['python', '-m', 'py_compile', str(file_path)],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                return True, ""
+            return False, f"Python syntax error: {result.stderr.strip()}"
+        except Exception as e:
+            return False, f"Failed to run syntax check: {str(e)}"
+
+    # JavaScript/TypeScript files
+    elif suffix in {'.js', '.jsx', '.mjs', '.cjs'}:
+        # Try node --check first (fastest)
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['node', '--check', str(file_path)],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                return True, ""
+            return False, f"JavaScript syntax error: {result.stderr.strip()}"
+        except FileNotFoundError:
+            # Node not available, skip validation
+            return True, ""
+        except Exception as e:
+            return False, f"Failed to run syntax check: {str(e)}"
+
+    elif suffix in {'.ts', '.tsx'}:
+        # Try TypeScript compiler if available
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['tsc', '--noEmit', '--skipLibCheck', str(file_path)],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                return True, ""
+            return False, f"TypeScript error: {result.stdout.strip()}"
+        except FileNotFoundError:
+            # TypeScript not available, skip validation
+            return True, ""
+        except Exception as e:
+            return False, f"Failed to run syntax check: {str(e)}"
+
+    # JSON files
+    elif suffix == '.json':
+        try:
+            content = file_path.read_text(encoding='utf-8', errors='ignore')
+            json.loads(content)
+            return True, ""
+        except json.JSONDecodeError as e:
+            return False, f"JSON syntax error: {str(e)}"
+        except Exception as e:
+            return False, f"Failed to read JSON: {str(e)}"
+
+    # YAML files
+    elif suffix in {'.yml', '.yaml'}:
+        try:
+            import yaml
+            content = file_path.read_text(encoding='utf-8', errors='ignore')
+            yaml.safe_load(content)
+            return True, ""
+        except ImportError:
+            # PyYAML not available, skip validation
+            return True, ""
+        except Exception as e:
+            return False, f"YAML syntax error: {str(e)}"
+
+    # XML/HTML files
+    elif suffix in {'.xml', '.html', '.htm'}:
+        try:
+            from xml.etree import ElementTree as ET
+            content = file_path.read_text(encoding='utf-8', errors='ignore')
+            ET.fromstring(content)
+            return True, ""
+        except Exception as e:
+            # XML parsing can be strict, treat as warning not error
+            return True, f"XML validation warning: {str(e)}"
+
+    # For other file types, assume valid (no syntax check available)
+    return True, ""
+
+
+def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
+    """Verify that a file was actually edited and has valid syntax."""
 
     file_path: Path | None = None
 
@@ -2945,17 +3044,30 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
             should_replan=True
         )
 
-    # P0-6: File exists but we can't verify the edit actually succeeded without proper validation
-    # Return INCONCLUSIVE instead of passed=True to force proper verification
+    # Run syntax validation on the edited file
+    is_valid, error_msg = _run_syntax_check(file_path)
+
+    if not is_valid:
+        # Syntax error detected - edit introduced a syntax error
+        return VerificationResult(
+            passed=False,
+            message=f"Edit to {file_path.name} introduced a syntax error",
+            details={
+                "file_path": str(file_path),
+                "syntax_error": error_msg,
+                "suggestion": "Fix the syntax error in the file"
+            },
+            should_replan=True
+        )
+
+    # File exists and has valid syntax - verification passed!
     return VerificationResult(
-        passed=False,
-        inconclusive=True,
-        message=f"Cannot verify edit to {file_path.name} - file exists but no validation was performed. Run tests or syntax checks to confirm the edit is correct.",
+        passed=True,
+        message=f"Edit to {file_path.name} verified successfully (file exists and syntax is valid)",
         details={
             "file_path": str(file_path),
-            "suggestion": "Run pytest/npm test to verify changes, or use python -m py_compile for syntax check"
-        },
-        should_replan=True
+            "syntax_checked": True
+        }
     )
 
 

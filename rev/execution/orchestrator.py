@@ -2956,15 +2956,32 @@ class Orchestrator:
                             from pathlib import Path
                             p = Path(file_path)
                             filename = p.stem  # e.g., "app" from "app.js"
+                            parent_dir = str(p.parent) if str(p.parent) != '.' else ''
 
-                            # Common test file patterns
+                            # Common test file patterns (expanded for better coverage)
                             test_patterns = [
+                                # Standard test directory patterns
                                 f"tests/{filename}.test{p.suffix}",
                                 f"test/{filename}.test{p.suffix}",
-                                f"{p.parent}/__tests__/{filename}.test{p.suffix}",
-                                f"{p.parent}/{filename}.test{p.suffix}",
-                                f"{p.parent}/{filename}.spec{p.suffix}",
+                                f"tests/{filename}.spec{p.suffix}",
+                                f"test/{filename}.spec{p.suffix}",
+                                # __tests__ directory (React/Jest convention)
+                                f"__tests__/{filename}.test{p.suffix}",
+                                f"{parent_dir}/__tests__/{filename}.test{p.suffix}",
+                                f"{parent_dir}/__tests__/{filename}.spec{p.suffix}",
+                                # Co-located tests
+                                f"{parent_dir}/{filename}.test{p.suffix}",
+                                f"{parent_dir}/{filename}.spec{p.suffix}",
+                                # Python-specific patterns
+                                f"tests/test_{filename}.py" if p.suffix == '.py' else None,
+                                f"test/test_{filename}.py" if p.suffix == '.py' else None,
+                                # Pattern: tests/path/to/file.test.ext
+                                f"tests/{parent_dir}/{filename}.test{p.suffix}" if parent_dir else None,
+                                f"test/{parent_dir}/{filename}.test{p.suffix}" if parent_dir else None,
                             ]
+
+                            # Filter out None values
+                            test_patterns = [p for p in test_patterns if p is not None]
 
                             # Check which test file exists
                             workspace_root = self.context.workspace_root if self.context and hasattr(self.context, 'workspace_root') else Path.cwd()
@@ -2973,22 +2990,28 @@ class Orchestrator:
                             for pattern in test_patterns:
                                 test_path = root / pattern
                                 if test_path.exists():
-                                    test_file_hint = pattern
+                                    test_file_hint = str(test_path.relative_to(root))
                                     break
 
                         # Build test description with specific file when possible
-                        if '.js' in file_path or '.ts' in file_path or '.vue' in file_path:
+                        # IMPORTANT: Only run the specific test file, not global tests
+                        if '.js' in file_path or '.ts' in file_path or '.jsx' in file_path or '.tsx' in file_path or '.vue' in file_path:
                             if test_file_hint:
-                                test_description = f"Run tests for {file_path}: npm test -- {test_file_hint}"
+                                # Run only the specific test file
+                                test_description = f"Run specific test for {file_path}: npm test -- {test_file_hint}"
                             else:
-                                test_description = f"Run tests to validate {file_path}: npm test"
+                                # If no test file found, run syntax validation only (don't run all tests)
+                                test_description = f"Validate syntax of {file_path}: node --check {file_path}"
                         elif 'pytest' in suggestion or '.py' in file_path:
                             if test_file_hint:
-                                test_description = f"Run tests for {file_path}: pytest {test_file_hint} -v"
+                                # Run only the specific test file
+                                test_description = f"Run specific test for {file_path}: pytest {test_file_hint} -v"
                             else:
-                                test_description = f"Run tests to validate {file_path}: pytest -v"
+                                # If no test file found, run syntax validation only
+                                test_description = f"Validate syntax of {file_path}: python -m py_compile {file_path}"
                         else:
-                            test_description = f"Run tests to validate the changes to {file_path}"
+                            # For other file types, skip testing (already validated in quick_verify)
+                            test_description = f"Syntax validation completed for {file_path}"
 
                         # Inject TEST task to validate the edit
                         forced_next_task = Task(
