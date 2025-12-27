@@ -58,10 +58,12 @@ def _extract_target_files_from_description(description: str) -> list[str]:
     return paths
 
 
-def _read_file_content_for_edit(file_path: str, max_lines: int = 500) -> str | None:
+def _read_file_content_for_edit(file_path: str, max_lines: int = 2000) -> str | None:
     """Read file content to include in edit context.
 
     Returns the file content or None if the file cannot be read.
+
+    For files over max_lines, falls back to using write_file strategy instead of replace_in_file.
     """
     try:
         result = execute_registry_tool("read_file", {"path": file_path})
@@ -74,16 +76,26 @@ def _read_file_content_for_edit(file_path: str, max_lines: int = 500) -> str | N
                 # Return the content from the read_file result
                 if isinstance(result_json, dict) and "content" in result_json:
                     content = result_json["content"]
-                    # Limit to max_lines
+                    # Warn if file is large - don't truncate, but suggest alternative approach
                     lines = content.split('\n')
                     if len(lines) > max_lines:
-                        return '\n'.join(lines[:max_lines]) + f"\n... (truncated, {len(lines) - max_lines} more lines)"
+                        return (
+                            content +
+                            f"\n\nWARNING: This file has {len(lines)} lines (>{max_lines}). "
+                            "For large files, consider using write_file with the complete new content "
+                            "instead of replace_in_file, as it's more reliable for extensive changes."
+                        )
                     return content
             except json.JSONDecodeError:
                 # Result is plain text content
                 lines = result.split('\n')
                 if len(lines) > max_lines:
-                    return '\n'.join(lines[:max_lines]) + f"\n... (truncated, {len(lines) - max_lines} more lines)"
+                    return (
+                        result +
+                        f"\n\nWARNING: This file has {len(lines)} lines (>{max_lines}). "
+                        "For large files, consider using write_file with the complete new content "
+                        "instead of replace_in_file, as it's more reliable for extensive changes."
+                    )
                 return result
     except Exception:
         pass
@@ -124,10 +136,16 @@ CRITICAL RULES FOR IMPLEMENTATION QUALITY:
     - For action_type="add": ONLY use `write_file`
     - For action_type="edit": use `rewrite_python_imports` (preferred for Python import rewrites) OR `replace_in_file`
     - For action_type="refactor": use `write_file`, `rewrite_python_imports`, or `replace_in_file` as needed
-3.  If using `replace_in_file`, you MUST provide the *exact* `old_string` content to be replaced, including all original indentation and surrounding lines for context. Use the provided file content to construct this.
-4.  Ensure the `new_string` is complete and correctly indented to match the surrounding code.
+3.  If using `replace_in_file`, follow these MANDATORY rules:
+    a) The `find` parameter MUST be an EXACT substring from the provided file content - character-for-character identical
+    b) Include 2-3 surrounding lines for context to ensure the match is unique
+    c) COPY the exact text from the provided file content - DO NOT type it from memory or modify spacing
+    d) Preserve ALL whitespace, tabs, and indentation exactly as shown
+    e) If you cannot find the exact text in the provided content, use `write_file` instead to rewrite the whole file
+    f) For small edits (1-20 lines), use replace_in_file; for large changes (>50 lines), use write_file
+4.  Ensure the `replace` parameter is complete and correctly indented to match the surrounding code.
 5.  If creating a new file, ensure the COMPLETE, FULL file content is provided to the `write_file` tool - not stubs or placeholders.
-6.  Your response MUST be a single, valid JSON object representing the tool call.
+6.  Your response MUST be a single, valid JSON object representing the tool call. NEVER wrap JSON in markdown code fences (```json...```).
 
 CRITICAL RULES FOR CODE EXTRACTION:
 7.  When extracting code from other files or refactoring:
@@ -732,11 +750,21 @@ class CodeWriterAgent(BaseAgent):
 
             # Include file content in prompt
             if file_contents:
-                file_content_section = "\n\nIMPORTANT - ACTUAL FILE CONTENT TO EDIT:\n" + "\n\n".join(file_contents)
+                separator = "=" * 70
+                file_content_section = f"\n\n{separator}\n"
+                file_content_section += "ACTUAL FILE CONTENT TO EDIT (USE THIS AS SOURCE FOR 'find' PARAMETER)\n"
+                file_content_section += f"{separator}\n\n"
+                file_content_section += "\n\n".join(file_contents)
+                file_content_section += f"\n\n{separator}\n"
                 file_content_section += (
-                    "\n\nCRITICAL: When using replace_in_file, the 'find' parameter MUST be an EXACT substring "
-                    "from the ACTUAL FILE CONTENT above. Do NOT guess or fabricate the content. "
-                    "Copy and paste the exact text including all whitespace and indentation."
+                    "CRITICAL INSTRUCTIONS FOR replace_in_file:\n"
+                    "1. The 'find' parameter MUST be copied CHARACTER-FOR-CHARACTER from the content above\n"
+                    "2. Include 2-3 lines of context BEFORE and AFTER the line you want to change\n"
+                    "3. DO NOT modify spacing, tabs, or line endings when copying the 'find' text\n"
+                    "4. DO NOT type from memory - COPY the exact text you see above\n"
+                    "5. If the text you need to edit is NOT visible above, use write_file instead\n"
+                    "6. Verify your 'find' text appears EXACTLY in the file content above before submitting\n"
+                    f"{separator}\n"
                 )
 
         # Select system prompt based on ultrathink mode
@@ -851,25 +879,28 @@ class CodeWriterAgent(BaseAgent):
 
                                     # Escalate suggestions based on failure count
                                     if consecutive_replace_failures == 1:
-                                        # First failure: suggest re-reading and trying again
+                                        # First failure: suggest using write_file for more reliable replacement
                                         noop_msg = (
-                                            f"{noop_msg}. RECOVERY STEP 1: Use read_file to verify the exact file content "
-                                            f"(pay attention to whitespace and indentation), then retry with the correct find string."
+                                            f"{noop_msg}\n\n"
+                                            f"RECOVERY STEP 1 (Recommended): Switch to write_file tool instead.\n"
+                                            f"- Read the entire current file content\n"
+                                            f"- Make the necessary changes to the content\n"
+                                            f"- Use write_file to replace the entire file with the modified content\n"
+                                            f"This is MORE RELIABLE than replace_in_file for complex changes.\n\n"
+                                            f"Alternative: Verify the exact 'find' text (character-for-character) from the file content provided, "
+                                            f"including ALL whitespace and indentation, then retry replace_in_file."
                                         )
-                                    elif consecutive_replace_failures == 2:
-                                        # Second failure: suggest apply_patch
+                                    elif consecutive_replace_failures >= 2:
+                                        # Second+ failure: strongly recommend write_file
                                         noop_msg = (
-                                            f"{noop_msg}. RECOVERY STEP 2: The find string still doesn't match. "
-                                            f"Use apply_patch instead of replace_in_file, providing the exact original "
-                                            f"content and full replacement. Or use write_file to completely replace the file."
-                                        )
-                                    else:
-                                        # Third+ failure: suggest asking user or using different approach
-                                        noop_msg = (
-                                            f"{noop_msg}. RECOVERY STEP 3: Multiple edit attempts have failed. "
-                                            f"Consider: (1) Use run_python_diagnostic to verify the issue still exists, "
-                                            f"(2) Ask the user for clarification on what needs to change, or "
-                                            f"(3) Use a completely different approach to solve the problem."
+                                            f"{noop_msg}\n\n"
+                                            f"RECOVERY STEP 2 (MANDATORY): You MUST use write_file instead of replace_in_file.\n"
+                                            f"replace_in_file has failed {consecutive_replace_failures} times. The 'find' pattern is not matching.\n"
+                                            f"REQUIRED ACTION:\n"
+                                            f"1. Request read_file for the target file to get complete current content\n"
+                                            f"2. Apply your changes to that content\n"
+                                            f"3. Use write_file with the complete modified content\n"
+                                            f"DO NOT attempt replace_in_file again - it will fail."
                                         )
 
                                 self.request_replan(
@@ -975,25 +1006,28 @@ class CodeWriterAgent(BaseAgent):
 
                                     # Escalate suggestions based on failure count
                                     if consecutive_replace_failures == 1:
-                                        # First failure: suggest re-reading and trying again
+                                        # First failure: suggest using write_file for more reliable replacement
                                         noop_msg = (
-                                            f"{noop_msg}. RECOVERY STEP 1: Use read_file to verify the exact file content "
-                                            f"(pay attention to whitespace and indentation), then retry with the correct find string."
+                                            f"{noop_msg}\n\n"
+                                            f"RECOVERY STEP 1 (Recommended): Switch to write_file tool instead.\n"
+                                            f"- Read the entire current file content\n"
+                                            f"- Make the necessary changes to the content\n"
+                                            f"- Use write_file to replace the entire file with the modified content\n"
+                                            f"This is MORE RELIABLE than replace_in_file for complex changes.\n\n"
+                                            f"Alternative: Verify the exact 'find' text (character-for-character) from the file content provided, "
+                                            f"including ALL whitespace and indentation, then retry replace_in_file."
                                         )
-                                    elif consecutive_replace_failures == 2:
-                                        # Second failure: suggest apply_patch
+                                    elif consecutive_replace_failures >= 2:
+                                        # Second+ failure: strongly recommend write_file
                                         noop_msg = (
-                                            f"{noop_msg}. RECOVERY STEP 2: The find string still doesn't match. "
-                                            f"Use apply_patch instead of replace_in_file, providing the exact original "
-                                            f"content and full replacement. Or use write_file to completely replace the file."
-                                        )
-                                    else:
-                                        # Third+ failure: suggest asking user or using different approach
-                                        noop_msg = (
-                                            f"{noop_msg}. RECOVERY STEP 3: Multiple edit attempts have failed. "
-                                            f"Consider: (1) Use run_python_diagnostic to verify the issue still exists, "
-                                            f"(2) Ask the user for clarification on what needs to change, or "
-                                            f"(3) Use a completely different approach to solve the problem."
+                                            f"{noop_msg}\n\n"
+                                            f"RECOVERY STEP 2 (MANDATORY): You MUST use write_file instead of replace_in_file.\n"
+                                            f"replace_in_file has failed {consecutive_replace_failures} times. The 'find' pattern is not matching.\n"
+                                            f"REQUIRED ACTION:\n"
+                                            f"1. Request read_file for the target file to get complete current content\n"
+                                            f"2. Apply your changes to that content\n"
+                                            f"3. Use write_file with the complete modified content\n"
+                                            f"DO NOT attempt replace_in_file again - it will fail."
                                         )
 
                                 self.request_replan(
