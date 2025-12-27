@@ -3,7 +3,12 @@
   "displayName": "Rev - AI Development Assistant",
   "description": "Integrate Rev autonomous AI development system with VSCode",
   "version": "2.1.0",
+  "license": "MIT",
   "publisher": "rev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/redsand/rev"
+  },
   "engines": {
     "vscode": "^1.75.0"
   },
@@ -214,6 +219,7 @@
     ]
   },
   "scripts": {
+    "build": "vsce package",
     "lint": "eslint .",
     "pretest": "npm run lint",
     "test": "node ./test/runTest.js"
@@ -222,9 +228,11 @@
     "@types/vscode": "^1.75.0",
     "@types/node": "16.x",
     "eslint": "^8.0.0",
-    "@vscode/test-electron": "^2.2.0"
+    "@vscode/test-electron": "^2.2.0",
+    "@vscode/vsce": "^2.26.1"
   },
   "dependencies": {
-    "axios": "^1.4.0"
+    "axios": "^1.4.0",
+    "ws": "^8.18.0"
   }
 }

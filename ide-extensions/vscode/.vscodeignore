@@ -1,0 +1,10 @@
+.vscode/**
+.git/**
+test/**
+tests/**
+coverage/**
+*.map
+*.log
+*.vsix
+**/tsconfig*.json
+**/*.ts

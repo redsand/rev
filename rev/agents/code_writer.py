@@ -23,42 +23,47 @@ def _extract_target_files_from_description(description: str) -> list[str]:
     """Extract file paths mentioned in a task description.
 
     Returns a list of potential file paths found in the description.
+
+    SIMPLIFIED: Instead of hardcoding file extensions, accept any path-like string.
+    This catches .prisma, .vue, .tsx, .jsx, .graphql, and any other file type.
     """
     if not description:
         return []
 
     paths = []
 
-    # Match backticked paths like `src/module/__init__.py`
-    backtick_pattern = r'`([^`]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1))`'
+    # Match backticked paths like `src/module/file.ext` (any extension)
+    backtick_pattern = r'`([^`]+\.\w+)`'
     for match in re.finditer(backtick_pattern, description, re.IGNORECASE):
         paths.append(match.group(1))
 
-    # Match quoted paths like "src/module/__init__.py"
-    quote_pattern = r'"([^"]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1))"'
+    # Match quoted paths like "src/module/file.ext" (any extension)
+    quote_pattern = r'"([^"]+\.\w+)"'
     for match in re.finditer(quote_pattern, description, re.IGNORECASE):
         if match.group(1) not in paths:
             paths.append(match.group(1))
 
-    # Match bare paths like src/module/__init__.py or main.py
-    bare_pattern = r'\b([\w./\\-]+\.(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1))\b'
+    # Match bare paths like src/module/file.ext or backend/prisma/schema.prisma
+    # Pattern: word chars, slashes, dots, hyphens + dot + extension
+    bare_pattern = r'\b([\w./\\-]+\.\w+)\b'
     for match in re.finditer(bare_pattern, description, re.IGNORECASE):
         candidate = match.group(1)
         # Filter out common false positives
-        # We allow root files (no slash) if they have a recognized extension, 
-        # but avoid simple things like ".py" or just "a.py" unless it's likely a real path
+        # Include if it has a path separator (/ or \) OR if it's a multi-character filename
         if candidate not in paths and not candidate.startswith('.'):
-            # Include if it has a slash OR if it's a multi-character name with extension
+            # Must have a slash (path) or be a meaningful filename (not just ".ext")
             if '/' in candidate or '\\' in candidate or len(candidate.split('.')[0]) > 1:
                 paths.append(candidate)
 
     return paths
 
 
-def _read_file_content_for_edit(file_path: str, max_lines: int = 500) -> str | None:
+def _read_file_content_for_edit(file_path: str, max_lines: int = 2000) -> str | None:
     """Read file content to include in edit context.
 
     Returns the file content or None if the file cannot be read.
+
+    For files over max_lines, falls back to using write_file strategy instead of replace_in_file.
     """
     try:
         result = execute_registry_tool("read_file", {"path": file_path})
@@ -71,20 +76,44 @@ def _read_file_content_for_edit(file_path: str, max_lines: int = 500) -> str | N
                 # Return the content from the read_file result
                 if isinstance(result_json, dict) and "content" in result_json:
                     content = result_json["content"]
-                    # Limit to max_lines
+                    # Warn if file is large - don't truncate, but suggest alternative approach
                     lines = content.split('\n')
                     if len(lines) > max_lines:
-                        return '\n'.join(lines[:max_lines]) + f"\n... (truncated, {len(lines) - max_lines} more lines)"
+                        return (
+                            content +
+                            f"\n\nWARNING: This file has {len(lines)} lines (>{max_lines}). "
+                            "For large files, consider using write_file with the complete new content "
+                            "instead of replace_in_file, as it's more reliable for extensive changes."
+                        )
                     return content
             except json.JSONDecodeError:
                 # Result is plain text content
                 lines = result.split('\n')
                 if len(lines) > max_lines:
-                    return '\n'.join(lines[:max_lines]) + f"\n... (truncated, {len(lines) - max_lines} more lines)"
+                    return (
+                        result +
+                        f"\n\nWARNING: This file has {len(lines)} lines (>{max_lines}). "
+                        "For large files, consider using write_file with the complete new content "
+                        "instead of replace_in_file, as it's more reliable for extensive changes."
+                    )
                 return result
     except Exception:
         pass
     return None
+
+
+def _task_is_command_only(description: str) -> bool:
+    if not description:
+        return False
+    desc = description.lower()
+    return bool(
+        re.search(
+            r"\b(run_cmd|run_terminal_command|run_tests|execute command|install|npm install|npm ci|yarn install|"
+            r"pnpm install|pip install|pipenv install|poetry install|pipx install|conda install|bundle install|composer install|"
+            r"apt-get|apt install|brew install|choco install|winget install|yum install|dnf install|apk add|pacman -S|zypper install)\b",
+            desc,
+        )
+    )
 
 CODE_WRITER_SYSTEM_PROMPT = """You are a specialized Code Writer agent. Your sole purpose is to execute a single coding task by calling the ONLY available tool for this specific task.
 
@@ -107,10 +136,16 @@ CRITICAL RULES FOR IMPLEMENTATION QUALITY:
     - For action_type="add": ONLY use `write_file`
     - For action_type="edit": use `rewrite_python_imports` (preferred for Python import rewrites) OR `replace_in_file`
     - For action_type="refactor": use `write_file`, `rewrite_python_imports`, or `replace_in_file` as needed
-3.  If using `replace_in_file`, you MUST provide the *exact* `old_string` content to be replaced, including all original indentation and surrounding lines for context. Use the provided file content to construct this.
-4.  Ensure the `new_string` is complete and correctly indented to match the surrounding code.
+3.  If using `replace_in_file`, follow these MANDATORY rules:
+    a) The `find` parameter MUST be an EXACT substring from the provided file content - character-for-character identical
+    b) Include 2-3 surrounding lines for context to ensure the match is unique
+    c) COPY the exact text from the provided file content - DO NOT type it from memory or modify spacing
+    d) Preserve ALL whitespace, tabs, and indentation exactly as shown
+    e) If you cannot find the exact text in the provided content, use `write_file` instead to rewrite the whole file
+    f) For small edits (1-20 lines), use replace_in_file; for large changes (>50 lines), use write_file
+4.  Ensure the `replace` parameter is complete and correctly indented to match the surrounding code.
 5.  If creating a new file, ensure the COMPLETE, FULL file content is provided to the `write_file` tool - not stubs or placeholders.
-6.  Your response MUST be a single, valid JSON object representing the tool call.
+6.  Your response MUST be a single, valid JSON object representing the tool call. NEVER wrap JSON in markdown code fences (```json...```).
 
 CRITICAL RULES FOR CODE EXTRACTION:
 7.  When extracting code from other files or refactoring:
@@ -642,21 +677,95 @@ class CodeWriterAgent(BaseAgent):
 - Do NOT use "pass" statements or TODO comments in new code
 - Document any assumptions or changes from original implementation"""
 
+        # PRIORITY 1 FIX: Mandatory file reading for edit/refactor tasks
         # For edit/refactor tasks, read target files and include their content
         # This ensures the LLM has the exact file content for replace_in_file
         file_content_section = ""
-        if task.action_type in ("edit", "refactor"):
+        if task.action_type in ("edit", "refactor") and not _task_is_command_only(task.description or ""):
             target_files = _extract_target_files_from_description(task.description)
-            if target_files:
-                file_contents = []
-                for file_path in target_files[:3]:  # Limit to 3 files to avoid context overflow
-                    content = _read_file_content_for_edit(file_path)
-                    if content:
-                        file_contents.append(f"=== ACTUAL FILE CONTENT: {file_path} ===\n{content}\n=== END OF {file_path} ===")
-                        print(f"  -> Including actual content of {file_path} for edit context")
-                if file_contents:
-                    file_content_section = "\n\nIMPORTANT - ACTUAL FILE CONTENT TO EDIT:\n" + "\n\n".join(file_contents)
-                    file_content_section += "\n\nCRITICAL: When using replace_in_file, the 'find' parameter MUST be an EXACT substring from the ACTUAL FILE CONTENT above. Do NOT guess or fabricate the content."
+
+            # MANDATORY: EDIT tasks must identify target files
+            if not target_files:
+                error_msg = (
+                    f"EDIT task must specify target file path in description. "
+                    f"Task: '{task.description[:100]}...' does not mention any file to edit. "
+                    f"Include file path like 'edit app.js' or 'update package.json'."
+                )
+                print(f"  [ERROR] {error_msg}")
+                if self.should_attempt_recovery(task, context):
+                    self.request_replan(
+                        context,
+                        reason="EDIT task missing target file specification",
+                        detailed_reason=(
+                            f"{error_msg}\n\n"
+                            "RECOVERY: Ensure the task description explicitly mentions the file path to edit. "
+                            "Examples: 'edit src/app.js to add routes', 'update package.json to add lint script'. "
+                            "If creating a new file, use action_type='add' instead of 'edit'."
+                        )
+                    )
+                    return self.make_recovery_request("missing_target_file", error_msg)
+                return self.make_failure_signal("missing_target_file", error_msg)
+
+            # MANDATORY: Read target files (don't proceed without content)
+            file_contents = []
+            files_read_successfully = []
+            files_failed_to_read = []
+
+            for file_path in target_files[:3]:  # Limit to 3 files to avoid context overflow
+                content = _read_file_content_for_edit(file_path)
+                if content:
+                    file_contents.append(f"=== ACTUAL FILE CONTENT: {file_path} ===\n{content}\n=== END OF {file_path} ===")
+                    files_read_successfully.append(file_path)
+                    print(f"  -> Including actual content of {file_path} for edit context")
+                else:
+                    files_failed_to_read.append(file_path)
+                    print(f"  [WARN] Cannot read target file: {file_path}")
+
+            # Fail fast if no files could be read successfully
+            if not files_read_successfully and target_files:
+                primary_file = target_files[0]
+                error_msg = (
+                    f"Cannot read target file '{primary_file}' for EDIT task. "
+                    f"File may not exist or is unreadable."
+                )
+                print(f"  [ERROR] {error_msg}")
+                if self.should_attempt_recovery(task, context):
+                    self.request_replan(
+                        context,
+                        reason="Target file not found for EDIT",
+                        detailed_reason=(
+                            f"{error_msg}\n\n"
+                            f"RECOVERY: If '{primary_file}' does not exist yet, use action_type='add' to create it. "
+                            f"If the file exists but has a different path, verify the correct path using 'read_file' or 'list_dir'. "
+                            f"Do NOT proceed with EDIT action on non-existent files."
+                        )
+                    )
+                    return self.make_recovery_request("file_not_found", error_msg)
+                return self.make_failure_signal("file_not_found", error_msg)
+
+            # Warn if some files couldn't be read
+            if files_failed_to_read:
+                print(f"  [WARN] Could not read {len(files_failed_to_read)} file(s): {', '.join(files_failed_to_read)}")
+                print(f"  [WARN] Proceeding with {len(files_read_successfully)} successfully read file(s)")
+
+            # Include file content in prompt
+            if file_contents:
+                separator = "=" * 70
+                file_content_section = f"\n\n{separator}\n"
+                file_content_section += "ACTUAL FILE CONTENT TO EDIT (USE THIS AS SOURCE FOR 'find' PARAMETER)\n"
+                file_content_section += f"{separator}\n\n"
+                file_content_section += "\n\n".join(file_contents)
+                file_content_section += f"\n\n{separator}\n"
+                file_content_section += (
+                    "CRITICAL INSTRUCTIONS FOR replace_in_file:\n"
+                    "1. The 'find' parameter MUST be copied CHARACTER-FOR-CHARACTER from the content above\n"
+                    "2. Include 2-3 lines of context BEFORE and AFTER the line you want to change\n"
+                    "3. DO NOT modify spacing, tabs, or line endings when copying the 'find' text\n"
+                    "4. DO NOT type from memory - COPY the exact text you see above\n"
+                    "5. If the text you need to edit is NOT visible above, use write_file instead\n"
+                    "6. Verify your 'find' text appears EXACTLY in the file content above before submitting\n"
+                    f"{separator}\n"
+                )
 
         # Select system prompt based on ultrathink mode
         system_prompt = CODE_WRITER_SYSTEM_PROMPT
@@ -770,25 +879,28 @@ class CodeWriterAgent(BaseAgent):
 
                                     # Escalate suggestions based on failure count
                                     if consecutive_replace_failures == 1:
-                                        # First failure: suggest re-reading and trying again
+                                        # First failure: suggest using write_file for more reliable replacement
                                         noop_msg = (
-                                            f"{noop_msg}. RECOVERY STEP 1: Use read_file to verify the exact file content "
-                                            f"(pay attention to whitespace and indentation), then retry with the correct find string."
+                                            f"{noop_msg}\n\n"
+                                            f"RECOVERY STEP 1 (Recommended): Switch to write_file tool instead.\n"
+                                            f"- Read the entire current file content\n"
+                                            f"- Make the necessary changes to the content\n"
+                                            f"- Use write_file to replace the entire file with the modified content\n"
+                                            f"This is MORE RELIABLE than replace_in_file for complex changes.\n\n"
+                                            f"Alternative: Verify the exact 'find' text (character-for-character) from the file content provided, "
+                                            f"including ALL whitespace and indentation, then retry replace_in_file."
                                         )
-                                    elif consecutive_replace_failures == 2:
-                                        # Second failure: suggest apply_patch
+                                    elif consecutive_replace_failures >= 2:
+                                        # Second+ failure: strongly recommend write_file
                                         noop_msg = (
-                                            f"{noop_msg}. RECOVERY STEP 2: The find string still doesn't match. "
-                                            f"Use apply_patch instead of replace_in_file, providing the exact original "
-                                            f"content and full replacement. Or use write_file to completely replace the file."
-                                        )
-                                    else:
-                                        # Third+ failure: suggest asking user or using different approach
-                                        noop_msg = (
-                                            f"{noop_msg}. RECOVERY STEP 3: Multiple edit attempts have failed. "
-                                            f"Consider: (1) Use run_python_diagnostic to verify the issue still exists, "
-                                            f"(2) Ask the user for clarification on what needs to change, or "
-                                            f"(3) Use a completely different approach to solve the problem."
+                                            f"{noop_msg}\n\n"
+                                            f"RECOVERY STEP 2 (MANDATORY): You MUST use write_file instead of replace_in_file.\n"
+                                            f"replace_in_file has failed {consecutive_replace_failures} times. The 'find' pattern is not matching.\n"
+                                            f"REQUIRED ACTION:\n"
+                                            f"1. Request read_file for the target file to get complete current content\n"
+                                            f"2. Apply your changes to that content\n"
+                                            f"3. Use write_file with the complete modified content\n"
+                                            f"DO NOT attempt replace_in_file again - it will fail."
                                         )
 
                                 self.request_replan(
@@ -894,25 +1006,28 @@ class CodeWriterAgent(BaseAgent):
 
                                     # Escalate suggestions based on failure count
                                     if consecutive_replace_failures == 1:
-                                        # First failure: suggest re-reading and trying again
+                                        # First failure: suggest using write_file for more reliable replacement
                                         noop_msg = (
-                                            f"{noop_msg}. RECOVERY STEP 1: Use read_file to verify the exact file content "
-                                            f"(pay attention to whitespace and indentation), then retry with the correct find string."
+                                            f"{noop_msg}\n\n"
+                                            f"RECOVERY STEP 1 (Recommended): Switch to write_file tool instead.\n"
+                                            f"- Read the entire current file content\n"
+                                            f"- Make the necessary changes to the content\n"
+                                            f"- Use write_file to replace the entire file with the modified content\n"
+                                            f"This is MORE RELIABLE than replace_in_file for complex changes.\n\n"
+                                            f"Alternative: Verify the exact 'find' text (character-for-character) from the file content provided, "
+                                            f"including ALL whitespace and indentation, then retry replace_in_file."
                                         )
-                                    elif consecutive_replace_failures == 2:
-                                        # Second failure: suggest apply_patch
+                                    elif consecutive_replace_failures >= 2:
+                                        # Second+ failure: strongly recommend write_file
                                         noop_msg = (
-                                            f"{noop_msg}. RECOVERY STEP 2: The find string still doesn't match. "
-                                            f"Use apply_patch instead of replace_in_file, providing the exact original "
-                                            f"content and full replacement. Or use write_file to completely replace the file."
-                                        )
-                                    else:
-                                        # Third+ failure: suggest asking user or using different approach
-                                        noop_msg = (
-                                            f"{noop_msg}. RECOVERY STEP 3: Multiple edit attempts have failed. "
-                                            f"Consider: (1) Use run_python_diagnostic to verify the issue still exists, "
-                                            f"(2) Ask the user for clarification on what needs to change, or "
-                                            f"(3) Use a completely different approach to solve the problem."
+                                            f"{noop_msg}\n\n"
+                                            f"RECOVERY STEP 2 (MANDATORY): You MUST use write_file instead of replace_in_file.\n"
+                                            f"replace_in_file has failed {consecutive_replace_failures} times. The 'find' pattern is not matching.\n"
+                                            f"REQUIRED ACTION:\n"
+                                            f"1. Request read_file for the target file to get complete current content\n"
+                                            f"2. Apply your changes to that content\n"
+                                            f"3. Use write_file with the complete modified content\n"
+                                            f"DO NOT attempt replace_in_file again - it will fail."
                                         )
 
                                 self.request_replan(

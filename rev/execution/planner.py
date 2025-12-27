@@ -23,7 +23,7 @@ from rev.config import (
 from rev import config
 from rev.tools.git_ops import get_repo_context
 from rev.tools.registry import get_available_tools, execute_tool
-from rev.tools.project_types import detect_project_type
+from rev.tools.project_types import detect_project_type, detect_test_command
 from rev.execution.ultrathink_prompts import get_ultrathink_prompt
 
 
@@ -181,6 +181,7 @@ Use these action_type values:
 - "add": creating new code or tests
 - "delete": deleting code or files
 - "test": running tests (pytest, npm test, go test, etc.)
+- "debug": diagnosing and fixing bugs
 - "doc": updating docs, READMEs, or comments
 
 When possible, include hints in the description about:
@@ -762,13 +763,13 @@ def _extract_validation_steps_from_description(description: str, action_type: st
 
     patterns = [
         r"(?:validation|verify|verification|run tests?|tests?)\s*[:\-]\s*`([^`]+)`",
-        r"(?:validation|verify|verification|run tests?|tests?)\s*[:\-]\s*([^\n.;]+)",
+        r"(?:validation|verify|verification|run tests?|tests?)\s*[:\-]\s*([^\n;]+)",
         r"(?:then\s+)?(?:run|rerun|execute)\s+`([^`]+)`",
     ]
 
     for pattern in patterns:
         for match in re.finditer(pattern, description, re.IGNORECASE):
-            candidate = match.group(1).strip()
+            candidate = match.group(1).strip().rstrip(" .;,")
             if not candidate:
                 continue
             if not _looks_like_validation_cmd(candidate):
@@ -806,6 +807,31 @@ def _apply_validation_steps(tasks_data: List[Dict[str, Any]]) -> List[Dict[str, 
     return updated
 
 
+def apply_validation_steps_to_task(task: Task) -> None:
+    """Extract validation commands from task descriptions into validation_steps."""
+    if not task:
+        return
+    description = task.description or ""
+    action_type = task.action_type or "review"
+    cleaned, steps = _extract_validation_steps_from_description(description, action_type)
+    if not steps:
+        return
+    existing = task.validation_steps if isinstance(task.validation_steps, list) else []
+    merged = []
+    seen = set()
+    for step in existing + steps:
+        if not isinstance(step, str):
+            continue
+        key = step.strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(step)
+    task.validation_steps = merged
+    if cleaned:
+        task.description = cleaned
+
+
 def _mentions_tool(description: str) -> bool:
     lowered = description.lower()
     return any(tool in lowered for tool in _ACTIONABILITY_TOOL_HINTS)
@@ -841,7 +867,7 @@ def _select_tool_for_action(action_type: str, description: str) -> str:
         return "set_workdir"
     if action_type == "test":
         return "run_tests"
-    if action_type in {"review", "debug"}:
+    if action_type == "review":
         if any(token in desc_lower for token in ("list", "tree", "dir")):
             return "list_dir"
         if any(token in desc_lower for token in ("search", "grep", "find")):
@@ -851,6 +877,8 @@ def _select_tool_for_action(action_type: str, description: str) -> str:
         if any(token in desc_lower for token in ("directory", "folder")):
             return "create_directory"
         return "write_file" if action_type == "add" else "replace_in_file"
+    if action_type == "debug":
+        return "replace_in_file"
     if action_type == "delete":
         return "delete_file"
     if action_type == "refactor":
@@ -879,7 +907,8 @@ def _coerce_actionable_task(
 
     if action_type == "test":
         if not has_command:
-            cmd = _default_test_command(project_type)
+            detected = detect_test_command(config.ROOT)
+            cmd = " ".join(detected) if detected else _default_test_command(project_type)
             description = f"Run tests using run_tests cmd=\"{cmd}\""
         if not _mentions_tool(description):
             description = f"{description} (use run_tests)"
@@ -897,7 +926,7 @@ def _coerce_actionable_task(
         updated["action_type"] = "set_workdir"
         return updated
 
-    if action_type in {"review", "debug"}:
+    if action_type in {"review"}:
         if not has_path and not has_command:
             description = f"Use list_dir on . to locate artifacts for: {description}"
         elif not has_tool:
@@ -910,7 +939,7 @@ def _coerce_actionable_task(
         updated["action_type"] = action_type
         return updated
 
-    if action_type in {"add", "edit", "delete", "refactor", "doc", "create_tool"}:
+    if action_type in {"add", "edit", "delete", "refactor", "doc", "create_tool", "debug"}:
         if not has_path:
             description = f"Use search_code on . to locate target files for: {description}"
             updated["description"] = description
@@ -1980,7 +2009,18 @@ def determine_next_action(
     """
 
     # Valid action types that the system supports
-    VALID_ACTION_TYPES = ["edit", "add", "delete", "rename", "test", "review", "create_directory", "general", "set_workdir"]
+    VALID_ACTION_TYPES = [
+        "edit",
+        "add",
+        "delete",
+        "rename",
+        "test",
+        "review",
+        "debug",
+        "create_directory",
+        "general",
+        "set_workdir",
+    ]
 
     model_name = config.PLANNING_MODEL
     tools = get_available_tools()
@@ -2016,7 +2056,7 @@ Based on the current progress and remaining tasks, what is the SINGLE NEXT ACTIO
    - AND user's original request is 100% satisfied
    - Answer: {{"action_type": "review", "description": "GOAL_ACHIEVED"}}
    - If ANY remaining tasks exist, do NOT say goal achieved
-3. action_type MUST be EXACTLY one of: edit, add, delete, rename, test, review, create_directory, general, set_workdir
+3. action_type MUST be EXACTLY one of: edit, add, delete, rename, test, review, debug, create_directory, general, set_workdir
 4. NO OTHER action types are allowed
 5. Be specific about files, classes, and functions
 6. DO NOT suggest repeating completed work
@@ -2030,6 +2070,7 @@ VALID ACTION TYPES (pick exactly ONE):
 - "rename" = rename/move a file
 - "test" = run tests or validation
 - "review" = analyze or review code
+- "debug" = diagnose and fix a bug
 - "create_directory" = create a directory
 - "set_workdir" = set scoped working directory for subprojects
 - "general" = other general task
@@ -2037,7 +2078,7 @@ VALID ACTION TYPES (pick exactly ONE):
 RESPONSE FORMAT (STRICT):
 Return ONLY a JSON object, no other text:
 {{
-  "action_type": "edit|add|delete|rename|test|review|general|set_workdir",
+  "action_type": "edit|add|delete|rename|test|review|debug|general|set_workdir",
   "description": "Specific description of the single action to take next"
 }}
 

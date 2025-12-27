@@ -201,9 +201,13 @@ class StateManager:
             print("⚠️  EXECUTION INTERRUPTED")
             print("=" * 60)
             print(f"\n✓ State saved to: {checkpoint_path}")
-            print("\nTo resume from where you left off, run:")
+            print("\nTo load this session and continue manually:")
             print(f"\n  rev --resume {checkpoint_path}")
-            print("\nOr to resume from the latest checkpoint:")
+            print("\nTo continue the prior plan immediately:")
+            print(f"\n  rev --resume {checkpoint_path} --resume-continue")
+            print("\nOr to use the latest checkpoint:")
+            print("\n  rev --resume")
+            print("  rev --resume --resume-continue")
 
             if token_usage:
                 total = token_usage.get("total", 0)
@@ -395,10 +399,13 @@ class StateManager:
             if resume_info.get('next_task'):
                 print(f"\nNext task: {resume_info['next_task']}")
 
-            print("\nTo resume:")
+            print("\nTo load this session and continue manually:")
             print(f"  rev --resume {checkpoint_path}")
+            print("\nTo continue the prior plan immediately:")
+            print(f"  rev --resume {checkpoint_path} --resume-continue")
             print("\nOr:")
             print("  rev --resume  (uses latest checkpoint)")
+            print("  rev --resume --resume-continue  (uses latest checkpoint and continues)")
             print("=" * 60)
 
         except Exception as e:

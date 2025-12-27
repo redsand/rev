@@ -3,6 +3,99 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from rev import config
 
+_TEST_SCRIPT_PRIORITY = (
+    "test:ci",
+    "test:unit",
+    "test:integration",
+    "test:e2e",
+    "test:all",
+    "test:api",
+    "test:backend",
+    "test:frontend",
+)
+
+
+def _load_package_json(root: Path) -> Optional[Dict[str, Any]]:
+    try:
+        pkg_path = root / "package.json"
+        if not pkg_path.exists():
+            return None
+        return json.loads(pkg_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _detect_package_manager(root: Path) -> str:
+    if (root / "pnpm-lock.yaml").exists():
+        return "pnpm"
+    if (root / "yarn.lock").exists():
+        return "yarn"
+    return "npm"
+
+
+def _is_placeholder_test_script(script: str) -> bool:
+    if not script:
+        return True
+    lowered = script.lower()
+    if "no test specified" in lowered:
+        return True
+    if "echo" in lowered and "test specified" in lowered and "exit 1" in lowered:
+        return True
+    return False
+
+
+def _select_test_script(scripts: Dict[str, Any]) -> Optional[str]:
+    if not scripts:
+        return None
+    script = scripts.get("test")
+    if isinstance(script, str) and not _is_placeholder_test_script(script):
+        return "test"
+    for key in _TEST_SCRIPT_PRIORITY:
+        script = scripts.get(key)
+        if isinstance(script, str) and not _is_placeholder_test_script(script):
+            return key
+    for key in sorted(scripts.keys()):
+        if key.startswith(("pretest", "posttest")):
+            continue
+        if key.startswith(("test:", "test-")):
+            script = scripts.get(key)
+            if isinstance(script, str) and not _is_placeholder_test_script(script):
+                return key
+    for key in sorted(scripts.keys()):
+        if key.startswith(("pretest", "posttest")):
+            continue
+        if "test" in key:
+            script = scripts.get(key)
+            if isinstance(script, str) and not _is_placeholder_test_script(script):
+                return key
+    return None
+
+
+def _node_test_runner_command(package_data: Dict[str, Any]) -> Optional[list[str]]:
+    deps: Dict[str, Any] = {}
+    for section in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+        data = package_data.get(section)
+        if isinstance(data, dict):
+            deps.update(data)
+
+    runner_map = (
+        ("vitest", ["npx", "--yes", "vitest", "run"]),
+        ("jest", ["npx", "--yes", "jest"]),
+        ("mocha", ["npx", "--yes", "mocha"]),
+        ("ava", ["npx", "--yes", "ava"]),
+        ("tap", ["npx", "--yes", "tap"]),
+        ("jasmine", ["npx", "--yes", "jasmine"]),
+        ("uvu", ["npx", "--yes", "uvu"]),
+        ("playwright", ["npx", "--yes", "playwright", "test"]),
+        ("cypress", ["npx", "--yes", "cypress", "run"]),
+    )
+
+    for runner, cmd in runner_map:
+        if runner in deps:
+            return cmd
+
+    return None
+
 def find_project_root(path: Path) -> Path:
     """Find the nearest project root containing project markers, staying within workspace."""
     try:
@@ -17,9 +110,11 @@ def find_project_root(path: Path) -> Path:
             
         # Markers that indicate a project root
         markers = {
-            "package.json", "pyproject.toml", "requirements.txt", "setup.py",
-            "go.mod", "Cargo.toml", "Gemfile", "composer.json", "pom.xml",
-            "build.gradle", "build.gradle.kts", "CMakeLists.txt", "Makefile",
+            "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+            "pyproject.toml", "requirements.txt", "setup.py",
+            "go.mod", "Cargo.toml", "Gemfile", "composer.json", "composer.lock",
+            "pom.xml", "build.gradle", "build.gradle.kts", "gradlew",
+            "CMakeLists.txt", "Makefile", "pubspec.yaml", "Package.swift",
             ".git", ".rev"
         }
         
@@ -120,3 +215,84 @@ def detect_project_type(path: Path) -> str:
     except Exception:
         pass
     return "unknown"
+
+
+def detect_test_command(path: Path) -> Optional[list[str]]:
+    """Detect a project-appropriate test command based on repo markers."""
+    try:
+        root = find_project_root(path)
+        if not root.exists():
+            return None
+
+        if (root / "package.json").exists():
+            package_data = _load_package_json(root)
+            package_manager = _detect_package_manager(root)
+            if package_data:
+                scripts = package_data.get("scripts")
+                if isinstance(scripts, dict):
+                    script_name = _select_test_script(scripts)
+                    if script_name:
+                        if package_manager == "npm":
+                            return ["npm", "test"] if script_name == "test" else ["npm", "run", script_name]
+                        if package_manager == "pnpm":
+                            return ["pnpm", "test"] if script_name == "test" else ["pnpm", "run", script_name]
+                        return ["yarn", "test"] if script_name == "test" else ["yarn", "run", script_name]
+                runner_cmd = _node_test_runner_command(package_data)
+                if runner_cmd:
+                    return runner_cmd
+                return None
+            if package_manager == "pnpm":
+                return ["pnpm", "test"]
+            if package_manager == "yarn":
+                return ["yarn", "test"]
+            return ["npm", "test"]
+
+        if (root / "pyproject.toml").exists() or (root / "requirements.txt").exists() or (root / "setup.py").exists():
+            return ["pytest", "-q"]
+
+        if (root / "go.mod").exists():
+            return ["go", "test", "./..."]
+
+        if (root / "Cargo.toml").exists():
+            return ["cargo", "test"]
+
+        if (root / "pom.xml").exists():
+            return ["mvn", "test"]
+
+        if (root / "build.gradle").exists() or (root / "build.gradle.kts").exists():
+            if (root / "gradlew").exists():
+                return ["./gradlew", "test"]
+            return ["gradle", "test"]
+
+        if any(root.glob("*.csproj")) or any(root.glob("*.sln")):
+            return ["dotnet", "test"]
+
+        if (root / "Gemfile").exists():
+            if (root / "spec").exists():
+                return ["bundle", "exec", "rspec"]
+            return ["bundle", "exec", "rake", "test"]
+
+        if (root / "composer.json").exists():
+            return ["vendor/bin/phpunit"]
+
+        if (root / "pubspec.yaml").exists():
+            try:
+                content = (root / "pubspec.yaml").read_text(errors="ignore")
+                if "flutter:" in content:
+                    return ["flutter", "test"]
+            except Exception:
+                pass
+            return ["dart", "test"]
+
+        if (root / "Package.swift").exists():
+            return ["swift", "test"]
+
+        if (root / "Makefile").exists():
+            return ["make", "test"]
+
+        if (root / "CMakeLists.txt").exists():
+            return ["ctest"]
+    except Exception:
+        return None
+
+    return None

@@ -718,6 +718,13 @@ def _enforce_action_tool_constraints(task: Task) -> tuple[bool, Optional[str]]:
     return True, None
 
 
+def _should_coerce_read_only(action_type: Optional[str]) -> bool:
+    action = (action_type or "").lower()
+    if not action:
+        return True
+    return action not in {"review", "read", "analyze", "research", "investigate"}
+
+
 def _find_workspace_matches_by_basename(*, root: Path, basename: str, limit: int = 25) -> List[str]:
     """Return workspace-relative POSIX paths matching basename."""
     if not basename:
@@ -857,6 +864,14 @@ def _preflight_correct_action_semantics(task: Task) -> tuple[bool, List[str]]:
     # Heuristic intent detection (word-boundary based to avoid false positives like
     # matching "analy" inside "analysis").
     desc_l = desc.lower()
+    command_intent = bool(
+        re.search(
+            r"\b(run_cmd|run_terminal_command|run_tests|execute command|install|npm install|npm ci|yarn install|"
+            r"pnpm install|pip install|pipenv install|poetry install|pipx install|conda install|bundle install|composer install|"
+            r"apt-get|apt install|brew install|choco install|winget install|yum install|dnf install|apk add|pacman -S|zypper install)\b",
+            desc_l,
+        )
+    )
     read_intent = bool(
         re.search(
             r"\b(read|inspect|review|analyze|analysis|understand|locate|find|search|inventory|identify|list|show|explain)\b",
@@ -872,6 +887,13 @@ def _preflight_correct_action_semantics(task: Task) -> tuple[bool, List[str]]:
     )
 
     messages: List[str] = []
+
+    # If task is explicitly about running a command (install/tests), route to test executor.
+    if command_intent and action not in {"test", "tool"}:
+        prev = action
+        task.action_type = "test"
+        messages.append(f"coerced action '{prev}' -> 'test' (command execution task)")
+        return True, messages
 
     # If action says mutate but description is clearly inspection-only, coerce to READ.
     if action in mutate_actions and read_intent and not write_intent:
@@ -1328,6 +1350,20 @@ class Orchestrator:
         self._context_builder: Optional[ContextBuilder] = None
         self._project_roots_cache: Optional[List[Path]] = None
 
+    def _apply_read_only_constraints(self, task: Task) -> Task:
+        if not self.context or not getattr(self.context, "read_only", False):
+            return task
+        if not _should_coerce_read_only(task.action_type):
+            return task
+
+        task.action_type = "review"
+        if task.description:
+            if not task.description.lower().startswith("read-only"):
+                task.description = f"Read-only analysis: {task.description}"
+        else:
+            task.description = "Read-only analysis"
+        return task
+
     def _update_phase(self, new_phase: AgentPhase):
         if self.context:
             self.context.set_current_phase(new_phase)
@@ -1611,12 +1647,23 @@ class Orchestrator:
             "has_examples_dir": os.path.isdir(self.project_root / "examples"),
         }
 
-    def execute(self, user_request: str, resume: bool = False) -> OrchestratorResult:
+    def execute(
+        self,
+        user_request: str,
+        resume: bool = False,
+        resume_plan: bool = True,
+        read_only: bool = False,
+    ) -> OrchestratorResult:
         """Execute a task through the full agent pipeline."""
         global _active_context
         aggregate_errors: List[str] = []
         last_result: Optional[OrchestratorResult] = None
-        self.context = RevContext(user_request=user_request, resume=resume)
+        self.context = RevContext(
+            user_request=user_request,
+            resume=resume,
+            resume_plan=resume_plan,
+            read_only=read_only,
+        )
         _active_context = self.context
         ensure_project_memory_file()
         # Keep repo_context minimal; sub-agents will retrieve focused context via ContextBuilder.
@@ -1625,7 +1672,7 @@ class Orchestrator:
         try:
             for attempt in range(self.config.orchestrator_retries + 1):
                 if attempt > 0:
-                    print(f"\n\n🔄 Orchestrator retry {attempt}/{self.config.orchestrator_retries}")
+                    print(f"\n\n{colorize('◆', Colors.BRIGHT_CYAN)} {colorize(f'Orchestrator iteration {attempt}/{self.config.orchestrator_retries}', Colors.WHITE)}")
                     self.context.plan = None
                     self.context.state_manager = None
                     self.context.errors = []
@@ -2202,7 +2249,7 @@ class Orchestrator:
 
         # Ensure we have a persistent plan and state manager for checkpoints
         if not self.context.plan:
-            if self.context.resume:
+            if self.context.resume and self.context.resume_plan:
                 latest = StateManager.find_latest_checkpoint()
                 if latest:
                     try:
@@ -2438,6 +2485,8 @@ class Orchestrator:
                     print(f"\n{colorize(Symbols.CHECK, Colors.BRIGHT_GREEN)} {colorize('Goal achieved.', Colors.BRIGHT_GREEN, bold=True)}")
                     return True
 
+                next_task = self._apply_read_only_constraints(next_task)
+
                 # FORWARD PROGRESS RULE: Check for redundant actions
                 action_sig = f"{(next_task.action_type or '').strip().lower()}::{(next_task.description or '').strip().lower()}"
                 if action_counts[action_sig] >= 2:
@@ -2447,8 +2496,12 @@ class Orchestrator:
 
                 next_task.task_id = iteration
                 try:
+                    from rev.execution.planner import apply_validation_steps_to_task
+
+                    apply_validation_steps_to_task(next_task)
                     # Ensure validation_steps are always present so quick_verify can enforce them.
-                    next_task.validation_steps = ExecutionPlan().generate_validation_steps(next_task)
+                    if not next_task.validation_steps:
+                        next_task.validation_steps = ExecutionPlan().generate_validation_steps(next_task)
                 except Exception:
                     pass
 
@@ -2765,6 +2818,10 @@ class Orchestrator:
                             "Use pytest for Python code, npm test for JavaScript, or appropriate linting/build commands. "
                             "This will reveal actual blocking issues that need to be fixed."
                         )
+                        # CRITICAL FIX: Set TDD flag so test failures are allowed in TDD mode
+                        # Loop-guard test tasks are diagnostic - treat failures as informational, not blockers
+                        if config.TDD_ENABLED:
+                            self.context.agent_state["tdd_pending_green"] = True
                     print(f"  [loop-guard] Injecting targeted fallback: {next_task.description[:100]}...")
 
             # Fast-path: don't dispatch a no-op create_directory if it already exists.
@@ -2893,15 +2950,45 @@ class Orchestrator:
                         file_path = verification_result.details.get('file_path', '')
                         suggestion = verification_result.details.get('suggestion', '')
 
-                        # Extract test command from suggestion if available
-                        if 'npm test' in suggestion or 'npm run' in suggestion:
-                            test_description = f"Run npm test to validate the changes to {file_path}"
-                        elif 'pytest' in suggestion:
-                            test_description = f"Run pytest to validate the changes to {file_path}"
-                        elif '.js' in file_path or '.ts' in file_path or '.vue' in file_path:
-                            test_description = f"Run npm test to validate the changes to {file_path}"
+                        # Try to find specific test file for the changed file
+                        test_file_hint = None
+                        if file_path:
+                            from pathlib import Path
+                            p = Path(file_path)
+                            filename = p.stem  # e.g., "app" from "app.js"
+
+                            # Common test file patterns
+                            test_patterns = [
+                                f"tests/{filename}.test{p.suffix}",
+                                f"test/{filename}.test{p.suffix}",
+                                f"{p.parent}/__tests__/{filename}.test{p.suffix}",
+                                f"{p.parent}/{filename}.test{p.suffix}",
+                                f"{p.parent}/{filename}.spec{p.suffix}",
+                            ]
+
+                            # Check which test file exists
+                            workspace_root = self.context.workspace_root if self.context and hasattr(self.context, 'workspace_root') else Path.cwd()
+                            root = Path(workspace_root) if workspace_root else Path.cwd()
+
+                            for pattern in test_patterns:
+                                test_path = root / pattern
+                                if test_path.exists():
+                                    test_file_hint = pattern
+                                    break
+
+                        # Build test description with specific file when possible
+                        if '.js' in file_path or '.ts' in file_path or '.vue' in file_path:
+                            if test_file_hint:
+                                test_description = f"Run tests for {file_path}: npm test -- {test_file_hint}"
+                            else:
+                                test_description = f"Run tests to validate {file_path}: npm test"
+                        elif 'pytest' in suggestion or '.py' in file_path:
+                            if test_file_hint:
+                                test_description = f"Run tests for {file_path}: pytest {test_file_hint} -v"
+                            else:
+                                test_description = f"Run tests to validate {file_path}: pytest -v"
                         else:
-                            test_description = f"Run pytest to validate the changes to {file_path}"
+                            test_description = f"Run tests to validate the changes to {file_path}"
 
                         # Inject TEST task to validate the edit
                         forced_next_task = Task(
@@ -2946,6 +3033,50 @@ class Orchestrator:
                     syntax_repair_attempts = self.context.agent_state.get(syntax_repair_key, 0)
 
                     if failure_counts[failure_sig] >= 3:
+                        # PRIORITY 2 FIX: ESCALATION for repeated replace_in_file failures
+                        # Check if this is a replace_in_file failure that should escalate to write_file
+                        tool_events = getattr(next_task, "tool_events", None) or []
+                        used_replace_in_file = any(
+                            str(ev.get("tool") or "").lower() == "replace_in_file"
+                            for ev in tool_events
+                        )
+
+                        escalation_key = f"edit_escalation::{failure_sig}"
+                        already_escalated = self.context.agent_state.get(escalation_key, False)
+
+                        if used_replace_in_file and not already_escalated and (next_task.action_type or "").lower() == "edit":
+                            # Third failure using replace_in_file - escalate to write_file strategy
+                            print(f"  {colorize(Symbols.WARNING, Colors.BRIGHT_YELLOW)} {colorize('ESCALATION: replace_in_file failed 3x - suggesting write_file strategy', Colors.BRIGHT_WHITE)}")
+
+                            # Mark that we've escalated this specific failure
+                            self.context.set_agent_state(escalation_key, True)
+
+                            # Add agent request to guide planner toward write_file
+                            self.context.add_agent_request(
+                                "EDIT_STRATEGY_ESCALATION",
+                                {
+                                    "agent": "Orchestrator",
+                                    "reason": f"replace_in_file failed {failure_counts[failure_sig]} times - switch to write_file",
+                                    "detailed_reason": (
+                                        f"EDIT STRATEGY ESCALATION: The 'replace_in_file' approach has failed {failure_counts[failure_sig]} times "
+                                        f"for this task. This usually means the 'find' string cannot match the actual file content.\n\n"
+                                        "REQUIRED NEXT STEPS:\n"
+                                        "1. Use 'read_file' to get the complete current content of the target file\n"
+                                        "2. Manually construct the desired new content by modifying what you read\n"
+                                        "3. Use 'write_file' to completely rewrite the file with the new content\n"
+                                        "4. Do NOT use 'replace_in_file' again - it has proven unreliable for this file\n\n"
+                                        "This approach is more reliable than trying to match exact substrings."
+                                    )
+                                }
+                            )
+
+                            # Reset failure count to give write_file strategy a chance
+                            failure_counts[failure_sig] = 0
+
+                            # Continue planning with the new constraint
+                            iteration -= 1  # Don't count this as a regular iteration
+                            continue
+
                         # SYNTAX RECOVERY: Check if this is a syntax error
                         is_syntax_error = _check_syntax_error_in_verification(verification_result)
 
@@ -2998,7 +3129,7 @@ class Orchestrator:
                     if verification_result.should_replan and (next_task.action_type or "").lower() != "test":
                         decomposed_task = self._decompose_extraction_task(next_task)
                         if decomposed_task:
-                            print(f"  [RETRY] Using decomposed task for next iteration")
+                            print(f"  {colorize('◆', Colors.BRIGHT_CYAN)} {colorize('Breaking down into smaller steps', Colors.WHITE)}")
                             forced_next_task = decomposed_task
                             iteration -= 1  # Don't count failed task as an iteration
                 else:
@@ -3133,9 +3264,11 @@ class Orchestrator:
             if self.context and self.context.agent_requests:
                 replan_req = next((r for r in self.context.agent_requests if r.get("type") == "REPLAN_REQUEST"), None)
                 if replan_req:
-                    print(f"\n  🔄 {colorize('Adaptive Replan Triggered', Colors.BRIGHT_YELLOW)}: {replan_req['details'].get('reason')}")
+                    # Make replanning look like a normal step, not an error
+                    reason = replan_req['details'].get('reason', 'Refining approach')
+                    print(f"\n  {colorize('◆', Colors.BRIGHT_CYAN)} {colorize('Refining strategy', Colors.WHITE)}: {reason}")
                     self.context.add_insight("orchestrator", "agent_request_triggered_replan", replan_req["details"])
-                    
+
                     # Force replan on next iteration
                     self.context.plan = ExecutionPlan(tasks=[])
                     forced_next_task = None
@@ -3170,8 +3303,16 @@ class Orchestrator:
             for key, value in debug_info.items():
                 print(f"    {colorize(key + ':', Colors.BRIGHT_BLACK)} {value}")
 
-        # Display strict/validation command outputs (compileall/pytest/etc)
+        # Display test output for failed tests (from test execution)
         details = verification_result.details or {}
+        test_output = details.get("output", "")
+        if test_output and isinstance(test_output, str) and test_output.strip():
+            print(f"\n    {colorize('Test Output:', Colors.BRIGHT_BLACK)}")
+            # Show last 15 lines of test output for context
+            for line in test_output.strip().splitlines()[-15:]:
+                print(f"      {line}")
+
+        # Display strict/validation command outputs (compileall/pytest/etc)
         for block_key in ("strict", "validation"):
             block = details.get(block_key)
             if not isinstance(block, dict) or not block:
@@ -3182,7 +3323,7 @@ class Orchestrator:
                 rc = res.get("rc")
                 stdout = (res.get("stdout") or "").strip()
                 stderr = (res.get("stderr") or "").strip()
-                
+
                 if rc is not None and rc != 0:
                     print(f"    {colorize('[' + label + '] failed (rc=' + str(rc) + ')', Colors.BRIGHT_YELLOW)}")
                     if stdout:
@@ -3197,7 +3338,7 @@ class Orchestrator:
         if getattr(verification_result, 'inconclusive', False):
             print("NEXT ACTION: Run validation to confirm changes are correct (tests/syntax checks)...")
         else:
-            print("NEXT ACTION: Re-planning with different approach...")
+            print("NEXT ACTION: Adjusting approach based on feedback...")
         print("=" * 70 + "\n")
 
     def _dispatch_to_sub_agents(self, context: RevContext, task: Optional[Task] = None) -> bool:
@@ -3209,6 +3350,8 @@ class Orchestrator:
 
         if task.status == TaskStatus.COMPLETED:
             return True
+
+        task = self._apply_read_only_constraints(task)
 
         # Guardrail: if the planner accidentally schedules a file creation as a directory creation
         # (common in decomposed tasks like "create __init__.py"), coerce to `add` so we can use write_file.
@@ -3398,6 +3541,8 @@ def run_orchestrated(
     context_guard_interactive: bool = True,
     context_guard_threshold: float = 0.3,
     resume: bool = False,
+    resume_plan: bool = True,
+    read_only: bool = False,
 ) -> OrchestratorResult:
     config_obj = OrchestratorConfig(
         enable_learning=enable_learning,
@@ -3422,5 +3567,5 @@ def run_orchestrated(
     )
 
     orchestrator = Orchestrator(project_root, config_obj)
-    return orchestrator.execute(user_request, resume=resume)
+    return orchestrator.execute(user_request, resume=resume, resume_plan=resume_plan, read_only=read_only)
 

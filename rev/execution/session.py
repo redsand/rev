@@ -12,6 +12,7 @@ small in long-running sessions. Features include:
 
 import json
 import time
+import threading
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field, asdict

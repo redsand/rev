@@ -79,6 +79,44 @@ _CONFIG_FILENAMES = {
     ".editorconfig",
 }
 
+_CODE_FILE_EXTENSIONS = {
+    ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hh",
+    ".cs", ".fs", ".fsx", ".fsproj",
+    ".go",
+    ".java", ".kt", ".kts", ".scala", ".groovy",
+    ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+    ".py",
+    ".rb",
+    ".rs",
+    ".php",
+    ".swift",
+    ".dart",
+    ".lua",
+    ".pl", ".pm",
+    ".r", ".jl",
+    ".clj", ".cljs", ".cljc",
+    ".hs",
+}
+_NON_TEXT_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg",
+    ".pdf", ".zip", ".tar", ".gz", ".7z", ".rar",
+    ".exe", ".dll", ".so", ".dylib", ".bin",
+    ".mp3", ".mp4", ".mov", ".avi",
+    ".woff", ".woff2", ".ttf", ".otf",
+}
+_MAX_CODE_FILE_BYTES = 512 * 1024
+
+_INSTRUCTION_FILENAMES = {
+    "agents.md",
+    "claude.md",
+    "codex.md",
+    "gemini.md",
+    "init.md",
+    "instructions.md",
+}
+_INSTRUCTION_MAX_FILES = 8
+_INSTRUCTION_SCORE = 2.0
+
 
 def _tokenize(text: str) -> List[str]:
     terms = re.findall(r"\b\w+\b", (text or "").lower())
@@ -134,6 +172,53 @@ def _read_file_excerpt(path: Path, max_lines: int = 200) -> str:
     return "\n".join([head, "... (truncated) ...", tail])
 
 
+def _is_binary_file(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            chunk = handle.read(2048)
+        return b"\x00" in chunk
+    except Exception:
+        return True
+
+
+def _discover_instruction_files(root: Path, max_files: int = _INSTRUCTION_MAX_FILES) -> List[Path]:
+    matches: List[Path] = []
+    seen: set[str] = set()
+    if not root.exists():
+        return matches
+
+    for fp in root.rglob("*"):
+        if not fp.is_file():
+            continue
+        if any(excluded in fp.parts for excluded in EXCLUDE_DIRS):
+            continue
+        name = fp.name.lower()
+        if name not in _INSTRUCTION_FILENAMES:
+            continue
+        key = str(fp.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        matches.append(fp)
+
+    matches.sort(key=lambda p: (len(p.parts), str(p).lower()))
+    return matches[:max_files]
+
+
+def _prepend_deduped(primary: Sequence["RetrievedChunk"], secondary: Sequence["RetrievedChunk"]) -> List["RetrievedChunk"]:
+    seen: set[str] = set()
+    combined: List[RetrievedChunk] = []
+    for chunk in list(primary) + list(secondary):
+        key = chunk.source or chunk.location
+        if not key:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        combined.append(chunk)
+    return combined
+
+
 def _build_file_chunks(root: Path, paths: Sequence[Path], *, score: float) -> List["RetrievedChunk"]:
     chunks: List[RetrievedChunk] = []
     for path in paths:
@@ -187,7 +272,7 @@ class ContextBundle:
 class CodeCorpus:
     """Lightweight code corpus index (token-overlap ranking)."""
 
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self, root: Path):
         self.root = root.resolve()
@@ -201,12 +286,57 @@ class CodeCorpus:
         return cache_dir / f"context_code_{root_id}.json"
 
     def _iter_files(self) -> Iterable[Path]:
-        for file_path in self.root.rglob("*.py"):
+        for file_path in self.root.rglob("*"):
             if any(excluded in file_path.parts for excluded in EXCLUDE_DIRS):
                 continue
             if not file_path.is_file():
                 continue
+            suffix = file_path.suffix.lower()
+            if suffix in _NON_TEXT_EXTENSIONS:
+                continue
+            if suffix in {".md", ".rst", ".adoc", ".txt"}:
+                continue
+            try:
+                if file_path.stat().st_size > _MAX_CODE_FILE_BYTES:
+                    continue
+            except Exception:
+                continue
+            if _is_binary_file(file_path):
+                continue
             yield file_path
+
+    def _chunk_text_file(self, file_path: Path) -> List[RetrievedChunk]:
+        try:
+            text = file_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return []
+
+        lines = text.splitlines()
+        if not lines:
+            return []
+
+        chunks: List[RetrievedChunk] = []
+        chunk_size = 200
+        rel = str(file_path.relative_to(self.root)).replace("\\", "/")
+        for start in range(0, len(lines), chunk_size):
+            end = min(start + chunk_size, len(lines))
+            content = "\n".join(lines[start:end])
+            chunks.append(
+                RetrievedChunk(
+                    corpus="code",
+                    source=rel,
+                    location=f"{rel}:{start + 1}",
+                    score=0.0,
+                    content=content,
+                    metadata={
+                        "file": rel,
+                        "start_line": start + 1,
+                        "end_line": end,
+                        "language": _infer_language(file_path),
+                    },
+                )
+            )
+        return chunks
 
     def _chunk_python_file(self, file_path: Path) -> List[RetrievedChunk]:
         try:
@@ -279,7 +409,10 @@ class CodeCorpus:
         start = time.perf_counter()
         chunks: List[RetrievedChunk] = []
         for fp in self._iter_files():
-            chunks.extend(self._chunk_python_file(fp))
+            if fp.suffix.lower() == ".py":
+                chunks.extend(self._chunk_python_file(fp))
+            else:
+                chunks.extend(self._chunk_text_file(fp))
         self._chunks = chunks
         self._built = True
         self._save()
@@ -680,6 +813,10 @@ class ContextBuilder:
         # Stage 2: rerank within each corpus.
         selected_code = _rerank_chunks(query, code_candidates)[:top_k_code]
         selected_docs = _rerank_chunks(query, docs_candidates)[:top_k_docs]
+        instruction_paths = _discover_instruction_files(self.root)
+        instruction_chunks = _build_file_chunks(self.root, instruction_paths, score=_INSTRUCTION_SCORE)
+        if instruction_chunks:
+            selected_docs = _prepend_deduped(instruction_chunks, selected_docs)
 
         tools_ranked = self.tools.query(query, k=max(top_k_tools, 12))
         if tool_candidates is not None:
@@ -746,6 +883,9 @@ class ContextBuilder:
                 deduped_code.append(chunk)
             selected_code = deduped_code
 
+        instruction_paths = _discover_instruction_files(self.root)
+        instruction_chunks = _build_file_chunks(self.root, instruction_paths, score=_INSTRUCTION_SCORE)
+
         mem_items = list(memory_items or [])
         mem_candidates: List[RetrievedChunk] = []
         mem_candidates.extend(self.project_memory.query(query, k=max(top_k_memory * 3, top_k_memory)))
@@ -765,7 +905,7 @@ class ContextBuilder:
 
         return ContextBundle(
             selected_code_chunks=selected_code,
-            selected_docs_chunks=[],
+            selected_docs_chunks=instruction_chunks,
             selected_tool_schemas=selected_tools,
             selected_memory_items=selected_mem,
         )

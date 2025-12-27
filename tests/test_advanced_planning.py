@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import the actual rev package modules
 from rev.models.task import Task, TaskStatus, ExecutionPlan, RiskLevel
+from rev.tools import project_types
 
 # Create agent_min module reference for backward compatibility with tests
 import types
@@ -445,6 +446,24 @@ class TestValidationSteps:
 
         assert len(steps) > 0
         assert any("syntax" in step.lower() for step in steps)
+
+    def test_validation_steps_project_type_detection(self, execution_plan, monkeypatch):
+        """Test project type detection for test command selection."""
+        execution_plan.add_task("Edit code", "edit")
+        task = execution_plan.tasks[0]
+
+        called = {"count": 0}
+
+        def fake_detect(path):
+            called["count"] += 1
+            return "python"
+
+        monkeypatch.setattr(project_types, "detect_project_type", fake_detect)
+
+        steps = execution_plan.generate_validation_steps(task)
+
+        assert called["count"] == 1
+        assert any("pytest" in step.lower() for step in steps)
 
     def test_validation_steps_for_code_changes(self, execution_plan):
         """Test validation steps for code-changing actions."""

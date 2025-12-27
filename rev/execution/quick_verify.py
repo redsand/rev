@@ -27,7 +27,7 @@ from rev.tools.workspace_resolver import (
 )
 from rev.tools.utils import quote_cmd_arg
 from rev.tools.command_runner import _resolve_command
-from rev.tools.project_types import find_project_root, detect_project_type
+from rev.tools.project_types import find_project_root, detect_project_type, detect_test_command
 from rev.llm.client import ollama_chat
 
 _READ_ONLY_TOOLS = {
@@ -84,6 +84,43 @@ _TDD_TEST_RESULT_KEYS = {
     "custom_test",
 }
 
+_TEST_NAME_PATTERN = re.compile(r"(?:^|[._-])(test|spec)(?:[._-]|$)", re.IGNORECASE)
+_NO_TEST_RUNNER_SENTINEL = "REV_NO_TEST_RUNNER"
+_MISSING_SCRIPT_PATTERN = re.compile(r"missing script:\s*\"?([A-Za-z0-9:_\\.-]+)\"?", re.IGNORECASE)
+_COMMAND_NOT_FOUND_PATTERN = re.compile(r"command\\s+\"?([A-Za-z0-9:_\\.-]+)\"?\\s+not\\s+found", re.IGNORECASE)
+_PNPM_NO_SCRIPT_PATTERN = re.compile(r"ERR_PNPM_NO_SCRIPT.*?\"?([A-Za-z0-9:_\\.-]+)\"?", re.IGNORECASE)
+
+
+def _detect_missing_script(stdout: str, stderr: str) -> Optional[str]:
+    text = f"{stdout}\n{stderr}"
+    for pattern in (_MISSING_SCRIPT_PATTERN, _PNPM_NO_SCRIPT_PATTERN, _COMMAND_NOT_FOUND_PATTERN):
+        match = pattern.search(text)
+        if match:
+            name = match.group(1)
+            return name or "test"
+    return None
+
+
+def _attempt_missing_script_fallback(cmd_parts: list[str], cwd: Optional[Path | str]) -> Optional[list[str]]:
+    try:
+        root = Path(cwd) if cwd else config.ROOT
+    except Exception:
+        root = Path(".").resolve()
+    try:
+        root = find_project_root(root)
+    except Exception:
+        pass
+
+    detected = detect_test_command(root)
+    if not detected:
+        return None
+
+    detected_norm = [str(part).lower() for part in detected]
+    cmd_norm = [str(part).lower() for part in cmd_parts]
+    if detected_norm == cmd_norm:
+        return None
+    return detected
+
 
 def _extract_tool_noop(tool: str, raw_result: Any) -> Optional[str]:
     """Return a tool_noop reason string when a tool reports no changes."""
@@ -119,7 +156,7 @@ def _extract_tool_noop(tool: str, raw_result: Any) -> Optional[str]:
             return "tool_noop: list_dir returned 0 files. RECOVERY: Check the path exists and contains files, or broaden the pattern."
 
     elif tool_l == "run_tests":
-        stdout = (payload.get("stdout") or "").lower()
+        stdout = ((payload.get("stdout") or "") + (payload.get("stderr") or "")).lower()
         if "collected 0 items" in stdout or "no tests ran" in stdout or "no tests found" in stdout:
             return "tool_noop: run_tests found 0 tests to run. RECOVERY: Check your test path or test discovery patterns."
             
@@ -214,20 +251,40 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
             should_replan=False
         )
 
+    action_type = task.action_type.lower()
+    verifiable_read_actions = {"read", "analyze", "research", "investigate", "general", "verify"}
+    if action_type in verifiable_read_actions:
+        read_events = getattr(task, "tool_events", None) or []
+        if not read_events:
+            return VerificationResult(
+                passed=False,
+                message="Read task executed no tools",
+                details={},
+                should_replan=True,
+            )
+        return VerificationResult(
+            passed=True,
+            message="Read-only task completed (verification skipped)",
+            details={"tools": [ev.get("tool") for ev in read_events]},
+        )
+
     # Surface tool no-ops clearly (e.g., search with 0 matches) first.
     # This ensures all actions are checked for functional success.
     events = getattr(task, "tool_events", None) or []
     for ev in reversed(list(events)):
-        reason = _extract_tool_noop(str(ev.get("tool") or ""), ev.get("raw_result"))
+        tool_name = str(ev.get("tool") or "").lower()
+        reason = _extract_tool_noop(tool_name, ev.get("raw_result"))
         if reason:
+            if action_type == "test" and tool_name == "run_tests":
+                reason_lower = reason.lower()
+                if any(token in reason_lower for token in ("no tests", "0 tests", "found 0 tests", "tests to run")):
+                    continue
             return VerificationResult(
                 passed=False,
                 message=reason,
                 details={"tool": ev.get("tool"), "artifact_ref": ev.get("artifact_ref")},
                 should_replan=True,
             )
-
-    action_type = task.action_type.lower()
     verification_mode = _get_verification_mode()
     test_only_change = False
     non_test_change = False
@@ -254,7 +311,6 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
         return _verify_directory_creation(task, context)
 
     # Route to appropriate verification handler
-    verifiable_read_actions = {"read", "analyze", "research", "investigate", "general", "verify"}
     if action_type == "refactor":
         result = _verify_refactoring(task, context)
     elif action_type == "add" or action_type == "create":
@@ -265,8 +321,6 @@ def verify_task_execution(task: Task, context: RevContext) -> VerificationResult
         result = _verify_directory_creation(task, context)
     elif action_type == "test":
         result = _verify_test_execution(task, context)
-    elif action_type in verifiable_read_actions:
-        result = _verify_read_task(task, context)
     else:
         # For unknown action types, return a passing result but flag for caution
         return VerificationResult(
@@ -868,6 +922,35 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
                 should_replan=True
             )
 
+        # CRITICAL CHECK: Detect similar/duplicate files and fail verification
+        # This forces replanning to extend existing files instead of creating duplicates
+        payload = _parse_task_result_payload(task.result)
+        if payload and payload.get("is_new_file") and payload.get("similar_files"):
+            similar_list = payload.get("similar_files", [])
+            similar_str = ", ".join(similar_list[:3])
+            context.add_agent_request(
+                "DUPLICATE_FILE_PREVENTION",
+                {
+                    "agent": "VerificationSystem",
+                    "reason": f"Similar files exist: {similar_str}",
+                    "detailed_reason": (
+                        f"DUPLICATE FILE DETECTED: File '{file_path.name}' was created but similar files already exist: {similar_str}. "
+                        f"Instead of creating new files with similar names, EDIT one of the existing files to add the new functionality. "
+                        f"Use action_type='edit' with the most appropriate existing file path."
+                    )
+                }
+            )
+            return VerificationResult(
+                passed=False,
+                message=f"Duplicate file: similar files exist ({similar_str}). Extend existing file instead of creating new one.",
+                details={
+                    **details,
+                    "similar_files": similar_list,
+                    "suggested_action": "extend_existing"
+                },
+                should_replan=True
+            )
+
         return VerificationResult(
             passed=True,
             message=f"File created successfully: {file_path.name}",
@@ -1340,8 +1423,27 @@ def _attempt_ecosystem_fallback(cmd: str | List[str], timeout: int | None, use_t
     return None
 
 
+def _select_recovery_hint(stdout: str, stderr: str, error: str) -> Optional[str]:
+    """Return a focused recovery hint when a known error pattern is detected."""
+    combined = f"{stdout}\n{stderr}\n{error}"
+    lowered = combined.lower()
+
+    missing_script = _detect_missing_script(stdout, stderr)
+    if missing_script:
+        return f"Missing test script '{missing_script}'. Update package.json scripts or choose a different test command."
+    if "cannot find package" in lowered or "err_module_not_found" in lowered or "module_not_found" in lowered:
+        return "Missing dependency detected. Install the package or update the import path before retrying."
+    if "modulenotfounderror" in lowered or "no module named" in lowered:
+        return "Missing Python module detected. Install the module or update PYTHONPATH before retrying."
+    if "command not found" in lowered or "is not recognized as an internal or external command" in lowered:
+        return "Command not found. Install the tool or fix PATH, then retry."
+    if "no tests found" in lowered or "no tests ran" in lowered or "no tests collected" in lowered:
+        return "No tests were discovered. Check test paths/patterns or run a per-file test command."
+    return None
+
+
 def _extract_error(res: Dict[str, Any], default: str = "Unknown error") -> str:
-    """Extract and truncate error message from tool result, with a broad recovery hint."""
+    """Extract and truncate error message from tool result, with a recovery hint."""
     stdout = res.get("stdout", "")
     stderr = res.get("stderr", "")
     error = res.get("error", "")
@@ -1361,13 +1463,16 @@ def _extract_error(res: Dict[str, Any], default: str = "Unknown error") -> str:
     if help_info:
         msg += f"\n\n--- COMMAND USAGE INFO (--help) ---\n{help_info}"
 
-    # Generic, broad recovery hint covering config, dependencies, and environment
-    hint = (
-        "\n\n[RECOVERY HINT] Analyze the output above. If it indicates a missing configuration file "
-        "(e.g., eslint.config.js, .eslintrc.json, pyproject.toml, tsconfig.json), a missing dependency, or an "
-        "uninitialized environment, your next step should be to fix the environment (e.g., "
-        "create the config file, install the package, or initialize the project) before retrying."
-    )
+    specific_hint = _select_recovery_hint(stdout, stderr, error)
+    if specific_hint:
+        hint = f"\n\n[RECOVERY HINT] {specific_hint}"
+    else:
+        hint = (
+            "\n\n[RECOVERY HINT] Analyze the output above. If it indicates a missing configuration file "
+            "(e.g., eslint.config.js, .eslintrc.json, pyproject.toml, tsconfig.json), a missing dependency, or an "
+            "uninitialized environment, your next step should be to fix the environment (e.g., "
+            "create the config file, install the package, or initialize the project) before retrying."
+        )
 
     if len(msg) > 500:
         msg = msg[:497] + "..."
@@ -1476,12 +1581,12 @@ def _path_is_test_like(path: Path) -> bool:
         parts = set()
 
     name = path.name.lower()
-    suffix = path.suffix.lower()
-    if suffix in _TEST_FILE_EXTENSIONS:
-        if "test" in name or "spec" in name:
-            return True
-        if name.startswith("test_") or name.endswith("_test" + suffix):
-            return True
+    if _TEST_NAME_PATTERN.search(name):
+        return True
+    if name.startswith("test_") or name.startswith("spec_"):
+        return True
+    if name.endswith("_test" + path.suffix.lower()) or name.endswith("_spec" + path.suffix.lower()):
+        return True
 
     return bool(parts.intersection(_TEST_DIR_TOKENS))
 
@@ -1583,12 +1688,11 @@ def _apply_tdd_red_override(
 
 def _looks_like_test_file(path: Path) -> bool:
     name = path.name.lower()
-    suffix = path.suffix.lower()
-    if suffix not in _TEST_FILE_EXTENSIONS:
-        return False
-    if "test" in name or "spec" in name:
+    if _TEST_NAME_PATTERN.search(name):
         return True
-    if name.startswith("test_") or name.endswith("_test" + suffix):
+    if name.startswith("test_") or name.startswith("spec_"):
+        return True
+    if name.endswith("_test" + path.suffix.lower()) or name.endswith("_spec" + path.suffix.lower()):
         return True
     return False
 
@@ -1736,10 +1840,9 @@ def _extract_test_paths_from_cmd(cmd_parts: list[str]) -> list[str]:
             path = Path(lower)
         except Exception:
             path = None
-        suffix = path.suffix if path else ""
         parts = set(path.parts) if path else set()
         name = path.name if path else lower
-        if suffix in _TEST_FILE_EXTENSIONS and ("test" in name or "spec" in name):
+        if _TEST_NAME_PATTERN.search(name):
             test_paths.append(arg)
             continue
         if parts and any(token in parts for token in _TEST_DIR_TOKENS):
@@ -2094,6 +2197,27 @@ def _run_validation_command(cmd: str | List[str], *, use_tests_tool: bool = Fals
                             cwd=cwd,
                             _retry_count=_retry_count + 1,
                         )
+
+                missing_script = _detect_missing_script(stdout, stderr)
+                if missing_script:
+                    if use_tests_tool or "test" in missing_script.lower() or any("test" in part.lower() for part in cmd_parts):
+                        fallback_cmd = _attempt_missing_script_fallback(cmd_parts, cwd)
+                        if fallback_cmd and fallback_cmd != cmd_parts:
+                            return _run_validation_command(
+                                fallback_cmd,
+                                use_tests_tool=use_tests_tool,
+                                timeout=timeout,
+                                cwd=cwd,
+                                _retry_count=_retry_count + 1,
+                            )
+                        if use_tests_tool:
+                            return {
+                                "rc": 0,
+                                "stdout": _NO_TEST_RUNNER_SENTINEL,
+                                "stderr": "",
+                                "cmd": cmd_str,
+                                "note": f"missing script: {missing_script}",
+                            }
 
             return data
         return {"raw": raw, "cmd": cmd_str}
@@ -2578,6 +2702,7 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
     validation_steps = task.validation_steps
     commands: list[tuple[str, str | list[str], str]] = []
     seen_cmds = set()
+    no_runner_detected = False
     paths = _paths_or_default(_collect_paths_for_strict_checks("", details, tool_events))
 
     def _add(label: str, cmd: str | list[str], tool: str = "run_cmd") -> None:
@@ -2645,23 +2770,32 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
             if hinted_test:
                 test_parts = shlex.split(hinted_test) if isinstance(hinted_test, str) else hinted_test
                 _add("hinted_test", test_parts + [str(primary_path)], "run_tests")
-            elif project_type == "python": _add("pytest", ["pytest", "-q"], "run_tests")
-            elif project_type in ("node", "vue", "react", "nextjs"): _add("npm_test", ["npm", "test"], "run_tests")
-            elif project_type == "go": _add("go_test", ["go", "test", "./..."], "run_tests")
-            elif project_type == "rust": _add("cargo_test", ["cargo", "test"], "run_tests")
-            elif project_type == "ruby": _add("rake_test", ["bundle", "exec", "rake", "test"], "run_tests")
-            elif project_type == "php": _add("phpunit", ["vendor/bin/phpunit"], "run_tests")
-            elif project_type == "java_maven": _add("mvn_test", ["mvn", "test"], "run_tests")
-            elif project_type == "java_gradle" or project_type == "kotlin": _add("gradle_test", ["./gradlew", "test"], "run_tests")
-            elif project_type == "csharp": _add("dotnet_test", ["dotnet", "test"], "run_tests")
-            elif project_type == "flutter": _add("flutter_test", ["flutter", "test"], "run_tests")
             else:
-                # P0-7: Smart fallback - detect package.json for npm test, otherwise pytest
-                root = find_project_root(primary_path)
-                if (root / "package.json").exists():
-                    _add("npm_test", ["npm", "test"], "run_tests")
-                else:
+                detected = detect_test_command(primary_path)
+                if detected:
+                    _add("project_test", detected, "run_tests")
+                elif project_type == "python":
                     _add("pytest", ["pytest", "-q"], "run_tests")
+                elif project_type in ("node", "vue", "react", "nextjs"):
+                    no_runner_detected = True
+                elif project_type == "go":
+                    _add("go_test", ["go", "test", "./..."], "run_tests")
+                elif project_type == "rust":
+                    _add("cargo_test", ["cargo", "test"], "run_tests")
+                elif project_type == "ruby":
+                    _add("rake_test", ["bundle", "exec", "rake", "test"], "run_tests")
+                elif project_type == "php":
+                    _add("phpunit", ["vendor/bin/phpunit"], "run_tests")
+                elif project_type == "java_maven":
+                    _add("mvn_test", ["mvn", "test"], "run_tests")
+                elif project_type == "java_gradle" or project_type == "kotlin":
+                    _add("gradle_test", ["./gradlew", "test"], "run_tests")
+                elif project_type == "csharp":
+                    _add("dotnet_test", ["dotnet", "test"], "run_tests")
+                elif project_type == "flutter":
+                    _add("flutter_test", ["flutter", "test"], "run_tests")
+                else:
+                    no_runner_detected = True
 
         # 4. TYPE CHECK
         if "mypy" in text or "type" in text:
@@ -2672,6 +2806,12 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
                 _add("tsc", ["npx", "--yes", "tsc", "--noEmit"])
 
     if not commands:
+        if no_runner_detected:
+            return VerificationResult(
+                passed=True,
+                message="No test runner detected; skipping validation",
+                details={"skipped": True, "reason": "no_test_runner_detected"},
+            )
         return None
 
     results: Dict[str, Any] = {}
@@ -2978,9 +3118,127 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
 
     if payload and isinstance(payload.get("rc"), int):
         rc = payload.get("rc", 1)
-        output = (payload.get("stdout", "") or "") + (payload.get("stderr", "") or "")
+        stdout = str(payload.get("stdout", "") or "")
+        stderr = str(payload.get("stderr", "") or "")
+        output = stdout + stderr
         context.agent_state["last_test_iteration"] = context.agent_state.get("current_iteration")
         context.agent_state["last_test_rc"] = rc
+        if _NO_TEST_RUNNER_SENTINEL in output:
+            return VerificationResult(
+                passed=True,
+                message="No test runner detected; tests skipped",
+                details={"rc": rc, "output": output[:200], "skipped": True, "reason": "no_test_runner_detected"},
+            )
+        if _output_indicates_no_tests(stdout, stderr) and not _no_tests_expected(task):
+            cmd_value = payload.get("cmd") or payload.get("command") or ""
+            cmd_parts = _split_command_parts(cmd_value)
+            cwd = payload.get("cwd")
+            fallback_cmd = _attempt_no_tests_fallback(cmd_parts, stdout, stderr, cwd)
+            if fallback_cmd:
+                fallback_result = _run_validation_command(
+                    fallback_cmd,
+                    use_tests_tool=True,
+                    timeout=config.VALIDATION_TIMEOUT_SECONDS,
+                    cwd=cwd,
+                )
+                fallback_stdout = str(fallback_result.get("stdout", "") or "")
+                fallback_stderr = str(fallback_result.get("stderr", "") or "")
+                fallback_rc = fallback_result.get("rc")
+                context.agent_state["last_test_iteration"] = context.agent_state.get("current_iteration")
+                context.agent_state["last_test_rc"] = fallback_rc
+                if _output_indicates_no_tests(fallback_stdout, fallback_stderr):
+                    return VerificationResult(
+                        passed=False,
+                        message="No tests found after retrying with explicit test paths",
+                        details={
+                            "rc": fallback_rc,
+                            "output": (fallback_stdout + fallback_stderr)[:500],
+                            "retry_cmd": fallback_result.get("cmd"),
+                        },
+                        should_replan=True,
+                    )
+                if fallback_rc == 0:
+                    return VerificationResult(
+                        passed=True,
+                        message="Tests passed (reran with explicit test paths)",
+                        details={
+                            "rc": fallback_rc,
+                            "output": (fallback_stdout + fallback_stderr)[:200],
+                            "retry_cmd": fallback_result.get("cmd"),
+                        },
+                    )
+                if fallback_rc == 5:
+                    if _no_tests_expected(task):
+                        return VerificationResult(
+                            passed=True,
+                            message="No tests collected (rc=5) - explicitly allowed",
+                            details={"rc": fallback_rc, "output": (fallback_stdout + fallback_stderr)[:200]},
+                        )
+                    return VerificationResult(
+                        passed=False,
+                        message="Verification INCONCLUSIVE: pytest collected 0 tests (rc=5)",
+                        details={"rc": fallback_rc, "output": (fallback_stdout + fallback_stderr)[:500]},
+                        should_replan=True,
+                    )
+                return VerificationResult(
+                    passed=False,
+                    message=f"Tests failed after retry (rc={fallback_rc})",
+                    details={
+                        "rc": fallback_rc,
+                        "output": (fallback_stdout + fallback_stderr)[:500],
+                        "retry_cmd": fallback_result.get("cmd"),
+                    },
+                    should_replan=True,
+                )
+        missing_script = _detect_missing_script(stdout, stderr)
+        if missing_script:
+            cmd_value = payload.get("cmd") or payload.get("command") or ""
+            cmd_parts = _split_command_parts(cmd_value)
+            cwd = payload.get("cwd")
+            fallback_cmd = _attempt_missing_script_fallback(cmd_parts, cwd)
+            if fallback_cmd:
+                fallback_result = _run_validation_command(
+                    fallback_cmd,
+                    use_tests_tool=True,
+                    timeout=config.VALIDATION_TIMEOUT_SECONDS,
+                    cwd=cwd,
+                )
+                fallback_stdout = str(fallback_result.get("stdout", "") or "")
+                fallback_stderr = str(fallback_result.get("stderr", "") or "")
+                fallback_output = fallback_stdout + fallback_stderr
+                fallback_rc = fallback_result.get("rc")
+                context.agent_state["last_test_iteration"] = context.agent_state.get("current_iteration")
+                context.agent_state["last_test_rc"] = fallback_rc
+                if _NO_TEST_RUNNER_SENTINEL in fallback_output:
+                    return VerificationResult(
+                        passed=True,
+                        message="No test runner detected; tests skipped",
+                        details={"rc": fallback_rc, "output": fallback_output[:200], "skipped": True},
+                    )
+                if _output_indicates_no_tests(fallback_stdout, fallback_stderr) and not _no_tests_expected(task):
+                    return VerificationResult(
+                        passed=False,
+                        message="No tests found after retrying missing script",
+                        details={"rc": fallback_rc, "output": fallback_output[:500], "retry_cmd": fallback_result.get("cmd")},
+                        should_replan=True,
+                    )
+                if fallback_rc == 0:
+                    return VerificationResult(
+                        passed=True,
+                        message="Tests passed after retrying missing script",
+                        details={"rc": fallback_rc, "output": fallback_output[:200], "retry_cmd": fallback_result.get("cmd")},
+                    )
+                return VerificationResult(
+                    passed=False,
+                    message=f"Tests failed after retry (rc={fallback_rc})",
+                    details={"rc": fallback_rc, "output": fallback_output[:500], "retry_cmd": fallback_result.get("cmd")},
+                    should_replan=True,
+                )
+            return VerificationResult(
+                passed=True,
+                message="No test script detected; tests skipped",
+                details={"rc": rc, "output": output[:200], "skipped": True, "reason": "missing_test_script"},
+            )
         if rc == 0:
             cmd = payload.get("cmd") or payload.get("command")
             if isinstance(cmd, str) and cmd.strip() and "pytest" not in cmd.lower():
@@ -2992,26 +3250,26 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
             return VerificationResult(
                 passed=True,
                 message="Tests passed",
-                details={"rc": rc, "output": output[:200]}
+                details={"rc": rc, "output": output[:200]},
             )
         if rc == 5:
             if _no_tests_expected(task):
-                 return VerificationResult(
+                return VerificationResult(
                     passed=True,
                     message="No tests collected (rc=5) - explicitly allowed",
-                    details={"rc": rc, "output": output[:200]}
+                    details={"rc": rc, "output": output[:200]},
                 )
             return VerificationResult(
                 passed=False,
                 message="Verification INCONCLUSIVE: pytest collected 0 tests (rc=5)",
                 details={"rc": rc, "output": output[:500]},
-                should_replan=True
+                should_replan=True,
             )
         return VerificationResult(
             passed=False,
             message=f"Tests failed (rc={rc})",
             details={"rc": rc, "output": output[:500]},
-            should_replan=True
+            should_replan=True,
         )
 
     if payload is not None:

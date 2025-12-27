@@ -7,7 +7,7 @@ from rev.models.task import Task
 def test_run_validation_steps_uses_project_root_cwd(monkeypatch):
     root = Path("tmp_test/workdir_project").resolve()
     (root / "src").mkdir(parents=True, exist_ok=True)
-    (root / "package.json").write_text("{}", encoding="utf-8")
+    (root / "package.json").write_text('{"scripts": {"test": "jest"}}', encoding="utf-8")
     test_file = root / "src" / "app.test.ts"
     test_file.write_text("test", encoding="utf-8")
 

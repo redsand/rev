@@ -8,6 +8,7 @@ from typing import Iterable, Optional, Set
 WRITE_ACTIONS: Set[str] = {
     "add",
     "create",
+    "debug",
     "edit",
     "refactor",
     "delete",

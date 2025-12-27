@@ -32,5 +32,14 @@ namespace RevExtension
             await Commands.AddDocumentationCommand.InitializeAsync(this);
             await Commands.ExecuteTaskCommand.InitializeAsync(this);
         }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                Commands.BaseRevCommand.RequestStopApiServer();
+            }
+            base.Dispose(disposing);
+        }
     }
 }

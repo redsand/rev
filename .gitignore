@@ -41,3 +41,4 @@ tests_tmp_*/
 .DS_Store
 Thumbs.db
 
+ide-extensions/vscode/node_modules/
