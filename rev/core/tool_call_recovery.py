@@ -57,6 +57,61 @@ def _extract_json_snippet(text: str) -> Optional[str]:
     return text[start : end + 1].strip()
 
 
+def _extract_patch_from_text(text: str) -> Optional[str]:
+    if not text:
+        return None
+
+    diff_match = re.search(r"```diff\s+(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    if diff_match:
+        return diff_match.group(1).strip()
+
+    if "*** Begin Patch" in text and "*** End Patch" in text:
+        start = text.find("*** Begin Patch")
+        end = text.rfind("*** End Patch")
+        if start >= 0 and end >= start:
+            return text[start : end + len("*** End Patch")].strip()
+
+    raw_match = re.search(r"^diff --git.*", text, re.DOTALL | re.MULTILINE)
+    if raw_match:
+        return raw_match.group(0).strip()
+
+    return None
+
+
+def _extract_file_from_text(text: str) -> Optional[Tuple[str, str]]:
+    if not text:
+        return None
+
+    fence = re.search(r"```[\w+-]*\s+([\s\S]*?)```", text)
+    if not fence:
+        return None
+
+    block = fence.group(1)
+    lines = block.splitlines()
+    if not lines:
+        return None
+
+    first_line = lines[0].strip()
+    path = None
+    if any(first_line.lower().startswith(marker) for marker in ("path:", "file:", "filepath:")):
+        path = first_line.split(":", 1)[1].strip()
+        body = "\n".join(lines[1:])
+    elif (
+        "." in first_line
+        and " " not in first_line
+        and first_line.lower().endswith((".py", ".js", ".ts", ".md", ".json", ".yaml", ".yml", ".txt"))
+    ):
+        path = first_line
+        body = "\n".join(lines[1:])
+    else:
+        return None
+
+    body = body.rstrip("\n")
+    if not path or not body:
+        return None
+    return path, body
+
+
 def _coerce_args(value: Any) -> Optional[Dict[str, Any]]:
     if value is None:
         return None
@@ -101,6 +156,17 @@ def recover_tool_call_from_text(
 ) -> Optional[RecoveredToolCall]:
     """Recover a single tool call from text content, if present."""
 
+    allowed = set(allowed_tools) if allowed_tools is not None else None
+
+    patch = _extract_patch_from_text(content or "")
+    if patch and (allowed is None or "apply_patch" in allowed):
+        return RecoveredToolCall(name="apply_patch", arguments={"patch": patch})
+
+    file_block = _extract_file_from_text(content or "")
+    if file_block and (allowed is None or "write_file" in allowed):
+        path, body = file_block
+        return RecoveredToolCall(name="write_file", arguments={"path": path, "content": body})
+
     snippet = _extract_json_snippet(content)
     if not snippet:
         return None
@@ -122,7 +188,7 @@ def recover_tool_call_from_text(
         recovered = _parse_tool_call_object(candidate)
         if not recovered:
             continue
-        if allowed_tools is not None and recovered.name not in set(allowed_tools):
+        if allowed is not None and recovered.name not in allowed:
             continue
         return recovered
 

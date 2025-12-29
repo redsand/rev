@@ -6,7 +6,7 @@ from rev.llm.client import ollama_chat
 from rev.core.context import RevContext
 from rev.execution.safety import is_scary_operation, prompt_scary_operation
 from difflib import unified_diff
-from typing import Tuple
+from typing import Dict, List, Optional, Tuple
 import re
 from pathlib import Path
 
@@ -458,6 +458,28 @@ class CodeWriterAgent(BaseAgent):
                 "(include surrounding lines for context to ensure a unique match)."
             )
         return f"{tool_name}: {arg_msg}"
+
+    def _retry_with_diff_or_file(
+        self,
+        messages: List[Dict[str, str]],
+        *,
+        allowed_tools: List[str],
+    ) -> Optional[RecoveredToolCall]:
+        """Fallback retry asking for unified diff or full file content."""
+        guidance = (
+            "Tool calling failed. Return ONLY one of the following:\n"
+            "1) A unified diff (diff --git or ---/+++ with @@ hunks), OR\n"
+            "2) A fenced file block with the first line 'path: <path>' and the full file content.\n"
+            "Do NOT include commentary."
+        )
+        retry_messages = list(messages) + [{"role": "user", "content": guidance}]
+        response = ollama_chat(retry_messages, tools=None, supports_tools=False)
+        content = ""
+        if isinstance(response, dict):
+            message = response.get("message") or {}
+            if isinstance(message, dict):
+                content = message.get("content") or ""
+        return recover_tool_call_from_text(content, allowed_tools=allowed_tools)
 
     def _color_diff_line(self, line: str) -> str:
         """Apply color coding to diff lines (matching linear mode formatting)."""
@@ -955,6 +977,11 @@ class CodeWriterAgent(BaseAgent):
                     else:
                         recovered = recover_tool_call_from_text(
                             response.get("message", {}).get("content", ""),
+                            allowed_tools=[t["function"]["name"] for t in available_tools],
+                        )
+                    if not recovered:
+                        recovered = self._retry_with_diff_or_file(
+                            messages,
                             allowed_tools=[t["function"]["name"] for t in available_tools],
                         )
                     if recovered:
