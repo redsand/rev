@@ -360,6 +360,22 @@ class TestExecutorAgent(BaseAgent):
         desc_lower = desc.lower()
 
         cmd = None
+        explicit_patterns = [
+            r"\bnpm\s+(?:install|ci)\b[^\n\r]*",
+            r"\byarn\s+install\b[^\n\r]*",
+            r"\bpnpm\s+install\b[^\n\r]*",
+            r"\bpip\s+install\b[^\n\r]*",
+            r"\bpoetry\s+install\b[^\n\r]*",
+            r"\bpipenv\s+install\b[^\n\r]*",
+        ]
+        for pattern in explicit_patterns:
+            match = re.search(pattern, desc, re.IGNORECASE)
+            if match:
+                cmd = match.group(0).strip()
+                cmd = re.split(r"\s+(?:in|within|inside|under)\s+", cmd, maxsplit=1, flags=re.IGNORECASE)[0]
+                cmd = cmd.rstrip(".,;")
+                break
+
         explicit_cmds = [
             "npm ci",
             "npm install",

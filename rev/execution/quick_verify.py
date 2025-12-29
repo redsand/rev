@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, Iterable, List
 from dataclasses import dataclass
 
-from rev.models.task import Task, TaskStatus
+from rev.models.task import Task, TaskStatus, explicitly_requests_tests, explicitly_requests_lint
 from rev.tools.registry import execute_tool, get_last_tool_call
 from rev import config
 from rev.core.context import RevContext
@@ -2310,6 +2310,12 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
                 should_replan=True,
             )
 
+    explicit_tests = False
+    explicit_lint = False
+    if task:
+        explicit_tests = explicitly_requests_tests(task.description) or task.action_type == "test"
+        explicit_lint = explicitly_requests_lint(task.description)
+
     # -------------------------------------------------------------------------
     # PYTHON VERIFICATION
     # -------------------------------------------------------------------------
@@ -2333,48 +2339,49 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
         if mode == "fast":
             return strict_details
 
-        # Targeted pytest for touched test files/directories
-        if custom_test_cmd:
-            pytest_cmd = custom_test_cmd
-        else:
-            test_targets = []
-            for p in paths:
-                parts_lower = {part.lower() for part in p.parts}
-                if "tests" in parts_lower or p.name.startswith("test_") or p.name.endswith("_test.py"):
-                    test_targets.append(p)
-            if test_targets:
-                pytest_cmd = ["pytest", "-q"] + [str(p) for p in test_targets]
+        if explicit_tests:
+            # Targeted pytest for touched test files/directories
+            if custom_test_cmd:
+                pytest_cmd = custom_test_cmd
             else:
-                pytest_cmd = ["pytest", "-q"]
-        
-        pytest_res = _run_validation_command(pytest_cmd, use_tests_tool=True, timeout=config.VALIDATION_TIMEOUT_SECONDS)
-        strict_details["pytest"] = pytest_res
-        rc = pytest_res.get("rc", 1)
-        # Pytest exit codes: 0=pass, 1=fail, 2=interrupted, 3=internal error, 4=usage error, 5=no tests collected
-        if pytest_res.get("blocked") or (rc != 0 and rc != 4):
-            if rc == 5:
-                if _no_tests_expected(task):
-                    strict_details["pytest_note"] = "No tests collected (rc=5) - explicitly allowed"
+                test_targets = []
+                for p in paths:
+                    parts_lower = {part.lower() for part in p.parts}
+                    if "tests" in parts_lower or p.name.startswith("test_") or p.name.endswith("_test.py"):
+                        test_targets.append(p)
+                if test_targets:
+                    pytest_cmd = ["pytest", "-q"] + [str(p) for p in test_targets]
+                else:
+                    pytest_cmd = ["pytest", "-q"]
+            
+            pytest_res = _run_validation_command(pytest_cmd, use_tests_tool=True, timeout=config.VALIDATION_TIMEOUT_SECONDS)
+            strict_details["pytest"] = pytest_res
+            rc = pytest_res.get("rc", 1)
+            # Pytest exit codes: 0=pass, 1=fail, 2=interrupted, 3=internal error, 4=usage error, 5=no tests collected
+            if pytest_res.get("blocked") or (rc != 0 and rc != 4):
+                if rc == 5:
+                    if _no_tests_expected(task):
+                        strict_details["pytest_note"] = "No tests collected (rc=5) - explicitly allowed"
+                    else:
+                        return VerificationResult(
+                            passed=False,
+                            message="Verification INCONCLUSIVE: pytest collected 0 tests (rc=5)",
+                            details={"strict": strict_details},
+                            should_replan=True,
+                        )
                 else:
                     return VerificationResult(
                         passed=False,
-                        message="Verification INCONCLUSIVE: pytest collected 0 tests (rc=5)",
+                        message=f"Verification failed: pytest errors. Error: {_extract_error(pytest_res)}",
                         details={"strict": strict_details},
                         should_replan=True,
                     )
-            else:
-                return VerificationResult(
-                    passed=False,
-                    message=f"Verification failed: pytest errors. Error: {_extract_error(pytest_res)}",
-                    details={"strict": strict_details},
-                    should_replan=True,
-                )
-        elif rc == 4:
-            strict_details["pytest_note"] = "No tests collected (rc=4) - treated as pass"
+            elif rc == 4:
+                strict_details["pytest_note"] = "No tests collected (rc=4) - treated as pass"
 
         # Optional lint/type checks
         py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]
-        if py_paths:
+        if py_paths and explicit_lint:
             targets = [str(p) for p in py_paths[:10]]
             # E9: Runtime/syntax errors, F63: Invalid print syntax, F7: Statement problems
             optional_checks = [
@@ -2424,7 +2431,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
                     )
 
         # 2. Targeted Linting (eslint)
-        if node_paths and mode == "strict":
+        if node_paths and mode == "strict" and explicit_lint:
              targets = [str(p) for p in node_paths[:10]]
              # Use list-based npx command to avoid security blocks
              cmd = ["npx", "--yes", "eslint"] + targets + ["--quiet"]
@@ -2445,7 +2452,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
                     )
 
         # 3. Vue/TS Type Checking (slower, maybe skip in strict=false?)
-        if project_type == "vue":
+        if project_type == "vue" and explicit_lint:
             vue_ts_touched = any(p.suffix in ('.vue', '.ts') for p in paths)
             if vue_ts_touched:
                 if mode == "strict":
@@ -2467,7 +2474,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
         # 3. Unit Tests (Vitest/Jest)
         # Look for test files in the paths
         test_touched = any("test" in p.name or "spec" in p.name for p in paths)
-        if test_touched or mode == "strict":
+        if explicit_tests:
             # Try dynamic discovery first
             test_cmd = None
             hinted_test = None
@@ -2552,7 +2559,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
             )
         
         # 2. Tests
-        if mode == "strict" or custom_test_cmd:
+        if explicit_tests:
             cmd = custom_test_cmd or "go test ./..."
             test_res = _run_validation_command(cmd, use_tests_tool=True, timeout=120)
             strict_details["go_test"] = test_res
@@ -2578,7 +2585,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
             )
             
         # 2. Tests
-        if mode == "strict" or custom_test_cmd:
+        if explicit_tests:
             cmd = custom_test_cmd or "cargo test"
             test_res = _run_validation_command(cmd, use_tests_tool=True, timeout=300)
             strict_details["cargo_test"] = test_res
@@ -2602,7 +2609,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
                 should_replan=True
             )
             
-        if mode == "strict" or custom_test_cmd:
+        if explicit_tests:
             cmd = custom_test_cmd or "dotnet test"
             test_res = _run_validation_command(cmd, use_tests_tool=True, timeout=180)
             strict_details["dotnet_test"] = test_res
@@ -2724,6 +2731,16 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
     node_extensions = {".js", ".ts", ".jsx", ".tsx", ".vue", ".mjs", ".cjs"}
     node_paths = [p for p in paths if p.suffix in node_extensions and p.exists()]
 
+    explicit_tests = explicitly_requests_tests(task.description) or task.action_type == "test"
+    explicit_lint = explicitly_requests_lint(task.description)
+    skip_lint = not explicit_lint
+    skip_tests = not explicit_tests
+    skip_notes: Dict[str, Any] = {}
+    if skip_lint:
+        skip_notes["lint_skipped"] = {"skipped": True, "reason": "not_explicitly_requested"}
+    if skip_tests:
+        skip_notes["tests_skipped"] = {"skipped": True, "reason": "not_explicitly_requested"}
+
     for step in validation_steps:
         text = step.lower()
         
@@ -2743,6 +2760,8 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
 
         # 2. LINT
         if "lint" in text or "linter" in text:
+            if skip_lint:
+                continue
             hinted_lint = _inspect_file_for_command_hints(primary_path, "lint") if paths else None
             
             if hinted_lint and node_paths:
@@ -2765,6 +2784,8 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
 
         # 3. TEST
         if "test" in text:
+            if skip_tests:
+                continue
             hinted_test = _inspect_file_for_command_hints(primary_path, "test") if paths else None
             
             if hinted_test:
@@ -2806,6 +2827,8 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
                 _add("tsc", ["npx", "--yes", "tsc", "--noEmit"])
 
     if not commands:
+        if skip_notes:
+            return skip_notes
         if no_runner_detected:
             return VerificationResult(
                 passed=True,
@@ -2851,6 +2874,8 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
                 should_replan=True,
             )
 
+    if skip_notes:
+        results.update(skip_notes)
     return results
 
 

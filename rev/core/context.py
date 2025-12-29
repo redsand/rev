@@ -135,6 +135,17 @@ class RevContext:
         self.purified_context: Optional[Any] = None # FilteredContext from context_guard phase
         self.work_history: List[str] = [] # History of completed/failed tasks for context and loop detection
         self.user_feedback: List[str] = [] # Real-time user guidance/comments
+        try:
+            self.logger.set_trace_context({
+                "run_id": self.run_id,
+                "user_request": self.user_request,
+                "resume": self.resume,
+                "resume_plan": self.resume_plan,
+                "read_only": self.read_only,
+                "project_root": str(getattr(config, "ROOT", "")),
+            })
+        except Exception:
+            pass
 
     def add_user_feedback(self, feedback: str):
         """Add user feedback/comment to the context."""
@@ -151,6 +162,10 @@ class RevContext:
         """Set the state manager instance and update session_id."""
         self.state_manager = state_manager
         self.session_id = state_manager.session_id
+        try:
+            self.logger.set_trace_context({"session_id": self.session_id})
+        except Exception:
+            pass
 
     def set_current_phase(self, phase: AgentPhase):
         """Set the current phase of the execution."""

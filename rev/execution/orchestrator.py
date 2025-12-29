@@ -1252,6 +1252,7 @@ def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optiona
 
     error_message = verification_result.message if verification_result and verification_result.message else ""
     missing_file_error = "not found" in error_message.lower() or "does not exist" in error_message.lower()
+    syntax_error = "syntax error" in error_message.lower()
     if missing_file_error and not _has_project_markers(config.ROOT):
         scaffold_paths = _scaffold_paths_from_task(task)
         if scaffold_paths:
@@ -1264,6 +1265,17 @@ def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optiona
                     action_type="add",
                 )
             )
+
+    if syntax_error and target_path:
+        tasks.append(
+            Task(
+                description=(
+                    f"Fix syntax error in {target_path} by reading the file and correcting the invalid "
+                    "code (use read_file then apply_patch or replace_in_file)."
+                ),
+                action_type="edit",
+            )
+        )
 
     if target_path:
         tasks.append(
@@ -1603,7 +1615,7 @@ def _choose_best_path_match_with_context(*, original: str, matches: List[str], d
 
 
 def _coerce_command_intent_to_test(task: Task) -> tuple[bool, List[str]]:
-    """Coerce command execution tasks (npm install, pip install, etc.) to action_type='test'.
+    """Coerce command execution tasks (npm install, pip install, etc.) to action_type='run'.
 
     This ensures they are routed to TestExecutorAgent which has access to run_cmd tool.
     This function ALWAYS runs, regardless of PREFLIGHT_ENABLED setting.
@@ -1616,8 +1628,8 @@ def _coerce_command_intent_to_test(task: Task) -> tuple[bool, List[str]]:
     if not action or not desc:
         return True, []
 
-    # Skip if already routed to test or tool executor
-    if action in {"test", "tool"}:
+    # Skip if already routed to command/test executor
+    if action in {"test", "tool", "run", "execute"}:
         return True, []
 
     # Detect command execution intent
@@ -1633,8 +1645,18 @@ def _coerce_command_intent_to_test(task: Task) -> tuple[bool, List[str]]:
 
     if command_intent:
         prev = action
-        task.action_type = "test"
-        return True, [f"coerced action '{prev}' -> 'test' (command execution task)"]
+        task.action_type = "run"
+        try:
+            from rev.debug_logger import get_logger
+            get_logger().log_transaction_event("ACTION_COERCED", {
+                "previous_action": prev,
+                "new_action": task.action_type,
+                "reason": "command_execution",
+                "description": task.description,
+            })
+        except Exception:
+            pass
+        return True, [f"coerced action '{prev}' -> 'run' (command execution task)"]
 
     return True, []
 
@@ -1679,11 +1701,30 @@ def _preflight_correct_action_semantics(task: Task) -> tuple[bool, List[str]]:
     if action in mutate_actions and read_intent and not write_intent:
         task.action_type = "read"
         messages.append(f"coerced action '{action}' -> 'read' (inspection-only task)")
+        try:
+            from rev.debug_logger import get_logger
+            get_logger().log_transaction_event("ACTION_COERCED", {
+                "previous_action": action,
+                "new_action": task.action_type,
+                "reason": "inspection_only",
+                "description": task.description,
+            })
+        except Exception:
+            pass
         return True, messages
 
     # If action says read-only but description includes mutation verbs, fail fast to replan.
     if action in read_actions and write_intent and not read_intent:
         messages.append(f"action '{action}' conflicts with write intent; choose edit/refactor instead")
+        try:
+            from rev.debug_logger import get_logger
+            get_logger().log_transaction_event("ACTION_CONFLICT", {
+                "action": action,
+                "reason": "read_action_with_write_intent",
+                "description": task.description,
+            })
+        except Exception:
+            pass
         return False, messages
 
     return True, messages
@@ -2445,6 +2486,14 @@ class Orchestrator:
             read_only=read_only,
         )
         _active_context = self.context
+        try:
+            self.debug_logger.set_trace_context({
+                "project_root": str(self.project_root),
+                "execution_mode": config.EXECUTION_MODE,
+                "orchestrator_retries": self.config.orchestrator_retries,
+            })
+        except Exception:
+            pass
         ensure_project_memory_file()
         # Keep repo_context minimal; sub-agents will retrieve focused context via ContextBuilder.
         self.context.repo_context = ""
@@ -2968,7 +3017,7 @@ class Orchestrator:
 
         return metrics.decision
 
-    def _is_completion_grounded(self, completed_tasks_log: List[str]) -> Tuple[bool, str]:
+    def _is_completion_grounded(self, completed_tasks_log: List[str], user_request: Optional[str] = None) -> Tuple[bool, str]:
         """Verify that the completion is grounded in concrete artifacts/evidence."""
         if not completed_tasks_log:
             return False, "No work history to verify."
@@ -3006,7 +3055,9 @@ class Orchestrator:
         has_action = evidence_found["files"] or evidence_found["tests"] or evidence_found["runtime"]
         
         # TDD Check: If the request mentioned "test" or "application", require test evidence
-        request_lower = user_request.lower()
+        if user_request is None and self.context:
+            user_request = self.context.user_request
+        request_lower = (user_request or "").lower()
         needs_tests = any(kw in request_lower for kw in ["test", "verify", "check", "application", "tdd"])
         if needs_tests and not evidence_found["tests"]:
             return False, "Completion rejected: The request implies test-driven development, but no test execution evidence was found."
@@ -3289,7 +3340,7 @@ class Orchestrator:
 
                     # Grounded Completion Check (Bait Density)
                     if config.UCCT_ENABLED:
-                        is_grounded, grounding_msg = self._is_completion_grounded(completed_tasks_log)
+                        is_grounded, grounding_msg = self._is_completion_grounded(completed_tasks_log, user_request)
                         if not is_grounded:
                             print(f"\n  {colorize(Symbols.INFO, Colors.BRIGHT_BLUE)} {colorize(grounding_msg + ' Forcing verification.', Colors.BRIGHT_BLACK)}")
                             forced_next_task = Task(description="Provide concrete evidence of the work completed by running tests and inspecting the modified files.", action_type="test")
@@ -4310,6 +4361,17 @@ class Orchestrator:
                 pass
 
             agent = AgentRegistry.get_agent_instance(task.action_type)
+            try:
+                self.debug_logger.set_trace_context({
+                    "task_id": task.task_id,
+                    "action_type": task.action_type,
+                    "task_description": task.description,
+                    "agent": agent.__class__.__name__,
+                    "phase": getattr(context, "current_phase", None).value if getattr(context, "current_phase", None) else None,
+                    "iteration": context.agent_state.get("current_iteration") if context else None,
+                })
+            except Exception:
+                pass
             result = agent.execute(task, context)
 
             # Global recovery: if an agent returns a tool-call payload as plain text, execute it here.

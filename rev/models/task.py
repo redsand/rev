@@ -10,6 +10,43 @@ from typing import Dict, Any, List, Optional
 from rev import config
 
 
+_EXPLICIT_VERB_PATTERN = re.compile(r"\b(run|rerun|re-run|execute|verify|validate|check)\b", re.IGNORECASE)
+_TEST_KEYWORD_PATTERN = re.compile(
+    r"\b(tests?|test suite|pytest|jest|vitest|mocha|unittest|unit tests?|integration tests?|e2e tests?)\b",
+    re.IGNORECASE,
+)
+_LINT_KEYWORD_PATTERN = re.compile(
+    r"\b(lint|linting|linter|eslint|ruff|pylint|mypy|type ?check|tsc|clippy|go vet|golangci-lint)\b",
+    re.IGNORECASE,
+)
+
+
+def explicitly_requests_tests(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    if _EXPLICIT_VERB_PATTERN.search(lowered) and _TEST_KEYWORD_PATTERN.search(lowered):
+        return True
+    stripped = lowered.strip()
+    for prefix in ("test ", "tests ", "pytest", "jest", "vitest", "mocha", "npm test", "pnpm test", "yarn test"):
+        if stripped.startswith(prefix):
+            return True
+    return False
+
+
+def explicitly_requests_lint(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    if _EXPLICIT_VERB_PATTERN.search(lowered) and _LINT_KEYWORD_PATTERN.search(lowered):
+        return True
+    stripped = lowered.strip()
+    for prefix in ("lint ", "linting ", "eslint", "ruff", "pylint", "mypy", "typecheck", "type check", "tsc"):
+        if stripped.startswith(prefix):
+            return True
+    return False
+
+
 class TaskStatus(Enum):
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
@@ -574,6 +611,8 @@ class ExecutionPlan:
             List of validation steps
         """
         steps = []
+        explicit_tests = explicitly_requests_tests(task.description) or task.action_type == "test"
+        explicit_lint = explicitly_requests_lint(task.description)
         
         from rev.tools.project_types import detect_project_type, detect_test_command
         project_type = detect_project_type(config.ROOT)
@@ -599,15 +638,17 @@ class ExecutionPlan:
         steps.append("Check for syntax errors")
 
         if task.action_type in ["add", "edit", "refactor", "create"]:
-            steps.append("Run linter to check code quality")
+            if explicit_lint:
+                steps.append("Run linter to check code quality")
             steps.append("Verify imports and dependencies")
 
         if task.action_type in ["add", "edit", "refactor", "create", "delete", "rename"]:
-            if test_cmd:
-                steps.append(f"Run test suite: {test_cmd}")
-            else:
-                steps.append("Run project test suite (command not detected)")
-            steps.append("Check for failing tests")
+            if explicit_tests:
+                if test_cmd:
+                    steps.append(f"Run test suite: {test_cmd}")
+                else:
+                    steps.append("Run project test suite (command not detected)")
+                steps.append("Check for failing tests")
 
         # Specific validations
         if "api" in task.description.lower():

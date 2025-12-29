@@ -1430,9 +1430,9 @@ def _enhance_repo_context(context_json: str) -> str:
         enhanced.append("```")
         enhanced.append("")
 
-    # Top-level directories
+    # Top-level directories (always include summary for quick orientation)
     top_level = context.get("top_level", [])
-    if top_level and not file_structure:  # Only show if file_structure isn't shown
+    if top_level:
         enhanced.append("📂 TOP-LEVEL ITEMS:")
         dirs = [item["name"] for item in top_level if item.get("type") == "dir"]
         files = [item["name"] for item in top_level if item.get("type") == "file"]

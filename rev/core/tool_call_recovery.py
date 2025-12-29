@@ -156,6 +156,17 @@ def recover_tool_call_from_text(
 ) -> Optional[RecoveredToolCall]:
     """Recover a single tool call from text content, if present."""
 
+    snippet = _extract_json_snippet(content)
+    if snippet:
+        try:
+            parsed = json.loads(snippet)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            # Guard: avoid re-executing tool calls embedded in sub-agent outputs.
+            if "tool_name" in parsed and "tool_args" in parsed:
+                return None
+
     allowed = set(allowed_tools) if allowed_tools is not None else None
 
     patch = _extract_patch_from_text(content or "")
@@ -167,22 +178,13 @@ def recover_tool_call_from_text(
         path, body = file_block
         return RecoveredToolCall(name="write_file", arguments={"path": path, "content": body})
 
-    snippet = _extract_json_snippet(content)
     if not snippet:
         return None
 
-    try:
-        parsed = json.loads(snippet)
-    except json.JSONDecodeError:
+    if not isinstance(parsed, (dict, list)):
         return None
 
-    candidates = []
-    if isinstance(parsed, dict):
-        candidates = [parsed]
-    elif isinstance(parsed, list):
-        candidates = [x for x in parsed if isinstance(x, dict)]
-    else:
-        return None
+    candidates = [parsed] if isinstance(parsed, dict) else [x for x in parsed if isinstance(x, dict)]
 
     for candidate in candidates:
         recovered = _parse_tool_call_object(candidate)

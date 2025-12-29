@@ -559,6 +559,14 @@ def ollama_chat(
     tools_provided = tools is not None and supports_tools
 
     debug_logger = get_logger()
+    try:
+        debug_logger.set_trace_context({
+            "llm_provider": config.LLM_PROVIDER,
+            "supports_tools": supports_tools,
+            "tools_provided": bool(tools),
+        })
+    except Exception:
+        pass
     if getattr(config, "LLM_TRANSACTION_LOG_ENABLED", False):
         try:
             debug_logger.log_llm_transcript(model=model_name, messages=messages, response={"pending": True}, tools=tools)
