@@ -3,6 +3,7 @@
 import os
 from typing import Any, Callable, Dict, List, Optional
 
+from rev import config
 from rev.debug_logger import get_logger
 from .base import LLMProvider, ErrorClass, ProviderError, RetryConfig
 
@@ -13,8 +14,9 @@ class OpenAIProvider(LLMProvider):
     def __init__(self, api_key: Optional[str] = None):
         super().__init__()
         self.name = "openai"
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY", "")
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY", "") or config.OPENAI_API_KEY
         self._client = None
+        self._responses_only_models: set[str] = set()
 
     def _get_client(self):
         """Lazy initialization of OpenAI client."""
@@ -27,6 +29,132 @@ class OpenAIProvider(LLMProvider):
                     "OpenAI package not installed. Install with: pip install openai"
                 )
         return self._client
+
+    @staticmethod
+    def _is_responses_only_error(error: Exception) -> bool:
+        message = str(error).lower()
+        return "v1/responses" in message and "chat/completions" in message
+
+    @staticmethod
+    def _get_value(obj: Any, key: str, default: Any = None) -> Any:
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    def _extract_output_text(self, response: Any) -> str:
+        text = self._get_value(response, "output_text", "")
+        if text:
+            return text
+
+        output = self._get_value(response, "output", [])
+        parts: List[str] = []
+        if isinstance(output, list):
+            for item in output:
+                item_type = self._get_value(item, "type", "")
+                if item_type == "message":
+                    content = self._get_value(item, "content", [])
+                    parts.extend(self._extract_content_parts(content))
+                elif item_type in ("output_text", "text"):
+                    value = self._get_value(item, "text", "") or self._get_value(item, "content", "")
+                    if value:
+                        parts.append(str(value))
+        return "".join(parts)
+
+    def _extract_content_parts(self, content: Any) -> List[str]:
+        parts: List[str] = []
+        if isinstance(content, str):
+            parts.append(content)
+            return parts
+        if isinstance(content, list):
+            for part in content:
+                part_type = self._get_value(part, "type", "")
+                if part_type in ("output_text", "text"):
+                    value = self._get_value(part, "text", "") or self._get_value(part, "content", "")
+                    if value:
+                        parts.append(str(value))
+                elif isinstance(part, str):
+                    parts.append(part)
+        return parts
+
+    def _extract_tool_calls(self, response: Any) -> List[Dict[str, Any]]:
+        output = self._get_value(response, "output", [])
+        tool_calls: List[Dict[str, Any]] = []
+        if not isinstance(output, list):
+            return tool_calls
+
+        for item in output:
+            item_type = self._get_value(item, "type", "")
+            if item_type not in ("tool_call", "function_call"):
+                continue
+            function = self._get_value(item, "function", {}) or self._get_value(item, "tool", {})
+            name = self._get_value(function, "name", "") or self._get_value(item, "name", "")
+            arguments = self._get_value(function, "arguments", "") or self._get_value(item, "arguments", "")
+            tool_calls.append({
+                "function": {
+                    "name": name,
+                    "arguments": arguments,
+                }
+            })
+        return tool_calls
+
+    def _extract_usage(self, response: Any) -> Dict[str, int]:
+        usage = self._get_value(response, "usage", {}) or {}
+        prompt = self._get_value(usage, "prompt_tokens", None)
+        if prompt is None:
+            prompt = self._get_value(usage, "input_tokens", 0)
+        completion = self._get_value(usage, "completion_tokens", None)
+        if completion is None:
+            completion = self._get_value(usage, "output_tokens", 0)
+        total = self._get_value(usage, "total_tokens", None)
+        if total is None:
+            total = int(prompt or 0) + int(completion or 0)
+        return {
+            "prompt": int(prompt or 0),
+            "completion": int(completion or 0),
+            "total": int(total or 0),
+        }
+
+    def _chat_with_responses(
+        self,
+        client: Any,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+        model_name: str,
+        supports_tools: bool,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        if not hasattr(client, "responses"):
+            raise RuntimeError("OpenAI client does not support responses API; upgrade the openai package.")
+
+        request_params: Dict[str, Any] = {
+            "model": model_name,
+            "input": messages,
+            "temperature": float(os.getenv("OPENAI_TEMPERATURE", "0.1")),
+        }
+
+        if tools and supports_tools:
+            request_params["tools"] = tools
+            request_params["tool_choice"] = "auto"
+
+        if "response_format" in kwargs and kwargs["response_format"] is not None:
+            request_params["response_format"] = kwargs["response_format"]
+
+        response = client.responses.create(**request_params)
+
+        content = self._extract_output_text(response)
+        result_message = {
+            "role": "assistant",
+            "content": content or "",
+        }
+        tool_calls = self._extract_tool_calls(response)
+        if tool_calls:
+            result_message["tool_calls"] = tool_calls
+
+        return {
+            "message": result_message,
+            "done": True,
+            "usage": self._extract_usage(response),
+        }
 
     def chat(
         self,
@@ -42,6 +170,14 @@ class OpenAIProvider(LLMProvider):
 
         # Default to GPT-4
         model_name = model or os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview")
+        if model_name in self._responses_only_models:
+            try:
+                result = self._chat_with_responses(client, messages, tools, model_name, supports_tools, **kwargs)
+                debug_logger.log_llm_response(model_name, result, cached=False)
+                return result
+            except Exception as e:
+                debug_logger.log("llm", "OPENAI_RESPONSES_ERROR", {"error": str(e)}, "ERROR")
+                return {"error": f"OpenAI API error: {e}"}
 
         # Build request parameters
         request_params = {
@@ -103,6 +239,15 @@ class OpenAIProvider(LLMProvider):
             return result
 
         except Exception as e:
+            if self._is_responses_only_error(e):
+                self._responses_only_models.add(model_name)
+                try:
+                    result = self._chat_with_responses(client, messages, tools, model_name, supports_tools, **kwargs)
+                    debug_logger.log_llm_response(model_name, result, cached=False)
+                    return result
+                except Exception as inner:
+                    debug_logger.log("llm", "OPENAI_RESPONSES_ERROR", {"error": str(inner)}, "ERROR")
+                    return {"error": f"OpenAI API error: {inner}"}
             debug_logger.log("llm", "OPENAI_ERROR", {"error": str(e)}, "ERROR")
             return {"error": f"OpenAI API error: {e}"}
 
@@ -122,6 +267,16 @@ class OpenAIProvider(LLMProvider):
         debug_logger = get_logger()
 
         model_name = model or os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview")
+        if model_name in self._responses_only_models:
+            try:
+                result = self._chat_with_responses(client, messages, tools, model_name, supports_tools, **kwargs)
+                if on_chunk and result.get("message", {}).get("content"):
+                    on_chunk(result["message"]["content"])
+                debug_logger.log_llm_response(model_name, result, cached=False)
+                return result
+            except Exception as e:
+                debug_logger.log("llm", "OPENAI_RESPONSES_ERROR", {"error": str(e)}, "ERROR")
+                return {"error": f"OpenAI streaming error: {e}"}
 
         request_params = {
             "model": model_name,
@@ -205,6 +360,17 @@ class OpenAIProvider(LLMProvider):
         except KeyboardInterrupt:
             raise
         except Exception as e:
+            if self._is_responses_only_error(e):
+                self._responses_only_models.add(model_name)
+                try:
+                    result = self._chat_with_responses(client, messages, tools, model_name, supports_tools, **kwargs)
+                    if on_chunk and result.get("message", {}).get("content"):
+                        on_chunk(result["message"]["content"])
+                    debug_logger.log_llm_response(model_name, result, cached=False)
+                    return result
+                except Exception as inner:
+                    debug_logger.log("llm", "OPENAI_RESPONSES_ERROR", {"error": str(inner)}, "ERROR")
+                    return {"error": f"OpenAI streaming error: {inner}"}
             debug_logger.log("llm", "OPENAI_STREAM_ERROR", {"error": str(e)}, "ERROR")
             return {"error": f"OpenAI streaming error: {e}"}
 
@@ -232,11 +398,17 @@ class OpenAIProvider(LLMProvider):
         try:
             client = self._get_client()
             models = client.models.list()
-            # Filter for chat models
-            chat_models = [
-                m.id for m in models.data
-                if "gpt" in m.id.lower()
-            ]
+            def is_chat_model(model_id: str) -> bool:
+                mid = model_id.lower()
+                return (
+                    mid.startswith("gpt-")
+                    or mid.startswith("o1")
+                    or mid.startswith("o3")
+                    or mid.startswith("o4")
+                    or mid.startswith("o-preview")
+                )
+
+            chat_models = [m.id for m in models.data if is_chat_model(m.id)]
             return sorted(chat_models)
         except Exception:
             return []

@@ -161,10 +161,9 @@ class GeminiProvider(LLMProvider):
         content = ""
         tool_calls = []
 
-        # Extract content from response
-        if hasattr(response, "text"):
-            content = response.text
-        elif hasattr(response, "parts"):
+        # ALWAYS check parts first for function calls
+        # response.text might exist but be empty when there are function calls
+        if hasattr(response, "parts"):
             for part in response.parts:
                 if hasattr(part, "text"):
                     content += part.text
@@ -177,6 +176,9 @@ class GeminiProvider(LLMProvider):
                             "arguments": json.dumps(dict(fc.args)),
                         }
                     })
+        elif hasattr(response, "text"):
+            # Fallback to text attribute if no parts
+            content = response.text
 
         result_message = {
             "role": "assistant",
@@ -322,13 +324,8 @@ class GeminiProvider(LLMProvider):
                 if check_user_messages:
                     check_user_messages()
 
-                # Extract text from chunk
-                if hasattr(chunk, "text"):
-                    text = chunk.text
-                    accumulated_content += text
-                    if on_chunk:
-                        on_chunk(text)
-                elif hasattr(chunk, "parts"):
+                # Extract text from chunk - check parts first for function calls
+                if hasattr(chunk, "parts"):
                     for part in chunk.parts:
                         if hasattr(part, "text"):
                             accumulated_content += part.text
@@ -342,6 +339,11 @@ class GeminiProvider(LLMProvider):
                                     "arguments": json.dumps(dict(fc.args)),
                                 }
                             })
+                elif hasattr(chunk, "text"):
+                    text = chunk.text
+                    accumulated_content += text
+                    if on_chunk:
+                        on_chunk(text)
 
             # Get usage from final chunk
             if hasattr(response_stream, "usage_metadata"):

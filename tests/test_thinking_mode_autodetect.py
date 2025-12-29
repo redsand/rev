@@ -44,7 +44,11 @@ def test_thinking_autodetect_disables_on_failure(monkeypatch):
     monkeypatch.setattr(llm_client, "get_llm_cache", lambda: _NoCache())
 
     provider = _DummyOpenAIProvider(supports_thinking=False)
-    monkeypatch.setattr(llm_client, "get_provider_for_model", lambda model: provider)
+    monkeypatch.setattr(
+        llm_client,
+        "get_provider_for_model",
+        lambda model, override_provider=None: provider,
+    )
 
     old_mode = llm_client.config.LLM_THINKING_MODE
     try:
@@ -75,7 +79,11 @@ def test_thinking_autodetect_keeps_enabled_on_success(monkeypatch):
     monkeypatch.setattr(llm_client, "get_llm_cache", lambda: _NoCache())
 
     provider = _DummyOpenAIProvider(supports_thinking=True)
-    monkeypatch.setattr(llm_client, "get_provider_for_model", lambda model: provider)
+    monkeypatch.setattr(
+        llm_client,
+        "get_provider_for_model",
+        lambda model, override_provider=None: provider,
+    )
 
     old_mode = llm_client.config.LLM_THINKING_MODE
     try:
@@ -97,3 +105,32 @@ def test_thinking_autodetect_keeps_enabled_on_success(monkeypatch):
     finally:
         llm_client.config.LLM_THINKING_MODE = old_mode
 
+
+def test_thinking_cache_recovers_on_error(monkeypatch):
+    llm_client.reset_thinking_capabilities()
+    monkeypatch.setattr(llm_client, "get_llm_cache", lambda: _NoCache())
+
+    provider = _DummyOpenAIProvider(supports_thinking=False)
+    monkeypatch.setattr(
+        llm_client,
+        "get_provider_for_model",
+        lambda model, override_provider=None: provider,
+    )
+
+    old_mode = llm_client.config.LLM_THINKING_MODE
+    try:
+        llm_client.config.LLM_THINKING_MODE = "auto"
+        messages = [{"role": "user", "content": "hi"}]
+
+        key = f"{provider.name}:deepseek-reasoner"
+        llm_client._THINKING_SUPPORT[key] = True
+
+        resp = llm_client.ollama_chat(messages, model="deepseek-reasoner", tools=None, supports_tools=False)
+        assert "error" not in resp
+        assert resp["message"]["content"].strip() == "final"
+        assert len(provider.calls) == 2
+        assert "thinking" in provider.calls[0][1]
+        assert "thinking" not in provider.calls[1][1]
+        assert llm_client._THINKING_SUPPORT[key] is False
+    finally:
+        llm_client.config.LLM_THINKING_MODE = old_mode

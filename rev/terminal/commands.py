@@ -253,12 +253,26 @@ class ModelCommand(CommandHandler):
             # OpenAI - only show if API key is set
             if openai_api_key:
                 output.append(f"\n  {colorize('OpenAI (ChatGPT):', Colors.BRIGHT_WHITE, bold=True)}")
-                openai_models = ["gpt-4-turbo-preview", "gpt-4", "gpt-3.5-turbo", "gpt-3.5-turbo-16k"]
-                for model in openai_models:
-                    is_current = model == config.OLLAMA_MODEL
-                    marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN) if is_current else "    "
-                    name_colored = colorize(model, Colors.BRIGHT_CYAN, bold=True) if is_current else model
-                    output.append(f"  {marker}{name_colored}")
+                try:
+                    from rev.llm.providers.openai_provider import OpenAIProvider
+                    provider = OpenAIProvider(api_key=openai_api_key)
+                    openai_models = provider.get_model_list()
+                    if openai_models:
+                        for model in openai_models:
+                            is_current = model == config.OLLAMA_MODEL
+                            marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN) if is_current else "    "
+                            name_colored = colorize(model, Colors.BRIGHT_CYAN, bold=True) if is_current else model
+                            output.append(f"  {marker}{name_colored}")
+                    else:
+                        output.append(f"    {colorize('No models available', Colors.DIM)}")
+                except Exception as e:
+                    output.append(f"    {colorize(f'Unable to fetch models: {str(e)[:50]}', Colors.BRIGHT_BLACK)}")
+                    fallback_models = ["o-preview", "gpt-4", "gpt-3.5-turbo", "gpt-3.5-turbo-16k"]
+                    for model in fallback_models:
+                        is_current = model == config.OLLAMA_MODEL
+                        marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN) if is_current else "    "
+                        name_colored = colorize(model, Colors.BRIGHT_CYAN, bold=True) if is_current else model
+                        output.append(f"  {marker}{name_colored}")
 
             # Anthropic - only show if API key is set
             if anthropic_api_key:
