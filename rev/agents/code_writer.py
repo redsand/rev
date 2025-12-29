@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Tuple
 import re
 from pathlib import Path
 
-from rev.core.tool_call_recovery import recover_tool_call_from_text
+from rev.core.tool_call_recovery import recover_tool_call_from_text, RecoveredToolCall
 from rev.core.tool_call_retry import retry_tool_call_with_response_format
 from rev.agents.context_provider import build_context_and_tools
 from rev.agents.subagent_io import build_subagent_output
