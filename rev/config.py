@@ -253,6 +253,10 @@ EXECUTION_SUPPORTS_TOOLS = os.getenv("REV_EXECUTION_SUPPORTS_TOOLS", str(DEFAULT
 PLANNING_SUPPORTS_TOOLS = os.getenv("REV_PLANNING_SUPPORTS_TOOLS", str(DEFAULT_SUPPORTS_TOOLS)).lower() == "true"
 RESEARCH_SUPPORTS_TOOLS = os.getenv("REV_RESEARCH_SUPPORTS_TOOLS", str(DEFAULT_SUPPORTS_TOOLS)).lower() == "true"
 
+# Workspace path policy
+# When enabled, keep all agents scoped to the workspace root and require workspace-relative paths.
+WORKSPACE_ROOT_ONLY = os.getenv("REV_WORKSPACE_ROOT_ONLY", "true").lower() == "true"
+
 # LLM Generation Parameters (for improved tool calling with local models)
 # Lower temperature improves consistency and accuracy for tool calling
 # Recommended: 0.1 for tool calling, 0.7 for creative tasks

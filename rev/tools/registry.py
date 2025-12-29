@@ -274,6 +274,13 @@ def _guard_command_like_path(tool: str, args: Dict[str, Any]) -> Optional[str]:
         )
     return None
 
+def _set_workdir_tool(args: Dict[str, Any]) -> str:
+    if config.WORKSPACE_ROOT_ONLY:
+        workspace = get_workspace()
+        workspace.current_working_dir = workspace.root
+        return "Working directory changes are disabled; using workspace root."
+    return get_workspace().set_working_dir(args["path"])
+
 # --- Dynamic Tool Registration ---
 _DYNAMIC_TOOLS: Dict[str, Dict[str, Any]] = {}
 _DYNAMIC_DISPATCH: Dict[str, Callable] = {}
@@ -459,7 +466,7 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         "file_exists": lambda args: file_exists(args["path"]),
         "read_file_lines": lambda args: read_file_lines(args["path"], args.get("start", 1), args.get("end")),
         "tree_view": lambda args: tree_view(args.get("path", "."), args.get("max_depth", 3), args.get("max_files", 100)),
-        "set_workdir": lambda args: get_workspace().set_working_dir(args["path"]),
+        "set_workdir": _set_workdir_tool,
 
         # Code operations
         "remove_unused_imports": lambda args: remove_unused_imports(args["file_path"], args.get("language", "python")),
@@ -637,7 +644,9 @@ def _format_description(name: str, args: Dict[str, Any]) -> str:
         "file_exists": f"Checking file exists: {args.get('path', '')}",
         "read_file_lines": f"Reading lines from file: {args.get('path', '')}",
         "tree_view": f"Displaying tree view: {args.get('path', '.')}",
-        "set_workdir": f"Setting working directory to: {args.get('path', '')}",
+        "set_workdir": "Working directory changes are disabled; using workspace root."
+        if config.WORKSPACE_ROOT_ONLY
+        else f"Setting working directory to: {args.get('path', '')}",
 
         # Code operations
         "remove_unused_imports": f"Removing unused imports in: {args.get('file_path', '')}",
@@ -1435,7 +1444,7 @@ def get_available_tools() -> list:
             "type": "function",
             "function": {
                 "name": "set_workdir",
-                "description": "Set the current working directory for relative path resolution. All subsequent relative paths will be resolved against this directory. Use this when focusing on a specific subdirectory of the project.",
+                "description": "Set the current working directory for relative path resolution. Disabled when workspace root-only mode is enabled; use workspace-relative paths instead.",
                 "parameters": {
                     "type": "object",
                     "properties": {

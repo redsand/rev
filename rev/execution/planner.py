@@ -27,7 +27,30 @@ from rev.tools.project_types import detect_project_type, detect_test_command
 from rev.execution.ultrathink_prompts import get_ultrathink_prompt
 
 
-PLANNING_SYSTEM = """You are a planning agent. Produce an execution plan for the user request.
+_WORKDIR_POLICY_NOTE = (
+    "- WORKSPACE ROOT ONLY: Do NOT use set_workdir. Always reference workspace-relative paths (e.g., backend/package.json)."
+    if config.WORKSPACE_ROOT_ONLY
+    else "- SCOPED WORKING DIRECTORY: If the project has subdirectories (e.g. `apps/server`, `client/`), use the `set_workdir` tool to focus relative path resolution on that directory."
+)
+_ACTION_TYPE_LIST = (
+    '"review" | "edit" | "add" | "delete" | "test" | "doc" | "refactor" | "debug" | "create_tool"'
+)
+if not config.WORKSPACE_ROOT_ONLY:
+    _ACTION_TYPE_LIST = f'{_ACTION_TYPE_LIST} | "set_workdir"'
+_WORKDIR_GUIDANCE = (
+    "- Do NOT use set_workdir; include full workspace-relative paths instead."
+    if config.WORKSPACE_ROOT_ONLY
+    else "- Use [SET_WORKDIR] if the task is focused on a specific subdirectory to avoid path drift."
+)
+_BREAKDOWN_TOOL_LIST = (
+    "read_file, list_dir, search_code, write_file, replace_in_file, apply_patch, "
+    "create_directory, delete_file, run_tests, run_cmd"
+)
+if not config.WORKSPACE_ROOT_ONLY:
+    _BREAKDOWN_TOOL_LIST = f"{_BREAKDOWN_TOOL_LIST}, set_workdir"
+
+
+PLANNING_SYSTEM = f"""You are a planning agent. Produce an execution plan for the user request.
 
 Priorities:
 1) Reuse first: prefer extending existing code and patterns; avoid duplication.
@@ -61,7 +84,7 @@ CRITICAL RULE: DO NOT Hallucinate File Paths or Class Names
   * The repository context provided to you
   * Research findings from your tool calls
   * The current conversation
-- SCOPED WORKING DIRECTORY: If the project has subdirectories (e.g. `apps/server`, `client/`), use the `set_workdir` tool to focus relative path resolution on that directory. This prevents path drift and ensures relative paths like `package.json` resolve correctly.
+{_WORKDIR_POLICY_NOTE}
 - If you suspect a file/class exists but do NOT see it in the provided context, you CANNOT create an [ADD] or [EDIT] task for it.
 - Instead, you MUST create a [REVIEW] or discovery task first: "Scan [directory] for '[pattern]' to identify specific items."
 
@@ -122,12 +145,12 @@ Output format (strict):
 - Return ONLY a JSON array. No prose, no markdown, no code fences.
 - Each item must be an object with exactly:
   - "description": string
-  - "action_type": "review" | "edit" | "add" | "delete" | "test" | "doc" | "refactor" | "debug" | "create_tool" | "set_workdir"
+  - "action_type": {_ACTION_TYPE_LIST}
   - "complexity": "low" | "medium" | "high"
 
 Guidance:
 - Put review/read tasks first (find existing implementations and patterns).
-- Use [SET_WORKDIR] if the task is focused on a specific subdirectory to avoid path drift.
+{_WORKDIR_GUIDANCE}
 - Use [ADD] to create platform-specific validation or reproduction scripts (e.g., .ps1 for Windows, .sh for Linux/macOS) based on the 'System Information' provided.
 - Use [CREATE_TOOL] if you need a specialized Python tool that doesn't exist yet.
 - For multi-feature work: one implementation task per feature with SPECIFIC names.
@@ -237,7 +260,7 @@ Rules:
 ACTIONABILITY (MANDATORY):
 - Each subtask MUST be directly executable with a specific tool AND a concrete artifact.
 - The description MUST include both:
-  1) The tool to use (e.g., read_file, list_dir, search_code, write_file, replace_in_file, apply_patch, create_directory, delete_file, run_tests, run_cmd, set_workdir)
+  1) The tool to use (e.g., {_BREAKDOWN_TOOL_LIST})
   2) The artifact (a specific file path, directory path, or command)
 - Example: "Use create_directory to create src/components" or "Use read_file on src/app.py".
 - Narrative tasks without tool+artifact will be rejected.
@@ -270,6 +293,8 @@ You MUST output PURE JSON and NOTHING ELSE.
 - Your ENTIRE response must be ONLY the JSON array, starting with [ and ending with ].
 
 Output format (strict): return ONLY a JSON array of objects with keys "description", "action_type", "complexity".."""
+
+BREAKDOWN_SYSTEM = BREAKDOWN_SYSTEM.replace("{_BREAKDOWN_TOOL_LIST}", _BREAKDOWN_TOOL_LIST)
 
 
 TOOL_RESULT_CHAR_LIMIT = 12000  # Increased to prevent truncation of important code context
@@ -669,10 +694,12 @@ _ACTIONABILITY_TOOL_HINTS = {
     "copy_file",
     "run_tests",
     "run_cmd",
-    "set_workdir",
     "create_tool",
     "split_python_module_classes",
 }
+
+if not config.WORKSPACE_ROOT_ONLY:
+    _ACTIONABILITY_TOOL_HINTS.add("set_workdir")
 
 _ACTIONABILITY_COMMAND_TOKENS = {
     "pytest",
@@ -891,6 +918,19 @@ def _workspace_missing_project_markers(context_raw: str) -> bool:
     return True
 
 
+def _workspace_has_visible_items(context_raw: str) -> bool:
+    try:
+        context = json.loads(context_raw)
+    except (json.JSONDecodeError, TypeError):
+        return False
+
+    top_level = context.get("top_level", []) or []
+    return any(
+        isinstance(item.get("name"), str) and not item.get("name", "").startswith(".")
+        for item in top_level
+    )
+
+
 def _request_suggests_scaffold(user_request: str) -> bool:
     lowered = (user_request or "").lower()
     keywords = (
@@ -934,7 +974,7 @@ def _derive_scaffold_paths(user_request: str) -> list[str]:
 def _select_tool_for_action(action_type: str, description: str) -> str:
     desc_lower = description.lower()
     if action_type == "set_workdir":
-        return "set_workdir"
+        return "set_workdir" if not config.WORKSPACE_ROOT_ONLY else "list_dir"
     if action_type == "test":
         return "run_tests"
     if action_type == "review":
@@ -987,6 +1027,13 @@ def _coerce_actionable_task(
         return updated
 
     if action_type == "set_workdir":
+        if config.WORKSPACE_ROOT_ONLY:
+            path = _extract_first_path(description) or "."
+            updated["description"] = (
+                f"Use list_dir on {path} to confirm workspace-relative paths (do not use set_workdir)"
+            )
+            updated["action_type"] = "review"
+            return updated
         path = _extract_first_path(description)
         if not path:
             description = "Set working directory using set_workdir to ."
@@ -1528,6 +1575,20 @@ def planning_mode(
 
     # Parse and enhance the context for better readability
     context_enhanced = _enhance_repo_context(context_raw)
+    workspace_note = ""
+    if _workspace_has_visible_items(context_raw):
+        if _workspace_missing_project_markers(context_raw):
+            workspace_note = (
+                "IMPORTANT: The workspace already has files/folders. "
+                "Work within the current workspace root; do NOT create a new top-level app directory "
+                "unless the user explicitly requests it."
+            )
+        else:
+            workspace_note = (
+                "IMPORTANT: Existing project markers detected. "
+                "Work within the current workspace root; do NOT create a new top-level app directory "
+                "unless the user explicitly requests it."
+            )
 
     from rev.execution.ledger import get_ledger
     ledger = get_ledger()
@@ -1617,6 +1678,7 @@ Shell Type: {sys_info['shell_type']}
 
 CURRENT WORKSPACE STATE:
 {context_enhanced}
+{workspace_note}
 
 ⚠️ CRITICAL: You MUST examine the workspace state above before planning any actions.
 - DO NOT create directories or files that already exist
@@ -2143,8 +2205,9 @@ def determine_next_action(
         "debug",
         "create_directory",
         "general",
-        "set_workdir",
     ]
+    if not config.WORKSPACE_ROOT_ONLY:
+        VALID_ACTION_TYPES.append("set_workdir")
 
     model_name = config.PLANNING_MODEL
     tools = get_available_tools()
@@ -2156,6 +2219,24 @@ def determine_next_action(
 
     default_progress = "  (Starting - no tasks completed yet)\n  (All planned tasks are still pending)"
     progress_text = completed_work if completed_work else default_progress
+
+    action_type_rule = ", ".join(VALID_ACTION_TYPES)
+    action_type_format = "|".join(VALID_ACTION_TYPES)
+    set_workdir_note = (
+        "\nNOTE: Do NOT use set_workdir; always use workspace-relative paths.\n"
+        if config.WORKSPACE_ROOT_ONLY
+        else ""
+    )
+    set_workdir_bullet = (
+        ""
+        if config.WORKSPACE_ROOT_ONLY
+        else '- "set_workdir" = set scoped working directory for subprojects\n'
+    )
+    set_workdir_example = (
+        ""
+        if config.WORKSPACE_ROOT_ONLY
+        else '{{"action_type": "set_workdir", "description": "Set working directory to apps/server to focus on backend implementation"}}\n'
+    )
 
     next_action_prompt = f"""You are helping complete this request: {user_request}
 
@@ -2180,12 +2261,13 @@ Based on the current progress and remaining tasks, what is the SINGLE NEXT ACTIO
    - AND user's original request is 100% satisfied
    - Answer: {{"action_type": "review", "description": "GOAL_ACHIEVED"}}
    - If ANY remaining tasks exist, do NOT say goal achieved
-3. action_type MUST be EXACTLY one of: edit, add, delete, rename, test, review, debug, create_directory, general, set_workdir
+3. action_type MUST be EXACTLY one of: {action_type_rule}
 4. NO OTHER action types are allowed
 5. Be specific about files, classes, and functions
 6. DO NOT suggest repeating completed work
 7. If remaining tasks exist, pick the NEXT ONE from the list above
 8. Suggest the most logical next step to progress toward the goal
+{set_workdir_note}
 
 VALID ACTION TYPES (pick exactly ONE):
 - "edit" = modify existing file
@@ -2196,20 +2278,18 @@ VALID ACTION TYPES (pick exactly ONE):
 - "review" = analyze or review code
 - "debug" = diagnose and fix a bug
 - "create_directory" = create a directory
-- "set_workdir" = set scoped working directory for subprojects
-- "general" = other general task
+{set_workdir_bullet}- "general" = other general task
 
 RESPONSE FORMAT (STRICT):
 Return ONLY a JSON object, no other text:
 {{
-  "action_type": "edit|add|delete|rename|test|review|debug|general|set_workdir",
+  "action_type": "{action_type_format}",
   "description": "Specific description of the single action to take next"
 }}
 
 EXAMPLES:
 {{"action_type": "add", "description": "Create src/auth/auth_validator.py with AuthValidator class"}}
-{{"action_type": "set_workdir", "description": "Set working directory to apps/server to focus on backend implementation"}}
-{{"action_type": "edit", "description": "Update src/registry.py to include new services"}}
+{set_workdir_example}{{"action_type": "edit", "description": "Update src/registry.py to include new services"}}
 {{"action_type": "test", "description": "Run pytest tests/auth to verify changes"}}
 {{"action_type": "review", "description": "GOAL_ACHIEVED"}}
 

@@ -84,11 +84,13 @@ def get_context_builder(root: Optional[Path] = None) -> ContextBuilder:
 def _collect_memory_items(context: RevContext) -> List[Tuple[str, str]]:
     items: List[Tuple[str, str]] = []
 
-    # Always include workspace root so sub-agents don’t drift.
+    # Always include workspace root so sub-agents don't drift.
     try:
         items.append(("workspace_root", str(config.ROOT)))
     except Exception:
         pass
+    if getattr(config, "WORKSPACE_ROOT_ONLY", False):
+        items.append(("path_policy", "Workspace root only; use workspace-relative paths (no set_workdir)."))
 
     # Errors (often the most relevant "memory" signal)
     for i, err in enumerate(context.errors[-10:], start=1):

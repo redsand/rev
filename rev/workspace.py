@@ -122,6 +122,10 @@ class Workspace:
         Raises:
             WorkspacePathError: If the path is outside allowed roots.
         """
+        from rev import config
+        if getattr(config, "WORKSPACE_ROOT_ONLY", False):
+            object.__setattr__(self, "current_working_dir", self.root)
+            return "Working directory changes are disabled; using workspace root."
         resolved = self.resolve_path(path, purpose="set_workdir")
         if not resolved.abs_path.is_dir():
             raise WorkspacePathError(f"Working directory must be an existing directory: {path}")

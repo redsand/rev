@@ -15,8 +15,10 @@ This helps with:
 
 import json
 import sys
+import re
 from typing import Dict, Any, Optional, Tuple
 from rev.llm.client import ollama_chat
+from rev.tools.git_ops import get_repo_context
 
 
 def should_optimize_prompt(user_request: str) -> bool:
@@ -66,6 +68,64 @@ def should_optimize_prompt(user_request: str) -> bool:
         return True
 
     return False
+
+
+def _workspace_has_visible_items() -> bool:
+    try:
+        context_raw = get_repo_context()
+        context = json.loads(context_raw) if isinstance(context_raw, str) else {}
+    except Exception:
+        return False
+
+    top_level = context.get("top_level", []) or []
+    return any(
+        isinstance(item.get("name"), str) and not item.get("name", "").startswith(".")
+        for item in top_level
+    )
+
+
+def _request_explicitly_targets_new_root(user_request: str) -> bool:
+    lowered = (user_request or "").lower()
+    if re.search(r"\b(new|create|make|scaffold|init(?:ialize)?)\s+(?:a\s+)?(directory|folder)\b", lowered):
+        return True
+    if re.search(r"\b(create|make|scaffold|init(?:ialize)?)\s+(?:a\s+)?(project|app|application)\s+in\b", lowered):
+        return True
+    if re.search(r"\b(in|within|inside|under)\s+([a-z0-9_.\\/-]+)\b", lowered):
+        match = re.search(r"\b(in|within|inside|under)\s+([a-z0-9_.\\/-]+)\b", lowered)
+        if match and any(sep in match.group(2) for sep in ("/", "\\")):
+            return True
+    return False
+
+
+def _request_already_scoped_to_current_workspace(user_request: str) -> bool:
+    lowered = (user_request or "").lower()
+    return any(
+        token in lowered
+        for token in (
+            "current directory",
+            "current folder",
+            "this directory",
+            "this folder",
+            "this repo",
+            "existing project",
+            "use existing",
+            "in-place",
+        )
+    )
+
+
+def _apply_workspace_guard(improved: str, user_request: str) -> str:
+    if not improved or not _workspace_has_visible_items():
+        return improved
+    if _request_explicitly_targets_new_root(user_request) or _request_already_scoped_to_current_workspace(user_request):
+        return improved
+    guard = (
+        "IMPORTANT: Use the existing workspace root; do NOT create a new top-level app directory "
+        "unless explicitly requested."
+    )
+    if guard.lower() in improved.lower():
+        return improved
+    return f"{improved}\n\n{guard}"
 
 
 def get_prompt_recommendations(user_request: str) -> Optional[Dict[str, Any]]:
@@ -162,6 +222,7 @@ def prompt_optimization_dialog(
     issues = recommendations.get("potential_issues", [])
     missing = recommendations.get("missing_info", [])
     improved = recommendations.get("suggested_improvement", user_request)
+    improved = _apply_workspace_guard(improved, user_request)
 
     print(f"📊 Analysis Results:")
     print(f"   Clarity Score: {clarity_score}/10")

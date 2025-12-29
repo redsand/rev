@@ -12,6 +12,7 @@ from rev.llm.client import ollama_chat
 from rev.agents.context_provider import build_context_and_tools
 from rev.agents.subagent_io import build_subagent_output
 from rev.tools.project_types import detect_test_command
+from rev import config
 
 TEST_EXECUTOR_SYSTEM_PROMPT = """You are a specialized Test Executor agent. Your purpose is to run tests, validate implementations, and perform execution checks.
 
@@ -469,6 +470,8 @@ class TestExecutorAgent(BaseAgent):
 
     def _extract_workdir_hint(self, desc: str) -> Optional[str]:
         """Best-effort guess for a working directory hinted in task text."""
+        if config.WORKSPACE_ROOT_ONLY:
+            return None
         if not desc:
             return None
         patterns = [

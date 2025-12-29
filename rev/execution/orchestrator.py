@@ -2185,6 +2185,9 @@ class Orchestrator:
         self.debug_logger = DebugLogger.get_instance()
         self._context_builder: Optional[ContextBuilder] = None
         self._project_roots_cache: Optional[List[Path]] = None
+        if config.WORKSPACE_ROOT_ONLY:
+            workspace = get_workspace()
+            workspace.current_working_dir = workspace.root
 
     def _apply_read_only_constraints(self, task: Task) -> Task:
         if not self.context or not getattr(self.context, "read_only", False):
@@ -2368,6 +2371,8 @@ class Orchestrator:
         return None
 
     def _should_autoset_workdir(self, task: Task) -> bool:
+        if config.WORKSPACE_ROOT_ONLY:
+            return False
         if not task or not task.description:
             return False
         action_type = (task.action_type or "").lower()
