@@ -140,9 +140,7 @@ def prompt_optimization_dialog(
 
     Returns: (final_prompt, was_optimized)
     """
-    print(f"\n{'='*70}")
-    print("PROMPT OPTIMIZATION")
-    print(f"{'='*70}")
+    print(f"\n[PROMPT OPTIMIZATION]")
 
     # Check if optimization is needed
     if not should_optimize_prompt(user_request):
@@ -189,12 +187,10 @@ def prompt_optimization_dialog(
     if not interactive:
         return improved, True
 
-    print(f"{'='*70}")
-    print("Options:")
+    print("\n[Options]")
     print("  [1] Use the suggested improvement")
     print("  [2] Keep the original request")
-    print("  [3] Enter a custom request")
-    print(f"{'='*70}\n")
+    print("  [3] Enter a custom request\n")
 
     while True:
         try:

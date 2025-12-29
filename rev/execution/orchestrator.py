@@ -93,10 +93,12 @@ def push_user_feedback(feedback: str) -> bool:
 
 def _format_verification_feedback(result: VerificationResult) -> str:
     """Format verification result for LLM feedback."""
+    import re
+
     feedback = f"VERIFICATION FAILED: {result.message or 'Check environment.'}"
-    
+
     details = result.details or {}
-    
+
     # Extract validation command outputs if present (from quick_verify.py)
     validation = details.get("validation") or details.get("strict")
     if isinstance(validation, dict):
@@ -109,18 +111,64 @@ def _format_verification_feedback(result: VerificationResult) -> str:
                 stdout = (res.get("stdout") or "").strip()
                 stderr = (res.get("stderr") or "").strip()
                 feedback += f"\n- {label} (rc={rc})"
-                if stderr:
+
+                # Special handling for lint commands - extract critical errors with file paths
+                if 'lint' in label.lower() and stdout:
+                    critical_errors = _extract_critical_lint_errors(stdout)
+                    if critical_errors:
+                        feedback += f"\n  {critical_errors}"
+                    else:
+                        # Fall back to last 3 lines if no critical errors found
+                        feedback += "\n  stdout: " + " ".join(stdout.splitlines()[-3:])
+                elif stderr:
                     feedback += "\n  stderr: " + " ".join(stderr.splitlines()[-3:]) # Last 3 lines
                 elif stdout:
                     feedback += "\n  stdout: " + " ".join(stdout.splitlines()[-3:])
                 else:
                     feedback += "\n(No stdout or stderr output captured from command)"
-    
+
     # Extract debug info if present
     if "debug" in details:
         feedback += f"\n\nDebug Info:\n{json.dumps(details['debug'], indent=2)}"
-        
+
     return feedback
+
+
+def _extract_critical_lint_errors(lint_output: str) -> str:
+    """Extract critical errors from lint output with file paths.
+
+    Returns a formatted string with file paths and their critical errors.
+    """
+    import re
+
+    # Pattern: file path followed by error lines
+    # Example: C:\path\to\file.js
+    #            71:1  error  Parsing error: Unexpected token
+
+    lines = lint_output.splitlines()
+    critical_errors = []
+    current_file = None
+
+    for line in lines:
+        # Check if line is a file path (has path separators and ends with an extension)
+        if re.match(r'^[A-Za-z]:\\|^/', line.strip()) or re.match(r'^[./].*\.(js|ts|py|jsx|tsx|vue)$', line.strip()):
+            current_file = line.strip()
+        # Check if line contains 'error' (not just 'warning')
+        elif 'error' in line.lower() and current_file:
+            # This is an error line - include it with the file path
+            error_line = line.strip()
+            # Extract line:col and error message
+            match = re.search(r'(\d+:\d+)\s+(error)\s+(.*)', error_line, re.IGNORECASE)
+            if match:
+                location = match.group(1)
+                error_msg = match.group(3)
+                critical_errors.append(f"{current_file}:{location} - {error_msg}")
+
+    if critical_errors:
+        # Return first 5 critical errors to keep it concise
+        return "CRITICAL ERRORS:\n    " + "\n    ".join(critical_errors[:5])
+
+    return ""
 
 
 def _extract_file_path_from_description(desc: str) -> Optional[str]:
@@ -375,6 +423,649 @@ def _check_syntax_error_in_verification(verification_result) -> bool:
 
     combined = f"{details_str} {message_str}"
     return any(indicator in combined for indicator in syntax_indicators)
+
+
+def _detect_prisma_error_pattern(verification_result) -> tuple[bool, str, str]:
+    """Detect Prisma validation errors and provide specific guidance.
+
+    Returns:
+        (is_prisma_error, error_type, detailed_guidance)
+    """
+    if not verification_result:
+        return False, "", ""
+
+    import re
+
+    # Combine all error information
+    message_str = str(verification_result.message)
+    details_str = str(verification_result.details)
+    combined = f"{message_str} {details_str}"
+
+    # Pattern 1: PrismaClientValidationError - Invalid field in query
+    if 'PrismaClientValidationError' in combined or 'Invalid `prisma.' in combined:
+        # Extract model and operation
+        model_match = re.search(r'Invalid `prisma\.(\w+)\.(\w+)\(\)` invocation', combined, re.IGNORECASE)
+        model_name = model_match.group(1).capitalize() if model_match else "Model"
+        operation = model_match.group(2) if model_match else "query"
+
+        # Extract the invalid field name - look in the error output after the invocation
+        # Pattern: look for field assignments after "where" or inside objects, but skip OR/AND keywords
+        field_match = re.search(r'[{,]\s*(\w+)\s*:\s*["\']', combined)
+        if not field_match or field_match.group(1) in ('OR', 'AND', 'where', 'NOT'):
+            # Look for any property access pattern that's not a keyword
+            field_match = re.search(r'(\w+)\s*:\s*["\'][^"\']+["\']', combined)
+            if field_match and field_match.group(1) not in ('OR', 'AND', 'where', 'NOT'):
+                invalid_field = field_match.group(1)
+            else:
+                invalid_field = "unknown_field"
+        else:
+            invalid_field = field_match.group(1)
+
+        # Extract file location
+        file_match = re.search(r'in\s+([\w\\/.-]+):(\d+):(\d+)', combined)
+        file_location = file_match.group(1) if file_match else "test file"
+
+        guidance = f"""
+🎯 DIAGNOSED: Prisma Schema Mismatch - Invalid Field
+
+**Problem**: `{invalid_field}` field doesn't exist in Prisma {model_name} model
+The test file is trying to use a field that doesn't exist in your database schema.
+
+**REQUIRED FIX (Choose ONE approach):**
+
+**Approach 1: Update Prisma Schema (RECOMMENDED for new projects)**
+1. Read prisma/schema.prisma (or backend/prisma/schema.prisma) to see the current {model_name} model
+2. Add the missing `{invalid_field}` field to the model:
+   ```prisma
+   model {model_name} {{
+     id        Int      @id @default(autoincrement())
+     {invalid_field}  String   @unique  // Add this field
+     // ... other existing fields
+   }}
+   ```
+3. Use run_cmd tool to generate and push schema:
+   ```bash
+   cd backend  # or wherever prisma directory is
+   npx prisma generate
+   npx prisma db push
+   ```
+
+**Approach 2: Update Test File (if schema is correct)**
+1. Read {file_location} to see what fields are being used
+2. Read the Prisma schema to see what fields actually exist
+3. Update the test to use the correct field names that exist in the schema
+
+**DO NOT:**
+- ❌ Ignore the error and move on
+- ❌ Comment out the failing test
+- ❌ Edit package.json or install packages
+
+**YOU MUST:**
+- ✅ Fix the schema/test mismatch by using ONE of the approaches above
+- ✅ Run prisma generate and db push if you modify the schema
+"""
+        return True, "PrismaValidation", guidance
+
+    # Pattern 2: Prisma connection errors
+    if 'PrismaClientInitializationError' in combined or 'Can\'t reach database server' in combined:
+        guidance = """
+🎯 DIAGNOSED: Prisma Database Connection Error
+
+**Problem**: Cannot connect to the database
+The Prisma client cannot connect to your database server.
+
+**REQUIRED FIX:**
+1. Check if DATABASE_URL is set in .env file
+2. Verify the database server is running
+3. For PostgreSQL: `docker-compose up -d` or check PostgreSQL service
+4. For SQLite: ensure the directory exists
+5. Run database initialization:
+   ```bash
+   cd backend  # or wherever prisma directory is
+   npx prisma generate
+   npx prisma db push
+   ```
+
+**DO NOT:**
+- ❌ Skip database setup
+- ❌ Modify schema without initializing database
+
+**YOU MUST:**
+- ✅ Ensure database is running and accessible
+- ✅ Run prisma generate and db push
+"""
+        return True, "PrismaConnection", guidance
+
+    # Pattern 3: Missing Prisma client
+    if 'Cannot find module \'@prisma/client\'' in combined or '@prisma/client is not installed' in combined:
+        guidance = """
+🎯 DIAGNOSED: Prisma Client Not Installed/Generated
+
+**Problem**: @prisma/client module not found
+Prisma client hasn't been generated or installed.
+
+**REQUIRED FIX:**
+1. Use run_cmd to install and generate Prisma client:
+   ```bash
+   cd backend  # or wherever package.json is
+   npm install @prisma/client
+   npx prisma generate
+   npx prisma db push
+   ```
+
+**YOU MUST:**
+- ✅ Install @prisma/client
+- ✅ Run prisma generate
+"""
+        return True, "PrismaMissing", guidance
+
+    return False, "", ""
+
+
+def _detect_http_error_pattern(verification_result) -> tuple[bool, str, str]:
+    """Detect HTTP error codes in test failures and provide specific guidance.
+
+    Returns:
+        (is_http_error, error_code, detailed_guidance)
+    """
+    if not verification_result:
+        return False, "", ""
+
+    import re
+
+    # Combine all error information
+    message_str = str(verification_result.message)
+    details_str = str(verification_result.details)
+    combined = f"{message_str} {details_str}"
+
+    # Pattern 1: 404 Not Found errors
+    match_404 = re.search(r'Expected.*?(\d{3}).*?Received.*?404', combined, re.IGNORECASE | re.DOTALL)
+    if not match_404:
+        match_404 = re.search(r'status.*?404|404.*?not found', combined, re.IGNORECASE)
+
+    if match_404:
+        # Try to extract the endpoint/route
+        endpoint_match = re.search(r'(GET|POST|PUT|DELETE|PATCH)\s+([/\w\-.:]+)', combined, re.IGNORECASE)
+        endpoint = endpoint_match.group(2) if endpoint_match else "/"
+        method = endpoint_match.group(1).upper() if endpoint_match else "GET"
+
+        guidance = f"""
+🎯 DIAGNOSED: HTTP 404 - Route Handler Missing
+
+**Problem**: {method} {endpoint} → 404 Not Found
+This means the route/endpoint doesn't exist in your Express/server code.
+
+**REQUIRED FIX:**
+1. Read app.js (or server.js, index.js, src/app.js) to see existing routes
+2. Find where routes are defined (look for app.get, app.post, router.get, etc.)
+3. Add the missing route handler:
+
+   For API endpoint:
+   ```javascript
+   app.{method.lower()}('{endpoint}', async (req, res) => {{
+     // Your implementation here
+     res.json({{ /* data */ }});
+   }});
+   ```
+
+   For frontend route (like GET /):
+   ```javascript
+   const path = require('path');
+   app.get('{endpoint}', (req, res) => {{
+     res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+   }});
+   ```
+
+4. Ensure the route is registered BEFORE module.exports
+
+**DO NOT:**
+- ❌ Edit package.json (404 is not a dependency issue)
+- ❌ Edit schema files (404 is not a database issue)
+- ❌ Run npm install (404 is not about missing packages)
+
+**YOU MUST:**
+- ✅ Edit the server file (app.js/server.js) to add the route
+"""
+        return True, "404", guidance
+
+    # Pattern 2: 500 Internal Server Error
+    match_500 = re.search(r'Expected.*?(\d{3}).*?Received.*?500', combined, re.IGNORECASE | re.DOTALL)
+    if not match_500:
+        match_500 = re.search(r'status.*?500|500.*?internal server error', combined, re.IGNORECASE)
+
+    if match_500:
+        guidance = """
+🎯 DIAGNOSED: HTTP 500 - Internal Server Error
+
+**Problem**: Server-side error in route implementation
+This means the route exists but threw an exception.
+
+**REQUIRED FIX:**
+1. Read the test output carefully for stack traces or error messages
+2. Look for errors like:
+   - Undefined variable/function
+   - Database query errors
+   - Missing try/catch blocks
+3. Read the route handler implementation
+4. Fix the bug in the implementation
+5. Add proper error handling:
+   ```javascript
+   try {
+     // your code
+   } catch (error) {
+     console.error(error);
+     res.status(500).json({ error: 'Internal server error' });
+   }
+   ```
+"""
+        return True, "500", guidance
+
+    # Pattern 3: 401 Unauthorized
+    match_401 = re.search(r'Expected.*?(\d{3}).*?Received.*?401', combined, re.IGNORECASE | re.DOTALL)
+    if not match_401:
+        match_401 = re.search(r'status.*?401|401.*?unauthorized', combined, re.IGNORECASE)
+
+    if match_401:
+        guidance = """
+🎯 DIAGNOSED: HTTP 401 - Unauthorized
+
+**Problem**: Missing or invalid authentication
+This means the endpoint requires authentication that wasn't provided or is invalid.
+
+**REQUIRED FIX:**
+1. Check if the test is providing an auth token:
+   - Look for: .set('Authorization', `Bearer ${token}`)
+2. If test provides token, check the auth middleware in app.js:
+   - Verify JWT validation logic
+   - Check token secret matches
+3. If endpoint should NOT require auth, remove the auth middleware
+4. Common auth middleware pattern:
+   ```javascript
+   const authenticate = (req, res, next) => {
+     const token = req.headers.authorization?.split(' ')[1];
+     if (!token) return res.status(401).json({ error: 'Unauthorized' });
+     // verify token...
+     next();
+   };
+   ```
+"""
+        return True, "401", guidance
+
+    # Pattern 4: 400 Bad Request
+    match_400 = re.search(r'Expected.*?(\d{3}).*?Received.*?400', combined, re.IGNORECASE | re.DOTALL)
+    if not match_400:
+        match_400 = re.search(r'status.*?400|400.*?bad request', combined, re.IGNORECASE)
+
+    if match_400:
+        guidance = """
+🎯 DIAGNOSED: HTTP 400 - Bad Request
+
+**Problem**: Request validation failed
+This means required fields are missing or invalid.
+
+**REQUIRED FIX:**
+1. Check what fields the test is sending
+2. Read the route handler to see validation logic
+3. Common issues:
+   - Missing required fields → Update validation
+   - Wrong field names → Fix field names in code
+   - Type mismatch → Add proper type conversion
+4. Add validation:
+   ```javascript
+   if (!req.body.email || !req.body.password) {
+     return res.status(400).json({ error: 'Missing required fields' });
+   }
+   ```
+"""
+        return True, "400", guidance
+
+    return False, "", ""
+
+
+def _create_error_signature(verification_result) -> str:
+    """Create a robust error signature that identifies the root error type.
+
+    This looks beyond just the first line to find the actual error type
+    (PrismaClientValidationError, HTTP 404, SyntaxError, etc.)
+
+    Returns:
+        Error signature string for deduplication
+    """
+    import re
+
+    if not verification_result:
+        return "unknown_error"
+
+    # Get all error text
+    message = getattr(verification_result, 'message', '') or ""
+    details = getattr(verification_result, 'details', {})
+
+    # Collect error output
+    error_text = message
+    if isinstance(details, dict):
+        for key in ['test_output', 'stdout', 'stderr']:
+            if key in details:
+                val = details[key]
+                if isinstance(val, str):
+                    error_text += " " + val
+                elif isinstance(val, dict) and 'stdout' in val:
+                    error_text += " " + val.get('stdout', '') + " " + val.get('stderr', '')
+
+    # Priority 1: Look for specific error types
+    error_patterns = [
+        (r'PrismaClientValidationError', 'prisma_validation'),
+        (r'PrismaClientInitializationError', 'prisma_init'),
+        (r'Cannot find module [\'"]@prisma/client[\'"]', 'prisma_missing'),
+        (r'Received.*?HTTP[:\s]+(\d{3})', lambda m: f'http_{m.group(1)}'),  # Match "Received HTTP 404"
+        (r'status[:\s]+(\d{3})', lambda m: f'http_{m.group(1)}'),  # Match "status: 404" or "status 404"
+        (r'HTTP (\d{3})', lambda m: f'http_{m.group(1)}'),  # Generic HTTP status
+        (r'SyntaxError.*line (\d+)', lambda m: f'syntax_error_line_{m.group(1)}'),
+        (r'Parsing error.*line (\d+)', lambda m: f'parse_error_line_{m.group(1)}'),
+        (r'ModuleNotFoundError.*[\'"](\w+)[\'"]', lambda m: f'module_missing_{m.group(1)}'),
+        (r'ImportError.*cannot import.*[\'"](\w+)[\'"]', lambda m: f'import_error_{m.group(1)}'),
+        (r'ENOENT.*no such file.*[\'"]([^\'\"]+)[\'"]', lambda m: f'file_missing'),
+        (r'FAIL ([\w/\\.-]+)', lambda m: f'test_fail_{m.group(1).split("/")[-1]}'),
+    ]
+
+    for pattern, sig_value in error_patterns:
+        match = re.search(pattern, error_text, re.IGNORECASE)
+        if match:
+            if callable(sig_value):
+                return sig_value(match)
+            return sig_value
+
+    # Priority 2: Use first non-empty line of message
+    first_line = message.splitlines()[0].strip() if message else "unknown"
+
+    # Remove variable parts to make signature more generic
+    first_line = re.sub(r'\d{4}-\d{2}-\d{2}', 'DATE', first_line)  # Dates
+    first_line = re.sub(r'\d+\.\d+s', 'Xs', first_line)  # Durations
+    first_line = re.sub(r'\d+ (test|suite)', 'N \\1', first_line)  # Counts
+
+    return first_line[:100]  # Limit length
+
+
+def _extract_failing_test_file(error_output: str) -> str:
+    """Extract the specific test file that's failing from error output.
+
+    Returns:
+        Test file path (e.g., "tests/user.test.js") or empty string if not found
+    """
+    import re
+
+    # Pattern 1: "FAIL tests/user.test.js"
+    match = re.search(r'FAIL\s+([\w/\\.-]+\.(?:test|spec)\.\w+)', error_output)
+    if match:
+        return match.group(1)
+
+    # Pattern 2: "in C:\path\to\tests\user.test.js:23:23"
+    match = re.search(r'in\s+([^\s:]+\.(?:test|spec)\.\w+):\d+:\d+', error_output)
+    if match:
+        # Extract just the filename and tests/ directory
+        full_path = match.group(1)
+        if 'tests' in full_path or 'test' in full_path:
+            # Extract from tests/ onward
+            parts = full_path.replace('\\', '/').split('/')
+            if 'tests' in parts:
+                idx = parts.index('tests')
+                return '/'.join(parts[idx:])
+            elif 'test' in parts:
+                idx = parts.index('test')
+                return '/'.join(parts[idx:])
+        return full_path
+
+    # Pattern 3: pytest format "tests/test_user.py::TestClass::test_method FAILED"
+    match = re.search(r'([\w/\\.-]+\.py)::\S+\s+FAILED', error_output)
+    if match:
+        return match.group(1)
+
+    return ""
+
+
+def _extract_comprehensive_error_context(
+    failed_task: "Task",
+    verification_result,
+    recent_history: list = None
+) -> dict:
+    """Extract all available error context for generic repair.
+
+    Returns a rich context dict with all information needed for the LLM to diagnose and fix.
+    """
+    context = {
+        "task_description": failed_task.description,
+        "task_action_type": failed_task.action_type or "unknown",
+        "error_message": "",
+        "error_details": {},
+        "tool_calls": [],
+        "affected_files": [],
+        "stdout": "",
+        "stderr": "",
+        "test_output": "",
+        "failing_test_file": "",  # Add this to track specific failing test
+    }
+
+    # Extract error message
+    if verification_result:
+        context["error_message"] = getattr(verification_result, 'message', '')
+        details = getattr(verification_result, 'details', {})
+        if isinstance(details, dict):
+            context["error_details"] = details
+
+            # Extract test output if available
+            for key in ['test_output', 'stdout', 'stderr']:
+                if key in details:
+                    val = details[key]
+                    if isinstance(val, str):
+                        context[key] = val
+                    elif isinstance(val, dict) and 'stdout' in val:
+                        context['stdout'] = val.get('stdout', '')
+                        context['stderr'] = val.get('stderr', '')
+
+    # Extract failing test file from error output
+    all_error_text = f"{context['error_message']} {context['stdout']} {context['stderr']} {context['test_output']}"
+    context["failing_test_file"] = _extract_failing_test_file(all_error_text)
+
+    # Extract tool events
+    if hasattr(failed_task, 'tool_events') and failed_task.tool_events:
+        for event in failed_task.tool_events:
+            tool_name = event.get('tool', 'unknown')
+            args = event.get('args', {})
+            result = event.get('result', '')
+
+            context["tool_calls"].append({
+                "tool": tool_name,
+                "args": args,
+                "result": str(result)[:500] if result else ""
+            })
+
+            # Extract affected files
+            if isinstance(args, dict):
+                for key in ['path', 'file_path', 'target', 'source', 'file']:
+                    if key in args and isinstance(args[key], str):
+                        context["affected_files"].append(args[key])
+
+    # Remove duplicates from affected files
+    context["affected_files"] = list(set(context["affected_files"]))
+
+    return context
+
+
+def _create_generic_repair_task(
+    failed_task: "Task",
+    verification_result,
+    attempt_number: int,
+    failure_count: int,
+    context=None
+) -> "Task":
+    """Create a generic repair task that leverages LLM's knowledge to fix ANY error type.
+
+    This is sustainable because it doesn't require adding new code for each tool/framework.
+    The LLM already knows how to fix Prisma errors, dependency issues, API mismatches, etc.
+    We just need to provide rich context and ask it to analyze and fix.
+
+    Args:
+        failed_task: The task that failed
+        verification_result: The verification result with error details
+        attempt_number: Which repair attempt this is (1-5)
+        failure_count: How many times the original task has failed
+
+    Returns:
+        A new Task focused on diagnosing and fixing the error
+    """
+    from rev.models.task import Task
+    import json
+
+    # Extract all available context
+    error_ctx = _extract_comprehensive_error_context(failed_task, verification_result)
+
+    # Check for specific error patterns in priority order
+    # 1. Check Prisma errors first (higher priority - schema issues must be fixed before HTTP tests can pass)
+    is_prisma_error, prisma_type, prisma_guidance = _detect_prisma_error_pattern(verification_result)
+
+    # 2. Check HTTP error patterns only if no Prisma error
+    is_http_error, http_code, http_guidance = (False, "", "")
+    if not is_prisma_error:
+        is_http_error, http_code, http_guidance = _detect_http_error_pattern(verification_result)
+
+    # Build a comprehensive prompt for the LLM
+    description = (
+        f"🔧 AUTOMATIC ERROR RECOVERY (Attempt {attempt_number}/5)\n\n"
+        f"The following task has failed {failure_count} times and needs to be fixed:\n\n"
+        f"**Original Task:**\n"
+        f"[{error_ctx['task_action_type'].upper()}] {error_ctx['task_description']}\n\n"
+        f"**Error Summary:**\n"
+        f"{error_ctx['error_message']}\n\n"
+    )
+
+    # Add specific guidance based on error type (highest priority first)
+    if is_prisma_error:
+        description += prisma_guidance + "\n\n"
+    elif is_http_error:
+        description += http_guidance + "\n\n"
+
+    # Add detailed error information
+    if error_ctx['stderr']:
+        description += f"**Error Output:**\n```\n{error_ctx['stderr'][:1000]}\n```\n\n"
+    elif error_ctx['stdout']:
+        description += f"**Command Output:**\n```\n{error_ctx['stdout'][:1000]}\n```\n\n"
+
+    if error_ctx['test_output']:
+        description += f"**Test Failures:**\n```\n{error_ctx['test_output'][:1000]}\n```\n\n"
+
+    # Add tool call history
+    if error_ctx['tool_calls']:
+        description += "**What Was Tried:**\n"
+        for i, call in enumerate(error_ctx['tool_calls'][-3:], 1):  # Last 3 calls
+            description += f"{i}. {call['tool']}({json.dumps(call['args'])})\n"
+        description += "\n"
+
+    # Add affected files
+    if error_ctx['affected_files']:
+        description += f"**Files Involved:** {', '.join(error_ctx['affected_files'])}\n\n"
+
+    # Provide analysis framework
+    description += (
+        "**YOUR TASK: Analyze and Fix**\n\n"
+        "Step 1: DIAGNOSE\n"
+        "- Read the error messages carefully\n"
+        "- Identify the root cause (missing dependency? schema mismatch? API endpoint? configuration?)\n"
+        "- Check if affected files exist and contain what's expected\n\n"
+
+        "Step 2: GATHER CONTEXT\n"
+        "- Read any relevant configuration files (package.json, schema.prisma, tsconfig.json, etc.)\n"
+        "- Read test files if tests are failing to understand expectations\n"
+        "- List directories if files are missing\n\n"
+
+        "Step 3: FIX\n"
+        "- Choose the appropriate fix based on your diagnosis:\n"
+        "  * Schema mismatch → Update schema file + run migrations\n"
+        "  * Missing dependency → Install package\n"
+        "  * Missing file/route → Create it\n"
+        "  * Configuration error → Update config\n"
+        "  * Wrong implementation → Modify code\n\n"
+
+        "Step 4: VERIFY\n"
+        "- After fixing, the system will automatically re-run verification\n"
+        "- If it still fails, you'll get another attempt with more context\n\n"
+
+        "**IMPORTANT GUIDELINES:**\n"
+        "- Be methodical: First understand the error, then fix it\n"
+        "- Don't guess - read files to understand current state\n"
+        "- Fix the root cause, not symptoms\n"
+        "- If you need to run commands (npm install, prisma push, etc.), use the run_cmd tool\n"
+        "- This is an automatic recovery system - be thorough but efficient\n"
+    )
+
+    # FEEDBACK LOOP: Track error signatures to detect if fix didn't work
+    if attempt_number > 1 and context:
+        # Create error signature for comparison
+        current_error_sig = f"{error_ctx['error_message'][:200]}"
+
+        # Check if this is the same error as last time
+        previous_error_sig = context.agent_state.get("last_recovery_error_sig", "")
+
+        if current_error_sig == previous_error_sig:
+            # Same error after fix attempt - previous diagnosis was wrong!
+            description += (
+                f"\n**🔴 CRITICAL - PREVIOUS FIX DID NOT WORK (Attempt {attempt_number}):**\n"
+                "The error is EXACTLY THE SAME as before your last fix attempt!\n"
+                "This means your previous diagnosis or fix was INCORRECT.\n\n"
+                "**YOU MUST:**\n"
+                "1. ❌ DO NOT repeat the same fix approach\n"
+                "2. ❌ DO NOT edit the same files in the same way\n"
+                "3. ✅ Re-read the error with fresh eyes\n"
+                "4. ✅ Try a COMPLETELY DIFFERENT approach\n"
+                "5. ✅ Question your assumptions about what's broken\n\n"
+                f"**What you tried before (from tool history):**\n"
+            )
+
+            # Show what was tried before
+            if error_ctx['tool_calls']:
+                for call in error_ctx['tool_calls'][-2:]:
+                    description += f"  - {call['tool']} on {call.get('args', {}).get('path', 'N/A')}\n"
+
+            description += "\n**Think differently this time!**\n\n"
+        else:
+            # Different error - progress was made
+            description += (
+                f"\n**⚠️ ATTEMPT {attempt_number} - Partial Progress:**\n"
+                "The error changed from the previous attempt, which means you made some progress!\n"
+                "However, there's still an issue to fix.\n"
+                "- Review what was tried before (see tool call history above)\n"
+                "- Build on the progress made\n"
+                "- Consider if there are multiple issues that need fixing\n\n"
+            )
+
+        # Update error signature for next iteration
+        if context:
+            context.set_agent_state("last_recovery_error_sig", current_error_sig)
+    elif attempt_number > 1:
+        # No context available, use basic message
+        description += (
+            f"\n**⚠️ ATTEMPT {attempt_number}:**\n"
+            "Previous repair attempt(s) did not fully resolve the issue.\n"
+            "- Review what was tried before (see tool call history above)\n"
+            "- Try a different approach or look deeper\n"
+            "- Consider if there are multiple issues that need fixing\n"
+        )
+
+    # CRITICAL: Add targeted test execution guidance
+    if error_ctx.get("failing_test_file"):
+        test_file = error_ctx["failing_test_file"]
+        description += (
+            f"\n**🎯 TARGETED TESTING (IMPORTANT):**\n"
+            f"The failing test is: `{test_file}`\n\n"
+            f"After fixing, verify ONLY this specific test, not the entire test suite:\n"
+            f"- For JavaScript/Node: `npm test -- {test_file}`\n"
+            f"- For Python/pytest: `pytest {test_file} -v`\n\n"
+            f"**DO NOT** run the full test suite (`npm test` or `pytest`) - it wastes 3+ minutes.\n"
+            f"Run ONLY the specific failing test file shown above.\n\n"
+        )
+
+    return Task(
+        description=description,
+        action_type="fix"
+    )
 
 
 def _create_syntax_repair_task(failed_task: "Task", verification_result) -> "Task":
@@ -847,8 +1538,48 @@ def _choose_best_path_match_with_context(*, original: str, matches: List[str], d
     return ranked[0]
 
 
+def _coerce_command_intent_to_test(task: Task) -> tuple[bool, List[str]]:
+    """Coerce command execution tasks (npm install, pip install, etc.) to action_type='test'.
+
+    This ensures they are routed to TestExecutorAgent which has access to run_cmd tool.
+    This function ALWAYS runs, regardless of PREFLIGHT_ENABLED setting.
+
+    Returns:
+        (ok_to_execute, messages)
+    """
+    action = (task.action_type or "").strip().lower()
+    desc = (task.description or "").strip()
+    if not action or not desc:
+        return True, []
+
+    # Skip if already routed to test or tool executor
+    if action in {"test", "tool"}:
+        return True, []
+
+    # Detect command execution intent
+    desc_l = desc.lower()
+    command_intent = bool(
+        re.search(
+            r"\b(run_cmd|run_terminal_command|run_tests|execute command|install|npm install|npm ci|yarn install|"
+            r"pnpm install|pip install|pipenv install|poetry install|pipx install|conda install|bundle install|composer install|"
+            r"apt-get|apt install|brew install|choco install|winget install|yum install|dnf install|apk add|pacman -S|zypper install)\b",
+            desc_l,
+        )
+    )
+
+    if command_intent:
+        prev = action
+        task.action_type = "test"
+        return True, [f"coerced action '{prev}' -> 'test' (command execution task)"]
+
+    return True, []
+
+
 def _preflight_correct_action_semantics(task: Task) -> tuple[bool, List[str]]:
     """Coerce overloaded actions into read-only vs mutating actions.
+
+    NOTE: Command coercion (npm install -> test) is now handled separately in
+    _coerce_command_intent_to_test() which ALWAYS runs.
 
     Returns:
         (ok_to_execute, messages)
@@ -864,14 +1595,6 @@ def _preflight_correct_action_semantics(task: Task) -> tuple[bool, List[str]]:
     # Heuristic intent detection (word-boundary based to avoid false positives like
     # matching "analy" inside "analysis").
     desc_l = desc.lower()
-    command_intent = bool(
-        re.search(
-            r"\b(run_cmd|run_terminal_command|run_tests|execute command|install|npm install|npm ci|yarn install|"
-            r"pnpm install|pip install|pipenv install|poetry install|pipx install|conda install|bundle install|composer install|"
-            r"apt-get|apt install|brew install|choco install|winget install|yum install|dnf install|apk add|pacman -S|zypper install)\b",
-            desc_l,
-        )
-    )
     read_intent = bool(
         re.search(
             r"\b(read|inspect|review|analyze|analysis|understand|locate|find|search|inventory|identify|list|show|explain)\b",
@@ -887,13 +1610,6 @@ def _preflight_correct_action_semantics(task: Task) -> tuple[bool, List[str]]:
     )
 
     messages: List[str] = []
-
-    # If task is explicitly about running a command (install/tests), route to test executor.
-    if command_intent and action not in {"test", "tool"}:
-        prev = action
-        task.action_type = "test"
-        messages.append(f"coerced action '{prev}' -> 'test' (command execution task)")
-        return True, messages
 
     # If action says mutate but description is clearly inspection-only, coerce to READ.
     if action in mutate_actions and read_intent and not write_intent:
@@ -1706,9 +2422,7 @@ class Orchestrator:
         """Run a single orchestration attempt."""
         execution_mode_val = config.EXECUTION_MODE
         if execution_mode_val != 'sub-agent':
-            print("\n" + "=" * 60)
-            print("ORCHESTRATOR - MULTI-AGENT COORDINATION")
-            print("=" * 60)
+            print("\n[ORCHESTRATOR - MULTI-AGENT COORDINATION]")
             print(f"Task: {user_request[:100]}...")
             print(f"Execution Mode: {execution_mode_val.upper()}")
 
@@ -2008,6 +2722,22 @@ class Orchestrator:
              "- If the request involves new functionality, your first few actions must be to [ADD] test files and [TEST] them (expecting failure).\n"
              "- Only after tests are written and verified as failing should you [EDIT] implementation code.\n"
              "- Use [TEST] frequently to verify progress. If a test fails, your next action should be to [ANALYZE] the failure or [EDIT] the code to fix it.\n"
+             "\n"
+             "TEST FILE CONSOLIDATION POLICY (CRITICAL):\n"
+             "- NEVER create new test files without first checking what test files already exist.\n"
+             "- BEFORE proposing [ADD] for a new test file, you MUST first:\n"
+             "  1. Use [READ] to list the tests/ directory and see what test files exist\n"
+             "  2. Use [READ] to read existing test files and understand what they cover\n"
+             "  3. ONLY create a new test file if existing files cannot be extended\n"
+             "- PREFER extending existing test files over creating new ones:\n"
+             "  * If tests/user.test.js exists → ADD tests to it (use [EDIT])\n"
+             "  * If tests/api.test.js exists → ADD tests to it (use [EDIT])\n"
+             "  * Multiple test files for the same API/feature = ANTI-PATTERN\n"
+             "- EXAMPLES OF DUPLICATES (avoid these):\n"
+             "  * api.test.js + user_api.test.js → DUPLICATE (consolidate into one)\n"
+             "  * user.test.js + user_crud.test.js → DUPLICATE (consolidate into one)\n"
+             "  * api/users.test.js + tests/user.test.js → DUPLICATE (consolidate into one)\n"
+             "- If verification warns 'Similar files exist', you MUST use [EDIT] on the existing file, not create a new one.\n"
              "\n"
              "FAILURE RECOVERY GUIDANCE:\n"
              "- If an [EDIT] or [REFACTOR] action failed because a tool (like replace_in_file) made no changes (replaced=0), do NOT repeat the same action.\n"
@@ -2309,8 +3039,9 @@ class Orchestrator:
             self.context.resource_budget.update_step()
             self.context.resource_budget.tokens_used = get_token_usage().get("total", 0)
 
-            # MANDATORY: Force initial workspace examination on first iteration
-            if iteration == 1 and forced_next_task is None:
+            # OPTIONAL: Force initial workspace examination on first iteration
+            # Disabled by default since decent LLMs naturally propose research as first step
+            if config.INJECT_INITIAL_RESEARCH and iteration == 1 and forced_next_task is None:
                 # Check if workspace has already been examined
                 workspace_examination_ops = ["tree_view", "list_dir", "git_status", "git_diff", "read_file", "inspect", "examine"]
                 has_examined = any(
@@ -2348,10 +3079,28 @@ class Orchestrator:
                 and config.TDD_ENABLED
                 and self.context.agent_state.get("tdd_require_test")
             ):
-                forced_next_task = Task(
-                    description="Run the test suite to verify the new feature (TDD green must pass).",
-                    action_type="test",
-                )
+                # Check if we know which specific test file was failing - run only that test
+                last_failing_test = self.context.agent_state.get("last_failing_test_file", "")
+
+                if last_failing_test:
+                    # Run ONLY the specific failing test, not the entire suite
+                    if last_failing_test.endswith('.py'):
+                        test_cmd = f"pytest {last_failing_test} -v"
+                    else:
+                        # JavaScript/Node.js test
+                        test_cmd = f"npm test -- {last_failing_test}"
+
+                    forced_next_task = Task(
+                        description=f"Run ONLY the specific test that was failing: {test_cmd}",
+                        action_type="test",
+                    )
+                    print(f"  [tdd] Targeted test injection: {last_failing_test}")
+                else:
+                    # NO FALLBACK - don't inject generic test runs
+                    # Running the full test suite wastes time and causes hangs
+                    # Only run tests when we have a specific test file to target
+                    print(f"  [tdd] Skipping test injection - no specific failing test identified")
+                    self.context.set_agent_state("tdd_require_test", False)
 
             if not forced_next_task:
                 diagnostic_task = _pop_diagnostic_task(self.context)
@@ -2490,9 +3239,28 @@ class Orchestrator:
                 # FORWARD PROGRESS RULE: Check for redundant actions
                 action_sig = f"{(next_task.action_type or '').strip().lower()}::{(next_task.description or '').strip().lower()}"
                 if action_counts[action_sig] >= 2:
+                    # Check if we've already transformed this type of action multiple times
+                    transformation_count = self.context.agent_state.get("transformation_count", 0)
+
+                    if transformation_count >= 3:
+                        # Too many transformations - trigger circuit breaker instead
+                        print(f"\n  ⚠️  Transformation limit reached ({transformation_count}x) - triggering circuit breaker")
+                        self.context.set_agent_state("no_retry", True)
+                        self.context.add_error(f"Circuit breaker: too many action transformations ({transformation_count}x)")
+                        print("\n[🛑 CIRCUIT BREAKER: TRANSFORMATION LOOP DETECTED]")
+                        print(f"System has transformed actions {transformation_count} times without progress.")
+                        print("This indicates a fundamental issue that cannot be auto-fixed.\n")
+                        return False
+
                     next_task = self._transform_redundant_action(next_task, action_sig, action_counts[action_sig])
                     # Update signature after transformation
                     action_sig = f"{(next_task.action_type or '').strip().lower()}::{(next_task.description or '').strip().lower()}"
+
+                    # Increment transformation counter
+                    self.context.set_agent_state("transformation_count", transformation_count + 1)
+                else:
+                    # Reset transformation counter on successful new action
+                    self.context.set_agent_state("transformation_count", 0)
 
                 next_task.task_id = iteration
                 try:
@@ -2508,6 +3276,12 @@ class Orchestrator:
                 # ACTION LOGGING: Concise and consistent
                 action_type = (next_task.action_type or "general").upper()
                 print(f"\n{colorize(str(iteration), Colors.BRIGHT_BLACK)}. {colorize(action_type, Colors.BRIGHT_CYAN, bold=True)} {next_task.description}")
+
+            # CRITICAL: Command intent coercion must ALWAYS run (not just when PREFLIGHT_ENABLED)
+            # This ensures "npm install" tasks get routed to TestExecutorAgent which has run_cmd access
+            ok_coercion, coercion_msgs = _coerce_command_intent_to_test(next_task)
+            for msg in coercion_msgs:
+                print(f"  [routing] {msg}")
 
             if config.PREFLIGHT_ENABLED:
                 ok, sem_msgs = _preflight_correct_action_semantics(next_task)
@@ -2530,9 +3304,7 @@ class Orchestrator:
                     if failure_counts[sig] >= 3:
                         self.context.set_agent_state("no_retry", True)
                         self.context.add_error("Circuit breaker: repeating preflight action semantics failure")
-                        print("\n" + "=" * 70)
-                        print("CIRCUIT BREAKER - PREFLIGHT FAILURE")
-                        print("=" * 70)
+                        print("\n[CIRCUIT BREAKER - PREFLIGHT FAILURE]")
                         print(f"Repeated preflight failure {failure_counts[sig]}x: {'; '.join(sem_msgs)}")
                         print("Blocking issue: planner is not producing an executable action; refusing to loop.\n")
                         return False
@@ -2550,9 +3322,7 @@ class Orchestrator:
                     if failure_counts[sig] >= 3:
                         self.context.set_agent_state("no_retry", True)
                         self.context.add_error("Circuit breaker: repeating preflight path failure")
-                        print("\n" + "=" * 70)
-                        print("CIRCUIT BREAKER - PREFLIGHT FAILURE")
-                        print("=" * 70)
+                        print("\n[CIRCUIT BREAKER - PREFLIGHT FAILURE]")
                         print(f"Repeated preflight failure {failure_counts[sig]}x: {key_msg}")
                         print("Blocking issue: planner is not producing an executable action; refusing to loop.\n")
                         return False
@@ -2675,18 +3445,14 @@ class Orchestrator:
                 if is_read_action:
                     goal_achieved = _check_goal_likely_achieved(user_request, completed_tasks_log)
                     if goal_achieved:
-                        print("\n" + "=" * 70)
-                        print("CIRCUIT BREAKER - GOAL ACHIEVED")
-                        print("=" * 70)
+                        print("\n[CIRCUIT BREAKER - GOAL ACHIEVED]")
                         print(f"Repeated verification action {action_counts[action_sig]}x, but goal appears achieved.")
                         print("Forcing successful completion.\n")
                         return True
 
                 self.context.set_agent_state("no_retry", True)
                 self.context.add_error(f"Circuit breaker: repeating action '{next_task.action_type}'")
-                print("\n" + "=" * 70)
-                print("🛑 CIRCUIT BREAKER TRIGGERED: REPEATED ACTION")
-                print("=" * 70)
+                print("\n[🛑 CIRCUIT BREAKER TRIGGERED: REPEATED ACTION]")
                 print(f"Repeated action {repeat_same_action}x consecutively (total {action_counts[action_sig]}x): [{(next_task.action_type or '').upper()}] {next_task.description}")
                 
                 # Enhanced circuit-breaker message
@@ -2700,7 +3466,17 @@ class Orchestrator:
                 if recent_ledger_actions:
                     print("\nLast 5 Tool Calls:")
                     for i, a in enumerate(recent_ledger_actions, 1):
-                        print(f"  {i}. {a['tool']}({json.dumps(a['arguments'])}) -> {a['status']}")
+                        # Convert Path objects to strings for JSON serialization
+                        args = a.get('arguments', {})
+                        if args and isinstance(args, dict):
+                            args_serializable = {k: str(v) if isinstance(v, Path) else v for k, v in args.items()}
+                        else:
+                            args_serializable = args
+                        try:
+                            args_str = json.dumps(args_serializable)
+                        except (TypeError, ValueError):
+                            args_str = str(args_serializable)
+                        print(f"  {i}. {a['tool']}({args_str}) -> {a['status']}")
                 
                 if last_verification:
                     print("\nLast Verification Status:")
@@ -3035,9 +3811,27 @@ class Orchestrator:
                     self._handle_verification_failure(verification_result)
 
                     # Anti-loop: stop if the same verification failure repeats.
-                    first_line = verification_result.message.splitlines()[0].strip() if verification_result.message else ""
-                    failure_sig = f"{(next_task.action_type or '').lower()}::{first_line}"
+                    # Use robust error signature that identifies root error type
+                    error_sig = _create_error_signature(verification_result)
+                    failure_sig = f"{(next_task.action_type or '').lower()}::{error_sig}"
                     failure_counts[failure_sig] += 1
+
+                    # Extract and save failing test file for targeted re-testing
+                    all_error_text = f"{verification_result.message} "
+                    if hasattr(verification_result, 'details') and isinstance(verification_result.details, dict):
+                        for key in ['test_output', 'stdout', 'stderr']:
+                            val = verification_result.details.get(key, '')
+                            if isinstance(val, str):
+                                all_error_text += val + " "
+
+                    failing_test_file = _extract_failing_test_file(all_error_text)
+                    if failing_test_file:
+                        self.context.set_agent_state("last_failing_test_file", failing_test_file)
+                        print(f"  [test-targeting] Detected failing test: {failing_test_file}")
+
+                    # Log the detected error signature for debugging
+                    if failure_counts[failure_sig] > 1:
+                        print(f"  [circuit-breaker] Same error detected {failure_counts[failure_sig]}x: {error_sig}")
 
                     if failure_counts[failure_sig] == 2:
                         diag_key = f"diagnostic::{failure_sig}"
@@ -3100,35 +3894,68 @@ class Orchestrator:
                             iteration -= 1  # Don't count this as a regular iteration
                             continue
 
-                        # SYNTAX RECOVERY: Check if this is a syntax error
-                        is_syntax_error = _check_syntax_error_in_verification(verification_result)
+                        # GENERIC AUTO-RECOVERY: Let the LLM analyze and fix ANY type of error
+                        # This is sustainable - no need to add handlers for each tool/framework
+                        generic_repair_key = f"generic_repair::{failure_sig}"
+                        generic_repair_attempts = self.context.agent_state.get(generic_repair_key, 0)
 
-                        if is_syntax_error and syntax_repair_attempts < 5:
-                            # Enter syntax repair mode - give LLM focused attempts to fix
-                            print(f"  {colorize(Symbols.WARNING, Colors.BRIGHT_YELLOW)} {colorize('Syntax error detected. Entering focused repair mode (attempt ' + str(syntax_repair_attempts + 1) + '/5)', Colors.BRIGHT_WHITE)}")
+                        # Track total recovery attempts across ALL errors to prevent infinite loops
+                        total_recovery_attempts = self.context.agent_state.get("total_recovery_attempts", 0)
 
-                            # Increment syntax repair counter
-                            self.context.set_agent_state(syntax_repair_key, syntax_repair_attempts + 1)
+                        # HARD LIMIT: Stop if we've made 10 recovery attempts total, regardless of error type
+                        if total_recovery_attempts >= 10:
+                            summary = self._build_failure_summary(
+                                next_task,
+                                verification_result,
+                                failure_sig,
+                                failure_counts[failure_sig],
+                            )
+                            self.context.set_agent_state("no_retry", True)
+                            self.context.add_error(summary)
+                            print(f"\n[{colorize('🛑 CIRCUIT BREAKER: RECOVERY LIMIT EXCEEDED', Colors.BRIGHT_RED, bold=True)}]")
+                            print(f"{colorize(f'Made {total_recovery_attempts} recovery attempts across all errors.', Colors.BRIGHT_WHITE)}")
+                            print(f"{colorize('This indicates a fundamental issue that cannot be auto-fixed.', Colors.BRIGHT_WHITE)}")
+                            print(f"{colorize('Manual intervention required.', Colors.BRIGHT_YELLOW)}\n")
+                            print(f"{colorize(Symbols.INFO, Colors.BRIGHT_BLUE)} {summary}")
+                            return False
 
-                            # Create a focused syntax repair task
-                            syntax_repair_task = _create_syntax_repair_task(next_task, verification_result)
+                        if generic_repair_attempts < 5:
+                            # Enter generic repair mode - LLM will diagnose and fix
+                            print(f"  {colorize(Symbols.WARNING, Colors.BRIGHT_YELLOW)} {colorize('Entering automatic error recovery mode (attempt ' + str(generic_repair_attempts + 1) + '/5)', Colors.BRIGHT_WHITE)}")
+
+                            # Increment generic repair counter
+                            self.context.set_agent_state(generic_repair_key, generic_repair_attempts + 1)
+                            self.context.set_agent_state("total_recovery_attempts", total_recovery_attempts + 1)
+
+                            # Create a generic repair task with full error context
+                            repair_task = _create_generic_repair_task(
+                                failed_task=next_task,
+                                verification_result=verification_result,
+                                attempt_number=generic_repair_attempts + 1,
+                                failure_count=failure_counts[failure_sig],
+                                context=self.context  # Pass context for feedback loop
+                            )
 
                             # Reset general failure count to allow more attempts
                             failure_counts[failure_sig] = 0
 
                             # Replace the failed task with the repair task
-                            forced_next_task = syntax_repair_task
+                            forced_next_task = repair_task
                             iteration -= 1  # Don't count this as a regular iteration
+                            continue
 
-                        elif is_syntax_error and syntax_repair_attempts >= 5:
-                            # Exhausted syntax repair attempts - try auto-revert as last resort
-                            print(f"  {colorize(Symbols.CROSS, Colors.BRIGHT_RED)} {colorize('Repair exhausted. Reverting changes...', Colors.BRIGHT_WHITE)}")
+                        # FALLBACK: Generic repair exhausted (5 attempts) - try git revert as last resort
+                        is_syntax_error = _check_syntax_error_in_verification(verification_result)
+
+                        if is_syntax_error and generic_repair_attempts >= 5:
+                            # Generic repair failed - try auto-revert as last resort for syntax errors
+                            print(f"  {colorize(Symbols.CROSS, Colors.BRIGHT_RED)} {colorize('Automatic repair exhausted. Attempting git revert...', Colors.BRIGHT_WHITE)}")
 
                             reverted_files = _attempt_git_revert_for_syntax_errors(next_task)
                             if reverted_files:
                                 print(f"  {colorize(Symbols.CHECK, Colors.BRIGHT_GREEN)} {colorize('Auto-reverted: ' + ', '.join(reverted_files), Colors.BRIGHT_BLACK)}")
-                                # Clear syntax repair counter
-                                self.context.set_agent_state(syntax_repair_key, 0)
+                                # Clear repair counter
+                                self.context.set_agent_state(generic_repair_key, 0)
                                 return False  # Stop execution, but code is in working state
                             else:
                                 print(f"  {colorize(Symbols.CROSS, Colors.BRIGHT_RED)} {colorize('Auto-revert failed. Manual intervention required.', Colors.BRIGHT_RED)}")
@@ -3357,12 +4184,10 @@ class Orchestrator:
                             print(f"      {colorize('stderr:', Colors.BRIGHT_BLACK)} {line}")
 
         # P0-6: Different message for inconclusive vs failed
-        print("\n" + "=" * 70)
         if getattr(verification_result, 'inconclusive', False):
-            print("NEXT ACTION: Run validation to confirm changes are correct (tests/syntax checks)...")
+            print("\n[NEXT ACTION: Run validation to confirm changes are correct (tests/syntax checks)...]\n")
         else:
-            print("NEXT ACTION: Adjusting approach based on feedback...")
-        print("=" * 70 + "\n")
+            print("\n[NEXT ACTION: Adjusting approach based on feedback...]\n")
 
     def _dispatch_to_sub_agents(self, context: RevContext, task: Optional[Task] = None) -> bool:
         """Dispatches tasks to appropriate sub-agents."""
@@ -3512,15 +4337,13 @@ class Orchestrator:
             # Sub-agent mode has its own summary logic or is more streamlined
             return
 
-        print("\n" + "=" * 60)
-        print("ORCHESTRATOR - EXECUTION SUMMARY")
-        print("=" * 60)
-        
+        print("\n[ORCHESTRATOR - EXECUTION SUMMARY]")
+
         status = "SUCCESS" if result.success else "FAILED"
         print(f"Status: {status}")
         print(f"Phase Reached: {result.phase_reached.value}")
         print(f"Time Taken: {result.execution_time:.2f} seconds")
-        
+
         # Display UCCT Anchoring metrics if available in insights
         if "anchoring_evaluation" in self.context.agent_insights:
             metrics = self.context.agent_insights["anchoring_evaluation"]
@@ -3533,13 +4356,13 @@ class Orchestrator:
 
         if result.plan:
             print(f"\nTasks: {result.plan.get_summary()}")
-            
+
         if result.errors:
             print("\nErrors:")
             for err in result.errors:
                 print(f"  - {err}")
-        
-        print("=" * 60)
+
+        print()
 
 def run_orchestrated(
     user_request: str,

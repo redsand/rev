@@ -233,20 +233,27 @@ class StateManager:
         return self._last_checkpoint
 
     def list_checkpoints(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """List recent checkpoints.
+        """List recent checkpoints by modification time.
 
         Args:
             limit: Maximum number of checkpoints to return
 
         Returns:
-            List of checkpoint info dictionaries
+            List of checkpoint info dictionaries (most recent first)
         """
         checkpoints = []
 
         if not self.checkpoint_dir.exists():
             return checkpoints
 
-        for filepath in sorted(self.checkpoint_dir.glob("checkpoint_*.json"), reverse=True):
+        # Sort by modification time (most recent first)
+        checkpoint_files = sorted(
+            self.checkpoint_dir.glob("checkpoint_*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True
+        )
+
+        for filepath in checkpoint_files:
             if len(checkpoints) >= limit:
                 break
 
@@ -277,7 +284,7 @@ class StateManager:
         return checkpoints
 
     def clean_old_checkpoints(self, keep_last: int = 10):
-        """Remove old checkpoints, keeping only the most recent.
+        """Remove old checkpoints by modification time, keeping only the most recent.
 
         Args:
             keep_last: Number of recent checkpoints to keep
@@ -288,7 +295,12 @@ class StateManager:
         if not self.checkpoint_dir.exists():
             return
 
-        checkpoints = sorted(self.checkpoint_dir.glob("checkpoint_*.json"), reverse=True)
+        # Sort by modification time (most recent first) to keep the newest checkpoints
+        checkpoints = sorted(
+            self.checkpoint_dir.glob("checkpoint_*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True
+        )
 
         for filepath in checkpoints[keep_last:]:
             try:
@@ -344,7 +356,7 @@ class StateManager:
 
     @staticmethod
     def find_latest_checkpoint(checkpoint_dir: str = str(config.CHECKPOINTS_DIR)) -> Optional[str]:
-        """Find the most recent checkpoint file.
+        """Find the most recent checkpoint file by modification time.
 
         Args:
             checkpoint_dir: Directory containing checkpoints
@@ -357,12 +369,16 @@ class StateManager:
         if not checkpoint_path.exists():
             return None
 
-        checkpoints = sorted(checkpoint_path.glob("checkpoint_*.json"), reverse=True)
+        # Sort by modification time (most recent first), not lexicographically
+        checkpoints = list(checkpoint_path.glob("checkpoint_*.json"))
 
-        if checkpoints:
-            return str(checkpoints[0])
+        if not checkpoints:
+            return None
 
-        return None
+        # Sort by modification time in descending order (newest first)
+        checkpoints_sorted = sorted(checkpoints, key=lambda p: p.stat().st_mtime, reverse=True)
+
+        return str(checkpoints_sorted[0])
 
     def print_resume_info(self, checkpoint_path: Optional[str] = None):
         """Print information about how to resume execution.

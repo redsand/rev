@@ -10,6 +10,8 @@ import threading
 import queue
 import time
 import re
+import os
+from pathlib import Path
 from typing import Callable, Optional
 
 
@@ -100,6 +102,18 @@ class TUI:
         self._scroll_pos = 0 # Horizontal scroll for input
         self._worker: Optional[threading.Thread] = None
 
+        # Command history (last 100 commands)
+        self._command_history: list[str] = []
+        self._history_pos = -1  # Position in history when browsing (-1 = not browsing)
+        self._history_temp = ""  # Temp storage for current input when browsing history
+        self._history_file = Path.home() / ".rev" / "history"
+
+        # Scrollback control
+        self._log_scroll_offset = 0  # How many lines scrolled up from bottom
+
+        # Load persistent history
+        self._load_history()
+
     def log(self, text: str) -> None:
         """Queue text for append to scrollback (thread-safe)."""
         if text is None:
@@ -154,11 +168,26 @@ class TUI:
             self._render_input()
 
             if initial_input and initial_input.strip():
+                # Add initial command to history
+                self._command_history.append(initial_input)
+                if len(self._command_history) > 100:
+                    self._command_history.pop(0)
+
                 self.log("\x1b[95m" + self.prompt + "\x1b[0m" + initial_input)
                 self._start_worker(on_input, initial_input)
 
             while not self._stop.is_set():
                 self._drain_log_queue()
+
+                # Ensure cursor is in input window at correct position
+                if self._input_win:
+                    try:
+                        prompt_len = len(self.prompt)
+                        cursor_x = prompt_len + (self._cursor_pos - self._scroll_pos)
+                        self._input_win.move(0, cursor_x)
+                        self._input_win.refresh()
+                    except curses.error:
+                        pass
 
                 try:
                     ch = stdscr.getch()
@@ -178,8 +207,27 @@ class TUI:
                     self._input_buffer = ""
                     self._cursor_pos = 0
                     self._scroll_pos = 0
+                    self._history_pos = -1  # Reset history browsing
                     self._render_input()
+
                     if line.strip():
+                        # Handle /history command
+                        if line.strip() == "/history":
+                            self.log("\x1b[95m" + self.prompt + "\x1b[0m" + line)
+                            self.log("\n\x1b[96m=== Command History ===\x1b[0m")
+                            if not self._command_history:
+                                self.log("\x1b[90m(no commands yet)\x1b[0m")
+                            else:
+                                for i, cmd in enumerate(self._command_history, 1):
+                                    self.log(f"\x1b[90m{i:3}.\x1b[0m {cmd}")
+                            self.log("\x1b[96m" + "=" * 23 + "\x1b[0m\n")
+                            continue
+
+                        # Add to command history (keep last 100)
+                        self._command_history.append(line)
+                        if len(self._command_history) > 100:
+                            self._command_history.pop(0)
+
                         # Log with prompt color
                         self.log("\x1b[95m" + self.prompt + "\x1b[0m" + line)
                         self._start_worker(on_input, line)
@@ -198,6 +246,51 @@ class TUI:
                         self._input_buffer = self._input_buffer[:self._cursor_pos] + self._input_buffer[self._cursor_pos+1:]
                         self._render_input()
                     continue
+                if ch == curses.KEY_UP:
+                    # Browse command history backward (older commands)
+                    if self._command_history:
+                        if self._history_pos == -1:
+                            # Just started browsing - save current input
+                            self._history_temp = self._input_buffer
+                            self._history_pos = len(self._command_history) - 1
+                        elif self._history_pos > 0:
+                            self._history_pos -= 1
+
+                        self._input_buffer = self._command_history[self._history_pos]
+                        self._cursor_pos = len(self._input_buffer)
+                        self._render_input()
+                    continue
+
+                if ch == curses.KEY_DOWN:
+                    # Browse command history forward (newer commands)
+                    if self._history_pos >= 0:
+                        if self._history_pos < len(self._command_history) - 1:
+                            self._history_pos += 1
+                            self._input_buffer = self._command_history[self._history_pos]
+                        else:
+                            # Reached end - restore temp input
+                            self._history_pos = -1
+                            self._input_buffer = self._history_temp
+
+                        self._cursor_pos = len(self._input_buffer)
+                        self._render_input()
+                    continue
+
+                if ch == curses.KEY_PPAGE:  # Page Up
+                    # Scroll log up (show older messages)
+                    max_y, _ = self._log_win.getmaxyx() if self._log_win else (0, 0)
+                    max_scroll = max(0, len(self.lines) - max_y)
+                    self._log_scroll_offset = min(self._log_scroll_offset + max_y // 2, max_scroll)
+                    self._refresh_log()
+                    continue
+
+                if ch == curses.KEY_NPAGE:  # Page Down
+                    # Scroll log down (show newer messages)
+                    max_y, _ = self._log_win.getmaxyx() if self._log_win else (0, 0)
+                    self._log_scroll_offset = max(self._log_scroll_offset - max_y // 2, 0)
+                    self._refresh_log()
+                    continue
+
                 if ch == curses.KEY_LEFT:
                     if self._cursor_pos > 0:
                         self._cursor_pos -= 1
@@ -225,6 +318,29 @@ class TUI:
 
     def stop(self) -> None:
         self._stop.set()
+        # Save history on exit
+        self._save_history()
+
+    def _load_history(self) -> None:
+        """Load command history from persistent storage."""
+        try:
+            if self._history_file.exists():
+                with open(self._history_file, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                    # Load last 100 commands
+                    self._command_history = [line.rstrip('\n') for line in lines[-100:]]
+        except Exception:
+            pass  # Silently fail if can't load history
+
+    def _save_history(self) -> None:
+        """Save command history to persistent storage."""
+        try:
+            self._history_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._history_file, 'w', encoding='utf-8') as f:
+                for cmd in self._command_history:
+                    f.write(cmd + '\n')
+        except Exception:
+            pass  # Silently fail if can't save history
 
     # Internal helpers
     def _start_worker(self, on_input: Callable[[str], None], line: str) -> None:
@@ -257,6 +373,8 @@ class TUI:
         except queue.Empty:
             pass
         if changed:
+            # Reset scroll to bottom when new content arrives
+            self._log_scroll_offset = 0
             self._refresh_log()
 
     def _resize_windows(self) -> None:
@@ -283,8 +401,13 @@ class TUI:
             return
         self._log_win.erase()
         max_y, max_x = self._log_win.getmaxyx()
-        start = max(0, len(self.lines) - max_y)
-        for idx, line in enumerate(self.lines[start:]):
+
+        # Calculate start position based on scroll offset
+        # If scrolled up, show older messages; otherwise show newest
+        end_pos = len(self.lines) - self._log_scroll_offset
+        start = max(0, end_pos - max_y)
+
+        for idx, line in enumerate(self.lines[start:end_pos]):
             segments = _parse_ansi(line)
             x = 0
             for text, color_pair in segments:
@@ -294,6 +417,16 @@ class TUI:
                         x += len(text)
                 except curses.error:
                     pass
+
+        # Show scroll indicator if not at bottom
+        if self._log_scroll_offset > 0:
+            try:
+                indicator = f" ▲ -{self._log_scroll_offset} lines "
+                self._log_win.addstr(max_y - 1, max_x - len(indicator) - 1, indicator,
+                                   curses.color_pair(3) | curses.A_REVERSE)
+            except curses.error:
+                pass
+
         self._log_win.refresh()
 
     def _render_input(self) -> None:

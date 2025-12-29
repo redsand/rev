@@ -411,6 +411,8 @@ LOOP_GUARD_ENABLED = os.getenv("REV_LOOP_GUARD_ENABLED", "true").strip().lower()
 UCCT_ENABLED = os.getenv("REV_UCCT_ENABLED", "true").strip().lower() != "false"
 # Disabled by default until duplicate directory inclusion bug is fixed
 PREFLIGHT_ENABLED = os.getenv("REV_PREFLIGHT_ENABLED", "false").strip().lower() == "true"
+# Inject initial workspace examination task - disabled by default since decent LLMs naturally research first
+INJECT_INITIAL_RESEARCH = os.getenv("REV_INJECT_INITIAL_RESEARCH", "false").strip().lower() == "true"
 LLM_TRANSACTION_LOG_ENABLED = os.getenv("REV_LLM_TRACE", "false").strip().lower() == "true"
 LLM_TRANSACTION_LOG_PATH = os.getenv(
     "REV_LLM_TRACE_PATH",
@@ -464,7 +466,7 @@ PREFER_REUSE = os.getenv("REV_PREFER_REUSE", "true").lower() == "true"
 WARN_ON_NEW_FILES = os.getenv("REV_WARN_NEW_FILES", "true").lower() == "true"
 REQUIRE_REUSE_JUSTIFICATION = os.getenv("REV_REQUIRE_JUSTIFICATION", "false").lower() == "true"
 MAX_FILES_PER_FEATURE = int(os.getenv("REV_MAX_FILES", "5"))  # Encourage consolidation
-SIMILARITY_THRESHOLD = float(os.getenv("REV_SIMILARITY_THRESHOLD", "0.6"))  # For file name similarity
+SIMILARITY_THRESHOLD = float(os.getenv("REV_SIMILARITY_THRESHOLD", "0.4"))  # For file name similarity (lowered to catch more duplicates)
 
 # Security: Tool Permission Policy (REV-011)
 # PERMISSIONS_FAIL_OPEN: When permission check fails (e.g., malformed policy), should we allow or deny?

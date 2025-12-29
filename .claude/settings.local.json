@@ -38,7 +38,8 @@
       "Bash($env:PYTHONIOENCODING=\"utf-8\")",
       "Bash(python -c \"import tempfile, os, json; from pathlib import Path; from rev.workspace import init_workspace; from rev.tools.registry import execute_tool; from rev import config; tmp = Path\\(tempfile.mkdtemp\\(\\)\\); init_workspace\\(root=tmp\\); policy = tmp / ''tool_policy.yaml''; policy.write_text\\(''bad: yaml: {{''\\); os.chdir\\(str\\(tmp\\)\\); config.PERMISSIONS_FAIL_OPEN = False; test_file = tmp / ''test.txt''; test_file.write_text\\(''content''\\); result = execute_tool\\(''read_file'', {''file_path'': str\\(test_file\\)}, ''test''\\); print\\(''Result type:'', type\\(result\\)\\); print\\(''Result:'', result\\); parsed = json.loads\\(result\\) if result else None; print\\(''Parsed:'', parsed\\)\")",
       "Bash(dir /O-D /B \"C:\\\\Users\\\\champ\\\\source\\\\repos\\\\test-app\\\\.rev\\\\logs\")",
-      "Bash(dir \"C:\\\\Users\\\\champ\\\\source\\\\repos\\\\test-app\\\\.rev\\\\logs\" /B /O-D)"
+      "Bash(dir \"C:\\\\Users\\\\champ\\\\source\\\\repos\\\\test-app\\\\.rev\\\\logs\" /B /O-D)",
+      "Bash(wmic process where \"name=''python.exe''\" get commandline,processid)"
     ]
   }
 }

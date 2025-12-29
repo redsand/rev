@@ -379,6 +379,12 @@ def main():
         enable_prompt_optimization = True
         auto_optimize_prompt = True
 
+    # CRITICAL: In TUI mode, must use auto-optimize to avoid blocking input() calls
+    # TUI uses curses and stdin is not available for input() prompts
+    use_tui = args.tui or os.getenv("REV_TUI", "").lower() == "true"
+    if use_tui and enable_prompt_optimization:
+        auto_optimize_prompt = True  # Force auto-optimize in TUI mode
+
     # Determine ContextGuard settings
     # Priority: CLI flags > Environment variables > defaults
     enable_context_guard = True  # Default
@@ -397,6 +403,10 @@ def main():
         enable_context_guard = True
     if args.context_guard_auto:
         context_guard_interactive = False
+
+    # CRITICAL: In TUI mode, disable interactive prompts for ContextGuard too
+    if use_tui and enable_context_guard:
+        context_guard_interactive = False  # Auto-approve in TUI mode
 
     context_guard_threshold = args.context_guard_threshold
 
