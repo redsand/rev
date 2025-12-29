@@ -50,20 +50,35 @@ _PATH_EXTENSION_RE = re.compile(r"\.[A-Za-z0-9]{1,8}$")
 
 def _resolve_command(cmd_name: str) -> Optional[str | List[str]]:
     """Resolve a command name to its full path or execution wrapper.
-    
+
     On Windows, this correctly finds .cmd, .bat, and .exe files.
     If a .cmd or .bat file is found, it returns a list prefixed with cmd /c
     to ensure it can be executed with shell=False.
+
+    Windows built-in commands (like ren, rmdir, dir) are also wrapped with cmd /c
+    since they don't exist as standalone executables.
     """
+    # Windows built-in commands that are part of cmd.exe, not standalone executables
+    WINDOWS_BUILTINS = {
+        'dir', 'copy', 'move', 'ren', 'rename', 'del', 'erase',
+        'rmdir', 'rd', 'mkdir', 'md', 'type', 'echo', 'set',
+        'cd', 'chdir', 'cls', 'attrib', 'ver', 'vol', 'path',
+        'prompt', 'date', 'time', 'start', 'call', 'pushd', 'popd'
+    }
+
+    # Check if it's a Windows built-in command
+    if os.name == 'nt' and cmd_name.lower() in WINDOWS_BUILTINS:
+        return ["cmd.exe", "/c", cmd_name]
+
     resolved = shutil.which(cmd_name)
     if not resolved:
         return None
-        
+
     if os.name == 'nt':
         # If it's a batch file, we need cmd /c to run it with shell=False
         if resolved.lower().endswith(('.cmd', '.bat')):
             return ["cmd.exe", "/c", resolved]
-            
+
     return resolved
 
 

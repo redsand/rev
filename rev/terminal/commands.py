@@ -523,6 +523,41 @@ class ExitCommand(CommandHandler):
         return "__EXIT__"
 
 
+class HistoryCommand(CommandHandler):
+    """Show command history."""
+
+    def __init__(self):
+        super().__init__(
+            "history",
+            "Show command and input history",
+            aliases=["h"]
+        )
+
+    def execute(self, args: List[str], session_context: Dict[str, Any]) -> str:
+        from rev.terminal.history import get_history
+
+        history = get_history()
+        output = [create_header("Command History", width=80)]
+
+        cmd_history = history.get_command_history()
+        input_history = history.get_input_history()
+
+        if cmd_history:
+            output.append(create_section("Commands"))
+            for i, cmd in enumerate(cmd_history, 1):
+                output.append(f"  {i:3}. {cmd}")
+
+        if input_history:
+            output.append(create_section("Inputs"))
+            for i, inp in enumerate(input_history, 1):
+                output.append(f"  {i:3}. {inp[:80]}{'...' if len(inp) > 80 else ''}")
+
+        if not cmd_history and not input_history:
+            output.append("  No history yet")
+
+        return "\n".join(output)
+
+
 class DoctorCommand(CommandHandler):
     """Check system health and configuration."""
 
@@ -1143,6 +1178,7 @@ def _build_command_registry() -> Dict[str, CommandHandler]:
         SaveCommand(),
         ResetCommand(),
         ExitCommand(),
+        HistoryCommand(),
         DoctorCommand(),
         AddDirCommand(),
         InitCommand(),

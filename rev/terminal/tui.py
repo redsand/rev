@@ -15,6 +15,15 @@ from pathlib import Path
 from typing import Callable, Optional
 
 
+# Global reference to active TUI instance (for menu callbacks)
+_active_tui: Optional['TUI'] = None
+
+
+def get_active_tui() -> Optional['TUI']:
+    """Get the currently active TUI instance, if any."""
+    return _active_tui
+
+
 class TuiStream:
     """File-like stream that routes writes to a TUI log callback."""
 
@@ -111,6 +120,9 @@ class TUI:
         # Scrollback control
         self._log_scroll_offset = 0  # How many lines scrolled up from bottom
 
+        # Curses screen reference (set when curses starts)
+        self._stdscr = None
+
         # Load persistent history
         self._load_history()
 
@@ -128,9 +140,15 @@ class TUI:
 
     def run(self, on_input: Callable[[str], None], *, initial_input: Optional[str] = None, on_feedback: Optional[Callable[[str], bool]] = None) -> None:
         """Start the curses UI and dispatch input lines to on_input."""
+        global _active_tui
+        _active_tui = self  # Set global reference
+
         self._on_feedback = on_feedback
 
         def _curses_main(stdscr):
+            # Store stdscr reference for menu functionality
+            self._stdscr = stdscr
+
             # Initialize colors
             curses.start_color()
             curses.use_default_colors()
@@ -211,18 +229,6 @@ class TUI:
                     self._render_input()
 
                     if line.strip():
-                        # Handle /history command
-                        if line.strip() == "/history":
-                            self.log("\x1b[95m" + self.prompt + "\x1b[0m" + line)
-                            self.log("\n\x1b[96m=== Command History ===\x1b[0m")
-                            if not self._command_history:
-                                self.log("\x1b[90m(no commands yet)\x1b[0m")
-                            else:
-                                for i, cmd in enumerate(self._command_history, 1):
-                                    self.log(f"\x1b[90m{i:3}.\x1b[0m {cmd}")
-                            self.log("\x1b[96m" + "=" * 23 + "\x1b[0m\n")
-                            continue
-
                         # Add to command history (keep last 100)
                         self._command_history.append(line)
                         if len(self._command_history) > 100:
@@ -230,6 +236,9 @@ class TUI:
 
                         # Log with prompt color
                         self.log("\x1b[95m" + self.prompt + "\x1b[0m" + line)
+
+                        # Pass ALL input to the callback
+                        # The REPL's _handle_input_line will process commands via execute_command()
                         self._start_worker(on_input, line)
                     continue
                 if ch in (27,):  # ESC
@@ -316,10 +325,99 @@ class TUI:
 
         curses.wrapper(_curses_main)
 
+    def show_menu(self, title: str, options: list[str]) -> int:
+        """
+        Display a curses menu with up/down navigation.
+
+        Args:
+            title: The menu title
+            options: List of option strings
+
+        Returns:
+            The index of the selected option (0-based), or -1 if cancelled
+        """
+        if not hasattr(self, '_stdscr') or self._stdscr is None:
+            # TUI not initialized yet, fall back to index 0
+            return 0
+
+        selected_idx = [0]  # Use list to allow modification in nested function
+        done = [False]
+
+        # Display title once
+        self.log(f"\n\x1b[96m{title}\x1b[0m")
+
+        # Calculate menu start position (track where menu begins in lines)
+        menu_start_line = len(self.lines)
+
+        # Initial menu display
+        for i, option in enumerate(options):
+            if i == selected_idx[0]:
+                self.log(f"\x1b[7m  {option}\x1b[0m")  # Reverse video for selected
+            else:
+                self.log(f"  {option}")
+
+        # Force refresh
+        self._refresh_log()
+
+        # Menu interaction loop
+        while not done[0]:
+            try:
+                ch = self._stdscr.getch()
+            except Exception:
+                time.sleep(0.01)
+                continue
+
+            if ch == curses.KEY_UP and selected_idx[0] > 0:
+                selected_idx[0] -= 1
+                # Redraw menu options
+                for i, option in enumerate(options):
+                    line_idx = menu_start_line + i
+                    if line_idx < len(self.lines):
+                        if i == selected_idx[0]:
+                            self.lines[line_idx] = f"\x1b[7m  {option}\x1b[0m"
+                        else:
+                            self.lines[line_idx] = f"  {option}"
+                self._refresh_log()
+
+            elif ch == curses.KEY_DOWN and selected_idx[0] < len(options) - 1:
+                selected_idx[0] += 1
+                # Redraw menu options
+                for i, option in enumerate(options):
+                    line_idx = menu_start_line + i
+                    if line_idx < len(self.lines):
+                        if i == selected_idx[0]:
+                            self.lines[line_idx] = f"\x1b[7m  {option}\x1b[0m"
+                        else:
+                            self.lines[line_idx] = f"  {option}"
+                self._refresh_log()
+
+            elif ch in (curses.KEY_ENTER, 10, 13):
+                # Remove menu lines
+                del self.lines[menu_start_line:menu_start_line + len(options)]
+                # Show selection
+                self.log(f"\x1b[92m✓ Selected: {options[selected_idx[0]]}\x1b[0m\n")
+                self._refresh_log()
+                done[0] = True
+                return selected_idx[0]
+
+            elif ch == 27:  # ESC
+                # Remove menu lines
+                del self.lines[menu_start_line:menu_start_line + len(options)]
+                self.log(f"\x1b[93m✗ Cancelled\x1b[0m\n")
+                self._refresh_log()
+                done[0] = True
+                return -1
+
+        return -1
+
     def stop(self) -> None:
+        global _active_tui
         self._stop.set()
         # Save history on exit
         self._save_history()
+        # Clear global reference
+        if _active_tui is self:
+            _active_tui = None
 
     def _load_history(self) -> None:
         """Load command history from persistent storage."""

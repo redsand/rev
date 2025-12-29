@@ -187,37 +187,65 @@ def prompt_optimization_dialog(
     if not interactive:
         return improved, True
 
-    print("\n[Options]")
-    print("  [1] Use the suggested improvement")
-    print("  [2] Keep the original request")
-    print("  [3] Enter a custom request\n")
+    # Check if TUI is active and use curses menu
+    from rev.terminal.tui import get_active_tui
+    tui = get_active_tui()
 
-    while True:
-        try:
-            choice = input("Choice [1-3]: ").strip()
+    if tui is not None:
+        # Use curses menu in TUI mode
+        options = [
+            "[1] Use the suggested improvement",
+            "[2] Keep the original request",
+            "[3] Enter a custom request"
+        ]
 
-            if choice == "1":
-                print(f"\n✓ Using improved request.\n")
-                return improved, True
+        selected = tui.show_menu("Prompt Optimization - Choose an option:", options)
 
-            elif choice == "2":
-                print(f"\n✓ Using original request.\n")
-                return user_request, False
-
-            elif choice == "3":
-                custom = input("Enter your custom request: ").strip()
-                if custom:
-                    print(f"\n✓ Using custom request.\n")
-                    return custom, True
-                else:
-                    print("Empty request. Please try again.\n")
-
-            else:
-                print("Invalid choice. Please enter 1, 2, or 3.\n")
-
-        except (KeyboardInterrupt, EOFError):
-            print("\n\nUsing original request.\n")
+        if selected == 0:  # Use suggested improvement
+            return improved, True
+        elif selected == 1:  # Keep original
             return user_request, False
+        elif selected == 2:  # Custom request
+            # For custom request, we still need to prompt for input
+            # This will be handled by the TUI's normal input flow
+            print("\n📝 Enter your custom request at the prompt below:")
+            return user_request, False  # Fall back to original for now
+        else:  # ESC or error
+            print("\n✓ Using original request (ESC pressed).\n")
+            return user_request, False
+    else:
+        # Use traditional text-based menu (non-TUI mode)
+        print("\n[Options]")
+        print("  [1] Use the suggested improvement")
+        print("  [2] Keep the original request")
+        print("  [3] Enter a custom request\n")
+
+        while True:
+            try:
+                choice = input("Choice [1-3]: ").strip()
+
+                if choice == "1":
+                    print(f"\n✓ Using improved request.\n")
+                    return improved, True
+
+                elif choice == "2":
+                    print(f"\n✓ Using original request.\n")
+                    return user_request, False
+
+                elif choice == "3":
+                    custom = input("Enter your custom request: ").strip()
+                    if custom:
+                        print(f"\n✓ Using custom request.\n")
+                        return custom, True
+                    else:
+                        print("Empty request. Please try again.\n")
+
+                else:
+                    print("Invalid choice. Please enter 1, 2, or 3.\n")
+
+            except (KeyboardInterrupt, EOFError):
+                print("\n\nUsing original request.\n")
+                return user_request, False
 
 
 def optimize_prompt_if_needed(

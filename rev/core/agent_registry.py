@@ -42,6 +42,9 @@ class AgentRegistry:
 AgentRegistry.register_agent("add", CodeWriterAgent)
 AgentRegistry.register_agent("edit", CodeWriterAgent)
 AgentRegistry.register_agent("create_directory", CodeWriterAgent)  # File/directory creation
+AgentRegistry.register_agent("delete", CodeWriterAgent)  # File deletion
+AgentRegistry.register_agent("move", CodeWriterAgent)  # File move/rename
+AgentRegistry.register_agent("rename", CodeWriterAgent)  # File rename (alias for move)
 AgentRegistry.register_agent("refactor", RefactoringAgent)
 AgentRegistry.register_agent("refracto", RefactoringAgent)
 AgentRegistry.register_agent("refacto", RefactoringAgent)
@@ -50,6 +53,8 @@ AgentRegistry.register_agent("general", RefactoringAgent)
 
 # Testing and debugging agents
 AgentRegistry.register_agent("test", TestExecutorAgent)
+AgentRegistry.register_agent("run", TestExecutorAgent)  # Command execution
+AgentRegistry.register_agent("execute", TestExecutorAgent)  # Command execution (alias)
 AgentRegistry.register_agent("debug", DebuggingAgent)
 AgentRegistry.register_agent("fix", DebuggingAgent)
 

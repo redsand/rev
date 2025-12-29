@@ -3031,7 +3031,7 @@ class Orchestrator:
 
         # PERFORMANCE FIX 1: Track consecutive research tasks to prevent endless loops
         consecutive_reads: int = 0
-        MAX_CONSECUTIVE_READS: int = 5  # Allow max 5 consecutive READ tasks
+        MAX_CONSECUTIVE_READS: int = 10  # Allow max 10 consecutive READ tasks
 
         while True:
             iteration += 1
@@ -4288,6 +4288,36 @@ class Orchestrator:
             if not ok:
                 task.status = TaskStatus.FAILED
                 task.error = constraint_error
+
+                # RECOVERY LOGIC: Track tool execution failures and provide explicit guidance
+                if "Write action completed without tool execution" in constraint_error:
+                    tool_failure_count = context.agent_state.get("tool_execution_failure_count", 0)
+                    context.set_agent_state("tool_execution_failure_count", tool_failure_count + 1)
+
+                    print(f"\n  ⚠️  {colorize('LLM FAILED TO EXECUTE TOOLS', Colors.BRIGHT_YELLOW)} (failure #{tool_failure_count + 1})")
+                    print(f"  {colorize('The LLM returned text instead of calling tools', Colors.BRIGHT_BLACK)}")
+
+                    # Circuit breaker: Too many tool execution failures
+                    if tool_failure_count >= 5:
+                        context.set_agent_state("no_retry", True)
+                        context.add_error(f"Circuit breaker: {tool_failure_count} consecutive tool execution failures")
+                        print(f"\n[{colorize('🛑 CIRCUIT BREAKER: TOOL EXECUTION FAILURES', Colors.BRIGHT_RED, bold=True)}]")
+                        print(f"{colorize(f'The LLM has failed to execute tools {tool_failure_count} times.', Colors.BRIGHT_WHITE)}")
+                        print(f"{colorize('This model does not properly support function calling.', Colors.BRIGHT_WHITE)}")
+                        print(f"\n{colorize('SOLUTION:', Colors.BRIGHT_YELLOW, bold=True)}")
+                        print(f"{colorize('  Switch to a model with better tool-calling capabilities:', Colors.BRIGHT_WHITE)}")
+                        print(f"{colorize('  - claude-sonnet (Anthropic)', Colors.BRIGHT_GREEN)}")
+                        print(f"{colorize('  - gpt-4 (OpenAI)', Colors.BRIGHT_GREEN)}")
+                        print(f"{colorize('  - mistral-large (Mistral)', Colors.BRIGHT_GREEN)}")
+                        print(f"{colorize('  - deepseek-coder (DeepSeek)', Colors.BRIGHT_GREEN)}")
+                        print(f"\n{colorize('Current model may be optimized for text generation, not tool use.', Colors.BRIGHT_BLACK)}\n")
+                        return False
+
+                    if tool_failure_count >= 2:
+                        print(f"  {colorize('⚠️  Multiple tool execution failures detected', Colors.BRIGHT_RED)}")
+                        print(f"  {colorize('Recommendation: Try a different model with better tool-calling support', Colors.BRIGHT_YELLOW)}")
+                        print(f"  {colorize('Current model may not properly support function calling', Colors.BRIGHT_BLACK)}\n")
+
                 return False
             # If sub-agent reported tool error, fail the task and replan.
             try:

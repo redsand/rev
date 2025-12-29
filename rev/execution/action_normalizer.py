@@ -28,6 +28,14 @@ _EXACT_ALIASES: dict[str, str] = {
     "inspect": "read",
     "view": "read",
     "explain": "read",
+    # file operation aliases
+    "rename_file": "rename",
+    "move_file": "move",
+    "delete_file": "delete",
+    "remove_file": "delete",
+    "run_cmd": "run",
+    "run_command": "run",
+    "exec": "execute",
     # known refactor typos
     "refator": "refactor",
     "refracto": "refactor",
