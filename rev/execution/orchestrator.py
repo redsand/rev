@@ -3165,17 +3165,19 @@ class Orchestrator:
             self.context.set_state_manager(StateManager(self.context.plan))
 
         if self.context.resume:
-            # Reset redundant-read counters and blocked read signatures on resume.
+            # Reset loop-guard/redundant-read counters and blocked read signatures on resume.
             completed_tasks = []
             self.context.set_agent_state("blocked_action_sigs", set())
-            print("  [resume] Reset redundant-read counters for new run")
+            self.context.set_agent_state("loop_guard_verification_attempted", False)
+            print("  [resume] Reset loop-guard counters for new run")
 
         iteration = len(self.context.plan.tasks)
         action_counts: Dict[str, int] = defaultdict(int)
-        # Re-populate action counts from history
-        for task in self.context.plan.tasks:
-            action_sig = f"{(task.action_type or '').strip().lower()}::{task.description.strip().lower()}"
-            action_counts[action_sig] += 1
+        # Re-populate action counts from history (skip on resume to avoid loop-guard carryover)
+        if not (self.context.resume and self.context.resume_plan):
+            for task in self.context.plan.tasks:
+                action_sig = f"{(task.action_type or '').strip().lower()}::{task.description.strip().lower()}"
+                action_counts[action_sig] += 1
 
         failure_counts: Dict[str, int] = defaultdict(int)
         last_task_signature: Optional[str] = None
@@ -3737,8 +3739,8 @@ class Orchestrator:
                             next_task.action_type = "test"
                             next_task.description = (
                                 f"Instead of re-reading {target_path}, validate it by running: "
-                                f"1) npm run lint (if available) to check syntax, or "
-                                f"2) npm run build to verify it compiles correctly. "
+                                f"1) `npm run lint` to check syntax (if available), or "
+                                f"2) `npm run build` to verify it compiles correctly. "
                                 f"This will reveal actual issues rather than just reading the same file again."
                             )
                         elif file_ext in ['py']:
