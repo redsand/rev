@@ -482,7 +482,7 @@ class TestExecutorAgent(BaseAgent):
                 if candidate:
                     return candidate
         for known in ("frontend", "client", "web", "ui", "backend", "server", "api"):
-            if re.search(rf"\b{known}\b", desc, re.IGNORECASE):
+            if re.search(rf"(?:^|\s){known}(?:$|\s|[.,;:\)\]])", desc, re.IGNORECASE):
                 return known
         return None
 

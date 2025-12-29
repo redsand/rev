@@ -1632,6 +1632,17 @@ def _coerce_command_intent_to_test(task: Task) -> tuple[bool, List[str]]:
     if action in {"test", "tool", "run", "execute"}:
         return True, []
 
+    def _is_explicit_command_invocation(text: str) -> bool:
+        if not text:
+            return False
+        return bool(
+            re.search(
+                r"^\s*(?:run|execute|run_cmd)\b|^\s*(?:npm|yarn|pnpm|pip|pipenv|poetry|conda|bundle|composer|"
+                r"apt-get|apt|brew|choco|winget|yum|dnf|apk|pacman|zypper)\b",
+                text,
+            )
+        )
+
     # Detect command execution intent
     desc_l = desc.lower()
     command_intent = bool(
@@ -1642,6 +1653,10 @@ def _coerce_command_intent_to_test(task: Task) -> tuple[bool, List[str]]:
             desc_l,
         )
     )
+
+    # Do not coerce read-only tasks unless the description is an explicit command invocation.
+    if action in {"read", "analyze", "research", "review"} and not _is_explicit_command_invocation(desc_l):
+        return True, []
 
     if command_intent:
         prev = action
