@@ -195,3 +195,133 @@ def recover_tool_call_from_text(
         return recovered
 
     return None
+
+
+def _extract_tool_name_lenient(text: str) -> Optional[str]:
+    if not text:
+        return None
+    patterns = [
+        r'"tool_name"\s*:\s*"([^"]+)"',
+        r'"name"\s*:\s*"([^"]+)"',
+        r'"tool"\s*:\s*"([^"]+)"',
+        r'"function"\s*:\s*{\s*"name"\s*:\s*"([^"]+)"',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            name = match.group(1).strip()
+            if name:
+                return name
+    return None
+
+
+def _decode_json_string_fragment(value: str) -> str:
+    if value is None:
+        return ""
+    try:
+        return json.loads(f"\"{value}\"")
+    except Exception:
+        return value
+
+
+def _extract_json_string_value(text: str, key: str) -> Optional[str]:
+    if not text or not key:
+        return None
+    pattern = rf'"{re.escape(key)}"\s*:\s*"'
+    match = re.search(pattern, text)
+    if not match:
+        return None
+    start = match.end()
+    escaped = False
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == "\"":
+            raw_value = text[start:idx]
+            return _decode_json_string_fragment(raw_value)
+    raw_value = text[start:]
+    return _decode_json_string_fragment(raw_value.rstrip())
+
+
+def _extract_arguments_object(text: str) -> Optional[Dict[str, Any]]:
+    if not text:
+        return None
+    match = re.search(r'"arguments"\s*:\s*{', text)
+    if not match:
+        return None
+    start = match.end() - 1
+    depth = 0
+    end = None
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = idx + 1
+                break
+    if end is None:
+        return None
+    snippet = text[start:end]
+    try:
+        parsed = json.loads(snippet)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def recover_tool_call_from_text_lenient(
+    content: str,
+    *,
+    allowed_tools: Optional[Iterable[str]] = None,
+) -> Optional[RecoveredToolCall]:
+    """Best-effort recovery for JSON-like tool calls (handles truncated output)."""
+    if not content:
+        return None
+    tool_name = _extract_tool_name_lenient(content)
+    if not tool_name:
+        return None
+    allowed = set(allowed_tools) if allowed_tools is not None else None
+    if allowed is not None and tool_name not in allowed:
+        return None
+
+    args_obj = _extract_arguments_object(content)
+    if args_obj is not None:
+        return RecoveredToolCall(name=tool_name, arguments=args_obj)
+
+    tool_lower = tool_name.lower()
+    if tool_lower in {"write_file", "append_to_file"}:
+        path = _extract_json_string_value(content, "path")
+        content_value = _extract_json_string_value(content, "content")
+        if path and content_value is not None:
+            return RecoveredToolCall(name=tool_name, arguments={"path": path, "content": content_value})
+        return None
+
+    if tool_lower == "replace_in_file":
+        path = _extract_json_string_value(content, "path")
+        find_value = _extract_json_string_value(content, "find") or _extract_json_string_value(content, "old_string")
+        replace_value = _extract_json_string_value(content, "replace") or _extract_json_string_value(content, "new_string")
+        if path and find_value is not None and replace_value is not None:
+            return RecoveredToolCall(name=tool_name, arguments={"path": path, "find": find_value, "replace": replace_value})
+        return None
+
+    if tool_lower in {"move_file", "copy_file"}:
+        src = _extract_json_string_value(content, "src") or _extract_json_string_value(content, "source")
+        dest = _extract_json_string_value(content, "dest") or _extract_json_string_value(content, "path")
+        if src and dest:
+            return RecoveredToolCall(name=tool_name, arguments={"src": src, "dest": dest})
+        return None
+
+    if tool_lower in {"delete_file", "read_file", "get_file_info", "file_exists"}:
+        path = _extract_json_string_value(content, "path")
+        if path:
+            return RecoveredToolCall(name=tool_name, arguments={"path": path})
+        return None
+
+    return None

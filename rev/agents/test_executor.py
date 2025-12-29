@@ -13,6 +13,8 @@ from rev.agents.context_provider import build_context_and_tools
 from rev.agents.subagent_io import build_subagent_output
 from rev.tools.project_types import detect_test_command
 from rev import config
+from rev.core.tool_call_recovery import recover_tool_call_from_text, recover_tool_call_from_text_lenient
+from rev.core.tool_call_retry import retry_tool_call_with_response_format
 
 TEST_EXECUTOR_SYSTEM_PROMPT = """You are a specialized Test Executor agent. Your purpose is to run tests, validate implementations, and perform execution checks.
 
@@ -39,6 +41,7 @@ CRITICAL RULES:
 8. Prefer `run_tests` for targeted tests and `run_cmd` for general validation or script execution.
 9. If the task is to "install" something, use `run_cmd`.
 10. Your response MUST be a single, valid JSON object representing the tool call.
+11. For Vitest, ALWAYS use a non-watch command that exits (e.g., `npx vitest run <file>` or `npx vitest --run <file>`). Avoid `npx vitest <file>` which starts watch mode.
 
 Example 1 - TARGETED test (PREFERRED):
 Task: "Run tests for tests/user_crud.test.js to verify the fix"
@@ -133,43 +136,60 @@ class TestExecutorAgent(BaseAgent):
 
             if not response or "message" not in response or "tool_calls" not in response["message"]:
                 # Try to recover tool call from text content before falling back to heuristics
-                from rev.core.tool_call_recovery import recover_tool_call_from_text
-
                 text_content = response.get("message", {}).get("content", "") if response else ""
-                if text_content:
-                    recovered = recover_tool_call_from_text(
+                allowed_tools = ['run_tests', 'run_cmd', 'file_exists', 'list_dir']
+                recovered = recover_tool_call_from_text(
+                    text_content,
+                    allowed_tools=allowed_tools,
+                )
+                if not recovered:
+                    recovered = recover_tool_call_from_text_lenient(
                         text_content,
-                        allowed_tools=['run_tests', 'run_cmd', 'file_exists', 'list_dir']
+                        allowed_tools=allowed_tools,
                     )
                     if recovered:
-                        print(f"  -> Recovered tool call from text: {recovered.name}")
+                        print("  [WARN] TestExecutorAgent: using lenient tool call recovery from text output")
+                if not recovered:
+                    recovered = retry_tool_call_with_response_format(
+                        messages,
+                        selected_tools,
+                        allowed_tools=allowed_tools,
+                    )
+                    if recovered:
+                        print(f"  -> Retried tool call with JSON format: {recovered.name}")
+                if recovered:
+                    print(f"  -> Recovered tool call from text: {recovered.name}")
 
-                        if config.TEST_EXECUTOR_COMMAND_CORRECTION_ENABLED and recovered.name in ("run_tests", "run_cmd"):
-                            cmd = recovered.arguments.get("cmd", "")
-                            corrected_cmd = self._validate_and_correct_test_command(cmd, task, context)
-                            if corrected_cmd != cmd:
-                                print(f"  [!] Correcting test command: {cmd} -> {corrected_cmd}")
-                                recovered.arguments["cmd"] = corrected_cmd
+                    if config.TEST_EXECUTOR_COMMAND_CORRECTION_ENABLED and recovered.name in ("run_tests", "run_cmd"):
+                        cmd = recovered.arguments.get("cmd", "")
+                        corrected_cmd = self._validate_and_correct_test_command(cmd, task, context)
+                        if corrected_cmd != cmd:
+                            print(f"  [!] Correcting test command: {cmd} -> {corrected_cmd}")
+                            recovered.arguments["cmd"] = corrected_cmd
 
-                        raw_result = execute_tool(recovered.name, recovered.arguments, agent_name="test_executor")
+                    blocked = self._block_non_terminating_command(recovered.name, recovered.arguments, task, context)
+                    if blocked:
+                        return blocked
 
-                        # Record test iteration for skip logic
-                        if recovered.name in ("run_tests", "run_cmd") and ("test" in str(recovered.arguments).lower() or "pytest" in str(recovered.arguments).lower()):
-                            context.set_agent_state("last_test_iteration", context.get_agent_state("current_iteration", 0))
-                            try:
-                                res_data = json.loads(raw_result)
-                                if isinstance(res_data, dict) and "rc" in res_data:
-                                    context.set_agent_state("last_test_rc", res_data["rc"])
-                            except: pass
+                    raw_result = execute_tool(recovered.name, recovered.arguments, agent_name="test_executor")
 
-                        return build_subagent_output(
-                            agent_name="TestExecutorAgent",
-                            tool_name=recovered.name,
-                            tool_args=recovered.arguments,
-                            tool_output=raw_result,
-                            context=context,
-                            task_id=task.task_id,
-                        )
+                    # Record test iteration for skip logic
+                    if recovered.name in ("run_tests", "run_cmd") and ("test" in str(recovered.arguments).lower() or "pytest" in str(recovered.arguments).lower()):
+                        context.set_agent_state("last_test_iteration", context.get_agent_state("current_iteration", 0))
+                        try:
+                            res_data = json.loads(raw_result)
+                            if isinstance(res_data, dict) and "rc" in res_data:
+                                context.set_agent_state("last_test_rc", res_data["rc"])
+                        except: pass
+
+                    return build_subagent_output(
+                        agent_name="TestExecutorAgent",
+                        tool_name=recovered.name,
+                        tool_args=recovered.arguments,
+                        tool_output=raw_result,
+                        context=context,
+                        task_id=task.task_id,
+                    )
 
                 # Only fall back to heuristics if recovery also failed
                 if not config.TEST_EXECUTOR_FALLBACK_ENABLED:
@@ -205,6 +225,10 @@ class TestExecutorAgent(BaseAgent):
                 if corrected_cmd != cmd:
                     print(f"  [!] Correcting test command: {cmd} -> {corrected_cmd}")
                     arguments["cmd"] = corrected_cmd
+
+            blocked = self._block_non_terminating_command(tool_name, arguments, task, context)
+            if blocked:
+                return blocked
 
             print(f"  -> Executing: {tool_name} {arguments}")
             raw_result = execute_tool(tool_name, arguments, agent_name="test_executor")
@@ -366,6 +390,69 @@ class TestExecutorAgent(BaseAgent):
         cleaned = re.sub(r"\\s+", " ", cleaned)
         return f"{cleaned} --runTestsByPath {test_path}".strip()
 
+    def _detect_non_terminating_command(self, cmd: str | list[str]) -> Optional[str]:
+        cmd_text = " ".join(cmd) if isinstance(cmd, list) else str(cmd or "")
+        if not cmd_text.strip():
+            return None
+        try:
+            tokens = [str(t) for t in cmd] if isinstance(cmd, list) else shlex.split(cmd_text)
+        except ValueError:
+            tokens = cmd_text.split()
+        tokens_lower = [t.lower() for t in tokens]
+
+        vitest_idx = None
+        for idx, tok in enumerate(tokens_lower):
+            if tok.endswith("vitest") or tok.endswith("vitest.cmd"):
+                vitest_idx = idx
+                break
+        if vitest_idx is not None:
+            has_run_flag = any(tok == "--run" or tok.startswith("--run=") for tok in tokens_lower)
+            has_run_subcommand = any(tok == "run" for tok in tokens_lower[vitest_idx + 1 : vitest_idx + 3])
+            watch_disabled = any(tok in ("--watch=false", "--watch=0") for tok in tokens_lower)
+            if not watch_disabled and "--watch" in tokens_lower:
+                for idx, tok in enumerate(tokens_lower):
+                    if tok == "--watch" and idx + 1 < len(tokens_lower):
+                        if tokens_lower[idx + 1] in ("false", "0", "no"):
+                            watch_disabled = True
+                            break
+
+            if not has_run_flag and not has_run_subcommand and not watch_disabled:
+                return (
+                    "Blocked non-terminating Vitest command. Use `npx vitest run <file>` or "
+                    "`npx vitest --run <file>` (or disable watch with `--watch=false`)."
+                )
+        return None
+
+    def _block_non_terminating_command(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        task: Task,
+        context: RevContext,
+    ) -> Optional[str]:
+        if tool_name not in ("run_cmd", "run_tests"):
+            return None
+        if not isinstance(arguments, dict):
+            return None
+        cmd = arguments.get("cmd")
+        if not cmd:
+            return None
+        reason = self._detect_non_terminating_command(cmd)
+        if not reason:
+            return None
+        payload = json.dumps(
+            {"rc": 1, "stdout": "", "stderr": reason, "blocked": True, "cmd": cmd},
+            ensure_ascii=False,
+        )
+        return build_subagent_output(
+            agent_name="TestExecutorAgent",
+            tool_name=tool_name,
+            tool_args=arguments,
+            tool_output=payload,
+            context=context,
+            task_id=task.task_id,
+        )
+
     def _should_skip_pytest(self, task: Task, context: RevContext) -> bool:
         """Heuristic to skip full pytest suites if nothing changed."""
         desc_lower = (task.description or "").lower()
@@ -397,6 +484,9 @@ class TestExecutorAgent(BaseAgent):
             cmd = explicit_cmd
             workdir = self._extract_workdir_hint(desc)
             cmd = self._apply_workdir(cmd, workdir)
+            blocked = self._block_non_terminating_command("run_cmd", {"cmd": cmd}, task, context)
+            if blocked:
+                return blocked
             print(f"  [i] Using explicit command from task: {cmd}")
             raw_result = execute_tool("run_cmd", {"cmd": cmd})
             return build_subagent_output(
@@ -478,6 +568,10 @@ class TestExecutorAgent(BaseAgent):
         workdir = self._extract_workdir_hint(desc)
         cmd = self._apply_workdir(cmd, workdir)
 
+        blocked = self._block_non_terminating_command("run_cmd", {"cmd": cmd}, task, context)
+        if blocked:
+            return blocked
+
         print(f"  [i] Using fallback heuristic: {cmd}")
         raw_result = execute_tool("run_cmd", {"cmd": cmd})
         return build_subagent_output(
@@ -527,6 +621,9 @@ class TestExecutorAgent(BaseAgent):
     def _execute_explicit_command(self, task: Task, context: RevContext, cmd: str) -> str:
         workdir = self._extract_workdir_hint(task.description or "")
         cmd = self._apply_workdir(cmd, workdir)
+        blocked = self._block_non_terminating_command("run_cmd", {"cmd": cmd}, task, context)
+        if blocked:
+            return blocked
         print(f"  [i] Using explicit command from task: {cmd}")
         raw_result = execute_tool("run_cmd", {"cmd": cmd})
         return build_subagent_output(

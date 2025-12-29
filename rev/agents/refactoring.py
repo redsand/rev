@@ -8,7 +8,7 @@ from rev.models.task import Task
 from rev.tools.registry import execute_tool, get_available_tools
 from rev.llm.client import ollama_chat
 from rev.core.context import RevContext
-from rev.core.tool_call_recovery import recover_tool_call_from_text
+from rev.core.tool_call_recovery import recover_tool_call_from_text, recover_tool_call_from_text_lenient
 from rev.core.tool_call_retry import retry_tool_call_with_response_format
 from rev.agents.context_provider import build_context_and_tools
 from rev.agents.subagent_io import build_subagent_output
@@ -255,20 +255,27 @@ class RefactoringAgent(BaseAgent):
             if error_type:
                 recovered = None
                 retried = False
-                recovered = retry_tool_call_with_response_format(
-                    messages,
-                    available_tools,
-                    allowed_tools=[t["function"]["name"] for t in available_tools],
-                )
-                if recovered:
-                    retried = True
-                    print(f"  -> Retried tool call with JSON format: {recovered.name}")
                 if response and isinstance(response.get("message"), dict):
+                    recovered = recover_tool_call_from_text(
+                        response["message"].get("content", ""),
+                        allowed_tools=[t["function"]["name"] for t in available_tools],
+                    )
                     if not recovered:
-                        recovered = recover_tool_call_from_text(
+                        recovered = recover_tool_call_from_text_lenient(
                             response["message"].get("content", ""),
                             allowed_tools=[t["function"]["name"] for t in available_tools],
                         )
+                        if recovered:
+                            print("  [WARN] RefactoringAgent: using lenient tool call recovery from text output")
+                if not recovered:
+                    recovered = retry_tool_call_with_response_format(
+                        messages,
+                        available_tools,
+                        allowed_tools=[t["function"]["name"] for t in available_tools],
+                    )
+                    if recovered:
+                        retried = True
+                        print(f"  -> Retried tool call with JSON format: {recovered.name}")
                 if recovered:
                     if not recovered.name:
                         return self.make_failure_signal("missing_tool", "Recovered tool call missing name")

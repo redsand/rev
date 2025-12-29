@@ -6,11 +6,11 @@ from rev.llm.client import ollama_chat
 from rev.core.context import RevContext
 from rev.execution.safety import is_scary_operation, prompt_scary_operation
 from difflib import unified_diff
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import re
 from pathlib import Path
 
-from rev.core.tool_call_recovery import recover_tool_call_from_text, RecoveredToolCall
+from rev.core.tool_call_recovery import recover_tool_call_from_text, recover_tool_call_from_text_lenient, RecoveredToolCall
 from rev.core.tool_call_retry import retry_tool_call_with_response_format
 from rev.agents.context_provider import build_context_and_tools
 from rev.agents.subagent_io import build_subagent_output
@@ -521,6 +521,34 @@ class CodeWriterAgent(BaseAgent):
             return recovered
         return None
 
+    def _retry_with_tool_call_repair(
+        self,
+        messages: List[Dict[str, str]],
+        raw_content: str,
+        *,
+        allowed_tools: List[str],
+        tools: List[Dict[str, Any]],
+    ) -> Optional[RecoveredToolCall]:
+        """Attempt to repair a tool call when the model returned JSON-like text."""
+        if not raw_content:
+            return None
+        if not any(token in raw_content for token in ("tool_name", "\"arguments\"", "\"function\"")):
+            return None
+        guidance = (
+            "Your previous response attempted a tool call but was invalid or truncated. "
+            "Use it as a hint and return ONLY a valid JSON tool call object with "
+            "\"tool_name\" and \"arguments\". No commentary."
+        )
+        repair_messages = list(messages) + [
+            {"role": "assistant", "content": raw_content},
+            {"role": "user", "content": guidance},
+        ]
+        return retry_tool_call_with_response_format(
+            repair_messages,
+            tools,
+            allowed_tools=allowed_tools,
+        )
+
     def _color_diff_line(self, line: str) -> str:
         """Apply color coding to diff lines (matching linear mode formatting)."""
         if line.startswith("+++") or line.startswith("---"):
@@ -1011,19 +1039,36 @@ class CodeWriterAgent(BaseAgent):
             if error_type:
                 if error_type in {"text_instead_of_tool_call", "empty_tool_calls", "missing_tool_calls"}:
                     retried = False
-                    recovered = retry_tool_call_with_response_format(
-                        messages,
-                        available_tools,
+                    recovered = recover_tool_call_from_text(
+                        response.get("message", {}).get("content", ""),
                         allowed_tools=recovery_allowed_tools,
                     )
-                    if recovered:
-                        retried = True
-                        print(f"  -> Retried tool call with JSON format: {recovered.name}")
-                    else:
-                        recovered = recover_tool_call_from_text(
+                    if not recovered:
+                        recovered = recover_tool_call_from_text_lenient(
                             response.get("message", {}).get("content", ""),
                             allowed_tools=recovery_allowed_tools,
                         )
+                        if recovered:
+                            print("  [WARN] CodeWriterAgent: using lenient tool call recovery from text output")
+                    if not recovered:
+                        raw_content = response.get("message", {}).get("content", "") if isinstance(response, dict) else ""
+                        if raw_content:
+                            print("  [WARN] CodeWriterAgent: attempting tool call repair from text output")
+                        recovered = self._retry_with_tool_call_repair(
+                            messages,
+                            raw_content,
+                            allowed_tools=recovery_allowed_tools,
+                            tools=available_tools,
+                        )
+                    if not recovered:
+                        recovered = retry_tool_call_with_response_format(
+                            messages,
+                            available_tools,
+                            allowed_tools=recovery_allowed_tools,
+                        )
+                        if recovered:
+                            retried = True
+                            print(f"  -> Retried tool call with JSON format: {recovered.name}")
                     if not recovered:
                         recovered = self._retry_with_diff_or_file(
                             messages,

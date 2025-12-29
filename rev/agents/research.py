@@ -5,7 +5,7 @@ from rev.models.task import Task
 from rev.tools.registry import execute_tool, get_available_tools
 from rev.llm.client import ollama_chat
 from rev.core.context import RevContext
-from rev.core.tool_call_recovery import recover_tool_call_from_text
+from rev.core.tool_call_recovery import recover_tool_call_from_text, recover_tool_call_from_text_lenient
 from rev.core.tool_call_retry import retry_tool_call_with_response_format
 from rev.agents.context_provider import build_context_and_tools
 from rev.agents.subagent_io import build_subagent_output
@@ -358,6 +358,45 @@ class ResearchAgent(BaseAgent):
                 if error_type:
                     # Try recovery first
                     if error_type in {"text_instead_of_tool_call", "empty_tool_calls", "missing_tool_calls"}:
+                        recovered = recover_tool_call_from_text(
+                            response.get("message", {}).get("content", ""),
+                            allowed_tools=[t["function"]["name"] for t in get_available_tools()],
+                        )
+                        if not recovered:
+                            recovered = recover_tool_call_from_text_lenient(
+                                response.get("message", {}).get("content", ""),
+                                allowed_tools=[t["function"]["name"] for t in get_available_tools()],
+                            )
+                            if recovered:
+                                print("  [WARN] ResearchAgent: using lenient tool call recovery from text output")
+                        if recovered:
+                            print(f"  -> Recovered tool call from text output: {recovered.name}")
+                            if (
+                                recovered.name == "read_file"
+                                and isinstance(recovered.arguments, dict)
+                                and isinstance(recovered.arguments.get("paths"), list)
+                            ):
+                                outputs = {}
+                                for path in recovered.arguments.get("paths", []):
+                                    if not isinstance(path, str):
+                                        continue
+                                    outputs[path] = execute_tool("read_file", {"path": path})
+                                raw_result = json.dumps(outputs)
+                            else:
+                                raw_result = execute_tool(recovered.name, recovered.arguments)
+                            snippet = _extract_snippet(recovered.name, recovered.arguments, raw_result)
+                            context.add_insight("research_agent", f"task_{task.task_id}_result", {
+                                "tool": recovered.name,
+                                "result": snippet
+                            })
+                            return build_subagent_output(
+                                agent_name="ResearchAgent",
+                                tool_name=recovered.name,
+                                tool_args=recovered.arguments,
+                                tool_output=raw_result,
+                                context=context,
+                                task_id=task.task_id,
+                            )
                         retry = retry_tool_call_with_response_format(
                             messages,
                             available_tools,
@@ -387,39 +426,6 @@ class ResearchAgent(BaseAgent):
                                 agent_name="ResearchAgent",
                                 tool_name=retry.name,
                                 tool_args=retry.arguments,
-                                tool_output=raw_result,
-                                context=context,
-                                task_id=task.task_id,
-                            )
-
-                        recovered = recover_tool_call_from_text(
-                            response.get("message", {}).get("content", ""),
-                            allowed_tools=[t["function"]["name"] for t in get_available_tools()],
-                        )
-                        if recovered:
-                            print(f"  -> Recovered tool call from text output: {recovered.name}")
-                            if (
-                                recovered.name == "read_file"
-                                and isinstance(recovered.arguments, dict)
-                                and isinstance(recovered.arguments.get("paths"), list)
-                            ):
-                                outputs = {}
-                                for path in recovered.arguments.get("paths", []):
-                                    if not isinstance(path, str):
-                                        continue
-                                    outputs[path] = execute_tool("read_file", {"path": path})
-                                raw_result = json.dumps(outputs)
-                            else:
-                                raw_result = execute_tool(recovered.name, recovered.arguments)
-                            snippet = _extract_snippet(recovered.name, recovered.arguments, raw_result)
-                            context.add_insight("research_agent", f"task_{task.task_id}_result", {
-                                "tool": recovered.name,
-                                "result": snippet
-                            })
-                            return build_subagent_output(
-                                agent_name="ResearchAgent",
-                                tool_name=recovered.name,
-                                tool_args=recovered.arguments,
                                 tool_output=raw_result,
                                 context=context,
                                 task_id=task.task_id,
