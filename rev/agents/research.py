@@ -241,6 +241,7 @@ class ResearchAgent(BaseAgent):
             tool_universe=all_tools,
             candidate_tool_names=research_tool_names,
             max_tools=30,  # Increased from 7 to allow more comprehensive research
+            force_tool_names=["rag_search"],
         )
         available_tools = selected_tools
 

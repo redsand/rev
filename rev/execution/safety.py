@@ -7,6 +7,8 @@ destructive operations that require user approval.
 
 from typing import Dict, Any
 
+from rev import config
+
 # ANSI color codes for highlighting patch previews
 _COLOR_RED = "\033[31m"
 _COLOR_GREEN = "\033[32m"
@@ -25,10 +27,21 @@ _PROMPT_DECISIONS: Dict[tuple[str, str], bool] = {}
 
 # Destructive operations that require confirmation
 SCARY_OPERATIONS = {
-    "keywords": ["delete", "remove", "rm ", "clean", "reset", "force", "destroy", "drop", "truncate"],
+    "keywords": [
+        "delete", "remove", "rm ", "del ", "erase ", "rmdir", "rd ", "unlink",
+        "clean", "reset", "force", "destroy", "drop", "truncate",
+    ],
     "git_commands": ["reset --hard", "clean -f", "clean -fd", "push --force", "push -f"],
     "action_types": ["delete"]  # Task action types that are destructive
 }
+
+_DELETE_REASON_TOKENS = ("delete", "remove", "rm ", "del ", "erase", "rmdir", "rd ", "unlink")
+
+
+def _requires_delete_confirmation(reason: str, operation: str) -> bool:
+    """Return True if the operation is a file deletion that must be confirmed."""
+    text = f"{reason} {operation}".lower()
+    return any(token in text for token in _DELETE_REASON_TOKENS)
 
 
 def _color_line(line: str) -> str:
@@ -98,6 +111,9 @@ def is_scary_operation(tool_name: str, args: Dict[str, Any], action_type: str = 
         return True, f"Destructive action type: {action_type}"
 
     # Check for file deletion
+    if tool_name == "delete_file":
+        return True, "Deleting a file"
+
     if tool_name == "run_cmd":
         raw_cmd = args.get("cmd", "")
         cmd = raw_cmd.lower() if isinstance(raw_cmd, str) else str(raw_cmd)
@@ -147,6 +163,12 @@ def prompt_scary_operation(operation: str, reason: str, auto_approve: bool = Fal
     Returns:
         True if user approves, False otherwise
     """
+    explicit_yes = getattr(config, "EXPLICIT_YES", False)
+    if explicit_yes:
+        auto_approve = True
+    if _requires_delete_confirmation(reason, operation) and not explicit_yes:
+        auto_approve = False
+
     # If auto_approve is set, skip user prompts
     if auto_approve:
         return True

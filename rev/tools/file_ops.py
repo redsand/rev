@@ -755,6 +755,7 @@ def tree_view(path: str = ".", max_depth: int = 3, max_files: int = 100) -> str:
 
             try:
                 items = sorted(dir_path.iterdir(), key=lambda x: (not x.is_dir(), x.name))
+                items = [item for item in items if not item.name.startswith(".")]
                 for idx, item in enumerate(items):
                     if count >= max_files:
                         break

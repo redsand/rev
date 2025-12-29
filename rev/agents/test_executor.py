@@ -144,8 +144,7 @@ class TestExecutorAgent(BaseAgent):
                     if recovered:
                         print(f"  -> Recovered tool call from text: {recovered.name}")
 
-                        # CRITICAL FIX: Validate command matches project type (recovery path)
-                        if recovered.name in ("run_tests", "run_cmd"):
+                        if config.TEST_EXECUTOR_COMMAND_CORRECTION_ENABLED and recovered.name in ("run_tests", "run_cmd"):
                             cmd = recovered.arguments.get("cmd", "")
                             corrected_cmd = self._validate_and_correct_test_command(cmd, task, context)
                             if corrected_cmd != cmd:
@@ -173,6 +172,23 @@ class TestExecutorAgent(BaseAgent):
                         )
 
                 # Only fall back to heuristics if recovery also failed
+                if not config.TEST_EXECUTOR_FALLBACK_ENABLED:
+                    explicit_cmd = self._extract_explicit_command(task.description or "")
+                    if explicit_cmd:
+                        return self._execute_explicit_command(task, context, explicit_cmd)
+                    error_payload = json.dumps({
+                        "error": "Fallback heuristics disabled; no explicit command found in task description.",
+                        "blocked": True,
+                        "rc": 1,
+                    })
+                    return build_subagent_output(
+                        agent_name="TestExecutorAgent",
+                        tool_name="run_cmd",
+                        tool_args={"cmd": ""},
+                        tool_output=error_payload,
+                        context=context,
+                        task_id=task.task_id,
+                    )
                 return self._execute_fallback_heuristic(task, context)
 
             tool_call = response["message"]["tool_calls"][0]
@@ -183,8 +199,7 @@ class TestExecutorAgent(BaseAgent):
                 try: arguments = json.loads(arguments)
                 except: pass
 
-            # CRITICAL FIX: Validate command matches project type
-            if tool_name in ("run_tests", "run_cmd"):
+            if config.TEST_EXECUTOR_COMMAND_CORRECTION_ENABLED and tool_name in ("run_tests", "run_cmd"):
                 cmd = arguments.get("cmd", "")
                 corrected_cmd = self._validate_and_correct_test_command(cmd, task, context)
                 if corrected_cmd != cmd:
@@ -218,6 +233,23 @@ class TestExecutorAgent(BaseAgent):
         except Exception as e:
             error_msg = f"Error in TestExecutorAgent: {e}"
             print(f"  [!] {error_msg}")
+            if not config.TEST_EXECUTOR_FALLBACK_ENABLED:
+                explicit_cmd = self._extract_explicit_command(task.description or "")
+                if explicit_cmd:
+                    return self._execute_explicit_command(task, context, explicit_cmd)
+                error_payload = json.dumps({
+                    "error": error_msg,
+                    "blocked": True,
+                    "rc": 1,
+                })
+                return build_subagent_output(
+                    agent_name="TestExecutorAgent",
+                    tool_name="run_cmd",
+                    tool_args={"cmd": ""},
+                    tool_output=error_payload,
+                    context=context,
+                    task_id=task.task_id,
+                )
             return self._execute_fallback_heuristic(task, context)
 
     def _maybe_rerun_no_tests(
@@ -360,6 +392,22 @@ class TestExecutorAgent(BaseAgent):
         desc = (task.description or "")
         desc_lower = desc.lower()
 
+        explicit_cmd = self._extract_explicit_command(desc)
+        if explicit_cmd:
+            cmd = explicit_cmd
+            workdir = self._extract_workdir_hint(desc)
+            cmd = self._apply_workdir(cmd, workdir)
+            print(f"  [i] Using explicit command from task: {cmd}")
+            raw_result = execute_tool("run_cmd", {"cmd": cmd})
+            return build_subagent_output(
+                agent_name="TestExecutorAgent",
+                tool_name="run_cmd",
+                tool_args={"cmd": cmd},
+                tool_output=raw_result,
+                context=context,
+                task_id=task.task_id,
+            )
+
         cmd = None
         explicit_patterns = [
             r"\bnpm\s+(?:install|ci)\b[^\n\r]*",
@@ -431,6 +479,55 @@ class TestExecutorAgent(BaseAgent):
         cmd = self._apply_workdir(cmd, workdir)
 
         print(f"  [i] Using fallback heuristic: {cmd}")
+        raw_result = execute_tool("run_cmd", {"cmd": cmd})
+        return build_subagent_output(
+            agent_name="TestExecutorAgent",
+            tool_name="run_cmd",
+            tool_args={"cmd": cmd},
+            tool_output=raw_result,
+            context=context,
+            task_id=task.task_id,
+        )
+
+    @staticmethod
+    def _extract_explicit_command(desc: str) -> Optional[str]:
+        if not desc:
+            return None
+        candidates = []
+        for pattern in (r"`([^`]+)`", r"\"([^\"]+)\"", r"'([^']+)'"):
+            for match in re.findall(pattern, desc):
+                if match and match.strip():
+                    candidates.append(match.strip())
+        command_tokens = (
+            "npx", "npm", "yarn", "pnpm",
+            "pip", "python", "python3",
+            "node", "go", "cargo", "dotnet",
+            "mvn", "gradle", "java",
+            "pwsh", "powershell", "bash", "sh",
+            "vitest", "jest", "pytest", "ava", "mocha", "playwright", "cypress",
+        )
+        token_pattern = r"\b(" + "|".join(command_tokens) + r")\b"
+        token_match = re.search(token_pattern, desc, re.IGNORECASE)
+        command_candidates = []
+        for candidate in candidates:
+            cleaned = candidate.strip().rstrip(".;:")
+            if re.match(token_pattern, cleaned, re.IGNORECASE):
+                command_candidates.append(cleaned)
+        if command_candidates:
+            return max(command_candidates, key=len)
+
+        if token_match:
+            candidate = desc[token_match.start():].strip()
+            candidate = re.split(r"\s+(?:to|for|on|in|within|inside|under)\s+", candidate, maxsplit=1, flags=re.IGNORECASE)[0]
+            candidate = candidate.strip().rstrip(".;:")
+            if re.match(token_pattern, candidate, re.IGNORECASE):
+                return candidate
+        return None
+
+    def _execute_explicit_command(self, task: Task, context: RevContext, cmd: str) -> str:
+        workdir = self._extract_workdir_hint(task.description or "")
+        cmd = self._apply_workdir(cmd, workdir)
+        print(f"  [i] Using explicit command from task: {cmd}")
         raw_result = execute_tool("run_cmd", {"cmd": cmd})
         return build_subagent_output(
             agent_name="TestExecutorAgent",
@@ -533,6 +630,31 @@ class TestExecutorAgent(BaseAgent):
         cmd_lower = cmd_text.lower().strip()
         desc = (task.description or "")
         desc_lower = desc.lower()
+
+        command_tokens = (
+            "npx", "npm", "yarn", "pnpm",
+            "pip", "python", "python3",
+            "node", "go", "cargo", "dotnet",
+            "mvn", "gradle", "java",
+            "pwsh", "powershell", "bash", "sh",
+            "vitest", "jest", "pytest", "ava", "mocha", "playwright", "cypress",
+        )
+        token_pattern = r"^(" + "|".join(command_tokens) + r")\b"
+
+        if cmd_lower and not re.match(token_pattern, cmd_lower, re.IGNORECASE):
+            test_path = self._extract_test_path(cmd_text)
+            if test_path:
+                if "vitest" in desc_lower:
+                    return f"npx vitest run {test_path}"
+                if "jest" in desc_lower:
+                    return f"npx jest --runTestsByPath {test_path}"
+                if "pytest" in desc_lower:
+                    return f"pytest {test_path} -v"
+                if "playwright" in desc_lower:
+                    return f"npx playwright test {test_path}"
+                if "cypress" in desc_lower:
+                    return f"npx cypress run --spec {test_path}"
+                return f"npm test -- {test_path}"
 
         # Priority 1: If task explicitly mentions a command, use it
         explicit_commands = {

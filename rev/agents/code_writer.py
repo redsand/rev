@@ -641,9 +641,10 @@ class CodeWriterAgent(BaseAgent):
 
     def _prompt_for_approval(self, tool_name: str, file_path: str, context: 'RevContext' = None) -> bool:
         """Prompt user to approve the change (matching linear mode behavior)."""
-        # If auto_approve is set in context, skip user prompts
+        # If auto_approve is set in context, skip user prompts unless deleting without --yes.
         if context and context.auto_approve:
-            return True
+            if tool_name != "delete_file" or getattr(config, "EXPLICIT_YES", False):
+                return True
 
         # Check if this is a scary operation
         is_scary, scary_reason = is_scary_operation(tool_name, {"file_path": file_path})

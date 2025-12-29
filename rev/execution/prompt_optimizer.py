@@ -16,9 +16,11 @@ This helps with:
 import json
 import sys
 import re
-from typing import Dict, Any, Optional, Tuple
+import os
+from typing import Dict, Any, Optional, Tuple, List
 from rev.llm.client import ollama_chat
 from rev.tools.git_ops import get_repo_context
+from rev.tools.file_ops import tree_view
 
 
 def should_optimize_prompt(user_request: str) -> bool:
@@ -70,18 +72,98 @@ def should_optimize_prompt(user_request: str) -> bool:
     return False
 
 
-def _workspace_has_visible_items() -> bool:
+def _get_workspace_snapshot() -> Dict[str, Any]:
     try:
         context_raw = get_repo_context()
-        context = json.loads(context_raw) if isinstance(context_raw, str) else {}
+        return json.loads(context_raw) if isinstance(context_raw, str) else {}
     except Exception:
-        return False
+        return {}
 
+
+def _workspace_has_visible_items() -> bool:
+    context = _get_workspace_snapshot()
     top_level = context.get("top_level", []) or []
     return any(
         isinstance(item.get("name"), str) and not item.get("name", "").startswith(".")
         for item in top_level
     )
+
+
+def _format_workspace_snapshot() -> str:
+    context = _get_workspace_snapshot()
+    top_level = context.get("top_level", []) or []
+    file_structure = context.get("file_structure", []) or []
+
+    top_items: List[str] = []
+    for item in top_level:
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        if name.startswith("."):
+            continue
+        suffix = "/" if item.get("type") == "dir" else ""
+        top_items.append(f"{name}{suffix}")
+        if len(top_items) >= 12:
+            break
+
+    key_paths: List[str] = []
+    for entry in file_structure:
+        path = entry.get("path")
+        if not isinstance(path, str) or not path:
+            continue
+        lowered = path.replace("\\", "/").lower()
+        if lowered.startswith(("src/", "tests/", "test/", "backend/", "frontend/", "server/", "client/")):
+            key_paths.append(path)
+        if len(key_paths) >= 12:
+            break
+
+    if not top_items and not key_paths:
+        return ""
+
+    lines = ["EXISTING WORKSPACE SNAPSHOT:"]
+    if top_items:
+        lines.append(f"Top-level items: {', '.join(top_items)}")
+    if key_paths:
+        lines.append(f"Key existing paths: {', '.join(key_paths)}")
+    return "\n".join(lines)
+
+
+def _get_full_tree_view() -> str:
+    try:
+        max_depth = int(os.getenv("REV_PROMPT_OPT_TREE_MAX_DEPTH", "10"))
+        max_files = int(os.getenv("REV_PROMPT_OPT_TREE_MAX_FILES", "2000"))
+    except ValueError:
+        max_depth = 10
+        max_files = 2000
+
+    raw = tree_view(".", max_depth=max_depth, max_files=max_files)
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    tree = payload.get("tree")
+    if not isinstance(tree, str) or not tree.strip():
+        return ""
+    files_shown = payload.get("files_shown")
+    if isinstance(files_shown, int) and files_shown >= max_files:
+        tree = f"{tree}\n... (truncated at {files_shown} entries)"
+    return tree
+
+
+def _build_structure_guard(user_request: str) -> str:
+    guard_lines = [
+        "IMPORTANT: Use the existing workspace root; do NOT create a new top-level app directory unless explicitly requested.",
+        "Reuse existing directories and structure; do not propose new folder splits unless the user asked.",
+    ]
+    snapshot = _format_workspace_snapshot()
+    if snapshot:
+        guard_lines.insert(1, snapshot)
+    request_paths = re.findall(r"(?:\\./|\\.\\./|[A-Za-z]:\\\\|/)[^\\s,;]+", user_request or "")
+    if request_paths:
+        guard_lines.insert(1, f"User-mentioned paths: {', '.join(request_paths[:6])}")
+    return "\n".join(guard_lines)
 
 
 def _request_explicitly_targets_new_root(user_request: str) -> bool:
@@ -119,11 +201,8 @@ def _apply_workspace_guard(improved: str, user_request: str) -> str:
         return improved
     if _request_explicitly_targets_new_root(user_request) or _request_already_scoped_to_current_workspace(user_request):
         return improved
-    guard = (
-        "IMPORTANT: Use the existing workspace root; do NOT create a new top-level app directory "
-        "unless explicitly requested."
-    )
-    if guard.lower() in improved.lower():
+    guard = _build_structure_guard(user_request)
+    if "existing workspace root" in improved.lower():
         return improved
     return f"{improved}\n\n{guard}"
 
@@ -134,11 +213,27 @@ def get_prompt_recommendations(user_request: str) -> Optional[Dict[str, Any]]:
 
     Returns: Dict with original_prompt, recommendations, and suggested_improvement
     """
+    workspace_snapshot = _format_workspace_snapshot()
+    tree_snapshot = _get_full_tree_view()
+    workspace_rules = ""
+    if workspace_snapshot:
+        workspace_rules = (
+            f"\n{workspace_snapshot}\n\n"
+            "IMPORTANT: Preserve the existing structure shown above. "
+            "Do NOT suggest creating new top-level folders or reorganizing into new layouts "
+            "unless the user explicitly requests it.\n"
+        )
+    if tree_snapshot:
+        workspace_rules = (
+            f"{workspace_rules}\nFULL TREE VIEW (current workspace):\n{tree_snapshot}\n\n"
+        )
+
     optimization_prompt = f"""
 You are a request clarification specialist. Your job is to help make user requests more clear and specific before they are executed.
 
 USER REQUEST:
 {user_request}
+{workspace_rules}
 
 Analyze this request and provide:
 

@@ -257,6 +257,14 @@ RESEARCH_SUPPORTS_TOOLS = os.getenv("REV_RESEARCH_SUPPORTS_TOOLS", str(DEFAULT_S
 # When enabled, keep all agents scoped to the workspace root and require workspace-relative paths.
 WORKSPACE_ROOT_ONLY = os.getenv("REV_WORKSPACE_ROOT_ONLY", "true").lower() == "true"
 
+# Test executor behavior
+# When disabled, avoid guessing commands; only run explicit commands from the task text.
+TEST_EXECUTOR_FALLBACK_ENABLED = os.getenv("REV_TEST_EXECUTOR_FALLBACK_ENABLED", "false").lower() == "true"
+TEST_EXECUTOR_COMMAND_CORRECTION_ENABLED = os.getenv("REV_TEST_EXECUTOR_COMMAND_CORRECTION_ENABLED", "false").lower() == "true"
+
+# Explicit approval flag for destructive operations
+EXPLICIT_YES = os.getenv("REV_EXPLICIT_YES", "false").lower() == "true"
+
 # LLM Generation Parameters (for improved tool calling with local models)
 # Lower temperature improves consistency and accuracy for tool calling
 # Recommended: 0.1 for tool calling, 0.7 for creative tasks

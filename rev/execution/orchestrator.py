@@ -743,13 +743,20 @@ def _create_error_signature(verification_result) -> str:
     # Collect error output
     error_text = message
     if isinstance(details, dict):
-        for key in ['test_output', 'stdout', 'stderr']:
+        for key in ['test_output', 'stdout', 'stderr', 'output']:
             if key in details:
                 val = details[key]
                 if isinstance(val, str):
                     error_text += " " + val
                 elif isinstance(val, dict) and 'stdout' in val:
                     error_text += " " + val.get('stdout', '') + " " + val.get('stderr', '')
+        for key in ["validation", "strict"]:
+            nested = details.get(key)
+            if isinstance(nested, dict):
+                for res in nested.values():
+                    if not isinstance(res, dict):
+                        continue
+                    error_text += " " + str(res.get("stdout", "") or "") + " " + str(res.get("stderr", "") or "")
 
     # Priority 1: Look for specific error types
     error_patterns = [
@@ -774,7 +781,12 @@ def _create_error_signature(verification_result) -> str:
                 return sig_value(match)
             return sig_value
 
-    # Priority 2: Use first non-empty line of message
+    # Priority 2.5: Use failing test file if available (helps avoid generic signatures)
+    failing_test_file = _extract_failing_test_file(error_text)
+    if failing_test_file:
+        return f"test_fail::{failing_test_file}"
+
+    # Priority 3: Use first non-empty line of message
     first_line = message.splitlines()[0].strip() if message else "unknown"
 
     # Remove variable parts to make signature more generic
@@ -841,6 +853,7 @@ def _extract_comprehensive_error_context(
         "stdout": "",
         "stderr": "",
         "test_output": "",
+        "output": "",
         "failing_test_file": "",  # Add this to track specific failing test
     }
 
@@ -852,7 +865,7 @@ def _extract_comprehensive_error_context(
             context["error_details"] = details
 
             # Extract test output if available
-            for key in ['test_output', 'stdout', 'stderr']:
+            for key in ['test_output', 'stdout', 'stderr', 'output']:
                 if key in details:
                     val = details[key]
                     if isinstance(val, str):
@@ -862,7 +875,7 @@ def _extract_comprehensive_error_context(
                         context['stderr'] = val.get('stderr', '')
 
     # Extract failing test file from error output
-    all_error_text = f"{context['error_message']} {context['stdout']} {context['stderr']} {context['test_output']}"
+    all_error_text = f"{context['error_message']} {context['stdout']} {context['stderr']} {context['test_output']} {context['output']}"
     context["failing_test_file"] = _extract_failing_test_file(all_error_text)
 
     # Extract tool events
@@ -2176,10 +2189,10 @@ class OrchestratorResult:
 class Orchestrator:
     """Coordinates all agents for autonomous task execution."""
 
-    def __init__(self, project_root: Path, config: Optional[OrchestratorConfig] = None):
+    def __init__(self, project_root: Path, config_obj: Optional[OrchestratorConfig] = None):
         self.project_root = project_root
-        self._user_config_provided = config is not None
-        self.config = config or OrchestratorConfig()
+        self._user_config_provided = config_obj is not None
+        self.config = config_obj or OrchestratorConfig()
         self.context: Optional[RevContext] = None
         self.learning_agent = LearningAgent(project_root) if self.config.enable_learning else None
         self.debug_logger = DebugLogger.get_instance()
@@ -3162,11 +3175,21 @@ class Orchestrator:
         last_task_signature: Optional[str] = None
         repeat_same_action: int = 0
         forced_next_task: Optional[Task] = None
+        pending_resume_tasks: List[Task] = []
         budget_warning_shown: bool = False
 
         # PERFORMANCE FIX 1: Track consecutive research tasks to prevent endless loops
         consecutive_reads: int = 0
         MAX_CONSECUTIVE_READS: int = 10  # Allow max 10 consecutive READ tasks
+
+        if self.context.resume and self.context.resume_plan and self.context.plan:
+            for task in self.context.plan.tasks:
+                if task.status in {TaskStatus.IN_PROGRESS, TaskStatus.STOPPED}:
+                    task.status = TaskStatus.PENDING
+            pending_resume_tasks = [
+                task for task in self.context.plan.tasks
+                if task.status == TaskStatus.PENDING
+            ]
 
         while True:
             iteration += 1
@@ -3241,6 +3264,13 @@ class Orchestrator:
                 diagnostic_task = _pop_diagnostic_task(self.context)
                 if diagnostic_task:
                     forced_next_task = diagnostic_task
+
+            if not forced_next_task and pending_resume_tasks:
+                forced_next_task = pending_resume_tasks.pop(0)
+                print(
+                    f"  [resume] Continuing pending task from checkpoint: "
+                    f"{forced_next_task.description[:80]}"
+                )
 
             if forced_next_task:
                 next_task = forced_next_task
@@ -3951,11 +3981,15 @@ class Orchestrator:
                     error_sig = _create_error_signature(verification_result)
                     failure_sig = f"{(next_task.action_type or '').lower()}::{error_sig}"
                     failure_counts[failure_sig] += 1
+                    action_type = (next_task.action_type or "").lower()
+                    repeat_break_threshold = 3
+                    if action_type == "test":
+                        repeat_break_threshold = 5
 
                     # Extract and save failing test file for targeted re-testing
                     all_error_text = f"{verification_result.message} "
                     if hasattr(verification_result, 'details') and isinstance(verification_result.details, dict):
-                        for key in ['test_output', 'stdout', 'stderr']:
+                        for key in ['test_output', 'stdout', 'stderr', 'output']:
                             val = verification_result.details.get(key, '')
                             if isinstance(val, str):
                                 all_error_text += val + " "
@@ -3985,7 +4019,7 @@ class Orchestrator:
                     syntax_repair_key = f"syntax_repair::{failure_sig}"
                     syntax_repair_attempts = self.context.agent_state.get(syntax_repair_key, 0)
 
-                    if failure_counts[failure_sig] >= 3:
+                    if failure_counts[failure_sig] >= repeat_break_threshold:
                         # PRIORITY 2 FIX: ESCALATION for repeated replace_in_file failures
                         # Check if this is a replace_in_file failure that should escalate to write_file
                         tool_events = getattr(next_task, "tool_events", None) or []

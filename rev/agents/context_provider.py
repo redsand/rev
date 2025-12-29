@@ -140,6 +140,7 @@ def build_context_and_tools(
     tool_universe: Sequence[Dict[str, Any]],
     candidate_tool_names: Sequence[str],
     max_tools: int = 7,
+    force_tool_names: Optional[Sequence[str]] = None,
 ) -> tuple[str, List[Dict[str, Any]], ContextBundle]:
     """Return rendered context + the (small) tool list to send to the LLM."""
 
@@ -188,6 +189,36 @@ def build_context_and_tools(
             t for t in tool_universe
             if t.get("function", {}).get("name") in allowed
         ][:max_tools]
+
+    if force_tool_names:
+        forced = [name for name in force_tool_names if isinstance(name, str) and name.strip()]
+        if forced:
+            existing = {t.get("function", {}).get("name") for t in selected_tool_schemas}
+            for name in forced:
+                if name in existing:
+                    continue
+                for tool in tool_universe:
+                    if tool.get("function", {}).get("name") == name:
+                        selected_tool_schemas.append(tool)
+                        existing.add(name)
+                        break
+
+            if max_tools and len(selected_tool_schemas) > max_tools:
+                forced_set = set(forced)
+                nonforced_limit = max_tools - len(forced_set)
+                nonforced_added = 0
+                trimmed: List[Dict[str, Any]] = []
+                for tool in selected_tool_schemas:
+                    name = tool.get("function", {}).get("name")
+                    if name in forced_set:
+                        trimmed.append(tool)
+                        continue
+                    if nonforced_limit < 0:
+                        continue
+                    if nonforced_added < nonforced_limit:
+                        trimmed.append(tool)
+                        nonforced_added += 1
+                selected_tool_schemas = trimmed
 
     context.agent_state["selected_tools"] = [t.get("function", {}).get("name") for t in selected_tool_schemas]
     return rendered, selected_tool_schemas, bundle

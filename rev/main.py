@@ -303,6 +303,7 @@ def main():
 
 
     args = parser.parse_args()
+    config.EXPLICIT_YES = bool(args.yes)
     # Windows: ensure ANSI output is handled correctly in classic consoles.
     try:
         if os.name == "nt":
