@@ -3164,6 +3164,12 @@ class Orchestrator:
         if not self.context.state_manager:
             self.context.set_state_manager(StateManager(self.context.plan))
 
+        if self.context.resume:
+            # Reset redundant-read counters and blocked read signatures on resume.
+            completed_tasks = []
+            self.context.set_agent_state("blocked_action_sigs", set())
+            print("  [resume] Reset redundant-read counters for new run")
+
         iteration = len(self.context.plan.tasks)
         action_counts: Dict[str, int] = defaultdict(int)
         # Re-populate action counts from history
