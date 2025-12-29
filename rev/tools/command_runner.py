@@ -48,6 +48,23 @@ _PATH_TOKEN_RE = re.compile(r"[\\/]|^\.\.?[\\/]|^[A-Za-z]:[\\/]|^~[\\/]")
 _PATH_EXTENSION_RE = re.compile(r"\.[A-Za-z0-9]{1,8}$")
 
 
+def _rewrite_windows_aliases(args: List[str]) -> List[str]:
+    """Normalize common POSIX commands to Windows built-ins."""
+    if os.name != "nt" or not args:
+        return args
+
+    cmd = args[0].lower()
+    if cmd == "ls":
+        return ["dir"] + args[1:]
+    if cmd == "cat":
+        return ["type"] + args[1:]
+    if cmd == "pwd":
+        return ["cd"]
+    if cmd == "clear":
+        return ["cls"]
+    return args
+
+
 def _resolve_command(cmd_name: str) -> Optional[str | List[str]]:
     """Resolve a command name to its full path or execution wrapper.
 
@@ -133,6 +150,8 @@ def _looks_like_path_token(token: str) -> bool:
     if not token:
         return False
     if token.startswith("-"):
+        return False
+    if os.name == "nt" and re.match(r"^/[A-Za-z0-9]+$", token):
         return False
     if _PATH_TOKEN_RE.search(token):
         return True
@@ -240,6 +259,7 @@ def run_command_safe(
             }
         
         original_cmd_str = " ".join(cmd)
+        args = _rewrite_windows_aliases(args)
     else:
         is_valid, error_msg, args = _parse_and_validate(cmd)
         if not is_valid:
@@ -252,6 +272,7 @@ def run_command_safe(
             }
         original_cmd_str = cmd
 
+    args = _rewrite_windows_aliases(args)
     args = _normalize_command_args(args, resolved_cwd)
     normalized_cmd_str = " ".join(args)
 

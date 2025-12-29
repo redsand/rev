@@ -721,6 +721,13 @@ _DEFAULT_TEST_COMMANDS = {
     "cpp_cmake": "ctest",
 }
 
+_PROJECT_MARKERS = {
+    "package.json", "pnpm-lock.yaml", "yarn.lock",
+    "pyproject.toml", "requirements.txt", "setup.py",
+    "go.mod", "Cargo.toml", "Gemfile", "composer.json",
+    "pom.xml", "build.gradle", "build.gradle.kts", "Makefile",
+}
+
 
 _VALIDATION_COMMAND_TOKENS = {
     "pytest",
@@ -859,6 +866,69 @@ def _extract_first_path(description: str) -> Optional[str]:
 
 def _default_test_command(project_type: str) -> str:
     return _DEFAULT_TEST_COMMANDS.get(project_type, "pytest -q")
+
+
+def _workspace_missing_project_markers(context_raw: str) -> bool:
+    try:
+        context = json.loads(context_raw)
+    except (json.JSONDecodeError, TypeError):
+        return False
+
+    file_structure = context.get("file_structure", []) or []
+    top_level = context.get("top_level", []) or []
+
+    for item in file_structure:
+        rel_path = (item.get("path") or item.get("name") or "").replace("\\", "/")
+        basename = rel_path.split("/")[-1] if rel_path else ""
+        if basename in _PROJECT_MARKERS:
+            return False
+
+    for item in top_level:
+        name = item.get("name")
+        if name in _PROJECT_MARKERS:
+            return False
+
+    return True
+
+
+def _request_suggests_scaffold(user_request: str) -> bool:
+    lowered = (user_request or "").lower()
+    keywords = (
+        "create", "build", "implement", "initialize", "init", "scaffold",
+        "new", "prototype", "starter", "bootstrap", "setup",
+        "vue", "react", "vite", "node", "express", "prisma", "sqlite",
+    )
+    return any(token in lowered for token in keywords)
+
+
+def _derive_scaffold_paths(user_request: str) -> list[str]:
+    lowered = (user_request or "").lower()
+    paths: list[str] = []
+
+    def add(path: str) -> None:
+        if path and path not in paths:
+            paths.append(path)
+
+    if any(token in lowered for token in ("vue", "react", "vite", "node", "express", "prisma", "sqlite", "spa")):
+        add("package.json")
+
+    if "prisma" in lowered:
+        add("prisma/schema.prisma")
+
+    if any(token in lowered for token in ("vue", "react", "spa")):
+        entry = "src/main.ts" if "typescript" in lowered or " ts " in lowered else "src/main.js"
+        add(entry)
+
+    if any(token in lowered for token in ("express", "api", "backend", "server")):
+        add("src/app.js")
+
+    if any(token in lowered for token in ("readme", "documentation", "document")):
+        add("README.md")
+
+    if not paths:
+        add("README.md")
+
+    return paths
 
 
 def _select_tool_for_action(action_type: str, description: str) -> str:
@@ -1348,12 +1418,13 @@ def _enhance_repo_context(context_json: str) -> str:
         enhanced.append("```")
         for item in file_structure[:30]:  # Show first 30 items
             indent = "  " * item.get("depth", 0)
-            name = item.get("name", "")
-            item_type = item.get("type", "")
-            if item_type == "dir":
-                enhanced.append(f"{indent}📂 {name}/")
+            rel_path = item.get("path") or item.get("name") or ""
+            item_type = (item.get("type") or "").lower()
+            is_dir = item_type in {"dir", "directory"}
+            if is_dir:
+                enhanced.append(f"{indent}📂 {rel_path}/")
             else:
-                enhanced.append(f"{indent}📄 {name}")
+                enhanced.append(f"{indent}📄 {rel_path}")
         if len(file_structure) > 30:
             enhanced.append(f"  ... and {len(file_structure) - 30} more items")
         enhanced.append("```")
@@ -1369,6 +1440,40 @@ def _enhance_repo_context(context_json: str) -> str:
             enhanced.append(f"  Directories: {', '.join(dirs)}")
         if files:
             enhanced.append(f"  Files: {', '.join(files)}")
+        enhanced.append("")
+
+    # Project marker detection (warn on empty or tool-only workspaces)
+    project_markers = {
+        "package.json", "pnpm-lock.yaml", "yarn.lock",
+        "pyproject.toml", "requirements.txt", "setup.py",
+        "go.mod", "Cargo.toml", "Gemfile", "composer.json",
+        "pom.xml", "build.gradle", "build.gradle.kts", "Makefile",
+    }
+
+    found_markers = set()
+    for item in file_structure:
+        rel_path = (item.get("path") or item.get("name") or "").replace("\\", "/")
+        basename = rel_path.split("/")[-1] if rel_path else ""
+        if basename in project_markers:
+            found_markers.add(basename)
+
+    for item in top_level:
+        name = item.get("name")
+        if name in project_markers:
+            found_markers.add(name)
+
+    has_non_hidden_top_level = any(
+        isinstance(item.get("name"), str) and not item.get("name", "").startswith(".")
+        for item in top_level
+    )
+
+    if not found_markers:
+        if not file_structure and not has_non_hidden_top_level:
+            enhanced.append("WARNING: Workspace appears to contain only hidden/tooling directories.")
+            enhanced.append("Action: scaffold required project files before reading missing paths.")
+        else:
+            enhanced.append("WARNING: No project marker files detected (package.json, pyproject.toml, etc.).")
+            enhanced.append("Action: plan to scaffold core files/directories for new projects.")
         enhanced.append("")
 
     # Error handling
@@ -1663,6 +1768,25 @@ Generate a comprehensive execution plan as a JSON array NOW with AT LEAST 2 task
 
         # Actionability enforcement: ensure tool + artifact per task
         tasks_data = _ensure_actionable_subtasks(tasks_data, user_request)
+
+        if _workspace_missing_project_markers(context_raw) and _request_suggests_scaffold(user_request):
+            scaffold_paths = _derive_scaffold_paths(user_request)
+            if scaffold_paths:
+                scaffold_set = {p.lower() for p in scaffold_paths}
+                already_scaffolded = any(
+                    any(path in (t.get("description", "").lower()) for path in scaffold_set)
+                    for t in tasks_data
+                )
+                if not already_scaffolded:
+                    tasks_data.insert(0, {
+                        "description": (
+                            "Scaffold project skeleton by creating "
+                            f"{', '.join(scaffold_paths)} with minimal placeholder content "
+                            "(use write_file)."
+                        ),
+                        "action_type": "add",
+                        "complexity": "low",
+                    })
 
         # VAGUE PLACEHOLDER DETECTION: Check for tasks with abstract placeholders
         print("→ Validating task specificity...")

@@ -433,7 +433,19 @@ def list_dir(pattern: str = "**/*") -> str:
             p = p.rstrip("/\\")
             pattern = f"{p}/**/*" if p else "**/*"
     files = _iter_files(pattern, include_dirs=True)
-    rels = sorted(_rel_to_root(p).replace("\\", "/") for p in files)[:LIST_LIMIT]
+
+    hidden_pattern = None
+    if isinstance(pattern, str):
+        normalized = pattern.strip().strip('"').strip("'")
+        if normalized == "*":
+            hidden_pattern = ".*"
+        elif normalized.endswith("**/*") or normalized.endswith("/*"):
+            hidden_pattern = normalized[:-1] + ".*"
+
+    if hidden_pattern:
+        files.extend(_iter_files(hidden_pattern, include_dirs=True))
+
+    rels = sorted({ _rel_to_root(p).replace("\\", "/") for p in files })[:LIST_LIMIT]
     return json.dumps({"count": len(rels), "files": rels})
 
 

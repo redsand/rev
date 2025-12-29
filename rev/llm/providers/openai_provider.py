@@ -17,6 +17,7 @@ class OpenAIProvider(LLMProvider):
         self.api_key = api_key or os.getenv("OPENAI_API_KEY", "") or config.OPENAI_API_KEY
         self._client = None
         self._responses_only_models: set[str] = set()
+        self._no_temperature_models: set[str] = set()
 
     def _get_client(self):
         """Lazy initialization of OpenAI client."""
@@ -34,6 +35,13 @@ class OpenAIProvider(LLMProvider):
     def _is_responses_only_error(error: Exception) -> bool:
         message = str(error).lower()
         return "v1/responses" in message and "chat/completions" in message
+
+    @staticmethod
+    def _is_temperature_unsupported_error(error: Exception) -> bool:
+        message = str(error).lower()
+        if "temperature" not in message:
+            return False
+        return "unsupported parameter" in message or "not supported" in message
 
     @staticmethod
     def _get_value(obj: Any, key: str, default: Any = None) -> Any:
@@ -97,6 +105,34 @@ class OpenAIProvider(LLMProvider):
             })
         return tool_calls
 
+    @staticmethod
+    def _normalize_tools_for_responses(tools: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
+        if not tools:
+            return tools
+        normalized: List[Dict[str, Any]] = []
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            if "name" in tool and "type" in tool:
+                normalized.append(tool)
+                continue
+            func = tool.get("function")
+            if isinstance(func, dict) and func.get("name"):
+                entry = {
+                    "type": tool.get("type", "function"),
+                    "name": func.get("name"),
+                }
+                desc = func.get("description")
+                params = func.get("parameters")
+                if desc is not None:
+                    entry["description"] = desc
+                if params is not None:
+                    entry["parameters"] = params
+                normalized.append(entry)
+                continue
+            normalized.append(tool)
+        return normalized
+
     def _extract_usage(self, response: Any) -> Dict[str, int]:
         usage = self._get_value(response, "usage", {}) or {}
         prompt = self._get_value(usage, "prompt_tokens", None)
@@ -131,15 +167,25 @@ class OpenAIProvider(LLMProvider):
             "input": messages,
             "temperature": float(os.getenv("OPENAI_TEMPERATURE", "0.1")),
         }
+        if model_name in self._no_temperature_models:
+            request_params.pop("temperature", None)
 
         if tools and supports_tools:
-            request_params["tools"] = tools
+            request_params["tools"] = self._normalize_tools_for_responses(tools)
             request_params["tool_choice"] = "auto"
 
         if "response_format" in kwargs and kwargs["response_format"] is not None:
             request_params["response_format"] = kwargs["response_format"]
 
-        response = client.responses.create(**request_params)
+        try:
+            response = client.responses.create(**request_params)
+        except Exception as e:
+            if self._is_temperature_unsupported_error(e) and "temperature" in request_params:
+                self._no_temperature_models.add(model_name)
+                request_params.pop("temperature", None)
+                response = client.responses.create(**request_params)
+            else:
+                raise
 
         content = self._extract_output_text(response)
         result_message = {
@@ -185,6 +231,8 @@ class OpenAIProvider(LLMProvider):
             "messages": messages,
             "temperature": float(os.getenv("OPENAI_TEMPERATURE", "0.1")),
         }
+        if model_name in self._no_temperature_models:
+            request_params.pop("temperature", None)
 
         # Optional: thinking mode for OpenAI-compatible backends (e.g., DeepSeek).
         # Passed through as-is; auto-detection is handled at a higher level.
@@ -248,6 +296,43 @@ class OpenAIProvider(LLMProvider):
                 except Exception as inner:
                     debug_logger.log("llm", "OPENAI_RESPONSES_ERROR", {"error": str(inner)}, "ERROR")
                     return {"error": f"OpenAI API error: {inner}"}
+            if self._is_temperature_unsupported_error(e):
+                self._no_temperature_models.add(model_name)
+                request_params.pop("temperature", None)
+                try:
+                    response = client.chat.completions.create(**request_params)
+                    message_content = response.choices[0].message
+
+                    result_message = {
+                        "role": "assistant",
+                        "content": message_content.content or "",
+                    }
+                    if hasattr(message_content, "tool_calls") and message_content.tool_calls:
+                        result_message["tool_calls"] = [
+                            {
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments,
+                                }
+                            }
+                            for tc in message_content.tool_calls
+                        ]
+
+                    result = {
+                        "message": result_message,
+                        "done": True,
+                        "usage": {
+                            "prompt": response.usage.prompt_tokens if response.usage else 0,
+                            "completion": response.usage.completion_tokens if response.usage else 0,
+                            "total": response.usage.total_tokens if response.usage else 0,
+                        }
+                    }
+
+                    debug_logger.log_llm_response(model_name, result, cached=False)
+                    return result
+                except Exception as inner:
+                    debug_logger.log("llm", "OPENAI_ERROR", {"error": str(inner)}, "ERROR")
+                    return {"error": f"OpenAI API error: {inner}"}
             debug_logger.log("llm", "OPENAI_ERROR", {"error": str(e)}, "ERROR")
             return {"error": f"OpenAI API error: {e}"}
 
@@ -284,6 +369,8 @@ class OpenAIProvider(LLMProvider):
             "temperature": float(os.getenv("OPENAI_TEMPERATURE", "0.1")),
             "stream": True,
         }
+        if model_name in self._no_temperature_models:
+            request_params.pop("temperature", None)
 
         if "thinking" in kwargs and kwargs["thinking"] is not None:
             request_params["thinking"] = kwargs["thinking"]
@@ -370,6 +457,65 @@ class OpenAIProvider(LLMProvider):
                     return result
                 except Exception as inner:
                     debug_logger.log("llm", "OPENAI_RESPONSES_ERROR", {"error": str(inner)}, "ERROR")
+                    return {"error": f"OpenAI streaming error: {inner}"}
+            if self._is_temperature_unsupported_error(e):
+                self._no_temperature_models.add(model_name)
+                request_params.pop("temperature", None)
+                try:
+                    stream = client.chat.completions.create(**request_params)
+                    accumulated_content = ""
+                    accumulated_tool_calls = []
+                    usage_info = {"prompt": 0, "completion": 0, "total": 0}
+
+                    for chunk in stream:
+                        if check_interrupt and check_interrupt():
+                            if on_chunk:
+                                on_chunk("\n[Cancelled]")
+                            raise KeyboardInterrupt("Execution interrupted")
+
+                        if check_user_messages:
+                            check_user_messages()
+
+                        delta = chunk.choices[0].delta if chunk.choices else None
+                        if not delta:
+                            continue
+
+                        if hasattr(delta, "content") and delta.content:
+                            accumulated_content += delta.content
+                            if on_chunk:
+                                on_chunk(delta.content)
+
+                        if hasattr(delta, "tool_calls") and delta.tool_calls:
+                            for tc in delta.tool_calls:
+                                accumulated_tool_calls.append({
+                                    "function": {
+                                        "name": tc.function.name if hasattr(tc.function, "name") else "",
+                                        "arguments": tc.function.arguments if hasattr(tc.function, "arguments") else "",
+                                    }
+                                })
+
+                    final_message = {
+                        "role": "assistant",
+                        "content": accumulated_content,
+                    }
+
+                    if accumulated_tool_calls:
+                        final_message["tool_calls"] = accumulated_tool_calls
+
+                    usage_info["completion"] = len(accumulated_content) // 3
+                    usage_info["prompt"] = sum(len(str(m.get("content", ""))) for m in messages) // 3
+                    usage_info["total"] = usage_info["prompt"] + usage_info["completion"]
+
+                    result = {
+                        "message": final_message,
+                        "done": True,
+                        "usage": usage_info,
+                    }
+
+                    debug_logger.log_llm_response(model_name, result, cached=False)
+                    return result
+                except Exception as inner:
+                    debug_logger.log("llm", "OPENAI_STREAM_ERROR", {"error": str(inner)}, "ERROR")
                     return {"error": f"OpenAI streaming error: {inner}"}
             debug_logger.log("llm", "OPENAI_STREAM_ERROR", {"error": str(e)}, "ERROR")
             return {"error": f"OpenAI streaming error: {e}"}

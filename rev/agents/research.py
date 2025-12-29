@@ -115,6 +115,16 @@ def _coerce_structure_tool(description: str, tool_name: str, arguments: dict) ->
         return "tree_view", {"path": path, "max_depth": 2}, True
     return "list_dir", {"pattern": _pattern_from_path(path)}, True
 
+
+def _tool_is_available(tool_name: str, tools: list[dict]) -> bool:
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        fn = tool.get("function") or {}
+        if fn.get("name") == tool_name:
+            return True
+    return False
+
 RESEARCH_SYSTEM_PROMPT = """You are a specialized Research agent. Your purpose is to investigate codebases, gather context, analyze code structures, and provide insights.
 
 You will be given a research task and context about the repository. Your goal is to gather information using available tools.
@@ -234,6 +244,30 @@ class ResearchAgent(BaseAgent):
         )
         available_tools = selected_tools
 
+        if _is_structure_inventory_task(task.description):
+            tool_name, arguments, coerced = _coerce_structure_tool(
+                task.description,
+                "analyze_code_structures",
+                {"path": "."},
+            )
+            if _tool_is_available(tool_name, available_tools):
+                if coerced:
+                    print(f"  -> ResearchAgent using direct tool '{tool_name}' for structure listing")
+                raw_result = execute_tool(tool_name, arguments)
+                snippet = _extract_snippet(tool_name, arguments, raw_result)
+                context.add_insight("research_agent", f"task_{task.task_id}_result", {
+                    "tool": tool_name,
+                    "result": snippet
+                })
+                return build_subagent_output(
+                    agent_name="ResearchAgent",
+                    tool_name=tool_name,
+                    tool_args=arguments,
+                    tool_output=raw_result,
+                    context=context,
+                    task_id=task.task_id,
+                )
+
         messages = [
             {"role": "system", "content": RESEARCH_SYSTEM_PROMPT},
             {"role": "user", "content": f"Task: {task.description}\n\nSelected Context:\n{rendered_context}"}
@@ -252,6 +286,9 @@ class ResearchAgent(BaseAgent):
                 if not response:
                     error_type = "empty_response"
                     error_detail = "LLM returned None/empty response"
+                elif "error" in response:
+                    error_type = "llm_error"
+                    error_detail = response.get("error")
                 elif "message" not in response:
                     error_type = "missing_message_key"
                     error_detail = f"Response missing 'message' key: {list(response.keys())}"

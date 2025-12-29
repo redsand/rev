@@ -1196,10 +1196,74 @@ def _extract_task_paths(task: Task) -> list[str]:
     return deduped
 
 
+_PROJECT_MARKERS = {
+    "package.json", "pnpm-lock.yaml", "yarn.lock",
+    "pyproject.toml", "requirements.txt", "setup.py",
+    "go.mod", "Cargo.toml", "Gemfile", "composer.json",
+    "pom.xml", "build.gradle", "build.gradle.kts", "Makefile",
+}
+
+
+def _has_project_markers(root: Path) -> bool:
+    for marker in _PROJECT_MARKERS:
+        if (root / marker).exists():
+            return True
+    for marker in _PROJECT_MARKERS:
+        if any(root.glob(f"*/{marker}")):
+            return True
+        if any(root.glob(f"*/*/{marker}")):
+            return True
+    return False
+
+
+def _scaffold_paths_from_task(task: Task) -> list[str]:
+    desc = (task.description or "").lower()
+    paths: list[str] = []
+
+    def add(path: str) -> None:
+        if not path:
+            return
+        if re.match(r"^[A-Za-z]:", path) or path.startswith(("/", "\\")):
+            return
+        if path not in paths:
+            paths.append(path)
+
+    for raw in _extract_task_paths(task):
+        add(raw)
+
+    if any(token in desc for token in ("vue", "react", "vite", "node", "express", "prisma", "sqlite", "spa")):
+        add("package.json")
+    if "prisma" in desc:
+        add("prisma/schema.prisma")
+    if any(token in desc for token in ("vue", "react", "spa")):
+        add("src/main.js")
+    if any(token in desc for token in ("express", "api", "backend", "server")):
+        add("src/app.js")
+    if any(token in desc for token in ("readme", "document", "documentation")):
+        add("README.md")
+
+    return paths
+
+
 def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optional[VerificationResult]) -> list[Task]:
     targets = _extract_task_paths(task)
     target_path = targets[0] if targets else ""
     tasks: list[Task] = []
+
+    error_message = verification_result.message if verification_result and verification_result.message else ""
+    missing_file_error = "not found" in error_message.lower() or "does not exist" in error_message.lower()
+    if missing_file_error and not _has_project_markers(config.ROOT):
+        scaffold_paths = _scaffold_paths_from_task(task)
+        if scaffold_paths:
+            tasks.append(
+                Task(
+                    description=(
+                        "Scaffold missing project files to unblock: "
+                        f"{', '.join(scaffold_paths)}. Use write_file to create minimal placeholders."
+                    ),
+                    action_type="add",
+                )
+            )
 
     if target_path:
         tasks.append(
@@ -3731,7 +3795,6 @@ class Orchestrator:
                         # Try to find specific test file for the changed file
                         test_file_hint = None
                         if file_path:
-                            from pathlib import Path
                             p = Path(file_path)
                             filename = p.stem  # e.g., "app" from "app.js"
                             parent_dir = str(p.parent) if str(p.parent) != '.' else ''

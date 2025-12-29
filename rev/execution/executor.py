@@ -963,12 +963,15 @@ def _apply_text_fallbacks(
         return False
 
     if _looks_like_codex_patch_block(content):
+        applied = _apply_patch_fallback(content, messages, session_tracker, debug_logger, exec_context)
+        if applied:
+            return True
         messages.append(
             {
                 "role": "user",
                 "content": (
-                    "You provided a patch in Codex '*** Begin Patch' format, which cannot be applied here. "
-                    "Use a unified diff (either start with 'diff --git', or provide '---/+++/@@' hunks inside a ```diff``` block)."
+                    "Codex-style patch failed to apply. Provide a unified diff (start with 'diff --git', "
+                    "or include '---/+++/@@' hunks inside a ```diff``` block)."
                 ),
             }
         )
@@ -1949,6 +1952,21 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                     no_tool_call_streak = 0
                     continue
 
+                if no_tool_call_streak >= 2 and tools_enabled and (current_task.action_type or "").lower() in {"add", "edit", "refactor", "fix"}:
+                    tools_enabled = False
+                    if messages and messages[0].get("role") == "system" and "Tool calling is disabled" not in messages[0].get("content", ""):
+                        messages[0]["content"] = messages[0]["content"] + "\n\nTool calling is disabled; output unified diffs or full file content."
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Tool calling is disabled for this task. "
+                            "Provide a unified diff (diff --git or ---/+++ with @@ hunks) "
+                            "or full file contents for new files. Do not include analysis."
+                        ),
+                    })
+                    no_tool_call_streak = 0
+                    continue
+
                 # If model keeps responding without tools or completion, inject guidance instead of failing
                 if no_tool_call_streak >= 3:
                     print(f"  ⚠️ Model still not calling tools; injecting reminder and continuing.")
@@ -2458,6 +2476,21 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                 debug_logger,
                 current_task=task,
             ):
+                no_tool_call_streak = 0
+                continue
+
+            if no_tool_call_streak >= 2 and tools_enabled and (task.action_type or "").lower() in {"add", "edit", "refactor", "fix"}:
+                tools_enabled = False
+                if messages and messages[0].get("role") == "system" and "Tool calling is disabled" not in messages[0].get("content", ""):
+                    messages[0]["content"] = messages[0]["content"] + "\n\nTool calling is disabled; output unified diffs or full file content."
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Tool calling is disabled for this task. "
+                        "Provide a unified diff (diff --git or ---/+++ with @@ hunks) "
+                        "or full file contents for new files. Do not include analysis."
+                    ),
+                })
                 no_tool_call_streak = 0
                 continue
 

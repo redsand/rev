@@ -36,6 +36,23 @@ _EXACT_ALIASES: dict[str, str] = {
     "run_cmd": "run",
     "run_command": "run",
     "exec": "execute",
+    # tool-shaped action tokens (map to canonical actions)
+    "read_file": "read",
+    "list_dir": "read",
+    "list_directory": "read",
+    "tree_view": "read",
+    "search_code": "research",
+    "get_repo_context": "read",
+    "write_file": "add",
+    "create_file": "add",
+    "append_to_file": "edit",
+    "replace_in_file": "edit",
+    "apply_patch": "edit",
+    "run_tests": "test",
+    # meta/invalid action tokens seen in the wild
+    "action": "analyze",
+    "action_type": "analyze",
+    "actionable_subtask": "analyze",
     # known refactor typos
     "refator": "refactor",
     "refracto": "refactor",

@@ -14,6 +14,7 @@ This helps with:
 """
 
 import json
+import sys
 from typing import Dict, Any, Optional, Tuple
 from rev.llm.client import ollama_chat
 
@@ -187,6 +188,10 @@ def prompt_optimization_dialog(
     if not interactive:
         return improved, True
 
+    if not sys.stdin or not sys.stdin.isatty():
+        print("?? Non-interactive input detected; using suggested improvement.\n")
+        return improved, True
+
     # Check if TUI is active and use curses menu
     from rev.terminal.tui import get_active_tui
     tui = get_active_tui()
@@ -220,7 +225,8 @@ def prompt_optimization_dialog(
         print("  [2] Keep the original request")
         print("  [3] Enter a custom request\n")
 
-        while True:
+        attempts = 0
+        while attempts < 3:
             try:
                 choice = input("Choice [1-3]: ").strip()
 
@@ -242,10 +248,14 @@ def prompt_optimization_dialog(
 
                 else:
                     print("Invalid choice. Please enter 1, 2, or 3.\n")
+                    attempts += 1
 
             except (KeyboardInterrupt, EOFError):
                 print("\n\nUsing original request.\n")
                 return user_request, False
+
+        print("\nToo many invalid choices; using original request.\n")
+        return user_request, False
 
 
 def optimize_prompt_if_needed(
