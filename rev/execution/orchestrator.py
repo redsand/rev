@@ -3238,10 +3238,13 @@ class Orchestrator:
 
                 # FORWARD PROGRESS RULE: Check for redundant actions
                 action_sig = f"{(next_task.action_type or '').strip().lower()}::{(next_task.description or '').strip().lower()}"
-                if action_counts[action_sig] >= 2:
-                    # Check if we've already transformed this type of action multiple times
-                    transformation_count = self.context.agent_state.get("transformation_count", 0)
 
+                # Track consecutive transformations regardless of signature changes
+                transformation_count = self.context.agent_state.get("transformation_count", 0)
+                was_transformed = False
+
+                if action_counts[action_sig] >= 2:
+                    # This is a redundant action - need to transform it
                     if transformation_count >= 3:
                         # Too many transformations - trigger circuit breaker instead
                         print(f"\n  ⚠️  Transformation limit reached ({transformation_count}x) - triggering circuit breaker")
@@ -3256,11 +3259,10 @@ class Orchestrator:
                     # Update signature after transformation
                     action_sig = f"{(next_task.action_type or '').strip().lower()}::{(next_task.description or '').strip().lower()}"
 
-                    # Increment transformation counter
+                    # Mark that we transformed and increment counter
+                    was_transformed = True
                     self.context.set_agent_state("transformation_count", transformation_count + 1)
-                else:
-                    # Reset transformation counter on successful new action
-                    self.context.set_agent_state("transformation_count", 0)
+                    print(f"  [transformation-tracking] Count: {transformation_count + 1}/3")
 
                 next_task.task_id = iteration
                 try:
@@ -4035,6 +4037,8 @@ class Orchestrator:
 
             # STEP 4: REPORT
             if next_task.status == TaskStatus.COMPLETED:
+                # Reset transformation counter on successful completion
+                self.context.set_agent_state("transformation_count", 0)
                 if self.context.state_manager:
                     self.context.state_manager.on_task_completed(next_task)
             elif next_task.status == TaskStatus.FAILED:

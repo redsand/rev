@@ -3,6 +3,6 @@
 # Note: REV_GIT_COMMIT should be populated at build time so wheels/sdists carry
 # the commit even when git metadata is unavailable at runtime.
 REV_VERSION = "2.1.0"
-REV_GIT_COMMIT = "c303e8c58e1693e40dfa4a1aa00358dce96a5022"
+REV_GIT_COMMIT = "8a752a155bd2b2af3d3f1936229a1b0d90af57ac"
 
 __all__ = ["REV_VERSION", "REV_GIT_COMMIT"]
