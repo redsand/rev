@@ -3888,8 +3888,13 @@ class Orchestrator:
                     print(f"  {colorize(Symbols.WARNING, Colors.BRIGHT_YELLOW)} {colorize('Skipped re-running tests: no code changes detected.', Colors.BRIGHT_BLACK)}")
 
                 if not verification_result.passed:
+                    action_type = (next_task.action_type or "").lower()
+                    details = getattr(verification_result, "details", {}) if verification_result else {}
+                    is_blocked = isinstance(details, dict) and details.get("blocked") is True
+                    skip_failure_counts = isinstance(details, dict) and details.get("skip_failure_counts") is True
+
                     # PERFORMANCE FIX 2: Check if verification is inconclusive (P0-6)
-                    if getattr(verification_result, 'inconclusive', False):
+                    if getattr(verification_result, 'inconclusive', False) and not (is_blocked and action_type == "test"):
                         print(f"  [inconclusive-verification] Edit completed but needs validation - injecting TEST task")
 
                         # Display inconclusive warning (already handled by _handle_verification_failure)
@@ -3984,13 +3989,15 @@ class Orchestrator:
 
                     # Anti-loop: stop if the same verification failure repeats.
                     # Use robust error signature that identifies root error type
-                    error_sig = _create_error_signature(verification_result)
-                    failure_sig = f"{(next_task.action_type or '').lower()}::{error_sig}"
-                    failure_counts[failure_sig] += 1
-                    action_type = (next_task.action_type or "").lower()
-                    repeat_break_threshold = 3
-                    if action_type == "test":
-                        repeat_break_threshold = 5
+                    if skip_failure_counts:
+                        print("  [skip-failure-counts] Verification marked as inconclusive/blocked; skipping circuit-breaker counts")
+                    else:
+                        error_sig = _create_error_signature(verification_result)
+                        failure_sig = f"{(next_task.action_type or '').lower()}::{error_sig}"
+                        failure_counts[failure_sig] += 1
+                        repeat_break_threshold = 3
+                        if action_type == "test":
+                            repeat_break_threshold = 5
 
                     # Extract and save failing test file for targeted re-testing
                     all_error_text = f"{verification_result.message} "
@@ -4005,27 +4012,28 @@ class Orchestrator:
                         self.context.set_agent_state("last_failing_test_file", failing_test_file)
                         print(f"  [test-targeting] Detected failing test: {failing_test_file}")
 
-                    # Log the detected error signature for debugging
-                    if failure_counts[failure_sig] > 1:
-                        print(f"  [circuit-breaker] Same error detected {failure_counts[failure_sig]}x: {error_sig}")
+                    if not skip_failure_counts:
+                        # Log the detected error signature for debugging
+                        if failure_counts[failure_sig] > 1:
+                            print(f"  [circuit-breaker] Same error detected {failure_counts[failure_sig]}x: {error_sig}")
 
-                    if failure_counts[failure_sig] == 2:
-                        diag_key = f"diagnostic::{failure_sig}"
-                        already_injected = self.context.agent_state.get(diag_key, False)
-                        if not already_injected:
-                            diagnostic_tasks = _build_diagnostic_tasks_for_failure(next_task, verification_result)
-                            injected = _queue_diagnostic_tasks(self.context, diagnostic_tasks)
-                            if injected:
-                                self.context.agent_state[diag_key] = True
-                                forced_next_task = injected
-                                iteration -= 1
-                                continue
+                        if failure_counts[failure_sig] == 2:
+                            diag_key = f"diagnostic::{failure_sig}"
+                            already_injected = self.context.agent_state.get(diag_key, False)
+                            if not already_injected:
+                                diagnostic_tasks = _build_diagnostic_tasks_for_failure(next_task, verification_result)
+                                injected = _queue_diagnostic_tasks(self.context, diagnostic_tasks)
+                                if injected:
+                                    self.context.agent_state[diag_key] = True
+                                    forced_next_task = injected
+                                    iteration -= 1
+                                    continue
 
-                    # Track syntax repair attempts separately
-                    syntax_repair_key = f"syntax_repair::{failure_sig}"
-                    syntax_repair_attempts = self.context.agent_state.get(syntax_repair_key, 0)
+                        # Track syntax repair attempts separately
+                        syntax_repair_key = f"syntax_repair::{failure_sig}"
+                        syntax_repair_attempts = self.context.agent_state.get(syntax_repair_key, 0)
 
-                    if failure_counts[failure_sig] >= repeat_break_threshold:
+                    if not skip_failure_counts and failure_counts[failure_sig] >= repeat_break_threshold:
                         # PRIORITY 2 FIX: ESCALATION for repeated replace_in_file failures
                         # Check if this is a replace_in_file failure that should escalate to write_file
                         tool_events = getattr(next_task, "tool_events", None) or []

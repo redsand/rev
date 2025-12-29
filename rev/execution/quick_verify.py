@@ -1559,19 +1559,31 @@ def _resolve_validation_cwd(cmd: str | list[str], primary_path: Optional[Path]) 
     return None
 
 
-def _output_indicates_no_tests(stdout: str, stderr: str) -> bool:
+def _output_indicates_tests_present(stdout: str, stderr: str) -> bool:
     combined = f"{stdout}\n{stderr}".lower()
     patterns = (
-        "no tests found",
-        "no tests ran",
-        "no tests collected",
-        "collected 0 items",
-        "ran 0 tests",
-        "no test files",
-        "0 tests",
-        "0 passing",
+        r"\btests?\s*\(?\s*([1-9]\d*)\b",
+        r"\b([1-9]\d*)\s+tests?\b",
+        r"\bcollected\s+([1-9]\d*)\s+items\b",
     )
-    return any(pat in combined for pat in patterns)
+    return any(re.search(pattern, combined) for pattern in patterns)
+
+
+def _output_indicates_no_tests(stdout: str, stderr: str) -> bool:
+    combined = f"{stdout}\n{stderr}".lower()
+    if _output_indicates_tests_present(stdout, stderr):
+        return False
+    patterns = (
+        r"\bno tests found\b",
+        r"\bno tests ran\b",
+        r"\bno tests collected\b",
+        r"\bcollected\s+0\s+items\b",
+        r"\bran\s+0\s+tests?\b",
+        r"\bno test files\b",
+        r"\b0\s+tests?\b",
+        r"\b0\s+passing\b",
+    )
+    return any(re.search(pattern, combined) for pattern in patterns)
 
 
 def _path_is_test_like(path: Path) -> bool:
@@ -3260,6 +3272,26 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
         output = stdout + stderr
         context.agent_state["last_test_iteration"] = context.agent_state.get("current_iteration")
         context.agent_state["last_test_rc"] = rc
+        blocked_reason = None
+        if payload.get("blocked") is True:
+            blocked_reason = (stderr or stdout or "Command blocked").strip()
+        elif "blocked non-terminating vitest command" in output.lower():
+            blocked_reason = "Blocked non-terminating Vitest command."
+        if blocked_reason:
+            return VerificationResult(
+                passed=False,
+                message="Verification INCONCLUSIVE: command blocked",
+                details={
+                    "rc": rc,
+                    "output": output[:500],
+                    "blocked": True,
+                    "skip_failure_counts": True,
+                    "reason": blocked_reason,
+                    "cmd": payload.get("cmd") or payload.get("command"),
+                },
+                should_replan=True,
+                inconclusive=True,
+            )
         if _NO_TEST_RUNNER_SENTINEL in output:
             return VerificationResult(
                 passed=True,
