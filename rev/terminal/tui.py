@@ -234,6 +234,9 @@ class TUI:
                         if len(self._command_history) > 100:
                             self._command_history.pop(0)
 
+                        # Save history immediately for persistence
+                        self._save_history()
+
                         # Log with prompt color
                         self.log("\x1b[95m" + self.prompt + "\x1b[0m" + line)
 

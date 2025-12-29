@@ -131,25 +131,30 @@ class GeminiProvider(LLMProvider):
         return result
 
     def _convert_tools(self, tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
-        """Convert OpenAI-style tool definitions to Gemini format."""
+        """Convert OpenAI-style tool definitions to Gemini format.
+
+        Gemini expects all function declarations in a single tools object:
+        [{"function_declarations": [func1, func2, ...]}]
+        """
         if not tools:
             return []
 
-        converted = []
+        function_declarations = []
         for tool in tools:
             if tool.get("type") == "function":
                 func = tool.get("function", {})
                 # Remove 'default' fields from parameters as Gemini doesn't support them
                 parameters = self._remove_default_fields(func.get("parameters", {}))
-                converted.append({
-                    "function_declarations": [{
-                        "name": func.get("name", ""),
-                        "description": func.get("description", ""),
-                        "parameters": parameters,
-                    }]
+                function_declarations.append({
+                    "name": func.get("name", ""),
+                    "description": func.get("description", ""),
+                    "parameters": parameters,
                 })
 
-        return converted
+        # Return all function declarations in a single tools object
+        if function_declarations:
+            return [{"function_declarations": function_declarations}]
+        return []
 
     def _convert_response(self, response: Any, usage_metadata: Optional[Any] = None) -> Dict[str, Any]:
         """Convert Gemini response to our standard format."""
