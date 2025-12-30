@@ -1609,11 +1609,16 @@ def _maybe_queue_hint_command(
     if not cmd:
         return False
     cmd_key = f"{retry_key_prefix}::{cmd.lower()}"
-    if context.agent_state.get(cmd_key):
-        return False
+    last_code_change_iteration = context.agent_state.get("last_code_change_iteration", -1)
+    prior = context.agent_state.get(cmd_key)
+    if isinstance(prior, dict):
+        prior_code_change = prior.get("code_change_iteration", -1)
+        if isinstance(prior_code_change, int) and isinstance(last_code_change_iteration, int) and last_code_change_iteration == prior_code_change:
+            return False
     context.set_agent_state(cmd_key, True)
     queued = _queue_diagnostic_tasks(context, [Task(description=f"Run {cmd}", action_type="run")])
     if queued:
+        context.set_agent_state(cmd_key, {"code_change_iteration": last_code_change_iteration, "cmd": cmd})
         return True
     return False
 
@@ -1784,10 +1789,31 @@ def _queue_diagnostic_tasks(context: RevContext, tasks: list[Task]) -> Optional[
     queue = context.agent_state.get("diagnostic_queue")
     if not isinstance(queue, list):
         queue = []
-    for task in tasks[1:]:
+    last_code_change_iteration = context.agent_state.get("last_code_change_iteration", -1)
+    deduped: list[Task] = []
+    for task in tasks:
+        desc = (task.description or "").strip().lower()
+        action = (task.action_type or "").strip().lower()
+        sig = f"{action}::{desc}"
+        diag_seen = context.agent_state.get("diagnostic_seen", {})
+        if not isinstance(diag_seen, dict):
+            diag_seen = {}
+        prior = diag_seen.get(sig)
+        if isinstance(prior, dict):
+            prior_change = prior.get("code_change_iteration", -1)
+            if isinstance(prior_change, int) and isinstance(last_code_change_iteration, int) and last_code_change_iteration == prior_change:
+                continue
+        diag_seen[sig] = {"code_change_iteration": last_code_change_iteration}
+        context.set_agent_state("diagnostic_seen", diag_seen)
+        deduped.append(task)
+
+    if not deduped:
+        return None
+
+    for task in deduped[1:]:
         queue.append({"description": task.description, "action_type": task.action_type})
     context.agent_state["diagnostic_queue"] = queue
-    return tasks[0] if tasks else None
+    return deduped[0] if deduped else None
 
 
 def _pop_diagnostic_task(context: RevContext) -> Optional[Task]:
@@ -4008,6 +4034,56 @@ class Orchestrator:
                 consecutive_reads += 1
             else:
                 consecutive_reads = 0  # Reset on any non-research action
+
+            # Aggressive research/task dedupe per code change
+            if action_type_normalized in {'read', 'analyze', 'research', 'investigate', 'review'}:
+                desc = (next_task.description or "").strip().lower()
+                sig = f"{action_type_normalized}::{desc}"
+                research_seen = self.context.agent_state.get("research_signature_seen", {})
+                if not isinstance(research_seen, dict):
+                    research_seen = {}
+                last_code_change_iteration = self.context.agent_state.get("last_code_change_iteration", -1)
+                prior = research_seen.get(sig)
+                if isinstance(prior, dict):
+                    prior_change = prior.get("code_change_iteration", -1)
+                    if isinstance(prior_change, int) and isinstance(last_code_change_iteration, int) and last_code_change_iteration == prior_change:
+                        print(f"  [research-dedupe] Skipping duplicate research task: {sig}")
+                        next_task.status = TaskStatus.STOPPED
+                        next_task.result = json.dumps({
+                            "skipped": True,
+                            "reason": "duplicate research signature since last code change",
+                            "signature": sig,
+                        })
+                        completed_tasks_log.append(f"[STOPPED] {next_task.description} | Reason: duplicate research signature")
+                        continue
+                research_seen[sig] = {"code_change_iteration": last_code_change_iteration}
+                self.context.set_agent_state("research_signature_seen", research_seen)
+
+            # Test task signature dedupe across pending/completed since last code change
+            if action_type_normalized == "test":
+                signature = _normalize_test_task_signature(next_task)
+                next_task._normalized_signature = signature
+                last_code_change_iteration = self.context.agent_state.get("last_code_change_iteration", -1)
+                seen_tests = self.context.agent_state.get("test_signature_seen", {})
+                if not isinstance(seen_tests, dict):
+                    seen_tests = {}
+                seen_entry = seen_tests.get(signature)
+                if isinstance(seen_entry, dict):
+                    seen_at = seen_entry.get("code_change_iteration", -1)
+                else:
+                    seen_at = -1
+                if isinstance(last_code_change_iteration, int) and isinstance(seen_at, int) and last_code_change_iteration == seen_at:
+                    print(f"  [test-dedupe] Skipping duplicate test task with signature: {signature}")
+                    next_task.status = TaskStatus.STOPPED
+                    next_task.result = json.dumps({
+                        "skipped": True,
+                        "reason": "duplicate test signature since last code change",
+                        "signature": signature,
+                    })
+                    completed_tasks_log.append(f"[STOPPED] {next_task.description} | Reason: duplicate test signature")
+                    continue
+                seen_tests[signature] = {"code_change_iteration": last_code_change_iteration}
+                self.context.set_agent_state("test_signature_seen", seen_tests)
 
             # Get or initialize blocked_action_sigs from context
             if self.context:
