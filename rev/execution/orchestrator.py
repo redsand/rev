@@ -1608,14 +1608,20 @@ def _append_task_tool_event(task: Task, result_payload: Any) -> None:
 def _enforce_action_tool_constraints(task: Task) -> tuple[bool, Optional[str]]:
     """Ensure write actions actually execute a write tool."""
     action = (task.action_type or "").lower()
-    if action not in WRITE_ACTIONS:
+    if action not in WRITE_ACTIONS and action != "test":
         return True, None
 
     events = getattr(task, "tool_events", None) or []
     if not events:
+        if action == "test":
+            return False, "Test action completed without tool execution"
         return False, "Write action completed without tool execution"
 
     tool_names = [str(ev.get("tool") or "").lower() for ev in events]
+    if action == "test":
+        if not any(name in {"run_cmd", "run_tests"} for name in tool_names):
+            return False, "Test action completed without run_cmd/run_tests execution"
+        return True, None
     if not has_write_tool(tool_names):
         return False, "Write action completed without write tool execution"
 
@@ -4686,6 +4692,10 @@ class Orchestrator:
                 pass
             ok, constraint_error = _enforce_action_tool_constraints(task)
             if not ok:
+                if (task.action_type or "").lower() == "test":
+                    task.status = TaskStatus.STOPPED
+                    task.error = constraint_error
+                    return False
                 task.status = TaskStatus.FAILED
                 task.error = constraint_error
 

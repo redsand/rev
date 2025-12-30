@@ -46,14 +46,35 @@ def _extract_target_files_from_description(description: str) -> list[str]:
     # Match bare paths like src/module/file.ext or backend/prisma/schema.prisma
     # Pattern: word chars, slashes, dots, hyphens + dot + extension
     bare_pattern = r'\b([\w./\\-]+\.\w+)\b'
+    allowed_bare = {
+        "package.json",
+        "tsconfig.json",
+        "jsconfig.json",
+        "vite.config.ts",
+        "vitest.config.ts",
+        "jest.config.js",
+        "README.md",
+        "readme.md",
+    }
+    verb_hint = re.compile(r"\b(edit|update|modify|create|add|remove|delete|replace|rename|refactor|fix|read|inspect|open|write)\b", re.IGNORECASE)
     for match in re.finditer(bare_pattern, description, re.IGNORECASE):
         candidate = match.group(1)
-        # Filter out common false positives
-        # Include if it has a path separator (/ or \) OR if it's a multi-character filename
-        if candidate not in paths and not candidate.startswith('.'):
-            # Must have a slash (path) or be a meaningful filename (not just ".ext")
-            if '/' in candidate or '\\' in candidate or len(candidate.split('.')[0]) > 1:
-                paths.append(candidate)
+        if candidate in paths or candidate.startswith('.'):
+            continue
+        end_idx = match.end()
+        if end_idx < len(description) and description[end_idx] == "(":
+            # Avoid method-like tokens such as express.json()
+            continue
+        if '/' in candidate or '\\' in candidate:
+            paths.append(candidate)
+            continue
+        if candidate.lower() in allowed_bare:
+            paths.append(candidate)
+            continue
+        context_start = max(0, match.start() - 25)
+        context = description[context_start:match.start()]
+        if verb_hint.search(context):
+            paths.append(candidate)
 
     return paths
 
