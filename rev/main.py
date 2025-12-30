@@ -258,6 +258,12 @@ def main():
         help="Clean all temporary files, caches, and logs"
     )
     parser.add_argument(
+        "--clear",
+        action="store_true",
+        dest="clean",
+        help="Alias for --clean (clean all temporary files, caches, and logs)"
+    )
+    parser.add_argument(
         "-v",
         "--version",
         action="store_true",

@@ -760,6 +760,15 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         setter=lambda value: config.DEFAULT_MCP_SERVERS.get("sequential-thinking", {}).update({"enabled": value}) if "sequential-thinking" in config.DEFAULT_MCP_SERVERS else None,
         default=True,
     ),
+    "forbid_shell_security": RuntimeSetting(
+        key="forbid_shell_security",
+        description="Block shell metacharacters and dangerous tokens in commands (False permits &&, ||, |)",
+        section="Execution",
+        parser=_parse_bool,
+        getter=lambda: getattr(config, "forbid_shell_security", False),
+        setter=lambda value: setattr(config, "forbid_shell_security", value),
+        default=getattr(config, "forbid_shell_security", False),
+    ),
     "mcp_fetch_enabled": RuntimeSetting(
         key="mcp_fetch_enabled",
         description="Enable MCP fetch server for HTTP requests",

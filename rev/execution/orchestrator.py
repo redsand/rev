@@ -5055,7 +5055,7 @@ class Orchestrator:
                             iteration -= 1  # Don't count failed task as an iteration
                 else:
                     # If we've just verified a successful test and no code has changed since,
-                    # treat this as "goal achieved" to prevent endless test loops.
+                    # avoid re-running the same test, but continue the plan instead of exiting early.
                     if (next_task.action_type or "").lower() == "test" and _did_run_real_tests(next_task, verification_result):
                         signature = getattr(next_task, "_normalized_signature", None) or _normalize_test_task_signature(next_task)
                         _record_test_signature_state(self.context, signature, "passed")
@@ -5069,8 +5069,10 @@ class Orchestrator:
                             and last_code_change_iteration != -1
                             and last_code_change_iteration <= last_test_iteration
                         ):
-                            print("\n[OK] Verification passed and no code changed since; stopping to avoid repeated tests.")
-                            return True
+                            print("\n[OK] Verification passed and no code changed since; skipping redundant test reruns and continuing.")
+                            # Mark the signature as passed for this code state so future identical test tasks are skipped.
+                            next_task.status = TaskStatus.COMPLETED
+                            continue
 
             action_type = (next_task.action_type or "").lower()
             if next_task.status == TaskStatus.COMPLETED and action_type in {"edit", "add", "refactor", "create_directory"}:
