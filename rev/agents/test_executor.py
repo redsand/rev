@@ -225,6 +225,32 @@ class TestExecutorAgent(BaseAgent):
 
             print(f"  -> Executing: {tool_name} {arguments}")
             raw_result = execute_tool(tool_name, arguments, agent_name="test_executor")
+            # Surface timeouts clearly to the user/verification layers.
+            try:
+                parsed = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict) and (parsed.get("timed_out") or parsed.get("timeout") or parsed.get("timeout_decision")):
+                timeout_seconds = None
+                if isinstance(arguments, dict):
+                    timeout_seconds = arguments.get("timeout")
+                if not timeout_seconds and isinstance(parsed.get("timeout_initial"), dict):
+                    timeout_seconds = parsed.get("timeout_initial", {}).get("timeout_seconds")
+                # Preserve stdout/stderr tails but keep output concise
+                stdout_tail = ""
+                stderr_tail = ""
+                if isinstance(parsed.get("stdout"), str):
+                    stdout_tail = parsed["stdout"][-500:]
+                if isinstance(parsed.get("stderr"), str):
+                    stderr_tail = parsed["stderr"][-500:]
+                parsed.update({
+                    "blocked": True,
+                    "reason": parsed.get("reason") or "Command timed out",
+                    "timeout_seconds": timeout_seconds,
+                    "stdout_tail": stdout_tail,
+                    "stderr_tail": stderr_tail,
+                })
+                raw_result = json.dumps(parsed, ensure_ascii=False)
             rerun = self._maybe_rerun_no_tests(tool_name, arguments, raw_result, task, context)
             if rerun:
                 tool_name, arguments, raw_result = rerun

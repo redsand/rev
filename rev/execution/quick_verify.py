@@ -3753,10 +3753,37 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
                 details=payload,
                 should_replan=True,
             )
-        if payload.get("timeout"):
+        if payload.get("timeout") or payload.get("timed_out") or payload.get("timeout_decision"):
+            # Only fail after the second timeout. Track per-task signature.
+            sig = (task.description or "").strip().lower() or "test-timeout"
+            key = f"timeout_count::{sig}"
+            try:
+                count = int(context.get_agent_state(key, 0))
+            except Exception:
+                count = 0
+            count += 1
+            context.set_agent_state(key, count)
+            # Surface a short view of stdout/stderr so the user can see why it hung.
+            stdout_tail = ""
+            stderr_tail = ""
+            if isinstance(payload.get("stdout"), str):
+                stdout_tail = payload["stdout"][-400:]
+            if isinstance(payload.get("stderr"), str):
+                stderr_tail = payload["stderr"][-400:]
+            tail_msg = ""
+            if stdout_tail or stderr_tail:
+                tail_msg = f" | stdout_tail: {stdout_tail[:200]}... stderr_tail: {stderr_tail[:200]}..."
+            if count < 2:
+                return VerificationResult(
+                    passed=False,
+                    message=f"Test command timed out (first occurrence); will retry with adjustments{tail_msg}",
+                    details=payload,
+                    should_replan=False,
+                    inconclusive=True,
+                )
             return VerificationResult(
                 passed=False,
-                message="Test command timed out",
+                message=f"Test command timed out (repeated){tail_msg}",
                 details=payload,
                 should_replan=True,
             )

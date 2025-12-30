@@ -319,6 +319,18 @@ def _maybe_retry_timeout(
         "stderr_tail": stderr_tail,
     }
 
+    # For tests: avoid blindly re-running with larger timeouts. Surface the suggestion instead.
+    if is_tests and decision.get("decision") == "rerun":
+        normalized["blocked"] = True
+        normalized["reason"] = decision.get("reason") or "Test command timed out"
+        normalized["timeout_decision"] = {**decision, "source": decision_source, "stdout_tail": stdout_tail, "stderr_tail": stderr_tail}
+        normalized["timeout_initial"] = {
+            "timeout_seconds": timeout,
+            "stdout_tail": stdout_tail,
+            "stderr_tail": stderr_tail,
+        }
+        return normalized
+
     if decision.get("decision") != "rerun":
         normalized["blocked"] = True
         if decision.get("reason"):
