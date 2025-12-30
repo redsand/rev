@@ -5522,8 +5522,9 @@ class Orchestrator:
                 return True
         except Exception as e:
             task.status = TaskStatus.FAILED
-            task.error = str(e)
-            context.add_error(f"Sub-agent execution exception for task {task.task_id}: {e}")
+            tb = traceback.format_exc()
+            task.error = f"{e}\n{tb}"
+            context.add_error(f"Sub-agent execution exception for task {task.task_id}: {e}\n{tb}")
             return False
     
     def _emit_run_metrics(self, plan: Optional[ExecutionPlan], result: OrchestratorResult, budget: ResourceBudget):
