@@ -21,6 +21,7 @@ import os
 import json
 import time
 import traceback
+import shlex
 from typing import Dict, Any, List, Optional, Literal, Tuple
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -797,6 +798,107 @@ def _create_error_signature(verification_result) -> str:
     return first_line[:100]  # Limit length
 
 
+def _normalize_test_task_signature(task: Task) -> str:
+    """Create a stable signature for test tasks to prevent duplicate blocked reruns."""
+    desc = (task.description or "").strip()
+    if not desc:
+        return "test::<empty>"
+    cmd_match = re.search(
+        r"\b(?:npm|npx|yarn|pnpm|vitest|jest|pytest|go test|cargo test|dotnet test)[^\r\n]*",
+        desc,
+        re.IGNORECASE,
+    )
+    signature = cmd_match.group(0) if cmd_match else desc
+    signature = re.sub(r"\s+", " ", signature.strip().lower())
+    return f"test::{signature}"
+
+
+def _extract_explicit_test_command(description: str) -> Optional[str]:
+    if not description:
+        return None
+    desc = description.strip()
+    token_pattern = r"\b(npx|npm|yarn|pnpm|vitest|jest|pytest|go test|cargo test|dotnet test)\b"
+    candidates: list[str] = []
+    for pattern in (r"`([^`]+)`", r"\"([^\"]+)\"", r"'([^']+)'"):
+        for match in re.findall(pattern, desc):
+            if not match or not match.strip():
+                continue
+            cleaned = match.strip().rstrip(".;:")
+            if re.search(token_pattern, cleaned, re.IGNORECASE):
+                candidates.append(cleaned)
+    if candidates:
+        return max(candidates, key=len)
+
+    token_match = re.search(token_pattern, desc, re.IGNORECASE)
+    if token_match:
+        candidate = desc[token_match.start():].strip()
+        candidate = re.split(r"\s+(?:to|for|on|in|within|inside|under)\s+", candidate, maxsplit=1, flags=re.IGNORECASE)[0]
+        candidate = candidate.strip().rstrip(".;:")
+        if re.search(token_pattern, candidate, re.IGNORECASE):
+            return candidate
+    return None
+
+
+def _extract_test_path_from_text(text: str) -> Optional[str]:
+    if not text:
+        return None
+    match = re.search(r"([A-Za-z0-9_./\\\\-]+\\.(?:test|spec)\\.[A-Za-z0-9]+)", text)
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _maybe_correct_explicit_test_command(explicit_cmd: str, description: str) -> str:
+    cmd_text = (explicit_cmd or "").strip()
+    if not cmd_text:
+        return cmd_text
+    desc_lower = (description or "").lower()
+    test_path = _extract_test_path_from_text(cmd_text) or _extract_test_path_from_text(description)
+
+    try:
+        tokens = shlex.split(cmd_text)
+    except ValueError:
+        tokens = cmd_text.split()
+    tokens_lower = [t.lower() for t in tokens]
+
+    vitest_idx = None
+    for idx, tok in enumerate(tokens_lower):
+        if tok.endswith("vitest") or tok.endswith("vitest.cmd"):
+            vitest_idx = idx
+            break
+
+    def _has_non_watch_flags() -> bool:
+        has_run_flag = any(tok == "--run" or tok.startswith("--run=") for tok in tokens_lower)
+        has_run_subcommand = False
+        if vitest_idx is not None:
+            has_run_subcommand = any(tok == "run" for tok in tokens_lower[vitest_idx + 1 : vitest_idx + 3])
+        watch_disabled = any(tok in ("--watch=false", "--watch=0") for tok in tokens_lower)
+        if not watch_disabled and "--watch" in tokens_lower:
+            for idx, tok in enumerate(tokens_lower):
+                if tok == "--watch" and idx + 1 < len(tokens_lower):
+                    if tokens_lower[idx + 1] in ("false", "0", "no"):
+                        watch_disabled = True
+                        break
+        return has_run_flag or has_run_subcommand or watch_disabled
+
+    if vitest_idx is not None:
+        if _has_non_watch_flags():
+            return cmd_text
+        if test_path:
+            return f"npx vitest run {test_path}"
+        return "npx vitest run"
+
+    if "vitest" not in desc_lower:
+        return cmd_text
+
+    if tokens_lower and tokens_lower[0] in ("npm", "yarn", "pnpm"):
+        if test_path:
+            return f"npx vitest run {test_path}"
+        return "npx vitest run"
+
+    return cmd_text
+
+
 def _extract_failing_test_file(error_output: str) -> str:
     """Extract the specific test file that's failing from error output.
 
@@ -1280,6 +1382,72 @@ def _select_js_validation_commands(root: Path) -> list[str]:
     return candidates[:2]
 
 
+def _select_build_fallback_command(description: str, root: Path) -> Optional[str]:
+    desc_lower = (description or "").lower()
+    scripts = _package_json_scripts(root)
+    deps = _package_json_deps(root)
+
+    if scripts:
+        for key in ("build", "compile", "typecheck"):
+            if key in scripts:
+                return f"npm run {key}"
+        if "lint" in scripts and any(token in desc_lower for token in ("lint", "build", "compile", "compilation")):
+            return "npm run lint"
+
+    if "typescript" in deps:
+        return "npx tsc --noEmit"
+
+    if (root / "go.mod").exists():
+        return "go build ./..."
+    if (root / "Cargo.toml").exists():
+        return "cargo build"
+    if (root / "pom.xml").exists():
+        return "mvn -q -DskipTests package"
+    if (root / "build.gradle").exists() or (root / "build.gradle.kts").exists():
+        if (root / "gradlew").exists():
+            return "./gradlew build -x test"
+        return "gradle build -x test"
+    if any(root.glob("*.csproj")) or any(root.glob("*.sln")):
+        return "dotnet build"
+
+    return None
+
+
+def _select_test_fallback_command(description: str, root: Path) -> Optional[str]:
+    desc_lower = (description or "").lower()
+    test_path = _extract_test_path_from_text(description)
+
+    if "vitest" in desc_lower:
+        if test_path:
+            return f"npx vitest run {test_path}"
+        return "npx vitest run"
+
+    try:
+        from rev.tools.project_types import detect_test_command
+        detected = detect_test_command(root)
+    except Exception:
+        detected = None
+
+    if detected:
+        cmd_text = " ".join(detected) if isinstance(detected, list) else str(detected)
+        cmd_lower = cmd_text.lower()
+        if test_path:
+            if "vitest" in cmd_lower:
+                if " vitest run" not in cmd_lower and "--run" not in cmd_lower:
+                    return f"npx vitest run {test_path}"
+                return f"{cmd_text} {test_path}"
+            if "jest" in cmd_lower and "--runtestsbypath" not in cmd_lower:
+                return f"{cmd_text} --runTestsByPath {test_path}"
+            if "pytest" in cmd_lower and test_path not in cmd_lower:
+                return f"{cmd_text} {test_path}"
+            return f"{cmd_text} {test_path}"
+        return cmd_text
+
+    if test_path:
+        return f"npx vitest run {test_path}"
+    return None
+
+
 def _build_no_tests_diagnostic_tasks(details: dict) -> list[Task]:
     tasks: list[Task] = []
     test_files = details.get("test_files") if isinstance(details, dict) else []
@@ -1305,6 +1473,83 @@ def _build_no_tests_diagnostic_tasks(details: dict) -> list[Task]:
             action_type="review",
         )
     )
+    return tasks
+
+
+def _collect_no_tests_hints(details: dict) -> list[str]:
+    hints: list[str] = []
+    if not isinstance(details, dict):
+        return hints
+    debug = details.get("debug")
+    if isinstance(debug, dict):
+        suspected = debug.get("suspected_issue")
+        if isinstance(suspected, str) and suspected.strip():
+            hints.append(suspected.strip())
+        debug_hints = debug.get("hints")
+        if isinstance(debug_hints, list):
+            for hint in debug_hints:
+                if isinstance(hint, str) and hint.strip():
+                    hints.append(hint.strip())
+    suspected = details.get("suspected_issue")
+    if isinstance(suspected, str) and suspected.strip():
+        hints.append(suspected.strip())
+    extra_hints = details.get("hints")
+    if isinstance(extra_hints, list):
+        for hint in extra_hints:
+            if isinstance(hint, str) and hint.strip():
+                hints.append(hint.strip())
+    return hints
+
+
+def _build_no_tests_remediation_tasks(details: dict) -> list[Task]:
+    tasks: list[Task] = []
+    hints = _collect_no_tests_hints(details)
+    if not hints:
+        return tasks
+
+    hint_text = " ".join(hints).lower()
+    root = config.ROOT or Path.cwd()
+    schema_exists = (root / "prisma" / "schema.prisma").exists()
+    node_modules_missing = "node_modules is missing" in hint_text
+
+    if node_modules_missing:
+        tasks.append(
+            Task(
+                description="Install dependencies to ensure test runner and Prisma client are available: npm install",
+                action_type="run",
+            )
+        )
+
+    if "vitest is referenced but not listed" in hint_text and not node_modules_missing:
+        tasks.append(
+            Task(
+                description="Add Vitest for test discovery: npm install -D vitest",
+                action_type="run",
+            )
+        )
+
+    if "@prisma/client is missing" in hint_text and not node_modules_missing:
+        tasks.append(
+            Task(
+                description="Install Prisma client for runtime: npm install @prisma/client",
+                action_type="run",
+            )
+        )
+
+    if "prisma migrations are missing" in hint_text and schema_exists:
+        tasks.append(
+            Task(
+                description="Initialize Prisma client artifacts: npx prisma generate",
+                action_type="run",
+            )
+        )
+        tasks.append(
+            Task(
+                description="Initialize Prisma migrations: npx prisma migrate dev --name init",
+                action_type="run",
+            )
+        )
+
     return tasks
 
 
@@ -3318,7 +3563,7 @@ class Orchestrator:
 
         # PERFORMANCE FIX 1: Track consecutive research tasks to prevent endless loops
         consecutive_reads: int = 0
-        MAX_CONSECUTIVE_READS: int = 10  # Allow max 10 consecutive READ tasks
+        MAX_CONSECUTIVE_READS: int = 20  # Allow max 20 consecutive READ tasks
 
         if self.context.resume and self.context.resume_plan and self.context.plan:
             for task in self.context.plan.tasks:
@@ -3994,6 +4239,33 @@ class Orchestrator:
             verification_result = None
             deferred_tdd_test = False
             action_type_normalized = (next_task.action_type or "").strip().lower()
+            if action_type_normalized == "test":
+                blocked_tests = self.context.agent_state.get("blocked_test_signatures", {})
+                if not isinstance(blocked_tests, dict):
+                    blocked_tests = {}
+                signature = _normalize_test_task_signature(next_task)
+                record = blocked_tests.get(signature)
+                if record:
+                    last_change = self.context.agent_state.get("last_code_change_iteration", -1)
+                    blocked_change = record.get("code_change_iteration", -1) if isinstance(record, dict) else -1
+                    if isinstance(last_change, int) and isinstance(blocked_change, int) and last_change <= blocked_change:
+                        next_task.status = TaskStatus.STOPPED
+                        next_task.result = json.dumps(
+                            {
+                                "skipped": True,
+                                "blocked": True,
+                                "reason": "duplicate blocked test; no code changes since block",
+                                "signature": signature,
+                            }
+                        )
+                        log_entry = f"[STOPPED] (skipped) {next_task.description}"
+                        completed_tasks_log.append(log_entry)
+                        self.context.work_history = completed_tasks_log
+                        print(f"  {Symbols.WARNING} {log_entry}")
+                        continue
+                    if isinstance(last_change, int) and isinstance(blocked_change, int) and last_change > blocked_change:
+                        blocked_tests.pop(signature, None)
+                        self.context.set_agent_state("blocked_test_signatures", blocked_tests)
             if (
                 config.TDD_ENABLED
                 and config.TDD_DEFER_TEST_EXECUTION
@@ -4079,8 +4351,21 @@ class Orchestrator:
                         )
                         execution_success = True
                         self._handle_verification_failure(verification_result)
+                        remediation_tasks = _build_no_tests_remediation_tasks(details)
                         diagnostic_tasks = _build_no_tests_diagnostic_tasks(details)
-                        injected = _queue_diagnostic_tasks(self.context, diagnostic_tasks)
+                        queued_tasks = remediation_tasks + diagnostic_tasks
+                        rem_key = None
+                        if remediation_tasks:
+                            hint_key = "|".join(_collect_no_tests_hints(details)[:2]).lower()
+                            if hint_key:
+                                rem_key = f"no_tests_remediation::{hint_key}"
+                        already_applied = rem_key and self.context.agent_state.get(rem_key)
+                        if already_applied:
+                            queued_tasks = diagnostic_tasks
+                        else:
+                            if rem_key:
+                                self.context.set_agent_state(rem_key, True)
+                        injected = _queue_diagnostic_tasks(self.context, queued_tasks)
                         if injected:
                             forced_next_task = injected
                             iteration -= 1
@@ -4187,6 +4472,16 @@ class Orchestrator:
                                 "message": verification_result.message,
                             }
                         )
+                        if action_type == "test":
+                            blocked_tests = self.context.agent_state.get("blocked_test_signatures", {})
+                            if not isinstance(blocked_tests, dict):
+                                blocked_tests = {}
+                            signature = _normalize_test_task_signature(next_task)
+                            blocked_tests[signature] = {
+                                "blocked_iteration": iteration,
+                                "code_change_iteration": self.context.agent_state.get("last_code_change_iteration", -1),
+                            }
+                            self.context.set_agent_state("blocked_test_signatures", blocked_tests)
                         execution_success = True
                         self._handle_verification_failure(verification_result)
                         verification_handled = True
@@ -4693,6 +4988,80 @@ class Orchestrator:
             ok, constraint_error = _enforce_action_tool_constraints(task)
             if not ok:
                 if (task.action_type or "").lower() == "test":
+                    signature = _normalize_test_task_signature(task)
+                    fallback_key = f"test_tool_fallback::{signature}"
+                    if not context.agent_state.get(fallback_key):
+                        explicit_cmd = _extract_explicit_test_command(task.description or "")
+                        if not explicit_cmd and isinstance(task.result, str):
+                            explicit_cmd = _extract_explicit_test_command(task.result)
+                        if explicit_cmd:
+                            explicit_cmd = _maybe_correct_explicit_test_command(explicit_cmd, task.description or "")
+                            context.set_agent_state(fallback_key, True)
+                            print(f"  [tool-recovery] Executing fallback test command: {explicit_cmd}")
+                            raw_result = execute_tool("run_cmd", {"cmd": explicit_cmd}, agent_name="orchestrator")
+                            task.result = build_subagent_output(
+                                agent_name="Orchestrator",
+                                tool_name="run_cmd",
+                                tool_args={"cmd": explicit_cmd},
+                                tool_output=raw_result,
+                                context=context,
+                                task_id=task.task_id,
+                            )
+                            try:
+                                _append_task_tool_event(task, task.result)
+                            except Exception:
+                                pass
+                            ok, constraint_error = _enforce_action_tool_constraints(task)
+                            if ok:
+                                return True
+                        else:
+                            task_index = task.task_id if isinstance(task.task_id, int) else None
+                            current_iter = context.agent_state.get("current_iteration", 0)
+                            index_value = task_index if isinstance(task_index, int) else current_iter
+                            if isinstance(index_value, int) and index_value < 50:
+                                desc_lower = (task.description or "").lower()
+                                if any(token in desc_lower for token in ("build", "compile", "compilation", "structural integrity")):
+                                    fallback_cmd = _select_build_fallback_command(task.description or "", config.ROOT or Path.cwd())
+                                else:
+                                    fallback_cmd = _select_test_fallback_command(task.description or "", config.ROOT or Path.cwd())
+                                if fallback_cmd:
+                                    context.set_agent_state(fallback_key, True)
+                                    print(f"  [tool-recovery] Executing fallback test command: {fallback_cmd}")
+                                    raw_result = execute_tool("run_cmd", {"cmd": fallback_cmd}, agent_name="orchestrator")
+                                    task.result = build_subagent_output(
+                                        agent_name="Orchestrator",
+                                        tool_name="run_cmd",
+                                        tool_args={"cmd": fallback_cmd},
+                                        tool_output=raw_result,
+                                        context=context,
+                                        task_id=task.task_id,
+                                    )
+                                    try:
+                                        _append_task_tool_event(task, task.result)
+                                    except Exception:
+                                        pass
+                                    ok, constraint_error = _enforce_action_tool_constraints(task)
+                                    if ok:
+                                        return True
+                            else:
+                                suggestion = _select_test_fallback_command(task.description or "", config.ROOT or Path.cwd())
+                                if suggestion:
+                                    task.result = json.dumps(
+                                        {
+                                            "suggested_command": suggestion,
+                                            "reason": "Test task produced no tool call; suggested command not executed",
+                                        }
+                                    )
+
+                    blocked_tests = context.agent_state.get("blocked_test_signatures", {})
+                    if not isinstance(blocked_tests, dict):
+                        blocked_tests = {}
+                    blocked_tests[signature] = {
+                        "blocked_iteration": context.agent_state.get("current_iteration"),
+                        "code_change_iteration": context.agent_state.get("last_code_change_iteration", -1),
+                        "reason": str(constraint_error),
+                    }
+                    context.set_agent_state("blocked_test_signatures", blocked_tests)
                     task.status = TaskStatus.STOPPED
                     task.error = constraint_error
                     return False

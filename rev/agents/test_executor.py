@@ -854,6 +854,10 @@ class TestExecutorAgent(BaseAgent):
         desc = (task.description or "")
         desc_lower = desc.lower()
 
+        vitest_correction = self._maybe_correct_vitest_command(cmd_text, task, context)
+        if vitest_correction:
+            return vitest_correction
+
         command_tokens = (
             "npx", "npm", "yarn", "pnpm",
             "pip", "python", "python3",
@@ -943,3 +947,64 @@ class TestExecutorAgent(BaseAgent):
 
         # No correction needed
         return cmd_text
+
+    def _maybe_correct_vitest_command(self, cmd_text: str, task: Task, context: RevContext) -> Optional[str]:
+        if not cmd_text:
+            return None
+        try:
+            tokens = shlex.split(cmd_text)
+        except ValueError:
+            tokens = cmd_text.split()
+        if not tokens:
+            return None
+
+        tokens_lower = [t.lower() for t in tokens]
+        vitest_idx = None
+        for idx, tok in enumerate(tokens_lower):
+            if tok.endswith("vitest") or tok.endswith("vitest.cmd"):
+                vitest_idx = idx
+                break
+
+        def _has_non_watch_flags() -> bool:
+            has_run_flag = any(tok == "--run" or tok.startswith("--run=") for tok in tokens_lower)
+            has_run_subcommand = False
+            if vitest_idx is not None:
+                has_run_subcommand = any(tok == "run" for tok in tokens_lower[vitest_idx + 1 : vitest_idx + 3])
+            watch_disabled = any(tok in ("--watch=false", "--watch=0") for tok in tokens_lower)
+            if not watch_disabled and "--watch" in tokens_lower:
+                for idx, tok in enumerate(tokens_lower):
+                    if tok == "--watch" and idx + 1 < len(tokens_lower):
+                        if tokens_lower[idx + 1] in ("false", "0", "no"):
+                            watch_disabled = True
+                            break
+            return has_run_flag or has_run_subcommand or watch_disabled
+
+        if vitest_idx is not None and _has_non_watch_flags():
+            return None
+
+        test_path = self._extract_test_path(cmd_text) or self._extract_test_path(task.description or "")
+        if vitest_idx is not None:
+            if test_path:
+                return f"npx vitest run {test_path}"
+            return "npx vitest run"
+
+        package_manager = tokens_lower[0]
+        if package_manager not in ("npm", "yarn", "pnpm"):
+            return None
+
+        script_name = None
+        if len(tokens_lower) > 1 and tokens_lower[1] == "test":
+            script_name = "test"
+        elif len(tokens_lower) > 2 and tokens_lower[1] == "run":
+            script_name = tokens_lower[2]
+
+        if not script_name:
+            return None
+
+        desc_lower = (task.description or "").lower()
+        if "vitest" not in desc_lower:
+            return None
+
+        if test_path:
+            return f"npx vitest run {test_path}"
+        return "npx vitest run"

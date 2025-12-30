@@ -3762,6 +3762,11 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
         stdout = str(payload.get("stdout", "") or "")
         stderr = str(payload.get("stderr", "") or "")
         output = stdout + stderr
+        cwd = None
+        if isinstance(payload, dict):
+            cwd_value = payload.get("cwd") or payload.get("working_dir") or payload.get("workdir")
+            if isinstance(cwd_value, (str, Path)):
+                cwd = str(cwd_value)
         context.agent_state["last_test_iteration"] = context.agent_state.get("current_iteration")
         context.agent_state["last_test_rc"] = rc
         blocked_reason = None
