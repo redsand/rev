@@ -834,6 +834,9 @@ def _signature_state_matches(context: RevContext, signature: str, status: str) -
     entry = state.get(signature)
     if not isinstance(entry, dict):
         return False
+    # If a suite was marked superseded, treat it as matched regardless of iteration.
+    if str(entry.get("status")).lower() == "superseded" and status.lower() == "superseded":
+        return True
     last_code_change_iteration = context.agent_state.get("last_code_change_iteration", -1)
     entry_change = entry.get("code_change_iteration", -1)
     if not (isinstance(entry_change, int) and isinstance(last_code_change_iteration, int)):
@@ -4187,6 +4190,59 @@ class Orchestrator:
                     seen_at = seen_entry.get("code_change_iteration", -1)
                 else:
                     seen_at = -1
+
+                # Similarity guard: avoid enqueuing near-duplicate suites in the same code state.
+                test_path = _extract_test_path_from_text(next_task.description or "")
+                if test_path:
+                    try:
+                        stem = Path(test_path).name.lower()
+                    except Exception:
+                        stem = None
+                    seen_sim = self.context.get_agent_state("test_similarity_seen", [])
+                    if not isinstance(seen_sim, list):
+                        seen_sim = []
+                    canonical = None
+                    if stem:
+                        for entry in seen_sim:
+                            try:
+                                if (
+                                    entry.get("stem") == stem
+                                    and entry.get("code_change_iteration") == last_code_change_iteration
+                                    and entry.get("path") != test_path
+                                ):
+                                    canonical = entry.get("path")
+                                    break
+                            except Exception:
+                                continue
+                    if canonical:
+                        print(f"  [test-similar] Skipping similar test suite: {test_path} ~ {canonical} (code_change_iter={last_code_change_iteration})")
+                        next_task.status = TaskStatus.STOPPED
+                        next_task.result = json.dumps({
+                            "skipped": True,
+                            "reason": "similar test suite already queued",
+                            "canonical": canonical,
+                            "path": test_path,
+                            "code_change_iteration": last_code_change_iteration,
+                        })
+                        completed_tasks_log.append(
+                            f"[STOPPED] {next_task.description} | Reason: similar test suite already queued ({test_path} ~ {canonical})"
+                        )
+                        _record_test_signature_state(self.context, signature, "superseded")
+                        # Suggest cleanup without auto-deleting.
+                        if hasattr(self.context, "user_feedback"):
+                            self.context.user_feedback.append(
+                                f"Duplicate test detected: {test_path} is similar to {canonical}. Consider removing or archiving the duplicate."
+                            )
+                        continue
+                    else:
+                        if stem:
+                            seen_sim.append({
+                                "stem": stem,
+                                "path": test_path,
+                                "code_change_iteration": last_code_change_iteration,
+                            })
+                            self.context.set_agent_state("test_similarity_seen", seen_sim)
+
                 # Allow first-run tests (code_change_iter = -1); only dedupe when we have a valid code-change iteration.
                 if (
                     isinstance(last_code_change_iteration, int)
