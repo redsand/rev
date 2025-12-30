@@ -148,7 +148,7 @@ class ToolCreationAgent(BaseAgent):
 
                     if not error_type:
                         print(f"  -> ToolCreationAgent will call tool '{tool_name}' with arguments: {arguments}")
-                        result = execute_tool(tool_name, arguments)
+                        result = execute_tool(tool_name, arguments, agent_name="ToolCreationAgent")
 
                         # Store info about created tool
                         if tool_name == "write_file" and "file_path" in arguments:
@@ -190,7 +190,7 @@ class ToolCreationAgent(BaseAgent):
                             return self.make_failure_signal("missing_tool_args", "Recovered tool call missing arguments")
                         if not retried:
                             print(f"  -> Recovered tool call from text output: {recovered.name}")
-                        return execute_tool(recovered.name, recovered.arguments)
+                        return execute_tool(recovered.name, recovered.arguments, agent_name="ToolCreationAgent")
 
                 print(f"  [WARN] ToolCreationAgent: {error_detail}")
 

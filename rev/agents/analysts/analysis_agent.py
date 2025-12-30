@@ -43,6 +43,7 @@ def _extract_snippet(tool_name: str, tool_args: dict, raw_result: Any) -> str:
                 search = execute_tool(
                     "search_code",
                     {"pattern": "register|pkgutil|importlib|getmembers|registry", "include": include, "regex": True},
+                    agent_name="AnalysisAgent",
                 )
                 payload = json.loads(search) if isinstance(search, str) else {}
                 matches = payload.get("matches") or []
@@ -54,6 +55,7 @@ def _extract_snippet(tool_name: str, tool_args: dict, raw_result: Any) -> str:
                         window = execute_tool(
                             "read_file_lines",
                             {"path": file, "start": max(1, line - 3), "end": line + 3},
+                            agent_name="AnalysisAgent",
                         )
                         if isinstance(window, str) and window.strip():
                             return window
@@ -206,7 +208,7 @@ class AnalysisAgent(BaseAgent):
 
                     if not error_type:
                         print(f"  -> AnalysisAgent will call tool '{tool_name}' with arguments: {arguments}")
-                        result = execute_tool(tool_name, arguments)
+                        result = execute_tool(tool_name, arguments, agent_name="AnalysisAgent")
 
                         snippet = _extract_snippet(tool_name, arguments, result)
                         context.add_insight("analysis_agent", f"task_{task.task_id}_analysis", {
@@ -263,10 +265,10 @@ class AnalysisAgent(BaseAgent):
                             for path in tool_args.get("paths", []):
                                 if not isinstance(path, str):
                                     continue
-                                outputs[path] = execute_tool("read_file", {"path": path})
+                                outputs[path] = execute_tool("read_file", {"path": path}, agent_name="AnalysisAgent")
                             raw_result = json.dumps(outputs)
                         else:
-                            raw_result = execute_tool(recovered.name, tool_args)
+                            raw_result = execute_tool(recovered.name, tool_args, agent_name="AnalysisAgent")
 
                         snippet = _extract_snippet(recovered.name, tool_args, raw_result)
                         context.add_insight("analysis_agent", f"task_{task.task_id}_analysis", {

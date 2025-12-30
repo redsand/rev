@@ -124,7 +124,7 @@ class DebuggingAgent(BaseAgent):
 
                     if not error_type:
                         print(f"  -> DebuggingAgent will call tool '{tool_name}' with arguments: {arguments}")
-                        raw_result = execute_tool(tool_name, arguments)
+                        raw_result = execute_tool(tool_name, arguments, agent_name="DebuggingAgent")
                         return build_subagent_output(
                             agent_name="DebuggingAgent",
                             tool_name=tool_name,
@@ -165,7 +165,7 @@ class DebuggingAgent(BaseAgent):
                             return self.make_failure_signal("missing_tool_args", "Recovered tool call missing arguments")
                         if not retried:
                             print(f"  -> Recovered tool call from text output: {recovered.name}")
-                        raw_result = execute_tool(recovered.name, recovered.arguments)
+                        raw_result = execute_tool(recovered.name, recovered.arguments, agent_name="DebuggingAgent")
                         return build_subagent_output(
                             agent_name="DebuggingAgent",
                             tool_name=recovered.name,

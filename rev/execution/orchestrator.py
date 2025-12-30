@@ -1299,10 +1299,14 @@ def _attempt_git_revert_for_syntax_errors(task: "Task") -> list[str]:
     for file_path in files_to_revert:
         try:
             # Use git checkout to revert the file
-            result = execute_tool("run_cmd", {
-                "cmd": f"git checkout HEAD -- {file_path}",
-                "timeout": 10
-            })
+            result = execute_tool(
+                "run_cmd",
+                {
+                    "cmd": f"git checkout HEAD -- {file_path}",
+                    "timeout": 10,
+                },
+                agent_name="orchestrator",
+            )
             if result and "error" not in str(result).lower():
                 reverted.append(file_path)
         except Exception:
@@ -2953,7 +2957,7 @@ class Orchestrator:
             return None
 
         try:
-            execute_tool("set_workdir", {"path": str(target)})
+            execute_tool("set_workdir", {"path": str(target)}, agent_name="orchestrator")
         except Exception:
             return None
         return target
@@ -5246,6 +5250,7 @@ class Orchestrator:
         self._maybe_set_workdir_for_task(task)
 
         task.status = TaskStatus.IN_PROGRESS
+        verification_result: Optional[VerificationResult] = None
         try:
             # Build a focused context snapshot (selection pipeline); agents will also
             # use this same pipeline when selecting tools and composing prompts.

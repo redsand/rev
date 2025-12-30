@@ -675,7 +675,7 @@ def _search_relevant_code(keywords: List[str]) -> Dict[str, Any]:
     for keyword in keywords[:5]:
         try:
             # Search for keyword in code
-            result = execute_tool("search_code", {"pattern": keyword, "max_results": 5})
+            result = execute_tool("search_code", {"pattern": keyword, "max_results": 5}, agent_name="researcher")
             result_data = json.loads(result)
 
             matches = result_data.get("matches", [])
@@ -708,7 +708,7 @@ def _analyze_project_structure() -> Dict[str, Any]:
 
     try:
         # Get directory structure
-        result = execute_tool("tree_view", {"path": ".", "max_depth": 2})
+        result = execute_tool("tree_view", {"path": ".", "max_depth": 2}, agent_name="researcher")
         result_data = json.loads(result)
         tree = result_data.get("tree")
         if tree is None:
@@ -739,7 +739,7 @@ def _analyze_project_structure() -> Dict[str, Any]:
         # Check for common config files
         configs = ["setup.py", "pyproject.toml", "setup.cfg", ".eslintrc", "tsconfig.json"]
         for config in configs:
-            result = execute_tool("file_exists", {"path": config})
+            result = execute_tool("file_exists", {"path": config}, agent_name="researcher")
             result_data = json.loads(result)
             if result_data.get("exists"):
                 notes.append(f"Uses {config} for configuration")
@@ -768,7 +768,7 @@ def _find_similar_implementations(user_request: str, keywords: List[str]) -> Dic
 
     for pattern in search_patterns[:3]:
         try:
-            result = execute_tool("search_code", {"pattern": pattern, "max_results": 3})
+            result = execute_tool("search_code", {"pattern": pattern, "max_results": 3}, agent_name="researcher")
             result_data = json.loads(result)
 
             for match in result_data.get("matches", []):
@@ -792,7 +792,7 @@ def _analyze_dependencies(keywords: List[str]) -> Dict[str, Any]:
     for keyword in keywords[:3]:
         try:
             # Search for imports
-            result = execute_tool("search_code", {"pattern": f"import.*{keyword}", "max_results": 5})
+            result = execute_tool("search_code", {"pattern": f"import.*{keyword}", "max_results": 5}, agent_name="researcher")
             result_data = json.loads(result)
 
             for match in result_data.get("matches", []):

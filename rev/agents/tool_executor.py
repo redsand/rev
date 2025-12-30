@@ -95,7 +95,7 @@ class ToolExecutorAgent(BaseAgent):
         if parsed:
             tool_name, tool_args = parsed
             if tool_name in allowed_tool_names:
-                raw_result = execute_tool(tool_name, tool_args)
+                raw_result = execute_tool(tool_name, tool_args, agent_name="ToolExecutorAgent")
                 return build_subagent_output(
                     agent_name="ToolExecutorAgent",
                     tool_name=tool_name,
@@ -139,7 +139,7 @@ class ToolExecutorAgent(BaseAgent):
                     if recovered:
                         print("  [WARN] ToolExecutorAgent: using lenient tool call recovery from text output")
                 if recovered:
-                    raw_result = execute_tool(recovered.name, recovered.arguments)
+                    raw_result = execute_tool(recovered.name, recovered.arguments, agent_name="ToolExecutorAgent")
                     return build_subagent_output(
                         agent_name="ToolExecutorAgent",
                         tool_name=recovered.name,
@@ -154,7 +154,7 @@ class ToolExecutorAgent(BaseAgent):
                     allowed_tools=tool_names,
                 )
                 if recovered:
-                    raw_result = execute_tool(recovered.name, recovered.arguments)
+                    raw_result = execute_tool(recovered.name, recovered.arguments, agent_name="ToolExecutorAgent")
                     return build_subagent_output(
                         agent_name="ToolExecutorAgent",
                         tool_name=recovered.name,
@@ -189,7 +189,7 @@ class ToolExecutorAgent(BaseAgent):
                             error_type = "unknown_tool"
                             error_detail = f"Tool '{tool_name}' is not available"
                         else:
-                            raw_result = execute_tool(tool_name, tool_args)
+                            raw_result = execute_tool(tool_name, tool_args, agent_name="ToolExecutorAgent")
                             return build_subagent_output(
                                 agent_name="ToolExecutorAgent",
                                 tool_name=tool_name,
@@ -229,7 +229,7 @@ class ToolExecutorAgent(BaseAgent):
                             return self.make_failure_signal("missing_tool_args", "Recovered tool call missing arguments")
                         if not retried:
                             print(f"  -> Recovered tool call from text output: {recovered.name}")
-                        raw_result = execute_tool(recovered.name, recovered.arguments)
+                        raw_result = execute_tool(recovered.name, recovered.arguments, agent_name="ToolExecutorAgent")
                         return build_subagent_output(
                             agent_name="ToolExecutorAgent",
                             tool_name=recovered.name,

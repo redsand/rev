@@ -783,7 +783,7 @@ def _run_linter(cmd: str | list[str]) -> ValidationResult:
 def _check_git_diff(plan: ExecutionPlan) -> ValidationResult:
     """Check git diff to verify changes were made."""
     try:
-        result = execute_tool("git_diff", {})
+        result = execute_tool("git_diff", {}, agent_name="executor")
         result_data = json.loads(result)
         diff = result_data.get("diff", "")
 
@@ -1190,7 +1190,7 @@ def quick_validate(plan: ExecutionPlan) -> bool:
     try:
         common_dirs = _get_common_dirs()
         test_dir = common_dirs["tests"][0]
-        result = execute_tool("run_tests", {"test_path": f"{test_dir}/", "verbose": False})
+        result = execute_tool("run_tests", {"test_path": f"{test_dir}/", "verbose": False}, agent_name="executor")
         result_data = json.loads(result)
         return result_data.get("rc", 1) == 0
     except:

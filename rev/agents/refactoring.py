@@ -135,7 +135,7 @@ class RefactoringAgent(BaseAgent):
             "target_directory": target_dir,
             "overwrite": False,
         }
-        result = execute_tool("split_python_module_classes", arguments)
+        result = execute_tool("split_python_module_classes", arguments, agent_name="RefactoringAgent")
         return build_subagent_output(
             agent_name="RefactoringAgent",
             tool_name="split_python_module_classes",
@@ -238,7 +238,7 @@ class RefactoringAgent(BaseAgent):
                         print(f"  -> RefactoringAgent will call tool '{tool_name}'")
                         print(f"    Arguments: {json.dumps(arguments, indent=2)[:200]}...")
 
-                        result = execute_tool(tool_name, arguments)
+                        result = execute_tool(tool_name, arguments, agent_name="RefactoringAgent")
                         logger.info(f"[REFACTORING] Tool execution successful: {str(result)[:100]}")
                         return build_subagent_output(
                             agent_name="RefactoringAgent",
@@ -283,7 +283,7 @@ class RefactoringAgent(BaseAgent):
                         return self.make_failure_signal("missing_tool_args", "Recovered tool call missing arguments")
                     if not retried:
                         print(f"  -> Recovered tool call from text output: {recovered.name}")
-                    raw_result = execute_tool(recovered.name, recovered.arguments)
+                    raw_result = execute_tool(recovered.name, recovered.arguments, agent_name="RefactoringAgent")
                     return build_subagent_output(
                         agent_name="RefactoringAgent",
                         tool_name=recovered.name,

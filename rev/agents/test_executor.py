@@ -561,7 +561,7 @@ class TestExecutorAgent(BaseAgent):
             if blocked:
                 return blocked
             print(f"  [i] Using explicit command from task: {cmd}")
-            raw_result = execute_tool("run_cmd", {"cmd": cmd})
+            raw_result = execute_tool("run_cmd", {"cmd": cmd}, agent_name="test_executor")
             return build_subagent_output(
                 agent_name="TestExecutorAgent",
                 tool_name="run_cmd",
@@ -647,7 +647,7 @@ class TestExecutorAgent(BaseAgent):
             return blocked
 
         print(f"  [i] Using fallback heuristic: {cmd}")
-        raw_result = execute_tool("run_cmd", {"cmd": cmd})
+        raw_result = execute_tool("run_cmd", {"cmd": cmd}, agent_name="test_executor")
         return build_subagent_output(
             agent_name="TestExecutorAgent",
             tool_name="run_cmd",
@@ -751,7 +751,7 @@ class TestExecutorAgent(BaseAgent):
         if blocked:
             return blocked
         print(f"  [i] Using explicit command from task: {cmd}")
-        raw_result = execute_tool("run_cmd", {"cmd": cmd})
+        raw_result = execute_tool("run_cmd", {"cmd": cmd}, agent_name="test_executor")
         return build_subagent_output(
             agent_name="TestExecutorAgent",
             tool_name="run_cmd",

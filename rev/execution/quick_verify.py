@@ -699,7 +699,7 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
                             # Build a simple import test command
                             import_test_cmd = f'cd "{parent_dir}" && python -c "from {package_name} import *; print(\'Success\')"'
                             try:
-                                import_test_result = execute_tool("run_cmd", {"cmd": import_test_cmd, "timeout": 10})
+                                import_test_result = execute_tool("run_cmd", {"cmd": import_test_cmd, "timeout": 10}, agent_name="quick_verify")
                                 import_test_data = json.loads(import_test_result)
                                 if import_test_data.get("rc") == 0:
                                     details["runtime_import_test"] = "PASSED"
@@ -1334,7 +1334,7 @@ def _try_auto_install(base_cmd: str) -> bool:
             return False
         print(f"  [i] Tool '{base_cmd}' not found, attempting auto-install: {install_cmd}...")
         _record_install_attempt(install_cmd, root=config.ROOT)
-        install_res = execute_tool("run_cmd", {"cmd": install_cmd, "timeout": 300})
+        install_res = execute_tool("run_cmd", {"cmd": install_cmd, "timeout": 300}, agent_name="quick_verify")
         try:
             if json.loads(install_res).get("rc") == 0:
                 print(f"  [OK] Successfully installed {base_cmd}")
@@ -1365,7 +1365,7 @@ def _try_npm_repair(pkg: str) -> bool:
                 print("  [i] Skipping npm install: dependency state unchanged.")
                 return False
             _record_install_attempt(install_cmd, root=config.ROOT)
-            execute_tool("run_cmd", {"cmd": ["npm", "install"], "timeout": 600})
+            execute_tool("run_cmd", {"cmd": ["npm", "install"], "timeout": 600}, agent_name="quick_verify")
             return (config.ROOT / "node_modules" / pkg_name).exists()
     except:
         pass
@@ -1505,7 +1505,7 @@ def _get_help_output(cmd_name: str) -> Optional[str]:
         try:
             # We use execute_tool directly to avoid recursion
             payload = {"cmd": f"{cmd_name} {flag}", "timeout": 5}
-            raw = execute_tool("run_cmd", payload)
+            raw = execute_tool("run_cmd", payload, agent_name="quick_verify")
             res = json.loads(raw)
             # rc=0 is success, but some tools output help to stderr or with non-zero rc
             out = (res.get("stdout") or res.get("stderr") or "").strip()
@@ -1533,7 +1533,7 @@ def _try_dynamic_help_discovery(path: Path) -> Optional[str]:
             
         for flag in ("--help", "-h"):
             cmd = f"{runner} {_quote_path(path)} {flag}"
-            raw = execute_tool("run_cmd", {"cmd": cmd, "timeout": 5})
+            raw = execute_tool("run_cmd", {"cmd": cmd, "timeout": 5}, agent_name="quick_verify")
             res = json.loads(raw)
             out = (res.get("stdout") or res.get("stderr") or "").strip()
             if out and ("usage:" in out.lower() or "options:" in out.lower() or "arguments:" in out.lower()):
@@ -2676,7 +2676,7 @@ def _run_validation_command(cmd: str | List[str], *, use_tests_tool: bool = Fals
 
     tool = "run_tests" if use_tests_tool else "run_cmd"
     try:
-        raw = execute_tool(tool, payload)
+        raw = execute_tool(tool, payload, agent_name="quick_verify")
         data = json.loads(raw)
         if isinstance(data, dict):
             # Ensure cmd is present in the result
@@ -3966,7 +3966,7 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
 
     # Fall back to running tests if we have no usable tool result.
     try:
-        result = execute_tool("run_tests", {"cmd": "pytest -q", "timeout": 30})
+        result = execute_tool("run_tests", {"cmd": "pytest -q", "timeout": 30}, agent_name="quick_verify")
         result_data = json.loads(result)
         rc = result_data.get("rc", 1)
         output = result_data.get("stdout", "") + result_data.get("stderr", "")

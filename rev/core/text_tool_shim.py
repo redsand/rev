@@ -46,7 +46,7 @@ def maybe_execute_tool_call_from_text(
         for path in recovered.arguments.get("paths", []):
             if not isinstance(path, str):
                 continue
-            outputs[path] = execute_tool("read_file", {"path": path})
+            outputs[path] = execute_tool("read_file", {"path": path}, agent_name="text_tool_shim")
         return ExecutedTextToolCall(
             tool_name="read_file",
             tool_args={"paths": recovered.arguments.get("paths", [])},
@@ -54,7 +54,7 @@ def maybe_execute_tool_call_from_text(
             recovered=True,
         )
 
-    tool_output = execute_tool(recovered.name, recovered.arguments)
+    tool_output = execute_tool(recovered.name, recovered.arguments, agent_name="text_tool_shim")
     return ExecutedTextToolCall(
         tool_name=recovered.name,
         tool_args=recovered.arguments,

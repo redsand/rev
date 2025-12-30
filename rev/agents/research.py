@@ -55,6 +55,7 @@ def _extract_snippet(tool_name: str, tool_args: dict, raw_result: Any) -> str:
                 search = execute_tool(
                     "search_code",
                     {"pattern": "register|pkgutil|importlib|getmembers|registry", "include": include, "regex": True},
+                    agent_name="ResearchAgent",
                 )
                 payload = json.loads(search) if isinstance(search, str) else {}
                 matches = payload.get("matches") or []
@@ -66,6 +67,7 @@ def _extract_snippet(tool_name: str, tool_args: dict, raw_result: Any) -> str:
                         window = execute_tool(
                             "read_file_lines",
                             {"path": file, "start": max(1, line - 3), "end": line + 3},
+                            agent_name="ResearchAgent",
                         )
                         if isinstance(window, str) and window.strip():
                             return window
@@ -254,7 +256,7 @@ class ResearchAgent(BaseAgent):
             if _tool_is_available(tool_name, available_tools):
                 if coerced:
                     print(f"  -> ResearchAgent using direct tool '{tool_name}' for structure listing")
-                raw_result = execute_tool(tool_name, arguments)
+                raw_result = execute_tool(tool_name, arguments, agent_name="ResearchAgent")
                 snippet = _extract_snippet(tool_name, arguments, raw_result)
                 context.add_insight("research_agent", f"task_{task.task_id}_result", {
                     "tool": tool_name,
@@ -337,7 +339,7 @@ class ResearchAgent(BaseAgent):
                             if coerced:
                                 print(f"  -> ResearchAgent coerced to cheaper tool '{tool_name}' for structure listing")
                             print(f"  -> ResearchAgent will call tool '{tool_name}' with arguments: {arguments}")
-                            raw_result = execute_tool(tool_name, arguments)
+                            raw_result = execute_tool(tool_name, arguments, agent_name="ResearchAgent")
 
                             snippet = _extract_snippet(tool_name, arguments, raw_result)
                             context.add_insight("research_agent", f"task_{task.task_id}_result", {
@@ -380,10 +382,10 @@ class ResearchAgent(BaseAgent):
                                 for path in recovered.arguments.get("paths", []):
                                     if not isinstance(path, str):
                                         continue
-                                    outputs[path] = execute_tool("read_file", {"path": path})
+                                    outputs[path] = execute_tool("read_file", {"path": path}, agent_name="ResearchAgent")
                                 raw_result = json.dumps(outputs)
                             else:
-                                raw_result = execute_tool(recovered.name, recovered.arguments)
+                                raw_result = execute_tool(recovered.name, recovered.arguments, agent_name="ResearchAgent")
                             snippet = _extract_snippet(recovered.name, recovered.arguments, raw_result)
                             context.add_insight("research_agent", f"task_{task.task_id}_result", {
                                 "tool": recovered.name,
@@ -413,10 +415,10 @@ class ResearchAgent(BaseAgent):
                                 for path in retry.arguments.get("paths", []):
                                     if not isinstance(path, str):
                                         continue
-                                    outputs[path] = execute_tool("read_file", {"path": path})
+                                    outputs[path] = execute_tool("read_file", {"path": path}, agent_name="ResearchAgent")
                                 raw_result = json.dumps(outputs)
                             else:
-                                raw_result = execute_tool(retry.name, retry.arguments)
+                                raw_result = execute_tool(retry.name, retry.arguments, agent_name="ResearchAgent")
                             snippet = _extract_snippet(retry.name, retry.arguments, raw_result)
                             context.add_insight("research_agent", f"task_{task.task_id}_result", {
                                 "tool": retry.name,
