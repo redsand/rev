@@ -813,6 +813,35 @@ def _normalize_test_task_signature(task: Task) -> str:
     return f"test::{signature}"
 
 
+def _record_test_signature_state(context: RevContext, signature: str, status: str) -> None:
+    """Persist test signature status for the current code-change iteration."""
+    state = context.agent_state.get("test_signature_state", {})
+    if not isinstance(state, dict):
+        state = {}
+    last_code_change_iteration = context.agent_state.get("last_code_change_iteration", -1)
+    state[signature] = {
+        "status": status,
+        "code_change_iteration": last_code_change_iteration,
+    }
+    context.set_agent_state("test_signature_state", state)
+
+
+def _signature_state_matches(context: RevContext, signature: str, status: str) -> bool:
+    state = context.agent_state.get("test_signature_state", {})
+    if not isinstance(state, dict):
+        return False
+    entry = state.get(signature)
+    if not isinstance(entry, dict):
+        return False
+    last_code_change_iteration = context.agent_state.get("last_code_change_iteration", -1)
+    entry_change = entry.get("code_change_iteration", -1)
+    if not (isinstance(entry_change, int) and isinstance(last_code_change_iteration, int)):
+        return False
+    if entry_change != last_code_change_iteration:
+        return False
+    return str(entry.get("status")).lower() == status.lower()
+
+
 def _extract_explicit_test_command(description: str) -> Optional[str]:
     if not description:
         return None
@@ -4032,12 +4061,36 @@ class Orchestrator:
             action_type_normalized = (next_task.action_type or '').strip().lower()
             if action_type_normalized in {'read', 'analyze', 'research', 'investigate', 'review'}:
                 consecutive_reads += 1
-            else:
-                consecutive_reads = 0  # Reset on any non-research action
 
-            # Aggressive research/task dedupe per code change
-            if action_type_normalized in {'read', 'analyze', 'research', 'investigate', 'review'}:
+                # Aggressive research/task dedupe per code change
                 desc = (next_task.description or "").strip().lower()
+                if ("tree view" in desc or "list the contents" in desc or "listing directory" in desc) and any(tok in desc for tok in ["current directory", "src", "tests", "root"]):
+                    structure_seen = self.context.agent_state.get("structure_read_seen", {})
+                    if not isinstance(structure_seen, dict):
+                        structure_seen = {}
+                    last_code_change_iteration = self.context.agent_state.get("last_code_change_iteration", -1)
+                    prior = structure_seen.get(desc)
+                    if isinstance(prior, dict):
+                        prior_change = prior.get("code_change_iteration", -1)
+                        if (
+                            isinstance(prior_change, int)
+                            and isinstance(last_code_change_iteration, int)
+                            and prior_change == last_code_change_iteration
+                        ):
+                            print(f"  [structure-read] Skipping duplicate structure listing (code_change_iter={last_code_change_iteration})")
+                            next_task.status = TaskStatus.STOPPED
+                            next_task.result = json.dumps({
+                                "skipped": True,
+                                "reason": "structure listing already performed for current code state",
+                                "code_change_iteration": last_code_change_iteration,
+                            })
+                            completed_tasks_log.append(
+                                f"[STOPPED] {next_task.description} | Reason: structure listing already done (code_change_iter={last_code_change_iteration})"
+                            )
+                            continue
+                    structure_seen[desc] = {"code_change_iteration": last_code_change_iteration}
+                    self.context.set_agent_state("structure_read_seen", structure_seen)
+
                 sig = f"{action_type_normalized}::{desc}"
                 research_seen = self.context.agent_state.get("research_signature_seen", {})
                 if not isinstance(research_seen, dict):
@@ -4046,7 +4099,11 @@ class Orchestrator:
                 prior = research_seen.get(sig)
                 if isinstance(prior, dict):
                     prior_change = prior.get("code_change_iteration", -1)
-                    if isinstance(prior_change, int) and isinstance(last_code_change_iteration, int) and last_code_change_iteration == prior_change:
+                    if (
+                        isinstance(prior_change, int)
+                        and isinstance(last_code_change_iteration, int)
+                        and last_code_change_iteration == prior_change
+                    ):
                         print(f"  [research-dedupe] Skipping duplicate research task: {sig}")
                         next_task.status = TaskStatus.STOPPED
                         next_task.result = json.dumps({
@@ -4058,6 +4115,8 @@ class Orchestrator:
                         continue
                 research_seen[sig] = {"code_change_iteration": last_code_change_iteration}
                 self.context.set_agent_state("research_signature_seen", research_seen)
+            else:
+                consecutive_reads = 0  # Reset on any non-research action
 
             # Test task signature dedupe across pending/completed since last code change
             if action_type_normalized == "test":
@@ -4073,14 +4132,28 @@ class Orchestrator:
                 else:
                     seen_at = -1
                 if isinstance(last_code_change_iteration, int) and isinstance(seen_at, int) and last_code_change_iteration == seen_at:
-                    print(f"  [test-dedupe] Skipping duplicate test task with signature: {signature}")
+                    print(f"  [test-dedupe] Skipping duplicate test task with signature: {signature} (code_change_iter={last_code_change_iteration})")
                     next_task.status = TaskStatus.STOPPED
                     next_task.result = json.dumps({
                         "skipped": True,
                         "reason": "duplicate test signature since last code change",
                         "signature": signature,
+                        "code_change_iteration": last_code_change_iteration,
                     })
-                    completed_tasks_log.append(f"[STOPPED] {next_task.description} | Reason: duplicate test signature")
+                    completed_tasks_log.append(f"[STOPPED] {next_task.description} | Reason: duplicate test signature (code_change_iter={last_code_change_iteration})")
+                    _record_test_signature_state(self.context, signature, "blocked")
+                    continue
+                if _signature_state_matches(self.context, signature, "blocked"):
+                    print(f"  [test-dedupe] Skipping blocked test signature: {signature} (code_change_iter={last_code_change_iteration})")
+                    next_task.status = TaskStatus.STOPPED
+                    next_task.result = json.dumps({
+                        "skipped": True,
+                        "reason": "test signature marked blocked for current code state",
+                        "signature": signature,
+                        "code_change_iteration": last_code_change_iteration,
+                    })
+                    completed_tasks_log.append(f"[STOPPED] {next_task.description} | Reason: test signature blocked (code_change_iter={last_code_change_iteration})")
+                    _record_test_signature_state(self.context, signature, "blocked")
                     continue
                 seen_tests[signature] = {"code_change_iteration": last_code_change_iteration}
                 self.context.set_agent_state("test_signature_seen", seen_tests)
@@ -4505,6 +4578,38 @@ class Orchestrator:
                     no_tests_discovered = isinstance(details, dict) and details.get("no_tests_discovered") is True
 
                     if no_tests_discovered:
+                        signature = getattr(next_task, "_normalized_signature", None) or _normalize_test_task_signature(next_task)
+                        hint_key = "|".join(_collect_no_tests_hints(details)[:2]).lower() if isinstance(details, dict) else ""
+                        no_tests_seen = self.context.agent_state.get("no_tests_sig_hint_seen", {})
+                        if not isinstance(no_tests_seen, dict):
+                            no_tests_seen = {}
+                        last_code_change_iteration = self.context.agent_state.get("last_code_change_iteration", -1)
+                        seen_entry = no_tests_seen.get((signature, hint_key))
+                        if isinstance(seen_entry, dict):
+                            prior_change = seen_entry.get("code_change_iteration", -1)
+                            if (
+                                isinstance(prior_change, int)
+                                and isinstance(last_code_change_iteration, int)
+                                and prior_change == last_code_change_iteration
+                            ):
+                                print(f"  [no-tests-repeat] Skipping repeat no-tests remediation for {signature} (code_change_iter={last_code_change_iteration})")
+                                self.context.set_agent_state("tests_blocked_no_changes", True)
+                                _record_test_signature_state(self.context, signature, "blocked")
+                                next_task.status = TaskStatus.STOPPED
+                                next_task.result = json.dumps(
+                                    {
+                                        "skipped": True,
+                                        "reason": "no tests discovered repeated for same signature and hints",
+                                        "signature": signature,
+                                        "code_change_iteration": last_code_change_iteration,
+                                    }
+                                )
+                                verification_handled = True
+                                execution_success = True
+                                continue
+                        no_tests_seen[(signature, hint_key)] = {"code_change_iteration": last_code_change_iteration}
+                        self.context.set_agent_state("no_tests_sig_hint_seen", no_tests_seen)
+
                         next_task.status = TaskStatus.STOPPED
                         next_task.error = _format_verification_feedback(verification_result)
                         next_task.result = json.dumps(
@@ -4535,6 +4640,7 @@ class Orchestrator:
                             forced_next_task = injected
                             iteration -= 1
                             continue
+                        _record_test_signature_state(self.context, signature, "blocked")
                         verification_handled = True
 
                     # PERFORMANCE FIX 2: Check if verification is inconclusive (P0-6)
@@ -4684,6 +4790,7 @@ class Orchestrator:
                                 "code_change_iteration": self.context.agent_state.get("last_code_change_iteration", -1),
                             }
                             self.context.set_agent_state("blocked_test_signatures", blocked_tests)
+                            _record_test_signature_state(self.context, signature, "blocked")
                         execution_success = True
                         self._handle_verification_failure(verification_result)
                         verification_handled = True
@@ -4880,6 +4987,8 @@ class Orchestrator:
                     # If we've just verified a successful test and no code has changed since,
                     # treat this as "goal achieved" to prevent endless test loops.
                     if (next_task.action_type or "").lower() == "test" and _did_run_real_tests(next_task, verification_result):
+                        signature = getattr(next_task, "_normalized_signature", None) or _normalize_test_task_signature(next_task)
+                        _record_test_signature_state(self.context, signature, "passed")
                         last_test_rc = self.context.agent_state.get("last_test_rc")
                         last_test_iteration = self.context.agent_state.get("last_test_iteration", -1)
                         last_code_change_iteration = self.context.agent_state.get("last_code_change_iteration", -1)
@@ -5328,6 +5437,24 @@ class Orchestrator:
                     task.error = result[len("[USER_REJECTED]"):]
                 return False
             else:
+                # Harden TEST actions: they must execute a real test command.
+                action_type = (task.action_type or "").lower()
+                if action_type == "test" and not _did_run_real_tests(task, verification_result):
+                    signature = getattr(task, "_normalized_signature", None) or _normalize_test_task_signature(task)
+                    _record_test_signature_state(context, signature, "blocked")
+                    blocked_tests = context.agent_state.get("blocked_test_signatures", {})
+                    if not isinstance(blocked_tests, dict):
+                        blocked_tests = {}
+                    blocked_tests[signature] = {
+                        "blocked_iteration": context.agent_state.get("current_iteration"),
+                        "code_change_iteration": context.agent_state.get("last_code_change_iteration", -1),
+                        "reason": "Test action completed without executing tests",
+                    }
+                    context.set_agent_state("blocked_test_signatures", blocked_tests)
+                    task.status = TaskStatus.STOPPED
+                    task.error = "Test action completed without executing tests (no run_cmd/run_tests detected)"
+                    return False
+
                 task.status = TaskStatus.COMPLETED
                 try:
                     # If the agent produced tool evidence, it may include artifact refs.
