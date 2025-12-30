@@ -9,7 +9,7 @@ import re
 import shlex
 import subprocess
 import tempfile
-from typing import Optional, Iterable, Tuple
+from typing import Optional, Iterable, Tuple, Dict, Any
 
 # Patches larger than this many characters often hit context limits in agent prompts
 # or produce opaque failures. When we detect a patch above this size that still
@@ -20,9 +20,25 @@ _LARGE_PATCH_HINT_THRESHOLD = 120_000
 from rev import config
 from rev.debug_logger import prune_old_logs
 from rev.tools.utils import quote_cmd_arg
+from rev.llm.client import ollama_chat
 
 # Backward compatibility for tests
 ROOT = config.ROOT
+
+_DEFAULT_RUN_CMD_TIMEOUT = 300
+_DEFAULT_RUN_TESTS_TIMEOUT = 600
+_LLM_TIMEOUT_ANALYSIS_MIN_SECONDS = 300
+_LLM_TIMEOUT_ANALYSIS_MAX_SECONDS = 3600
+_LLM_TIMEOUT_OUTPUT_LIMIT = 2000
+
+_TIMEOUT_ANALYSIS_SYSTEM_PROMPT = (
+    "You are a command-timeout triage assistant. "
+    "Decide if a timed-out command is likely long-running (should rerun with a longer timeout) "
+    "or stuck in non-terminating watch/server mode (should stop). "
+    "Return ONLY JSON with: decision ('rerun' or 'stop'), suggested_timeout_seconds (int, "
+    "only if decision='rerun'), mode ('long_running' or 'watch' or 'unknown'), reason, "
+    "and suggested_command (string, optional) if a different command should be run instead."
+)
 
 
 # ========== Helper Function ==========
@@ -91,6 +107,259 @@ def _tail_file(path: pathlib.Path, limit: int) -> str:
         else:
             handle.seek(0)
         return handle.read()
+
+
+def _truncate_text(value: str, limit: int) -> str:
+    if not value:
+        return ""
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[-limit:]
+
+
+def _parse_timeout_decision(content: str) -> Optional[Dict[str, Any]]:
+    if not content:
+        return None
+    text = content.strip()
+    candidates = [text]
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        candidates.append(match.group(0))
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _extract_test_path_from_command(cmd_text: str) -> Optional[str]:
+    if not cmd_text:
+        return None
+    matches = re.findall(r"([A-Za-z0-9_./\\\\-]+\\.(?:test|spec)\\.[A-Za-z0-9]+)", cmd_text)
+    if not matches:
+        return None
+    return max(matches, key=len)
+
+
+def _normalize_timeout_decision(payload: Dict[str, Any]) -> Dict[str, Any]:
+    decision_raw = str(payload.get("decision") or payload.get("action") or payload.get("status") or "").strip().lower()
+    mode_raw = str(payload.get("mode") or payload.get("classification") or payload.get("category") or "").strip().lower()
+    reason = str(payload.get("reason") or "").strip()
+    suggested_command_raw = (
+        payload.get("suggested_command")
+        or payload.get("suggested_cmd")
+        or payload.get("alternate_command")
+        or payload.get("rerun_command")
+    )
+    suggested_command = None
+    if isinstance(suggested_command_raw, (str, list)):
+        suggested_command = suggested_command_raw
+
+    decision = decision_raw
+    if decision in {"retry", "rerun", "continue", "extend"}:
+        decision = "rerun"
+    if decision in {"stop", "cancel", "abort", "halt", "watch", "wait"}:
+        decision = "stop"
+
+    if decision not in {"rerun", "stop"}:
+        if mode_raw in {"watch", "non_terminating", "non-terminating", "server"}:
+            decision = "stop"
+        elif mode_raw in {"long_running", "long-running"}:
+            decision = "rerun"
+
+    suggested = (
+        payload.get("suggested_timeout_seconds")
+        or payload.get("suggested_timeout")
+        or payload.get("timeout_seconds")
+        or payload.get("timeout")
+    )
+    suggested_timeout: Optional[int] = None
+    try:
+        if suggested is not None:
+            suggested_timeout = int(suggested)
+    except Exception:
+        suggested_timeout = None
+
+    return {
+        "decision": decision if decision in {"rerun", "stop"} else "stop",
+        "suggested_timeout_seconds": suggested_timeout,
+        "mode": mode_raw or "unknown",
+        "reason": reason,
+        "suggested_command": suggested_command,
+    }
+
+
+def _detect_watch_mode(output: str) -> bool:
+    if not output:
+        return False
+    lowered = output.lower()
+    watch_markers = (
+        "watching for file changes",
+        "waiting for file changes",
+        "press q to quit",
+        "press h to show help",
+        "dev server running",
+        "localhost:",
+        "127.0.0.1:",
+        "waiting for changes",
+        "ready in",
+        "watch mode",
+        "listening on",
+    )
+    return any(marker in lowered for marker in watch_markers)
+
+
+def _suggest_non_watch_command(cmd_text: str) -> Optional[str]:
+    if not cmd_text:
+        return None
+    lowered = cmd_text.lower()
+    if "vitest" not in lowered:
+        return None
+    if " vitest run" in lowered or "vitest --run" in lowered:
+        return None
+    test_path = _extract_test_path_from_command(cmd_text)
+    if test_path:
+        return f"npx vitest run {test_path}"
+    return "npx vitest run"
+
+
+def _clamp_timeout(value: int, minimum: int, maximum: int) -> int:
+    try:
+        return max(minimum, min(int(value), maximum))
+    except Exception:
+        return minimum
+
+
+def _analyze_timeout_with_llm(
+    cmd_text: str,
+    timeout: int,
+    stdout_tail: str,
+    stderr_tail: str,
+) -> Optional[Dict[str, Any]]:
+    user_prompt = (
+        f"Command: {cmd_text}\n"
+        f"TimeoutSeconds: {timeout}\n"
+        "StdoutTail:\n"
+        f"{stdout_tail}\n"
+        "StderrTail:\n"
+        f"{stderr_tail}\n"
+        "If output suggests watch/server mode or waiting for file changes, choose decision='stop'. "
+        "If output suggests active tests/builds that just need more time, choose decision='rerun' "
+        "and provide suggested_timeout_seconds. "
+        "If a different command should be run instead (for example, a non-watch test command), "
+        "include suggested_command."
+    )
+    response = ollama_chat(
+        [
+            {"role": "system", "content": _TIMEOUT_ANALYSIS_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        tools=None,
+        model=config.EXECUTION_MODEL,
+        supports_tools=False,
+        temperature=0.2,
+    )
+    if not response or "error" in response:
+        return None
+    content = response.get("message", {}).get("content", "")
+    payload = _parse_timeout_decision(content)
+    if not payload:
+        return None
+    return _normalize_timeout_decision(payload)
+
+
+def _maybe_retry_timeout(
+    cmd: str | list[str],
+    timeout: int,
+    cwd: Optional[pathlib.Path],
+    result: Dict[str, Any],
+    *,
+    is_tests: bool = False,
+) -> Dict[str, Any]:
+    if not isinstance(result, dict):
+        return result
+    if not (result.get("timed_out") or result.get("timeout")):
+        return result
+    if timeout < _LLM_TIMEOUT_ANALYSIS_MIN_SECONDS:
+        return result
+
+    cmd_text = " ".join(cmd) if isinstance(cmd, list) else str(cmd or "")
+    stdout_tail = _truncate_text(result.get("stdout", ""), _LLM_TIMEOUT_OUTPUT_LIMIT)
+    stderr_tail = _truncate_text(result.get("stderr", ""), _LLM_TIMEOUT_OUTPUT_LIMIT)
+    combined_output = f"{stdout_tail}\n{stderr_tail}".strip()
+
+    decision = _analyze_timeout_with_llm(cmd_text, timeout, stdout_tail, stderr_tail)
+    decision_source = "llm"
+    if not decision:
+        decision_source = "heuristic"
+        if _detect_watch_mode(combined_output):
+            suggested_command = _suggest_non_watch_command(cmd_text)
+            decision = {
+                "decision": "stop",
+                "mode": "watch",
+                "reason": "output indicates watch/server mode",
+                "suggested_command": suggested_command,
+            }
+        else:
+            decision = {
+                "decision": "rerun",
+                "mode": "unknown",
+                "reason": "no watch-mode indicators; retrying with extended timeout",
+            }
+
+    normalized = dict(result)
+    normalized["timeout_decision"] = {**decision, "source": decision_source, "stdout_tail": stdout_tail, "stderr_tail": stderr_tail}
+    normalized["timeout_initial"] = {
+        "timeout_seconds": timeout,
+        "stdout_tail": stdout_tail,
+        "stderr_tail": stderr_tail,
+    }
+
+    if decision.get("decision") != "rerun":
+        normalized["blocked"] = True
+        if decision.get("reason"):
+            normalized["reason"] = decision.get("reason")
+        return normalized
+
+    suggested = decision.get("suggested_timeout_seconds")
+    if suggested is None:
+        suggested = timeout * 2
+
+    rerun_timeout = _clamp_timeout(
+        suggested,
+        minimum=max(timeout + 30, _LLM_TIMEOUT_ANALYSIS_MIN_SECONDS),
+        maximum=_LLM_TIMEOUT_ANALYSIS_MAX_SECONDS,
+    )
+    if rerun_timeout <= timeout:
+        rerun_timeout = min(timeout * 2, _LLM_TIMEOUT_ANALYSIS_MAX_SECONDS)
+
+    rerun_cmd = cmd
+    suggested_command = decision.get("suggested_command")
+    if isinstance(suggested_command, (str, list)) and suggested_command:
+        rerun_cmd = suggested_command
+
+    from rev.tools.command_runner import run_command_safe
+
+    rerun_result = run_command_safe(
+        rerun_cmd,
+        timeout=rerun_timeout,
+        cwd=cwd,
+        capture_output=True,
+        check_interrupt=True,
+    )
+    if isinstance(rerun_result, dict):
+        rerun_result["timeout_retry"] = {
+            "timeout_seconds": rerun_timeout,
+            "is_tests": is_tests,
+            "command": " ".join(rerun_cmd) if isinstance(rerun_cmd, list) else str(rerun_cmd),
+        }
+        rerun_result["timeout_decision"] = normalized.get("timeout_decision")
+        rerun_result["timeout_initial"] = normalized.get("timeout_initial")
+    return rerun_result if isinstance(rerun_result, dict) else normalized
 
 
 def _working_tree_snapshot() -> str:
@@ -990,7 +1259,7 @@ def git_branch(action: str = "list", branch_name: str = None) -> str:
 
 # ========== Additional Git Operations ==========
 
-def run_cmd(cmd: str | list[str], timeout: int = 300, cwd: Optional[pathlib.Path] = None) -> str:
+def run_cmd(cmd: str | list[str], timeout: int = _DEFAULT_RUN_CMD_TIMEOUT, cwd: Optional[pathlib.Path] = None) -> str:
     """Run a shell command safely with security validation.
 
     Security:
@@ -1051,10 +1320,11 @@ def run_cmd(cmd: str | list[str], timeout: int = 300, cwd: Optional[pathlib.Path
         capture_output=True,
         check_interrupt=True,
     )
+    result = _maybe_retry_timeout(cmd, timeout, cwd, result, is_tests=False)
     return json.dumps(result)
 
 
-def run_tests(cmd: str | list[str] = "pytest -q", timeout: int = 600, cwd: Optional[pathlib.Path] = None) -> str:
+def run_tests(cmd: str | list[str] = "pytest -q", timeout: int = _DEFAULT_RUN_TESTS_TIMEOUT, cwd: Optional[pathlib.Path] = None) -> str:
     """Run test suite safely with security validation.
 
     Security:
@@ -1076,6 +1346,7 @@ def run_tests(cmd: str | list[str] = "pytest -q", timeout: int = 600, cwd: Optio
         capture_output=True,
         check_interrupt=True,
     )
+    result = _maybe_retry_timeout(cmd, timeout, cwd, result, is_tests=True)
     return json.dumps(result)
 
 

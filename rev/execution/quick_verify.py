@@ -9,6 +9,7 @@ for the workflow loop: Plan → Execute → Verify → Report → Re-plan if nee
 import json
 import re
 import os
+import fnmatch
 import shlex
 import shutil
 from pathlib import Path
@@ -1601,6 +1602,480 @@ def _extract_test_files_from_output(output: str) -> list[str]:
         seen.add(normalized)
         deduped.append(normalized)
     return deduped
+
+
+def _resolve_import_target(test_path: Path, module_spec: str, root: Path) -> Optional[Path]:
+    if not module_spec:
+        return None
+    if not module_spec.startswith("."):
+        return None
+    base = (test_path.parent / module_spec)
+    candidates: list[Path] = []
+    if base.suffix:
+        candidates.append(base)
+    else:
+        candidates.extend(
+            base.with_suffix(ext)
+            for ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+        )
+        candidates.append(base / "index.ts")
+        candidates.append(base / "index.js")
+        candidates.append(base / "index.tsx")
+        candidates.append(base / "index.jsx")
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            continue
+        if not resolved.exists() or not resolved.is_file():
+            continue
+        try:
+            root_resolved = root.resolve()
+        except Exception:
+            root_resolved = root
+        if root_resolved not in resolved.parents and resolved != root_resolved:
+            continue
+        return resolved
+    return None
+
+
+def _detect_import_export_mismatch(test_files: list[str], root: Path) -> list[str]:
+    hints: list[str] = []
+    for test_file in test_files[:5]:
+        try:
+            test_path = Path(test_file)
+            if not test_path.is_absolute():
+                test_path = (root / test_path).resolve()
+        except Exception:
+            continue
+        if not test_path.exists():
+            continue
+        content = _read_text_file(test_path)
+        if not content:
+            continue
+
+        for match in re.finditer(r"import\s+([^;]+?)\s+from\s+['\"]([^'\"]+)['\"]", content):
+            import_clause = match.group(1).strip()
+            module_spec = match.group(2).strip()
+            target = _resolve_import_target(test_path, module_spec, root)
+            if not target:
+                if module_spec.startswith("."):
+                    hints.append(
+                        f"{test_path.as_posix()} imports {module_spec} but the path does not resolve to a file."
+                    )
+                continue
+
+            target_content = _read_text_file(target)
+            if not target_content:
+                continue
+            exported_names, has_default = _extract_exports(target_content)
+            default_name, named_imports = _parse_import_clause(import_clause)
+
+            if default_name and not has_default:
+                hints.append(
+                    f"{test_path.as_posix()} imports default '{default_name}' from {module_spec} but {target.as_posix()} has no default export."
+                )
+            for name in named_imports:
+                if name not in exported_names:
+                    hints.append(
+                        f"{test_path.as_posix()} imports '{{ {name} }}' from {module_spec} but {target.as_posix()} does not export it."
+                    )
+
+    return hints
+
+
+def _read_text_file(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def _load_package_json(root: Path) -> dict:
+    pkg = root / "package.json"
+    if not pkg.exists():
+        return {}
+    try:
+        return json.loads(pkg.read_text(errors="ignore"))
+    except Exception:
+        return {}
+
+
+def _package_dependencies(root: Path) -> set[str]:
+    pkg_data = _load_package_json(root)
+    deps: dict[str, Any] = {}
+    for key in ("dependencies", "devDependencies", "peerDependencies"):
+        value = pkg_data.get(key)
+        if isinstance(value, dict):
+            deps.update(value)
+    return {str(name).lower() for name in deps.keys()}
+
+
+def _extract_exports(content: str) -> tuple[set[str], bool]:
+    names: set[str] = set()
+    for match in re.finditer(r"export\s+(?:const|function|class|interface|type)\s+([A-Za-z0-9_]+)", content):
+        names.add(match.group(1))
+    for match in re.finditer(r"export\s+\{([^}]+)\}", content):
+        for part in match.group(1).split(","):
+            item = part.strip()
+            if not item:
+                continue
+            if " as " in item:
+                item = item.split(" as ", 1)[0].strip()
+            names.add(item)
+    has_default = bool(re.search(r"\bexport\s+default\b", content))
+    return names, has_default
+
+
+def _parse_import_clause(clause: str) -> tuple[Optional[str], list[str]]:
+    default_name = None
+    named: list[str] = []
+    if not clause:
+        return default_name, named
+    if clause.startswith("{"):
+        named = _parse_named_imports(clause)
+        return default_name, named
+    if clause.startswith("*"):
+        return default_name, named
+    if "," in clause:
+        default_part, rest = clause.split(",", 1)
+        default_name = default_part.strip()
+        named = _parse_named_imports(rest)
+        return default_name, named
+    default_name = clause.strip()
+    return default_name, named
+
+
+def _parse_named_imports(segment: str) -> list[str]:
+    match = re.search(r"\{([^}]+)\}", segment)
+    if not match:
+        return []
+    names: list[str] = []
+    for part in match.group(1).split(","):
+        item = part.strip()
+        if not item:
+            continue
+        if " as " in item:
+            item = item.split(" as ", 1)[0].strip()
+        names.append(item)
+    return names
+
+
+def _parse_env_file_vars(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    values: set[str] = set()
+    for line in _read_text_file(path).splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key:
+            values.add(key)
+    return values
+
+
+def _collect_env_vars_from_text(text: str) -> set[str]:
+    if not text:
+        return set()
+    env_vars = set(re.findall(r"process\.env\.([A-Za-z0-9_]+)", text))
+    env_vars.update(re.findall(r"import\.meta\.env\.([A-Za-z0-9_]+)", text))
+    env_vars.update(re.findall(r"os\.environ\[['\"]([A-Za-z0-9_]+)['\"]\]", text))
+    return env_vars
+
+
+def _extract_string_literals(raw: str) -> list[str]:
+    return [match for match in re.findall(r"['\"]([^'\"]+)['\"]", raw or "")]
+
+
+def _extract_patterns_from_config_content(content: str) -> dict[str, list[str]]:
+    patterns = {"include": [], "exclude": [], "test_match": [], "test_regex": []}
+    if not content:
+        return patterns
+    fields = {
+        "include": "include",
+        "exclude": "exclude",
+        "testMatch": "test_match",
+        "testRegex": "test_regex",
+    }
+    for field, key in fields.items():
+        matches = re.finditer(
+            rf"{field}\s*:\s*(\[[^\]]*\]|['\"][^'\"]+['\"]|/[^/]+/)",
+            content,
+            re.IGNORECASE | re.DOTALL,
+        )
+        for match in matches:
+            raw = match.group(1)
+            if raw.startswith("/") and raw.endswith("/") and key == "test_regex":
+                patterns[key].append(raw.strip("/"))
+                continue
+            patterns[key].extend(_extract_string_literals(raw))
+    return patterns
+
+
+def _collect_test_discovery_patterns(root: Path) -> dict[str, list[str]]:
+    combined = {"include": [], "exclude": [], "test_match": [], "test_regex": []}
+    candidates = [
+        "vitest.config.ts",
+        "vitest.config.js",
+        "vitest.config.mjs",
+        "vitest.config.cjs",
+        "vite.config.ts",
+        "vite.config.js",
+        "vite.config.mjs",
+        "vite.config.cjs",
+        "jest.config.ts",
+        "jest.config.js",
+        "jest.config.mjs",
+        "jest.config.cjs",
+    ]
+    for name in candidates:
+        path = root / name
+        if not path.exists():
+            continue
+        content = _read_text_file(path)
+        patterns = _extract_patterns_from_config_content(content)
+        for key in combined:
+            combined[key].extend(patterns[key])
+
+    pkg = _load_package_json(root)
+    jest_cfg = pkg.get("jest")
+    if isinstance(jest_cfg, dict):
+        combined["test_match"].extend(jest_cfg.get("testMatch", []) or [])
+        regex = jest_cfg.get("testRegex")
+        if isinstance(regex, str):
+            combined["test_regex"].append(regex)
+        elif isinstance(regex, list):
+            combined["test_regex"].extend(regex)
+    vitest_cfg = pkg.get("vitest") or pkg.get("test")
+    if isinstance(vitest_cfg, dict):
+        combined["include"].extend(vitest_cfg.get("include", []) or [])
+        combined["exclude"].extend(vitest_cfg.get("exclude", []) or [])
+
+    return combined
+
+
+def _expand_brace_pattern(pattern: str) -> list[str]:
+    if "{" not in pattern or "}" not in pattern:
+        return [pattern]
+    prefix, rest = pattern.split("{", 1)
+    inner, suffix = rest.split("}", 1)
+    parts = [part.strip() for part in inner.split(",") if part.strip()]
+    return [f"{prefix}{part}{suffix}" for part in parts] or [pattern]
+
+
+def _match_any_glob(path: str, patterns: list[str]) -> bool:
+    for pattern in patterns:
+        for expanded in _expand_brace_pattern(pattern):
+            if fnmatch.fnmatch(path, expanded):
+                return True
+    return False
+
+
+def _detect_test_discovery_config_mismatch(test_files: list[str], root: Path) -> Optional[str]:
+    if not test_files:
+        return None
+    patterns = _collect_test_discovery_patterns(root)
+    include = patterns["include"] or patterns["test_match"]
+    exclude = patterns["exclude"]
+    regexes = patterns["test_regex"]
+
+    normalized = [path.replace("\\", "/") for path in test_files]
+    if include:
+        if not any(_match_any_glob(path, include) for path in normalized):
+            return "Test discovery patterns do not match any test files (check include/testMatch config)."
+    if regexes:
+        try:
+            compiled = [re.compile(expr) for expr in regexes]
+        except re.error:
+            compiled = []
+        if compiled and not any(any(regex.search(path) for regex in compiled) for path in normalized):
+            return "testRegex patterns do not match any test files."
+    if exclude and all(_match_any_glob(path, exclude) for path in normalized):
+        return "All discovered test files are excluded by config patterns."
+    return None
+
+
+def _test_file_has_cases(content: str) -> bool:
+    return bool(re.search(r"\b(it|test|bench)\s*\(", content))
+
+
+def _detect_empty_test_files(test_files: list[str], root: Path) -> Optional[str]:
+    for test_file in test_files[:5]:
+        try:
+            path = Path(test_file)
+            if not path.is_absolute():
+                path = (root / path).resolve()
+        except Exception:
+            continue
+        content = _read_text_file(path)
+        if content and not _test_file_has_cases(content):
+            return f"{path.as_posix()} defines no test cases (no it()/test() calls)."
+    return None
+
+
+def _detect_missing_env_vars(test_files: list[str], root: Path) -> list[str]:
+    env_vars: set[str] = set()
+    for test_file in test_files[:5]:
+        try:
+            path = Path(test_file)
+            if not path.is_absolute():
+                path = (root / path).resolve()
+        except Exception:
+            continue
+        env_vars.update(_collect_env_vars_from_text(_read_text_file(path)))
+    if not env_vars:
+        return []
+    env_file_vars = _parse_env_file_vars(root / ".env")
+    missing = []
+    for name in sorted(env_vars):
+        if name in {"NODE_ENV", "PATH", "PWD", "HOME"}:
+            continue
+        if name not in env_file_vars and name not in os.environ:
+            missing.append(name)
+    return missing
+
+
+def _detect_missing_modules_from_output(output: str, root: Path) -> list[str]:
+    if not output:
+        return []
+    deps = _package_dependencies(root)
+    builtins = {
+        "fs", "path", "http", "https", "url", "crypto", "stream", "events", "os", "util",
+        "child_process", "buffer", "zlib", "net", "tls", "assert", "timers",
+    }
+    missing: list[str] = []
+    for match in re.findall(r"Cannot find module ['\"]([^'\"]+)['\"]", output):
+        module_name = match.strip()
+        module_lower = module_name.lower()
+        if module_name.startswith("."):
+            missing.append(f"Missing local import: {module_name}")
+        elif module_lower not in deps and module_lower not in builtins:
+            missing.append(f"Missing dependency: {module_name}")
+    for match in re.findall(r"Can't resolve ['\"]([^'\"]+)['\"]", output):
+        module_name = match.strip()
+        module_lower = module_name.lower()
+        if module_name.startswith("."):
+            missing.append(f"Missing local import: {module_name}")
+        elif module_lower not in deps and module_lower not in builtins:
+            missing.append(f"Missing dependency: {module_name}")
+    return missing
+
+
+def _detect_typescript_setup_issues(test_files: list[str], root: Path) -> list[str]:
+    uses_ts = any(path.endswith((".ts", ".tsx")) for path in test_files)
+    uses_vue = any(path.endswith(".vue") for path in test_files)
+    if not (uses_ts or uses_vue):
+        return []
+    hints: list[str] = []
+    if not (root / "tsconfig.json").exists() and not (root / "jsconfig.json").exists():
+        hints.append("TypeScript files detected but tsconfig.json/jsconfig.json is missing.")
+    deps = _package_dependencies(root)
+    if "typescript" not in deps:
+        hints.append("TypeScript is not listed in package.json dependencies.")
+    if uses_vue and "@vue/compiler-sfc" not in deps:
+        hints.append("Vue files detected but @vue/compiler-sfc is missing in dependencies.")
+    return hints
+
+
+def _detect_prisma_setup_issues(test_files: list[str], output: str, root: Path) -> list[str]:
+    hinted = False
+    for test_file in test_files[:5]:
+        if "@prisma/client" in _read_text_file(root / test_file if not Path(test_file).is_absolute() else Path(test_file)):
+            hinted = True
+            break
+    if "prisma" in (output or "").lower():
+        hinted = True
+    if not hinted:
+        return []
+    hints: list[str] = []
+    if not (root / "prisma" / "schema.prisma").exists():
+        hints.append("Prisma schema.prisma is missing.")
+    if not (root / "node_modules" / "@prisma" / "client").exists():
+        hints.append("@prisma/client is missing from node_modules.")
+    if not (root / "prisma" / "migrations").exists():
+        hints.append("Prisma migrations are missing; run prisma migrate to initialize.")
+    return hints
+
+
+def _detect_connection_errors(output: str) -> Optional[str]:
+    lowered = (output or "").lower()
+    if any(token in lowered for token in ("econnrefused", "connect econnrefused", "socket hang up", "enotfound")):
+        return "Connection error detected (server not running or wrong host/port)."
+    return None
+
+
+def _detect_missing_test_runner(test_files: list[str], output: str, root: Path) -> Optional[str]:
+    deps = _package_dependencies(root)
+    content_hint = ""
+    for test_file in test_files[:5]:
+        content_hint += _read_text_file(root / test_file if not Path(test_file).is_absolute() else Path(test_file))
+    combined = f"{output}\n{content_hint}".lower()
+    if "vitest" in combined and "vitest" not in deps:
+        return "Vitest is referenced but not listed in package.json dependencies."
+    if "jest" in combined and "jest" not in deps:
+        return "Jest is referenced but not listed in package.json dependencies."
+    return None
+
+
+def _build_test_diagnostics(output: str, test_files: list[str], root: Path) -> dict[str, Any]:
+    debug: dict[str, Any] = {}
+    hints: list[str] = []
+    discovered = test_files or _discover_test_files(root)
+    if discovered:
+        debug["discovered_test_files"] = discovered[:5]
+
+    import_hints = _detect_import_export_mismatch(discovered, root)
+    hints.extend(import_hints[:2])
+
+    config_hint = _detect_test_discovery_config_mismatch(discovered, root)
+    if config_hint:
+        hints.append(config_hint)
+
+    empty_hint = _detect_empty_test_files(discovered, root)
+    if empty_hint:
+        hints.append(empty_hint)
+
+    missing_env = _detect_missing_env_vars(discovered, root)
+    if missing_env:
+        debug["missing_env_vars"] = missing_env[:5]
+        hints.append("Missing environment variables detected in tests.")
+
+    missing_mods = _detect_missing_modules_from_output(output, root)
+    if missing_mods:
+        debug["missing_dependencies"] = missing_mods[:5]
+        hints.append(missing_mods[0])
+
+    if (root / "package.json").exists() and not (root / "node_modules").exists():
+        hints.append("node_modules is missing; install dependencies before running tests.")
+
+    ts_hints = _detect_typescript_setup_issues(discovered, root)
+    hints.extend(ts_hints[:2])
+
+    prisma_hints = _detect_prisma_setup_issues(discovered, output, root)
+    hints.extend(prisma_hints[:2])
+
+    conn_hint = _detect_connection_errors(output)
+    if conn_hint:
+        hints.append(conn_hint)
+
+    runner_hint = _detect_missing_test_runner(discovered, output, root)
+    if runner_hint:
+        hints.append(runner_hint)
+
+    if hints:
+        debug["suspected_issue"] = hints[0]
+        debug["hints"] = hints[:4]
+
+    return debug
+
+
+def _merge_debug_details(details: dict[str, Any], debug: dict[str, Any]) -> dict[str, Any]:
+    if not debug:
+        return details
+    merged = dict(details)
+    merged["debug"] = debug
+    return merged
 
 
 def _path_is_test_like(path: Path) -> bool:
@@ -3316,7 +3791,13 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
                 details={"rc": rc, "output": output[:200], "skipped": True, "reason": "no_test_runner_detected"},
             )
         if _output_indicates_no_tests(stdout, stderr) and not _no_tests_expected(task):
+            root = Path(cwd) if cwd else config.ROOT
+            try:
+                root = root.resolve()
+            except Exception:
+                root = Path.cwd().resolve()
             test_files = _extract_test_files_from_output(output)
+            debug_info = _build_test_diagnostics(output, test_files, root)
             return VerificationResult(
                 passed=False,
                 message="Verification INCONCLUSIVE: no tests discovered",
@@ -3327,6 +3808,7 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
                     "non_retriable": True,
                     "skip_failure_counts": True,
                     "test_files": test_files,
+                    "debug": debug_info if debug_info else None,
                     "cmd": payload.get("cmd") or payload.get("command"),
                 },
                 should_replan=True,
@@ -3407,10 +3889,22 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
                 details={"rc": rc, "output": output[:500]},
                 should_replan=True,
             )
+        root_path = Path(cwd) if cwd else (config.ROOT or Path.cwd())
+        try:
+            root_path = root_path.resolve()
+        except Exception:
+            root_path = Path.cwd().resolve()
         return VerificationResult(
             passed=False,
             message=f"Tests failed (rc={rc})",
-            details={"rc": rc, "output": output[:500]},
+            details=_merge_debug_details(
+                {"rc": rc, "output": output[:500]},
+                _build_test_diagnostics(
+                    output,
+                    _extract_test_files_from_output(output),
+                    root_path,
+                ),
+            ),
             should_replan=True,
         )
 

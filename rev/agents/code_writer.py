@@ -741,6 +741,17 @@ class CodeWriterAgent(BaseAgent):
 
         # Constrain available tools based on task action_type
         all_tools = get_available_tools()
+        python_tools = [
+            'rewrite_python_imports',
+            'rewrite_python_keyword_args',
+            'rename_imported_symbols',
+            'move_imported_symbols',
+            'rewrite_python_function_parameters',
+        ]
+        target_files_for_tools = _extract_target_files_from_description(task.description)
+        include_python_tools = any(
+            path.lower().endswith((".py", ".pyi")) for path in target_files_for_tools
+        )
 
         # Determine which tools are appropriate for this action_type
         if task.action_type == "create_directory":
@@ -752,31 +763,25 @@ class CodeWriterAgent(BaseAgent):
         elif task.action_type == "edit":
             # File modification tasks may use AST-aware edits for safer Python refactors
             tool_names = [
-                'rewrite_python_imports',
-                'rewrite_python_keyword_args',
-                'rename_imported_symbols',
-                'move_imported_symbols',
-                'rewrite_python_function_parameters',
                 'replace_in_file',
                 'apply_patch',
                 'write_file',
                 'copy_file',
                 'move_file',
             ]
+            if include_python_tools:
+                tool_names = python_tools + tool_names
         elif task.action_type == "refactor":
             # Refactoring may need to create or modify files
             tool_names = [
                 'write_file',
                 'apply_patch',
-                'rewrite_python_imports',
-                'rewrite_python_keyword_args',
-                'rename_imported_symbols',
-                'move_imported_symbols',
-                'rewrite_python_function_parameters',
                 'replace_in_file',
                 'copy_file',
                 'move_file',
             ]
+            if include_python_tools:
+                tool_names = python_tools + tool_names
         elif task.action_type in {"move", "rename"}:
             # Move/rename should only use move_file to prevent accidental rewrites.
             tool_names = ['move_file']

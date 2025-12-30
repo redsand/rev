@@ -304,8 +304,7 @@ def run_command_safe(
 
         # Support interrupt checking for long-running commands
         if check_interrupt:
-            stdout_data, stderr_data = _communicate_with_interrupt(proc, timeout)
-            interrupted = get_escape_interrupt()
+            stdout_data, stderr_data, timed_out, interrupted = _communicate_with_interrupt(proc, timeout)
         else:
             try:
                 stdout_data, stderr_data = proc.communicate(timeout=timeout)
@@ -324,6 +323,20 @@ def run_command_safe(
 
         if os.getenv("REV_DEBUG_CMD"):
             print(f"  [DEBUG_CMD] Result: rc={proc.returncode}, stdout_len={len(stdout_data or '')}, stderr_len={len(stderr_data or '')}")
+
+        if check_interrupt and timed_out:
+            return {
+                "timeout": timeout,
+                "timed_out": True,
+                "cmd": original_cmd_str,
+                "cmd_normalized": normalized_cmd_str,
+                "cwd": str(resolved_cwd),
+                "rc": proc.returncode if proc.returncode is not None else -1,
+                "stdout": stdout_data or "",
+                "stderr": stderr_data or "",
+                "error": f"command exceeded {timeout}s timeout",
+                "interrupted": interrupted,
+            }
 
         return {
             "rc": proc.returncode,
@@ -356,7 +369,7 @@ def run_command_safe(
 def _communicate_with_interrupt(
     proc: subprocess.Popen,
     timeout: int,
-) -> Tuple[str, str]:
+) -> Tuple[str, str, bool, bool]:
     """Communicate with process while checking for interrupt flag.
 
     Args:
@@ -364,24 +377,27 @@ def _communicate_with_interrupt(
         timeout: Maximum time to wait
 
     Returns:
-        Tuple of (stdout, stderr) as strings
+        Tuple of (stdout, stderr, timed_out, interrupted)
 
     This function polls the process and checks the interrupt flag.
     If interrupted, it terminates the process gracefully, then kills if needed.
     """
     start_time = time.time()
     poll_interval = 0.1  # Check every 100ms
+    timed_out = False
+    interrupted = False
 
     while True:
         # Check if process has finished
         if proc.poll() is not None:
             # Process finished, get remaining output
             stdout, stderr = proc.communicate()
-            return stdout or "", stderr or ""
+            return stdout or "", stderr or "", timed_out, interrupted
 
         # Check for interrupt flag
         if get_escape_interrupt():
             # User requested cancellation
+            interrupted = True
             try:
                 proc.terminate()
                 # Wait briefly for graceful termination
@@ -395,14 +411,15 @@ def _communicate_with_interrupt(
                 pass
 
             stdout, stderr = proc.communicate()
-            return stdout or "", stderr or ""
+            return stdout or "", stderr or "", timed_out, interrupted
 
         # Check for timeout
         elapsed = time.time() - start_time
         if elapsed > timeout:
+            timed_out = True
             proc.kill()
             stdout, stderr = proc.communicate()
-            return stdout or "", stderr or ""
+            return stdout or "", stderr or "", timed_out, interrupted
 
         # Sleep briefly before next check
         time.sleep(poll_interval)

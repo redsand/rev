@@ -4003,12 +4003,12 @@ class Orchestrator:
             ):
                 deferred_tdd_test = True
                 self.context.agent_state["tdd_deferred_test"] = True
-                next_task.status = TaskStatus.COMPLETED
+                next_task.status = TaskStatus.STOPPED
                 next_task.result = json.dumps(
                     {
                         "skipped": True,
                         "kind": "tdd_deferred_test",
-                        "reason": "Tests deferred until implementation is completed.",
+                        "reason": "Tests deferred until implementation is completed; no tool execution.",
                     }
                 )
                 verification_result = VerificationResult(

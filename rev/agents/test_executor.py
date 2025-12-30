@@ -439,6 +439,8 @@ class TestExecutorAgent(BaseAgent):
             return None
         reason = self._detect_non_terminating_command(cmd)
         if not reason:
+            reason = self._detect_non_terminating_test_script(cmd, task, context)
+        if not reason:
             return None
         payload = json.dumps(
             {"rc": 1, "stdout": "", "stderr": reason, "blocked": True, "cmd": cmd},
@@ -451,6 +453,77 @@ class TestExecutorAgent(BaseAgent):
             tool_output=payload,
             context=context,
             task_id=task.task_id,
+        )
+
+    def _detect_non_terminating_test_script(
+        self,
+        cmd: str | list[str],
+        task: Task,
+        context: RevContext,
+    ) -> Optional[str]:
+        cmd_text = " ".join(cmd) if isinstance(cmd, list) else str(cmd or "")
+        if not cmd_text.strip():
+            return None
+        try:
+            tokens = [str(t) for t in cmd] if isinstance(cmd, list) else shlex.split(cmd_text)
+        except ValueError:
+            tokens = cmd_text.split()
+        if not tokens:
+            return None
+
+        tokens_lower = [t.lower() for t in tokens]
+        package_manager = tokens_lower[0]
+        if package_manager not in ("npm", "yarn", "pnpm"):
+            return None
+
+        script_name = None
+        if len(tokens_lower) > 1 and tokens_lower[1] == "test":
+            script_name = "test"
+        elif len(tokens_lower) > 2 and tokens_lower[1] == "run":
+            script_name = tokens_lower[2]
+
+        if not script_name:
+            return None
+
+        if any(tok in ("--run", "--watch=false", "--watch=0") or tok.startswith("--run=") for tok in tokens_lower):
+            return None
+
+        from rev.tools.project_types import find_project_root
+
+        root = find_project_root(config.ROOT)
+        pkg_path = root / "package.json"
+        if not pkg_path.exists():
+            return None
+
+        try:
+            pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+        scripts = pkg.get("scripts")
+        if not isinstance(scripts, dict):
+            return None
+        script_value = scripts.get(script_name)
+        if not isinstance(script_value, str) or not script_value.strip():
+            return None
+
+        script_lower = script_value.lower()
+        if "vitest" not in script_lower:
+            return None
+        if "vitest run" in script_lower or "--run" in script_lower:
+            return None
+        if "--watch=false" in script_lower or "--watch=0" in script_lower:
+            return None
+
+        test_path = self._extract_test_path(cmd_text) or self._extract_test_path(task.description or "")
+        if test_path:
+            suggestion = f"npx vitest run {test_path}"
+        else:
+            suggestion = "npx vitest run"
+
+        return (
+            "Blocked non-terminating test script: package.json runs vitest without --run/--watch=false. "
+            f"Use `{suggestion}` (or pass `-- --run` to the test script)."
         )
 
     def _should_skip_pytest(self, task: Task, context: RevContext) -> bool:
