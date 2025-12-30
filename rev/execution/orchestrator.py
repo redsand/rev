@@ -803,12 +803,12 @@ def _normalize_test_task_signature(task: Task) -> str:
     desc = (task.description or "").strip()
     if not desc:
         return "test::<empty>"
-    cmd_match = re.search(
-        r"\b(?:npm|npx|yarn|pnpm|vitest|jest|pytest|go test|cargo test|dotnet test)[^\r\n]*",
-        desc,
-        re.IGNORECASE,
-    )
-    signature = cmd_match.group(0) if cmd_match else desc
+    explicit_cmd = _extract_explicit_test_command(desc)
+    if explicit_cmd:
+        signature = explicit_cmd
+    else:
+        test_path = _extract_test_path_from_text(desc)
+        signature = test_path if test_path else desc
     signature = re.sub(r"\s+", " ", signature.strip().lower())
     return f"test::{signature}"
 
@@ -4463,6 +4463,31 @@ class Orchestrator:
                         continue
 
                     if getattr(verification_result, "inconclusive", False) and is_blocked:
+                        if action_type == "test":
+                            fallback_cmd = _select_test_fallback_command(next_task.description or "", config.ROOT or Path.cwd())
+                            if fallback_cmd:
+                                signature = _normalize_test_task_signature(next_task)
+                                recovery_key = f"test_blocked_fallback::{signature}"
+                                if not self.context.agent_state.get(recovery_key):
+                                    self.context.set_agent_state(recovery_key, True)
+                                    forced_next_task = Task(
+                                        description=f"Run {fallback_cmd}",
+                                        action_type="test",
+                                    )
+                                    next_task.status = TaskStatus.STOPPED
+                                    next_task.error = _format_verification_feedback(verification_result)
+                                    next_task.result = json.dumps(
+                                        {
+                                            "inconclusive": True,
+                                            "blocked": True,
+                                            "message": verification_result.message,
+                                            "suggested_command": fallback_cmd,
+                                        }
+                                    )
+                                    execution_success = True
+                                    self._handle_verification_failure(verification_result)
+                                    iteration -= 1
+                                    continue
                         next_task.status = TaskStatus.STOPPED
                         next_task.error = _format_verification_feedback(verification_result)
                         next_task.result = json.dumps(
