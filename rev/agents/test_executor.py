@@ -481,7 +481,7 @@ class TestExecutorAgent(BaseAgent):
 
         explicit_cmd = self._extract_explicit_command(desc)
         if explicit_cmd:
-            cmd = explicit_cmd
+            cmd = self._maybe_target_test_command(explicit_cmd, task, context)
             workdir = self._extract_workdir_hint(desc)
             cmd = self._apply_workdir(cmd, workdir)
             blocked = self._block_non_terminating_command("run_cmd", {"cmd": cmd}, task, context)
@@ -567,6 +567,7 @@ class TestExecutorAgent(BaseAgent):
 
         workdir = self._extract_workdir_hint(desc)
         cmd = self._apply_workdir(cmd, workdir)
+        cmd = self._maybe_target_test_command(cmd, task, context) if isinstance(cmd, str) else cmd
 
         blocked = self._block_non_terminating_command("run_cmd", {"cmd": cmd}, task, context)
         if blocked:
@@ -618,7 +619,59 @@ class TestExecutorAgent(BaseAgent):
                 return candidate
         return None
 
+    @staticmethod
+    def _extract_test_path_from_description(desc: str) -> Optional[str]:
+        if not desc:
+            return None
+        match = re.search(r"([A-Za-z0-9_/\\.-]+\.(?:test|spec)\.[A-Za-z0-9]+)", desc)
+        if not match:
+            return None
+        return match.group(1)
+
+    @staticmethod
+    def _description_requests_full_suite(desc_lower: str) -> bool:
+        tokens = (
+            "run all tests",
+            "all tests",
+            "full suite",
+            "full test suite",
+            "entire suite",
+            "entire test suite",
+        )
+        return any(token in desc_lower for token in tokens)
+
+    @staticmethod
+    def _command_has_test_path(cmd: str) -> bool:
+        if not cmd:
+            return False
+        return bool(re.search(r"(?:test|spec)\.[A-Za-z0-9]+", cmd))
+
+    def _maybe_target_test_command(self, cmd: str, task: Task, context: RevContext) -> str:
+        if not cmd or not isinstance(cmd, str):
+            return cmd
+        desc_lower = (task.description or "").lower()
+        if self._description_requests_full_suite(desc_lower):
+            return cmd
+        if self._command_has_test_path(cmd):
+            return cmd
+
+        target_path = self._extract_test_path_from_description(task.description or "")
+        if not target_path:
+            target_path = context.get_agent_state("last_failing_test_file", "")
+        if not target_path:
+            return cmd
+
+        cmd_lower = cmd.lower()
+        if "vitest" in cmd_lower and "run" in cmd_lower:
+            return f"{cmd} {target_path}"
+        if "pytest" in cmd_lower:
+            return f"{cmd} {target_path}"
+        if "jest" in cmd_lower and "--runtestsbypath" not in cmd_lower:
+            return f"{cmd} --runTestsByPath {target_path}"
+        return cmd
+
     def _execute_explicit_command(self, task: Task, context: RevContext, cmd: str) -> str:
+        cmd = self._maybe_target_test_command(cmd, task, context)
         workdir = self._extract_workdir_hint(task.description or "")
         cmd = self._apply_workdir(cmd, workdir)
         blocked = self._block_non_terminating_command("run_cmd", {"cmd": cmd}, task, context)

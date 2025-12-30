@@ -1209,6 +1209,130 @@ def _extract_task_paths(task: Task) -> list[str]:
     return deduped
 
 
+def _sanitize_path_candidate(raw: str) -> str:
+    """Extract a filesystem path token from a command-like string."""
+    if not raw:
+        return ""
+    text = raw.strip().strip("`\"'")
+    path_pattern = r"(?:[A-Za-z]:\\[^\s\"']+|/[^\s\"']+|[\w./\\-]+\.[A-Za-z0-9]{1,6})"
+    matches = re.findall(path_pattern, text)
+    if not matches:
+        return text
+
+    def score(match: str) -> tuple[int, float]:
+        has_sep = 1 if ("/" in match or "\\" in match) else 0
+        return (has_sep, min(len(match), 100) / 100.0)
+
+    best = max(matches, key=score)
+    return best.strip("`\"'.,;:")
+
+
+def _load_package_json(root: Path) -> dict:
+    path = root / "package.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _package_json_scripts(root: Path) -> set[str]:
+    data = _load_package_json(root)
+    scripts = data.get("scripts", {})
+    if not isinstance(scripts, dict):
+        return set()
+    return {str(key).strip().lower() for key in scripts.keys() if isinstance(key, str)}
+
+
+def _package_json_deps(root: Path) -> set[str]:
+    data = _load_package_json(root)
+    deps: set[str] = set()
+    for field in ("dependencies", "devDependencies", "peerDependencies"):
+        values = data.get(field, {})
+        if isinstance(values, dict):
+            deps.update({str(key).strip().lower() for key in values.keys() if isinstance(key, str)})
+    return deps
+
+
+def _has_python_markers(root: Path) -> bool:
+    return any(
+        (root / marker).exists()
+        for marker in ("pyproject.toml", "requirements.txt", "setup.py", "setup.cfg")
+    )
+
+
+def _select_js_validation_commands(root: Path) -> list[str]:
+    scripts = _package_json_scripts(root)
+    deps = _package_json_deps(root)
+    candidates: list[str] = []
+    if "lint" in scripts:
+        candidates.append("npm run lint")
+    if "build" in scripts:
+        candidates.append("npm run build")
+    if "typecheck" in scripts:
+        candidates.append("npm run typecheck")
+    if not candidates:
+        if "eslint" in deps:
+            candidates.append("npx eslint .")
+        if "vitest" in deps:
+            candidates.append("npx vitest run")
+    return candidates[:2]
+
+
+def _build_no_tests_diagnostic_tasks(details: dict) -> list[Task]:
+    tasks: list[Task] = []
+    test_files = details.get("test_files") if isinstance(details, dict) else []
+    if isinstance(test_files, list):
+        for path in test_files[:3]:
+            if not isinstance(path, str) or not path.strip():
+                continue
+            tasks.append(
+                Task(
+                    description=(
+                        f"Inspect {path} to confirm it imports vitest APIs "
+                        f"(describe/it/test/expect) and defines at least one test case."
+                    ),
+                    action_type="read",
+                )
+            )
+    tasks.append(
+        Task(
+            description=(
+                "Locate vitest.config.* and verify test.include/test.exclude patterns match the test files "
+                "so Vitest discovers and executes them."
+            ),
+            action_type="review",
+        )
+    )
+    return tasks
+
+
+def _dedupe_pending_resume_tasks(tasks: list[Task]) -> list[Task]:
+    """Avoid repeated reads when resuming from checkpoints."""
+    if not tasks:
+        return []
+    seen_action_sigs: set[str] = set()
+    seen_read_targets: set[str] = set()
+    deduped: list[Task] = []
+    for task in tasks:
+        desc = (task.description or "").strip()
+        action = (task.action_type or "").strip().lower()
+        action_sig = f"{action}::{desc.lower()}"
+        if action_sig in seen_action_sigs:
+            continue
+        if action in {"read", "analyze", "research", "investigate", "review"}:
+            target = _extract_file_path_from_description(desc)
+            if target:
+                normalized = target.replace("\\", "/").lower()
+                if normalized in seen_read_targets:
+                    continue
+                seen_read_targets.add(normalized)
+        seen_action_sigs.add(action_sig)
+        deduped.append(task)
+    return deduped
+
+
 _PROJECT_MARKERS = {
     "package.json", "pnpm-lock.yaml", "yarn.lock",
     "pyproject.toml", "requirements.txt", "setup.py",
@@ -1260,7 +1384,7 @@ def _scaffold_paths_from_task(task: Task) -> list[str]:
 
 def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optional[VerificationResult]) -> list[Task]:
     targets = _extract_task_paths(task)
-    target_path = targets[0] if targets else ""
+    target_path = _sanitize_path_candidate(targets[0]) if targets else ""
     tasks: list[Task] = []
 
     error_message = verification_result.message if verification_result and verification_result.message else ""
@@ -3198,6 +3322,12 @@ class Orchestrator:
                 task for task in self.context.plan.tasks
                 if task.status == TaskStatus.PENDING
             ]
+            deduped_resume_tasks = _dedupe_pending_resume_tasks(pending_resume_tasks)
+            if len(deduped_resume_tasks) != len(pending_resume_tasks):
+                print(
+                    f"  [resume] Deduped pending READ tasks: {len(pending_resume_tasks)} -> {len(deduped_resume_tasks)}"
+                )
+            pending_resume_tasks = deduped_resume_tasks
 
         while True:
             iteration += 1
@@ -3733,25 +3863,43 @@ class Orchestrator:
                     if target_path:
                         # Determine file type to suggest appropriate validation
                         file_ext = target_path.split('.')[-1].lower() if '.' in target_path else ''
+                        root = Path(config.ROOT) if config.ROOT else Path.cwd()
 
                         if file_ext in ['js', 'ts', 'jsx', 'tsx', 'vue']:
                             # Frontend file - suggest build/lint
                             next_task.action_type = "test"
-                            next_task.description = (
-                                f"Instead of re-reading {target_path}, validate it by running: "
-                                f"1) `npm run lint` to check syntax (if available), or "
-                                f"2) `npm run build` to verify it compiles correctly. "
-                                f"This will reveal actual issues rather than just reading the same file again."
-                            )
+                            commands = _select_js_validation_commands(root)
+                            if commands:
+                                options = " or ".join(f"`{cmd}`" for cmd in commands)
+                                next_task.description = (
+                                    f"Instead of re-reading {target_path}, validate it by running {options}. "
+                                    f"This will reveal actual issues rather than just reading the same file again."
+                                )
+                            else:
+                                next_task.action_type = "analyze"
+                                next_task.description = (
+                                    f"Instead of re-reading {target_path}, analyze the cached file contents to: "
+                                    f"1) Summarize what the file currently contains, "
+                                    f"2) Identify what changes are still needed to satisfy acceptance criteria, "
+                                    f"3) Determine if the implementation is actually complete or if specific issues remain."
+                                )
                         elif file_ext in ['py']:
                             # Python file - suggest syntax check or relevant tests
-                            next_task.action_type = "test"
-                            next_task.description = (
-                                f"Instead of re-reading {target_path}, validate it by running: "
-                                f"1) python -m py_compile {target_path} to check syntax, or "
-                                f"2) Run relevant unit tests for this module. "
-                                f"This will reveal actual issues rather than static reading."
-                            )
+                            if _has_python_markers(root):
+                                next_task.action_type = "test"
+                                next_task.description = (
+                                    f"Instead of re-reading {target_path}, validate it by running "
+                                    f"`python -m py_compile {target_path}` to check syntax. "
+                                    f"This will reveal actual issues rather than static reading."
+                                )
+                            else:
+                                next_task.action_type = "analyze"
+                                next_task.description = (
+                                    f"Instead of re-reading {target_path}, analyze the cached file contents to: "
+                                    f"1) Summarize what the file currently contains, "
+                                    f"2) Identify what changes are still needed to satisfy acceptance criteria, "
+                                    f"3) Determine if the implementation is actually complete or if specific issues remain."
+                                )
                         else:
                             # Generic file - analyze using cached contents
                             next_task.action_type = "analyze"
@@ -3763,12 +3911,28 @@ class Orchestrator:
                             )
                     else:
                         # No specific file - suggest running tests or verification
-                        next_task.action_type = "test"
-                        next_task.description = (
-                            "Instead of re-reading files, validate the current state by running tests: "
-                            "Use pytest for Python code, npm test for JavaScript, or appropriate linting/build commands. "
-                            "This will reveal actual blocking issues that need to be fixed."
-                        )
+                        root = Path(config.ROOT) if config.ROOT else Path.cwd()
+                        commands = _select_js_validation_commands(root)
+                        if commands:
+                            next_task.action_type = "test"
+                            options = " or ".join(f"`{cmd}`" for cmd in commands)
+                            next_task.description = (
+                                "Instead of re-reading files, validate the current state by running "
+                                f"{options}. This will reveal actual blocking issues that need to be fixed."
+                            )
+                        elif _has_python_markers(root):
+                            next_task.action_type = "test"
+                            next_task.description = (
+                                "Instead of re-reading files, validate the current state by running "
+                                "`python -m compileall .` to check for syntax errors. "
+                                "This will reveal actual blocking issues that need to be fixed."
+                            )
+                        else:
+                            next_task.action_type = "analyze"
+                            next_task.description = (
+                                "Instead of re-reading files, analyze the cached contents to identify what changes "
+                                "are still needed and which files should be edited next."
+                            )
                         # CRITICAL FIX: Set TDD flag so test failures are allowed in TDD mode
                         # Loop-guard test tasks are diagnostic - treat failures as informational, not blockers
                         if config.TDD_ENABLED:
@@ -3894,9 +4058,35 @@ class Orchestrator:
                     details = getattr(verification_result, "details", {}) if verification_result else {}
                     is_blocked = isinstance(details, dict) and details.get("blocked") is True
                     skip_failure_counts = isinstance(details, dict) and details.get("skip_failure_counts") is True
+                    verification_handled = False
+                    no_tests_discovered = isinstance(details, dict) and details.get("no_tests_discovered") is True
+
+                    if no_tests_discovered:
+                        next_task.status = TaskStatus.STOPPED
+                        next_task.error = _format_verification_feedback(verification_result)
+                        next_task.result = json.dumps(
+                            {
+                                "inconclusive": True,
+                                "no_tests_discovered": True,
+                                "message": verification_result.message,
+                            }
+                        )
+                        execution_success = True
+                        self._handle_verification_failure(verification_result)
+                        diagnostic_tasks = _build_no_tests_diagnostic_tasks(details)
+                        injected = _queue_diagnostic_tasks(self.context, diagnostic_tasks)
+                        if injected:
+                            forced_next_task = injected
+                            iteration -= 1
+                            continue
+                        verification_handled = True
 
                     # PERFORMANCE FIX 2: Check if verification is inconclusive (P0-6)
-                    if getattr(verification_result, 'inconclusive', False) and not (is_blocked and action_type == "test"):
+                    if (
+                        getattr(verification_result, 'inconclusive', False)
+                        and not no_tests_discovered
+                        and not (is_blocked and action_type == "test")
+                    ):
                         print(f"  [inconclusive-verification] Edit completed but needs validation - injecting TEST task")
 
                         # Display inconclusive warning (already handled by _handle_verification_failure)
@@ -3981,116 +4171,188 @@ class Orchestrator:
                         # Continue to next iteration with the TEST task
                         continue
 
-                    # Verification definitely failed - mark task as failed and mark for re-planning
-                    next_task.status = TaskStatus.FAILED
-                    next_task.error = _format_verification_feedback(verification_result)
-                    execution_success = False
-
-                    # Display detailed debug information
-                    self._handle_verification_failure(verification_result)
-
-                    # Anti-loop: stop if the same verification failure repeats.
-                    # Use robust error signature that identifies root error type
-                    if skip_failure_counts:
-                        print("  [skip-failure-counts] Verification marked as inconclusive/blocked; skipping circuit-breaker counts")
-                    else:
-                        error_sig = _create_error_signature(verification_result)
-                        failure_sig = f"{(next_task.action_type or '').lower()}::{error_sig}"
-                        failure_counts[failure_sig] += 1
-                        repeat_break_threshold = 3
-                        if action_type == "test":
-                            repeat_break_threshold = 5
-
-                    # Extract and save failing test file for targeted re-testing
-                    all_error_text = f"{verification_result.message} "
-                    if hasattr(verification_result, 'details') and isinstance(verification_result.details, dict):
-                        for key in ['test_output', 'stdout', 'stderr', 'output']:
-                            val = verification_result.details.get(key, '')
-                            if isinstance(val, str):
-                                all_error_text += val + " "
-
-                    failing_test_file = _extract_failing_test_file(all_error_text)
-                    if failing_test_file:
-                        self.context.set_agent_state("last_failing_test_file", failing_test_file)
-                        print(f"  [test-targeting] Detected failing test: {failing_test_file}")
-
-                    if not skip_failure_counts:
-                        # Log the detected error signature for debugging
-                        if failure_counts[failure_sig] > 1:
-                            print(f"  [circuit-breaker] Same error detected {failure_counts[failure_sig]}x: {error_sig}")
-
-                        if failure_counts[failure_sig] == 2:
-                            diag_key = f"diagnostic::{failure_sig}"
-                            already_injected = self.context.agent_state.get(diag_key, False)
-                            if not already_injected:
-                                diagnostic_tasks = _build_diagnostic_tasks_for_failure(next_task, verification_result)
-                                injected = _queue_diagnostic_tasks(self.context, diagnostic_tasks)
-                                if injected:
-                                    self.context.agent_state[diag_key] = True
-                                    forced_next_task = injected
-                                    iteration -= 1
-                                    continue
-
-                        # Track syntax repair attempts separately
-                        syntax_repair_key = f"syntax_repair::{failure_sig}"
-                        syntax_repair_attempts = self.context.agent_state.get(syntax_repair_key, 0)
-
-                    if not skip_failure_counts and failure_counts[failure_sig] >= repeat_break_threshold:
-                        # PRIORITY 2 FIX: ESCALATION for repeated replace_in_file failures
-                        # Check if this is a replace_in_file failure that should escalate to write_file
-                        tool_events = getattr(next_task, "tool_events", None) or []
-                        used_replace_in_file = any(
-                            str(ev.get("tool") or "").lower() == "replace_in_file"
-                            for ev in tool_events
+                    if getattr(verification_result, "inconclusive", False) and is_blocked:
+                        next_task.status = TaskStatus.STOPPED
+                        next_task.error = _format_verification_feedback(verification_result)
+                        next_task.result = json.dumps(
+                            {
+                                "inconclusive": True,
+                                "blocked": True,
+                                "message": verification_result.message,
+                            }
                         )
+                        execution_success = True
+                        self._handle_verification_failure(verification_result)
+                        verification_handled = True
 
-                        escalation_key = f"edit_escalation::{failure_sig}"
-                        already_escalated = self.context.agent_state.get(escalation_key, False)
+                    # Verification definitely failed - mark task as failed and mark for re-planning
+                    if not verification_handled:
+                        next_task.status = TaskStatus.FAILED
+                        next_task.error = _format_verification_feedback(verification_result)
+                        execution_success = False
 
-                        if used_replace_in_file and not already_escalated and (next_task.action_type or "").lower() == "edit":
-                            # Third failure using replace_in_file - escalate to write_file strategy
-                            print(f"  {colorize(Symbols.WARNING, Colors.BRIGHT_YELLOW)} {colorize('ESCALATION: replace_in_file failed 3x - suggesting write_file strategy', Colors.BRIGHT_WHITE)}")
+                        # Display detailed debug information
+                        self._handle_verification_failure(verification_result)
 
-                            # Mark that we've escalated this specific failure
-                            self.context.set_agent_state(escalation_key, True)
+                        # Anti-loop: stop if the same verification failure repeats.
+                        # Use robust error signature that identifies root error type
+                        if skip_failure_counts:
+                            print("  [skip-failure-counts] Verification marked as inconclusive/blocked; skipping circuit-breaker counts")
+                        else:
+                            error_sig = _create_error_signature(verification_result)
+                            failure_sig = f"{(next_task.action_type or '').lower()}::{error_sig}"
+                            failure_counts[failure_sig] += 1
+                            repeat_break_threshold = 3
+                            if action_type == "test":
+                                repeat_break_threshold = 5
 
-                            # Add agent request to guide planner toward write_file
-                            self.context.add_agent_request(
-                                "EDIT_STRATEGY_ESCALATION",
-                                {
-                                    "agent": "Orchestrator",
-                                    "reason": f"replace_in_file failed {failure_counts[failure_sig]} times - switch to write_file",
-                                    "detailed_reason": (
-                                        f"EDIT STRATEGY ESCALATION: The 'replace_in_file' approach has failed {failure_counts[failure_sig]} times "
-                                        f"for this task. This usually means the 'find' string cannot match the actual file content.\n\n"
-                                        "REQUIRED NEXT STEPS:\n"
-                                        "1. Use 'read_file' to get the complete current content of the target file\n"
-                                        "2. Manually construct the desired new content by modifying what you read\n"
-                                        "3. Use 'write_file' to completely rewrite the file with the new content\n"
-                                        "4. Do NOT use 'replace_in_file' again - it has proven unreliable for this file\n\n"
-                                        "This approach is more reliable than trying to match exact substrings."
-                                    )
-                                }
+                        # Extract and save failing test file for targeted re-testing
+                        all_error_text = f"{verification_result.message} "
+                        if hasattr(verification_result, 'details') and isinstance(verification_result.details, dict):
+                            for key in ['test_output', 'stdout', 'stderr', 'output']:
+                                val = verification_result.details.get(key, '')
+                                if isinstance(val, str):
+                                    all_error_text += val + " "
+
+                        failing_test_file = _extract_failing_test_file(all_error_text)
+                        if failing_test_file:
+                            self.context.set_agent_state("last_failing_test_file", failing_test_file)
+                            print(f"  [test-targeting] Detected failing test: {failing_test_file}")
+
+                        if not skip_failure_counts:
+                            # Log the detected error signature for debugging
+                            if failure_counts[failure_sig] > 1:
+                                print(f"  [circuit-breaker] Same error detected {failure_counts[failure_sig]}x: {error_sig}")
+
+                            if failure_counts[failure_sig] == 2:
+                                diag_key = f"diagnostic::{failure_sig}"
+                                already_injected = self.context.agent_state.get(diag_key, False)
+                                if not already_injected:
+                                    diagnostic_tasks = _build_diagnostic_tasks_for_failure(next_task, verification_result)
+                                    injected = _queue_diagnostic_tasks(self.context, diagnostic_tasks)
+                                    if injected:
+                                        self.context.agent_state[diag_key] = True
+                                        forced_next_task = injected
+                                        iteration -= 1
+                                        continue
+
+                            # Track syntax repair attempts separately
+                            syntax_repair_key = f"syntax_repair::{failure_sig}"
+                            syntax_repair_attempts = self.context.agent_state.get(syntax_repair_key, 0)
+
+                        if not skip_failure_counts and failure_counts[failure_sig] >= repeat_break_threshold:
+                            # PRIORITY 2 FIX: ESCALATION for repeated replace_in_file failures
+                            # Check if this is a replace_in_file failure that should escalate to write_file
+                            tool_events = getattr(next_task, "tool_events", None) or []
+                            used_replace_in_file = any(
+                                str(ev.get("tool") or "").lower() == "replace_in_file"
+                                for ev in tool_events
                             )
 
-                            # Reset failure count to give write_file strategy a chance
-                            failure_counts[failure_sig] = 0
+                            escalation_key = f"edit_escalation::{failure_sig}"
+                            already_escalated = self.context.agent_state.get(escalation_key, False)
 
-                            # Continue planning with the new constraint
-                            iteration -= 1  # Don't count this as a regular iteration
-                            continue
+                            if used_replace_in_file and not already_escalated and (next_task.action_type or "").lower() == "edit":
+                                # Third failure using replace_in_file - escalate to write_file strategy
+                                print(f"  {colorize(Symbols.WARNING, Colors.BRIGHT_YELLOW)} {colorize('ESCALATION: replace_in_file failed 3x - suggesting write_file strategy', Colors.BRIGHT_WHITE)}")
 
-                        # GENERIC AUTO-RECOVERY: Let the LLM analyze and fix ANY type of error
-                        # This is sustainable - no need to add handlers for each tool/framework
-                        generic_repair_key = f"generic_repair::{failure_sig}"
-                        generic_repair_attempts = self.context.agent_state.get(generic_repair_key, 0)
+                                # Mark that we've escalated this specific failure
+                                self.context.set_agent_state(escalation_key, True)
 
-                        # Track total recovery attempts across ALL errors to prevent infinite loops
-                        total_recovery_attempts = self.context.agent_state.get("total_recovery_attempts", 0)
+                                # Add agent request to guide planner toward write_file
+                                self.context.add_agent_request(
+                                    "EDIT_STRATEGY_ESCALATION",
+                                    {
+                                        "agent": "Orchestrator",
+                                        "reason": f"replace_in_file failed {failure_counts[failure_sig]} times - switch to write_file",
+                                        "detailed_reason": (
+                                            f"EDIT STRATEGY ESCALATION: The 'replace_in_file' approach has failed {failure_counts[failure_sig]} times "
+                                            f"for this task. This usually means the 'find' string cannot match the actual file content.\n\n"
+                                            "REQUIRED NEXT STEPS:\n"
+                                            "1. Use 'read_file' to get the complete current content of the target file\n"
+                                            "2. Manually construct the desired new content by modifying what you read\n"
+                                            "3. Use 'write_file' to completely rewrite the file with the new content\n"
+                                            "4. Do NOT use 'replace_in_file' again - it has proven unreliable for this file\n\n"
+                                            "This approach is more reliable than trying to match exact substrings."
+                                        )
+                                    }
+                                )
 
-                        # HARD LIMIT: Stop if we've made 10 recovery attempts total, regardless of error type
-                        if total_recovery_attempts >= 10:
-                            summary = self._build_failure_summary(
+                                # Reset failure count to give write_file strategy a chance
+                                failure_counts[failure_sig] = 0
+
+                                # Continue planning with the new constraint
+                                iteration -= 1  # Don't count this as a regular iteration
+                                continue
+
+                            # GENERIC AUTO-RECOVERY: Let the LLM analyze and fix ANY type of error
+                            # This is sustainable - no need to add handlers for each tool/framework
+                            generic_repair_key = f"generic_repair::{failure_sig}"
+                            generic_repair_attempts = self.context.agent_state.get(generic_repair_key, 0)
+
+                            # Track total recovery attempts across ALL errors to prevent infinite loops
+                            total_recovery_attempts = self.context.agent_state.get("total_recovery_attempts", 0)
+
+                            # HARD LIMIT: Stop if we've made 10 recovery attempts total, regardless of error type
+                            if total_recovery_attempts >= 10:
+                                summary = self._build_failure_summary(
+                                    next_task,
+                                    verification_result,
+                                    failure_sig,
+                                    failure_counts[failure_sig],
+                                )
+                                self.context.set_agent_state("no_retry", True)
+                                self.context.add_error(summary)
+                                print(f"\n[{colorize('🛑 CIRCUIT BREAKER: RECOVERY LIMIT EXCEEDED', Colors.BRIGHT_RED, bold=True)}]")
+                                print(f"{colorize(f'Made {total_recovery_attempts} recovery attempts across all errors.', Colors.BRIGHT_WHITE)}")
+                                print(f"{colorize('This indicates a fundamental issue that cannot be auto-fixed.', Colors.BRIGHT_WHITE)}")
+                                print(f"{colorize('Manual intervention required.', Colors.BRIGHT_YELLOW)}\n")
+                                print(f"{colorize(Symbols.INFO, Colors.BRIGHT_BLUE)} {summary}")
+                                return False
+
+                            if generic_repair_attempts < 5:
+                                # Enter generic repair mode - LLM will diagnose and fix
+                                print(f"  {colorize(Symbols.WARNING, Colors.BRIGHT_YELLOW)} {colorize('Entering automatic error recovery mode (attempt ' + str(generic_repair_attempts + 1) + '/5)', Colors.BRIGHT_WHITE)}")
+
+                                # Increment generic repair counter
+                                self.context.set_agent_state(generic_repair_key, generic_repair_attempts + 1)
+                                self.context.set_agent_state("total_recovery_attempts", total_recovery_attempts + 1)
+
+                                # Create a generic repair task with full error context
+                                repair_task = _create_generic_repair_task(
+                                    failed_task=next_task,
+                                    verification_result=verification_result,
+                                    attempt_number=generic_repair_attempts + 1,
+                                    failure_count=failure_counts[failure_sig],
+                                    context=self.context  # Pass context for feedback loop
+                                )
+
+                                # Reset general failure count to allow more attempts
+                                failure_counts[failure_sig] = 0
+
+                                # Replace the failed task with the repair task
+                                forced_next_task = repair_task
+                                iteration -= 1  # Don't count this as a regular iteration
+                                continue
+
+                            # FALLBACK: Generic repair exhausted (5 attempts) - try git revert as last resort
+                            is_syntax_error = _check_syntax_error_in_verification(verification_result)
+
+                            if is_syntax_error and generic_repair_attempts >= 5:
+                                # Generic repair failed - try auto-revert as last resort for syntax errors
+                                print(f"  {colorize(Symbols.CROSS, Colors.BRIGHT_RED)} {colorize('Automatic repair exhausted. Attempting git revert...', Colors.BRIGHT_WHITE)}")
+
+                                reverted_files = _attempt_git_revert_for_syntax_errors(next_task)
+                                if reverted_files:
+                                    print(f"  {colorize(Symbols.CHECK, Colors.BRIGHT_GREEN)} {colorize('Auto-reverted: ' + ', '.join(reverted_files), Colors.BRIGHT_BLACK)}")
+                                    # Clear repair counter
+                                    self.context.set_agent_state(generic_repair_key, 0)
+                                    return False  # Stop execution, but code is in working state
+                                else:
+                                    print(f"  {colorize(Symbols.CROSS, Colors.BRIGHT_RED)} {colorize('Auto-revert failed. Manual intervention required.', Colors.BRIGHT_RED)}")
+
+                            # Non-syntax errors or revert failed - use summary fast-exit
+                            summary = _summarize_repeated_failure(
                                 next_task,
                                 verification_result,
                                 failure_sig,
@@ -4098,66 +4360,9 @@ class Orchestrator:
                             )
                             self.context.set_agent_state("no_retry", True)
                             self.context.add_error(summary)
-                            print(f"\n[{colorize('🛑 CIRCUIT BREAKER: RECOVERY LIMIT EXCEEDED', Colors.BRIGHT_RED, bold=True)}]")
-                            print(f"{colorize(f'Made {total_recovery_attempts} recovery attempts across all errors.', Colors.BRIGHT_WHITE)}")
-                            print(f"{colorize('This indicates a fundamental issue that cannot be auto-fixed.', Colors.BRIGHT_WHITE)}")
-                            print(f"{colorize('Manual intervention required.', Colors.BRIGHT_YELLOW)}\n")
-                            print(f"{colorize(Symbols.INFO, Colors.BRIGHT_BLUE)} {summary}")
+                            print(f"  {colorize(Symbols.CROSS, Colors.BRIGHT_RED)} {colorize('Circuit Breaker: repeated failure ' + str(failure_counts[failure_sig]) + 'x. Stopping loop.', Colors.BRIGHT_RED)}")
+                            print(f"  {colorize(Symbols.INFO, Colors.BRIGHT_BLUE)} {summary}")
                             return False
-
-                        if generic_repair_attempts < 5:
-                            # Enter generic repair mode - LLM will diagnose and fix
-                            print(f"  {colorize(Symbols.WARNING, Colors.BRIGHT_YELLOW)} {colorize('Entering automatic error recovery mode (attempt ' + str(generic_repair_attempts + 1) + '/5)', Colors.BRIGHT_WHITE)}")
-
-                            # Increment generic repair counter
-                            self.context.set_agent_state(generic_repair_key, generic_repair_attempts + 1)
-                            self.context.set_agent_state("total_recovery_attempts", total_recovery_attempts + 1)
-
-                            # Create a generic repair task with full error context
-                            repair_task = _create_generic_repair_task(
-                                failed_task=next_task,
-                                verification_result=verification_result,
-                                attempt_number=generic_repair_attempts + 1,
-                                failure_count=failure_counts[failure_sig],
-                                context=self.context  # Pass context for feedback loop
-                            )
-
-                            # Reset general failure count to allow more attempts
-                            failure_counts[failure_sig] = 0
-
-                            # Replace the failed task with the repair task
-                            forced_next_task = repair_task
-                            iteration -= 1  # Don't count this as a regular iteration
-                            continue
-
-                        # FALLBACK: Generic repair exhausted (5 attempts) - try git revert as last resort
-                        is_syntax_error = _check_syntax_error_in_verification(verification_result)
-
-                        if is_syntax_error and generic_repair_attempts >= 5:
-                            # Generic repair failed - try auto-revert as last resort for syntax errors
-                            print(f"  {colorize(Symbols.CROSS, Colors.BRIGHT_RED)} {colorize('Automatic repair exhausted. Attempting git revert...', Colors.BRIGHT_WHITE)}")
-
-                            reverted_files = _attempt_git_revert_for_syntax_errors(next_task)
-                            if reverted_files:
-                                print(f"  {colorize(Symbols.CHECK, Colors.BRIGHT_GREEN)} {colorize('Auto-reverted: ' + ', '.join(reverted_files), Colors.BRIGHT_BLACK)}")
-                                # Clear repair counter
-                                self.context.set_agent_state(generic_repair_key, 0)
-                                return False  # Stop execution, but code is in working state
-                            else:
-                                print(f"  {colorize(Symbols.CROSS, Colors.BRIGHT_RED)} {colorize('Auto-revert failed. Manual intervention required.', Colors.BRIGHT_RED)}")
-
-                        # Non-syntax errors or revert failed - use summary fast-exit
-                        summary = _summarize_repeated_failure(
-                            next_task,
-                            verification_result,
-                            failure_sig,
-                            failure_counts[failure_sig],
-                        )
-                        self.context.set_agent_state("no_retry", True)
-                        self.context.add_error(summary)
-                        print(f"  {colorize(Symbols.CROSS, Colors.BRIGHT_RED)} {colorize('Circuit Breaker: repeated failure ' + str(failure_counts[failure_sig]) + 'x. Stopping loop.', Colors.BRIGHT_RED)}")
-                        print(f"  {colorize(Symbols.INFO, Colors.BRIGHT_BLUE)} {summary}")
-                        return False
 
                     # Try to decompose the failed task into more granular steps.
                     # Decomposing test failures is usually counterproductive (it tends to produce vague edits);

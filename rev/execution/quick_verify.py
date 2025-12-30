@@ -1586,6 +1586,23 @@ def _output_indicates_no_tests(stdout: str, stderr: str) -> bool:
     return any(re.search(pattern, combined) for pattern in patterns)
 
 
+def _extract_test_files_from_output(output: str) -> list[str]:
+    if not output:
+        return []
+    matches = re.findall(r"([A-Za-z0-9_/\\.-]+\.(?:test|spec)\.[A-Za-z0-9]+)", output)
+    if not matches:
+        return []
+    seen = set()
+    deduped: list[str] = []
+    for match in matches:
+        normalized = match.replace("\\", "/")
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
+
 def _path_is_test_like(path: Path) -> bool:
     try:
         parts = {part.lower() for part in path.parts}
@@ -3299,66 +3316,22 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
                 details={"rc": rc, "output": output[:200], "skipped": True, "reason": "no_test_runner_detected"},
             )
         if _output_indicates_no_tests(stdout, stderr) and not _no_tests_expected(task):
-            cmd_value = payload.get("cmd") or payload.get("command") or ""
-            cmd_parts = _split_command_parts(cmd_value)
-            cwd = payload.get("cwd")
-            fallback_cmd = _attempt_no_tests_fallback(cmd_parts, stdout, stderr, cwd)
-            if fallback_cmd:
-                fallback_result = _run_validation_command(
-                    fallback_cmd,
-                    use_tests_tool=True,
-                    timeout=config.VALIDATION_TIMEOUT_SECONDS,
-                    cwd=cwd,
-                )
-                fallback_stdout = str(fallback_result.get("stdout", "") or "")
-                fallback_stderr = str(fallback_result.get("stderr", "") or "")
-                fallback_rc = fallback_result.get("rc")
-                context.agent_state["last_test_iteration"] = context.agent_state.get("current_iteration")
-                context.agent_state["last_test_rc"] = fallback_rc
-                if _output_indicates_no_tests(fallback_stdout, fallback_stderr):
-                    return VerificationResult(
-                        passed=False,
-                        message="No tests found after retrying with explicit test paths",
-                        details={
-                            "rc": fallback_rc,
-                            "output": (fallback_stdout + fallback_stderr)[:500],
-                            "retry_cmd": fallback_result.get("cmd"),
-                        },
-                        should_replan=True,
-                    )
-                if fallback_rc == 0:
-                    return VerificationResult(
-                        passed=True,
-                        message="Tests passed (reran with explicit test paths)",
-                        details={
-                            "rc": fallback_rc,
-                            "output": (fallback_stdout + fallback_stderr)[:200],
-                            "retry_cmd": fallback_result.get("cmd"),
-                        },
-                    )
-                if fallback_rc == 5:
-                    if _no_tests_expected(task):
-                        return VerificationResult(
-                            passed=True,
-                            message="No tests collected (rc=5) - explicitly allowed",
-                            details={"rc": fallback_rc, "output": (fallback_stdout + fallback_stderr)[:200]},
-                        )
-                    return VerificationResult(
-                        passed=False,
-                        message="Verification INCONCLUSIVE: pytest collected 0 tests (rc=5)",
-                        details={"rc": fallback_rc, "output": (fallback_stdout + fallback_stderr)[:500]},
-                        should_replan=True,
-                    )
-                return VerificationResult(
-                    passed=False,
-                    message=f"Tests failed after retry (rc={fallback_rc})",
-                    details={
-                        "rc": fallback_rc,
-                        "output": (fallback_stdout + fallback_stderr)[:500],
-                        "retry_cmd": fallback_result.get("cmd"),
-                    },
-                    should_replan=True,
-                )
+            test_files = _extract_test_files_from_output(output)
+            return VerificationResult(
+                passed=False,
+                message="Verification INCONCLUSIVE: no tests discovered",
+                details={
+                    "rc": rc,
+                    "output": output[:500],
+                    "no_tests_discovered": True,
+                    "non_retriable": True,
+                    "skip_failure_counts": True,
+                    "test_files": test_files,
+                    "cmd": payload.get("cmd") or payload.get("command"),
+                },
+                should_replan=True,
+                inconclusive=True,
+            )
         missing_script = _detect_missing_script(stdout, stderr)
         if missing_script:
             cmd_value = payload.get("cmd") or payload.get("command") or ""
