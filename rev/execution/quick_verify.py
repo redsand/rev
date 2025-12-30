@@ -14,6 +14,7 @@ import shlex
 import shutil
 import traceback
 from pathlib import Path
+import re
 from typing import Dict, Any, Optional, Tuple, Iterable, List
 from dataclasses import dataclass
 
@@ -2074,6 +2075,17 @@ def _build_test_diagnostics(output: str, test_files: list[str], root: Path) -> d
     ts_hints = _detect_typescript_setup_issues(discovered, root)
     hints.extend(ts_hints[:2])
 
+    output_lower = output.lower()
+    # Broader framework/tooling hints
+    if "cacerror" in output_lower and "vitest" in output_lower:
+        hints.append("Vitest CLI error: invalid option or script; fix package.json test script to a non-watch single-file command.")
+    if "unknown option" in output_lower and "jest" in output_lower:
+        hints.append("Jest CLI error: invalid option; check package.json test script flags.")
+    if "enoent" in output_lower and ("node" in output_lower or "npm" in output_lower):
+        hints.append("Command failed to start; verify package.json scripts and that the test runner is installed.")
+    if "playwright" in output_lower and "not found" in output_lower:
+        hints.append("Playwright binary missing; install Playwright and run `npx playwright install`.")
+
     prisma_hints = _detect_prisma_setup_issues(discovered, output, root)
     hints.extend(prisma_hints[:2])
 
@@ -3796,6 +3808,9 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
             blocked_reason = (stderr or stdout or "Command blocked").strip()
         elif "blocked non-terminating vitest command" in output.lower():
             blocked_reason = "Blocked non-terminating Vitest command."
+        # Detect Vitest CLI option errors (e.g., --runTestsByPath not supported) to avoid misleading hints.
+        elif "cacerror" in output.lower() and "vitest" in output.lower():
+            blocked_reason = "Vitest CLI error: invalid option; test script/command is incorrect."
         if blocked_reason:
             return VerificationResult(
                 passed=False,
@@ -3825,6 +3840,31 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
                 root = Path.cwd().resolve()
             test_files = _extract_test_files_from_output(output)
             debug_info = _build_test_diagnostics(output, test_files, root)
+            # If we saw a Vitest CLI error, surface it and avoid unrelated hints (e.g., Prisma).
+            vitest_cli_error = None
+            if "cacerror" in output.lower() and "vitest" in output.lower():
+                vitest_cli_error = "Vitest CLI error detected (invalid option). Check package.json test script."
+                debug_info = debug_info or {}
+                existing_hints = debug_info.get("hints") if isinstance(debug_info.get("hints"), list) else []
+                debug_info["suspected_issue"] = vitest_cli_error
+                debug_info["hints"] = existing_hints + [
+                    "Update package.json test script to a non-watch, single-file command, e.g., \"vitest run tests/user.test.ts\".",
+                    "Avoid unsupported flags like --runTestsByPath in Vitest.",
+                ]
+            else:
+                # If we cannot determine the root cause, surface stdout/stderr and suggest a safe, targeted command.
+                if not debug_info:
+                    debug_info = {}
+                existing_hints = debug_info.get("hints") if isinstance(debug_info.get("hints"), list) else []
+                if not debug_info.get("suspected_issue"):
+                    debug_info["suspected_issue"] = "Test discovery failed for unknown reasons; see stdout/stderr."
+                suggested_cmd = None
+                first_file = test_files[0] if test_files else None
+                if first_file:
+                    suggested_cmd = f"npx vitest run {first_file}"
+                if suggested_cmd:
+                    existing_hints.append(f"Try a targeted run: {suggested_cmd}")
+                debug_info["hints"] = existing_hints
             return VerificationResult(
                 passed=False,
                 message="Verification INCONCLUSIVE: no tests discovered",
