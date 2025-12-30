@@ -1567,7 +1567,12 @@ def _output_indicates_tests_present(stdout: str, stderr: str) -> bool:
         r"\b([1-9]\d*)\s+tests?\b",
         r"\bcollected\s+([1-9]\d*)\s+items\b",
     )
-    return any(re.search(pattern, combined) for pattern in patterns)
+    for line in combined.splitlines():
+        if "test files" in line or "test file" in line:
+            continue
+        if any(re.search(pattern, line) for pattern in patterns):
+            return True
+    return False
 
 
 def _output_indicates_no_tests(stdout: str, stderr: str) -> bool:

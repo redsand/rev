@@ -1501,56 +1501,121 @@ def _collect_no_tests_hints(details: dict) -> list[str]:
     return hints
 
 
-def _build_no_tests_remediation_tasks(details: dict) -> list[Task]:
-    tasks: list[Task] = []
+def _parse_llm_command_response(content: str) -> Optional[str]:
+    if not content:
+        return None
+    text = content.strip()
+    candidates = [text]
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        candidates.append(match.group(0))
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            cmd = payload.get("command")
+            if isinstance(cmd, str) and cmd.strip():
+                return cmd.strip()
+            if cmd is None:
+                return None
+    return None
+
+
+def _sanitize_recommended_command(cmd: str) -> Optional[str]:
+    if not cmd:
+        return None
+    cleaned = cmd.strip().splitlines()[0].strip()
+    if not cleaned:
+        return None
+    if re.search(r"[;&|><`]|(\$\()", cleaned):
+        return None
+    return cleaned
+
+
+def _resolve_hint_command_via_llm(details: dict) -> Optional[str]:
     hints = _collect_no_tests_hints(details)
     if not hints:
-        return tasks
-
-    hint_text = " ".join(hints).lower()
+        return None
     root = config.ROOT or Path.cwd()
-    schema_exists = (root / "prisma" / "schema.prisma").exists()
-    node_modules_missing = "node_modules is missing" in hint_text
+    scripts = sorted(_package_json_scripts(root))
+    project_markers = sorted(
+        [marker for marker in _PROJECT_MARKERS if (root / marker).exists()]
+    )
+    output = ""
+    if isinstance(details, dict):
+        output = str(details.get("output", "") or "")
+    debug = details.get("debug") if isinstance(details, dict) else None
+    discovered = []
+    if isinstance(debug, dict):
+        discovered = debug.get("discovered_test_files") or []
 
-    if node_modules_missing:
-        tasks.append(
-            Task(
-                description="Install dependencies to ensure test runner and Prisma client are available: npm install",
-                action_type="run",
-            )
-        )
+    prompt = (
+        "You are a command recommendation assistant. "
+        "Given the verification hints, recommend ONE shell command to address the root issue. "
+        "Return ONLY JSON: {\"command\": \"...\"} or {\"command\": null} if no command should run.\n"
+        "Rules: command must be a single shell command with no shell operators (&&, ||, ;, |, >, <). "
+        "Prefer existing package.json scripts when applicable.\n\n"
+        f"Hints:\n- " + "\n- ".join(hints) + "\n\n"
+        f"Discovered test files: {discovered}\n"
+        f"Project markers: {project_markers}\n"
+        f"Available scripts: {scripts}\n"
+        "Last test output (truncated):\n"
+        f"{output[:800]}"
+    )
 
-    if "vitest is referenced but not listed" in hint_text and not node_modules_missing:
-        tasks.append(
-            Task(
-                description="Add Vitest for test discovery: npm install -D vitest",
-                action_type="run",
-            )
-        )
+    response = ollama_chat(
+        [
+            {"role": "system", "content": "Return only JSON with a command."},
+            {"role": "user", "content": prompt},
+        ],
+        tools=None,
+        model=config.EXECUTION_MODEL,
+        supports_tools=False,
+        temperature=0.2,
+    )
+    if not response or "error" in response:
+        return None
+    content = response.get("message", {}).get("content", "")
+    cmd = _parse_llm_command_response(content)
+    if not cmd:
+        cmd = _extract_explicit_test_command(content)
+    return _sanitize_recommended_command(cmd) if cmd else None
 
-    if "@prisma/client is missing" in hint_text and not node_modules_missing:
-        tasks.append(
-            Task(
-                description="Install Prisma client for runtime: npm install @prisma/client",
-                action_type="run",
-            )
-        )
 
-    if "prisma migrations are missing" in hint_text and schema_exists:
-        tasks.append(
-            Task(
-                description="Initialize Prisma client artifacts: npx prisma generate",
-                action_type="run",
-            )
-        )
-        tasks.append(
-            Task(
-                description="Initialize Prisma migrations: npx prisma migrate dev --name init",
-                action_type="run",
-            )
-        )
+def _build_hint_command_tasks(details: dict) -> list[Task]:
+    cmd = _resolve_hint_command_via_llm(details)
+    if not cmd:
+        return []
+    return [Task(description=f"Run {cmd}", action_type="run")]
 
+
+def _build_no_tests_remediation_tasks(details: dict) -> list[Task]:
+    tasks = _build_hint_command_tasks(details)
     return tasks
+
+
+def _maybe_queue_hint_command(
+    context: RevContext,
+    details: dict,
+    *,
+    retry_key_prefix: str,
+    current_iteration: int,
+) -> bool:
+    if not isinstance(details, dict):
+        return False
+    cmd = _resolve_hint_command_via_llm(details)
+    if not cmd:
+        return False
+    cmd_key = f"{retry_key_prefix}::{cmd.lower()}"
+    if context.agent_state.get(cmd_key):
+        return False
+    context.set_agent_state(cmd_key, True)
+    queued = _queue_diagnostic_tasks(context, [Task(description=f"Run {cmd}", action_type="run")])
+    if queued:
+        return True
+    return False
 
 
 def _dedupe_pending_resume_tasks(tasks: list[Task]) -> list[Task]:
@@ -4461,6 +4526,18 @@ class Orchestrator:
 
                         # Continue to next iteration with the TEST task
                         continue
+
+                    if action_type == "test" and not no_tests_discovered:
+                        queued = _maybe_queue_hint_command(
+                            self.context,
+                            details if isinstance(details, dict) else {},
+                            retry_key_prefix="test_failure_hint_cmd",
+                            current_iteration=iteration,
+                        )
+                        if queued:
+                            forced_next_task = _pop_diagnostic_task(self.context)
+                            iteration -= 1
+                            continue
 
                     if getattr(verification_result, "inconclusive", False) and is_blocked:
                         if action_type == "test":
