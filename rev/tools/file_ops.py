@@ -256,20 +256,24 @@ def _check_for_similar_files(path: str, content: str = None) -> dict:
         warnings = []
         similar_files = []
 
-        # Check for files with similar names in same directory
+        # Check for files with similar names in same directory.
+        # Only flag as similar if the stem matches (to avoid false positives like eslint.config.js vs jest.config.js).
         if parent_dir.exists():
             for existing in parent_dir.iterdir():
                 if not existing.is_file() or existing == p:
                     continue
 
-                # Check file extension matches
-                if existing.suffix == p.suffix:
-                    similarity = _calculate_similarity(existing.stem, filestem)
-                    if similarity >= SIMILARITY_THRESHOLD:
-                        similar_files.append({
-                            "path": _rel_to_root(existing),
-                            "similarity": f"{similarity:.1%}"
-                        })
+                if existing.suffix != p.suffix:
+                    continue
+                if existing.stem != filestem:
+                    continue
+
+                similarity = _calculate_similarity(existing.stem, filestem)
+                if similarity >= SIMILARITY_THRESHOLD:
+                    similar_files.append({
+                        "path": _rel_to_root(existing),
+                        "similarity": f"{similarity:.1%}"
+                    })
 
         # ENHANCED: For test files, also check semantic overlap (same endpoints/features being tested)
         is_test_file = any(marker in filename.lower() for marker in ['.test.', '.spec.', '_test.', '_spec.'])

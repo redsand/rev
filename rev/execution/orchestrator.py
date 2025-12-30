@@ -1771,6 +1771,27 @@ def _extract_missing_path_from_error(msg: str) -> str:
     return ""
 
 
+def _extract_missing_dependencies(msg: str) -> list[str]:
+    """Extract missing dependency names from error text."""
+    if not msg:
+        return []
+    deps = set()
+    patterns = [
+        r"cannot find module ['\"]([^'\"/]+[/\w-]*)['\"]",
+        r"failed to load url\s+([@A-Za-z0-9_./-]+)",
+        r"module not found.*['\"]([^'\"/]+[/\w-]*)['\"]",
+        r"err_module_not_found.*['\"]([^'\"/]+[/\w-]*)['\"]",
+    ]
+    for pat in patterns:
+        for m in re.finditer(pat, msg, re.IGNORECASE):
+            candidate = (m.group(1) or "").strip()
+            # Skip relative paths and empty
+            if not candidate or candidate.startswith((".", "/")):
+                continue
+            deps.add(candidate)
+    return list(deps)
+
+
 def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optional[VerificationResult]) -> list[Task]:
     targets = _extract_task_paths(task)
     target_path = _sanitize_path_candidate(targets[0]) if targets else ""
@@ -1865,6 +1886,19 @@ def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optiona
                         action_type="add",
                     )
                 )
+
+    # If a missing dependency is detected, queue an install task.
+    missing_deps = _extract_missing_dependencies(error_message)
+    for dep in missing_deps:
+        # Heuristic: dev deps for common tooling
+        is_dev = any(dep.startswith(prefix) for prefix in ("@playwright/", "jest", "ts-jest", "@types/", "vitest"))
+        install_cmd = f"npm install{' -D' if is_dev else ''} {dep}"
+        tasks.append(
+            Task(
+                description=f"Install missing dependency '{dep}' using \"{install_cmd}\"",
+                action_type="run",
+            )
+        )
 
     if syntax_error and target_path:
         tasks.append(

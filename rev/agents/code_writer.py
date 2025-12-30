@@ -79,6 +79,42 @@ def _extract_target_files_from_description(description: str) -> list[str]:
     return paths
 
 
+def _detect_path_conflict(path_str: str) -> Optional[str]:
+    """
+    Detect common path conflicts such as creating both <name>.ts and <name>/index.ts.
+    Returns a human-readable warning if a conflict is found.
+    """
+    if not path_str:
+        return None
+    try:
+        base = Path(config.ROOT) / path_str
+    except Exception:
+        return None
+
+    # If creating a file like foo.ts and a directory foo/ already exists with index.* inside, warn.
+    if base.suffix:
+        stem = base.with_suffix("")
+        dir_candidate = stem
+        if dir_candidate.is_dir():
+            index_files = list(dir_candidate.glob("index.*"))
+            if index_files:
+                return (
+                    f"Path conflict: '{path_str}' overlaps with existing directory '{dir_candidate}' "
+                    "that already contains an index.* file. Choose a single entry point."
+                )
+    # If creating a directory and a file with same stem exists, warn.
+    if not base.suffix:
+        file_candidate_ts = base.with_suffix(".ts")
+        file_candidate_js = base.with_suffix(".js")
+        for file_candidate in (file_candidate_ts, file_candidate_js):
+            if file_candidate.is_file():
+                return (
+                    f"Path conflict: target directory '{path_str}' overlaps with existing file '{file_candidate.name}'. "
+                    "Avoid creating both a file and a directory with the same name."
+                )
+    return None
+
+
 def _read_file_content_for_edit(file_path: str, max_lines: int = 2000) -> str | None:
     """Read file content to include in edit context.
 
@@ -1114,6 +1150,17 @@ class CodeWriterAgent(BaseAgent):
                             self._display_change_preview(tool_name, arguments)
 
                             file_path = arguments.get("path") or arguments.get("dest") or "unknown"
+                            conflict = _detect_path_conflict(file_path)
+                            if conflict:
+                                print(f"  [WARN] {conflict}")
+                                if self.should_attempt_recovery(task, context):
+                                    self.request_replan(
+                                        context,
+                                        reason="path_conflict",
+                                        detailed_reason=conflict,
+                                    )
+                                    return self.make_recovery_request("path_conflict", conflict)
+                                return self.make_failure_signal("path_conflict", conflict)
                             if tool_name == "write_file":
                                 content = arguments.get("content", "")
                                 is_valid, warning_msg = self._validate_import_targets(file_path, content)
