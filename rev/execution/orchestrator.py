@@ -814,6 +814,25 @@ def _normalize_test_task_signature(task: Task) -> str:
     return f"test::{signature}"
 
 
+def _normalize_structure_read_signature(desc: str) -> str:
+    """Normalize structure-listing requests so duplicate directory reads can be skipped."""
+    if not desc:
+        return "structure::<empty>"
+    lowered = desc.lower()
+    # Preserve path-like tokens; drop filler words.
+    path_matches = re.findall(r"(?:\\.?/?[\\w.-]+/)+(?:[\\w.-]+)?", lowered)
+    if path_matches:
+        key = path_matches[0]
+    elif "src" in lowered:
+        key = "src"
+    elif "tests" in lowered or "test" in lowered:
+        key = "tests"
+    else:
+        key = "workspace-root"
+    key = re.sub(r"\s+", " ", key.strip("/ "))
+    return f"structure::{key}"
+
+
 def _record_test_signature_state(context: RevContext, signature: str, status: str) -> None:
     """Persist test signature status for the current code-change iteration."""
     state = context.agent_state.get("test_signature_state", {})
@@ -1738,10 +1757,38 @@ def _scaffold_paths_from_task(task: Task) -> list[str]:
     return paths
 
 
+def _extract_missing_path_from_error(msg: str) -> str:
+    """Extract a likely missing TS/JS file path from an error message."""
+    if not msg:
+        return ""
+    pattern = (
+        r"(?:failed to load url|cannot find module|cannot find import|module not found|err_module_not_found)"
+        r"[^\\n]*?([\\w./\\\\-]+\\.(?:ts|js|mjs|cjs|tsx|jsx))"
+    )
+    match = re.search(pattern, msg, re.IGNORECASE)
+    if match:
+        return _sanitize_path_candidate(match.group(1))
+    return ""
+
+
 def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optional[VerificationResult]) -> list[Task]:
     targets = _extract_task_paths(task)
     target_path = _sanitize_path_candidate(targets[0]) if targets else ""
     tasks: list[Task] = []
+
+    # Collect error message/details early for downstream heuristics
+    error_message = ""
+    if verification_result:
+        if verification_result.message:
+            error_message = verification_result.message or ""
+        if verification_result.details:
+            try:
+                details_text = json.dumps(verification_result.details)
+                if details_text:
+                    combined = f"{error_message}\n{details_text}".strip()
+                    error_message = combined or error_message
+            except Exception:
+                pass
 
     # Special handling: Vitest CLI/script errors (e.g., unsupported --runTestsByPath) should trigger a script fix and targeted rerun.
     def _is_vitest_cli_error(vr: Optional[VerificationResult]) -> bool:
@@ -1769,22 +1816,28 @@ def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optiona
         )
         # Continue with generic diagnostics below as needed
 
-    # If tests refer to server/index entrypoint and it is missing, queue a creation task.
-    if "src/server" in (error_message or "").lower() or "src/index" in (error_message or "").lower():
-        server_ts = config.ROOT / "src" / "server.ts"
-        server_js = config.ROOT / "src" / "server.js"
-        if not server_ts.exists() and not server_js.exists():
-            tasks.append(
-                Task(
-                    description=(
-                        "Create backend entrypoint src/server.ts exporting the Express app and start function so tests can import it."
-                    ),
-                    action_type="add",
-                )
+    # Short-circuit: if hinted_test validation failed, queue the hinted command directly.
+    hinted_cmd = ""
+    if verification_result and isinstance(verification_result.details, dict):
+        val = verification_result.details.get("validation")
+        if isinstance(val, dict):
+            hinted = val.get("hinted_test")
+            if isinstance(hinted, dict):
+                hinted_cmd = hinted.get("cmd") or ""
+    if hinted_cmd:
+        tasks.append(
+            Task(
+                description=f"Run hinted test command to reproduce failure: {hinted_cmd}",
+                action_type="test",
             )
+        )
 
-    error_message = verification_result.message if verification_result and verification_result.message else ""
-    missing_file_error = "not found" in error_message.lower() or "does not exist" in error_message.lower()
+    missing_path = _extract_missing_path_from_error(error_message)
+    missing_file_error = (
+        "not found" in error_message.lower()
+        or "does not exist" in error_message.lower()
+        or bool(missing_path)
+    )
     syntax_error = "syntax error" in error_message.lower()
     if missing_file_error and not _has_project_markers(config.ROOT):
         scaffold_paths = _scaffold_paths_from_task(task)
@@ -1798,6 +1851,20 @@ def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optiona
                     action_type="add",
                 )
             )
+
+    if missing_path:
+        candidate = _sanitize_path_candidate(missing_path)
+        if candidate:
+            candidate_path = config.ROOT / candidate
+            if not candidate_path.exists():
+                tasks.append(
+                    Task(
+                        description=(
+                            f"Create or fix missing import target '{candidate}' referenced in errors so modules resolve."
+                        ),
+                        action_type="add",
+                    )
+                )
 
     if syntax_error and target_path:
         tasks.append(
@@ -4069,12 +4136,24 @@ class Orchestrator:
 
                 # Aggressive research/task dedupe per code change
                 desc = (next_task.description or "").strip().lower()
-                if ("tree view" in desc or "list the contents" in desc or "listing directory" in desc) and any(tok in desc for tok in ["current directory", "src", "tests", "root"]):
+                if (
+                    "tree view" in desc
+                    or "list the contents" in desc
+                    or "listing directory" in desc
+                    or "list files" in desc
+                    or "list directory" in desc
+                    or "project structure" in desc
+                    or "directory structure" in desc
+                    or "ls " in desc
+                    or desc.startswith("ls")
+                    or " dir" in desc
+                ):
                     structure_seen = self.context.agent_state.get("structure_read_seen", {})
                     if not isinstance(structure_seen, dict):
                         structure_seen = {}
                     last_code_change_iteration = self.context.agent_state.get("last_code_change_iteration", -1)
-                    prior = structure_seen.get(desc)
+                    struct_sig = _normalize_structure_read_signature(desc)
+                    prior = structure_seen.get(struct_sig)
                     if isinstance(prior, dict):
                         prior_change = prior.get("code_change_iteration", -1)
                         if (
@@ -4082,18 +4161,19 @@ class Orchestrator:
                             and isinstance(last_code_change_iteration, int)
                             and prior_change == last_code_change_iteration
                         ):
-                            print(f"  [structure-read] Skipping duplicate structure listing (code_change_iter={last_code_change_iteration})")
+                            print(f"  [structure-read] Skipping duplicate structure listing (sig={struct_sig}, code_change_iter={last_code_change_iteration})")
                             next_task.status = TaskStatus.STOPPED
                             next_task.result = json.dumps({
                                 "skipped": True,
                                 "reason": "structure listing already performed for current code state",
                                 "code_change_iteration": last_code_change_iteration,
+                                "signature": struct_sig,
                             })
                             completed_tasks_log.append(
-                                f"[STOPPED] {next_task.description} | Reason: structure listing already done (code_change_iter={last_code_change_iteration})"
+                                f"[STOPPED] {next_task.description} | Reason: structure listing already done (code_change_iter={last_code_change_iteration}, sig={struct_sig})"
                             )
                             continue
-                    structure_seen[desc] = {"code_change_iteration": last_code_change_iteration}
+                    structure_seen[struct_sig] = {"code_change_iteration": last_code_change_iteration}
                     self.context.set_agent_state("structure_read_seen", structure_seen)
 
                 sig = f"{action_type_normalized}::{desc}"

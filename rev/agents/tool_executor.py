@@ -129,8 +129,12 @@ class ToolExecutorAgent(BaseAgent):
                 error_type = "empty_response"
                 error_detail = "LLM returned None/empty response"
             elif "message" not in response:
-                error_type = "missing_message_key"
-                error_detail = f"Response missing 'message' key: {list(response.keys())}"
+                if "error" in response:
+                    error_type = "llm_error_payload"
+                    error_detail = str(response.get("error"))
+                else:
+                    error_type = "missing_message_key"
+                    error_detail = f"Response missing 'message' key: {list(response.keys())}"
             elif "tool_calls" not in response["message"]:
                 content = response.get("message", {}).get("content", "") or ""
                 recovered = recover_tool_call_from_text(content, allowed_tools=tool_names)

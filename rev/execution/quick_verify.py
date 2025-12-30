@@ -33,6 +33,15 @@ from rev.tools.command_runner import _resolve_command
 from rev.tools.project_types import find_project_root, detect_project_type, detect_test_command
 from rev.llm.client import ollama_chat
 
+ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _strip_ansi(text: Any) -> str:
+    if not isinstance(text, str):
+        return "" if text is None else str(text)
+    return ANSI_RE.sub("", text)
+
+
 _READ_ONLY_TOOLS = {
     "read_file",
     "read_file_lines",
@@ -1463,9 +1472,9 @@ def _select_recovery_hint(stdout: str, stderr: str, error: str) -> Optional[str]
 
 def _extract_error(res: Dict[str, Any], default: str = "Unknown error") -> str:
     """Extract and truncate error message from tool result, with a recovery hint."""
-    stdout = res.get("stdout", "")
-    stderr = res.get("stderr", "")
-    error = res.get("error", "")
+    stdout = _strip_ansi(res.get("stdout", ""))
+    stderr = _strip_ansi(res.get("stderr", ""))
+    error = _strip_ansi(res.get("error", ""))
     rc = res.get("rc")
     help_info = res.get("help_info")
     
