@@ -1915,6 +1915,30 @@ def _append_task_tool_event(task: Task, result_payload: Any) -> None:
     )
 
 
+def _did_run_real_tests(task: Task, verification_result: Optional["VerificationResult"]) -> bool:
+    """Heuristic: did this test task actually run tests (not installs/lint)?"""
+    try:
+        events = getattr(task, "tool_events", None) or []
+        for ev in events:
+            tool = str(ev.get("tool") or "").lower()
+            if tool == "run_tests":
+                return True
+            if tool == "run_cmd":
+                cmd = str(ev.get("args", {}).get("cmd") or "")
+                cmd_lower = cmd.lower()
+                if any(tok in cmd_lower for tok in ("vitest", "jest", "pytest", "npm test", "pnpm test", "yarn test")):
+                    return True
+        details = getattr(verification_result, "details", {}) if verification_result else {}
+        if isinstance(details, dict):
+            cmd = str(details.get("command") or details.get("cmd") or "")
+            cmd_lower = cmd.lower()
+            if any(tok in cmd_lower for tok in ("vitest", "jest", "pytest", "npm test", "pnpm test", "yarn test")):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _enforce_action_tool_constraints(task: Task) -> tuple[bool, Optional[str]]:
     """Ensure write actions actually execute a write tool."""
     action = (task.action_type or "").lower()
@@ -4779,7 +4803,7 @@ class Orchestrator:
                 else:
                     # If we've just verified a successful test and no code has changed since,
                     # treat this as "goal achieved" to prevent endless test loops.
-                    if (next_task.action_type or "").lower() == "test":
+                    if (next_task.action_type or "").lower() == "test" and _did_run_real_tests(next_task, verification_result):
                         last_test_rc = self.context.agent_state.get("last_test_rc")
                         last_test_iteration = self.context.agent_state.get("last_test_iteration", -1)
                         last_code_change_iteration = self.context.agent_state.get("last_code_change_iteration", -1)
