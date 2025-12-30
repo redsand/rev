@@ -12,6 +12,7 @@ import os
 import fnmatch
 import shlex
 import shutil
+import traceback
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, Iterable, List
 from dataclasses import dataclass
@@ -243,6 +244,22 @@ class VerificationResult:
 def verify_task_execution(task: Task, context: RevContext) -> VerificationResult:
     """
     Verify that a task actually completed successfully.
+    Wrapper catches unexpected exceptions to avoid opaque failures.
+    """
+    try:
+        return _verify_task_execution_impl(task, context)
+    except Exception as e:
+        return VerificationResult(
+            passed=False,
+            message=f"Verification exception: {e}",
+            details={"exception": traceback.format_exc()},
+            should_replan=True,
+        )
+
+
+def _verify_task_execution_impl(task: Task, context: RevContext) -> VerificationResult:
+    """
+    Internal implementation for task verification (wrapped to catch unexpected exceptions).
     """
     if task.status != TaskStatus.COMPLETED:
         return VerificationResult(

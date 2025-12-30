@@ -3631,6 +3631,13 @@ class Orchestrator:
         4. Report results
         5. Re-plan if needed
         """
+
+        if not config.TDD_ENABLED:
+            # Ensure stale TDD flags do not influence non-TDD runs.
+            for key in ("tdd_pending_green", "tdd_require_test", "tdd_deferred_test", "tdd_green_observed"):
+                if key in self.context.agent_state:
+                    self.context.agent_state.pop(key, None)
+            self.context.agent_state["tdd_disabled"] = True
         print(f"\n◈ {colorize('Sub-agent Orchestrator', Colors.BRIGHT_CYAN, bold=True)} active")
 
         from rev.execution.ledger import get_ledger
@@ -4548,7 +4555,15 @@ class Orchestrator:
                 action_type = (next_task.action_type or "").lower()
                 if action_type in verifiable_actions:
                     print(f"  {colorize('◌', Colors.BRIGHT_BLACK)} {colorize('Verifying...', Colors.BRIGHT_BLACK)}")
-                    verification_result = verify_task_execution(next_task, self.context)
+                    try:
+                        verification_result = verify_task_execution(next_task, self.context)
+                    except Exception as e:
+                        verification_result = VerificationResult(
+                            passed=False,
+                            message=f"Verification exception: {e}",
+                            details={'exception': traceback.format_exc()},
+                            should_replan=True,
+                        )
                     # Don't print the raw result object, just handle the outcome
                 else:
                     verification_result = VerificationResult(
@@ -5441,6 +5456,42 @@ class Orchestrator:
                 action_type = (task.action_type or "").lower()
                 if action_type == "test" and not _did_run_real_tests(task, verification_result):
                     signature = getattr(task, "_normalized_signature", None) or _normalize_test_task_signature(task)
+                    completion_key = f"test_completion_fallback::{signature}"
+                    attempted_fallback = context.agent_state.get(completion_key, False)
+
+                    # Try one automatic fallback before blocking the test task.
+                    if not attempted_fallback:
+                        context.set_agent_state(completion_key, True)
+                        explicit_cmd = _extract_explicit_test_command(task.description or "")
+                        if not explicit_cmd and isinstance(task.result, str):
+                            explicit_cmd = _extract_explicit_test_command(task.result)
+
+                        fallback_cmd = None
+                        if explicit_cmd:
+                            fallback_cmd = _maybe_correct_explicit_test_command(explicit_cmd, task.description or "")
+                        if not fallback_cmd:
+                            fallback_cmd = _select_test_fallback_command(task.description or "", config.ROOT or Path.cwd())
+
+                        if fallback_cmd:
+                            print(f"  [test-fallback] Executing fallback test command: {fallback_cmd}")
+                            raw_result = execute_tool("run_cmd", {"cmd": fallback_cmd}, agent_name="orchestrator")
+                            task.result = build_subagent_output(
+                                agent_name="Orchestrator",
+                                tool_name="run_cmd",
+                                tool_args={"cmd": fallback_cmd},
+                                tool_output=raw_result,
+                                context=context,
+                                task_id=task.task_id,
+                            )
+                            try:
+                                _append_task_tool_event(task, task.result)
+                            except Exception:
+                                pass
+
+                            if _did_run_real_tests(task, None):
+                                task.status = TaskStatus.COMPLETED
+                                return True
+
                     _record_test_signature_state(context, signature, "blocked")
                     blocked_tests = context.agent_state.get("blocked_test_signatures", {})
                     if not isinstance(blocked_tests, dict):

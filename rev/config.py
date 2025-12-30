@@ -430,7 +430,8 @@ LLM_TRANSACTION_LOG_PATH = os.getenv(
     "REV_LLM_TRACE_PATH",
     str((REV_DIR / "logs" / "llm_transactions.log").resolve()),
 )
-TDD_ENABLED = os.getenv("REV_TDD_ENABLED", "true").strip().lower() != "false"
+# Default TDD off unless explicitly enabled via REV_TDD_ENABLED=true
+TDD_ENABLED = os.getenv("REV_TDD_ENABLED", "false").strip().lower() == "true"
 TDD_DEFER_TEST_EXECUTION = os.getenv("REV_TDD_DEFER_TESTS", "true").strip().lower() != "false"
 
 EXCLUDE_DIRS = {
