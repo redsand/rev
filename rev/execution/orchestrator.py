@@ -18,6 +18,7 @@ and that validation is performed after each implementation step.
 """
 
 import os
+from datetime import datetime
 import json
 import time
 import traceback
@@ -1564,6 +1565,10 @@ def _sanitize_recommended_command(cmd: str) -> Optional[str]:
         return None
     if re.search(r"[;&|><`]|(\$\()", cleaned):
         return None
+    lower = cleaned.lower()
+    if "prisma migrate dev" in lower and "--name" not in lower:
+        suffix = datetime.utcnow().strftime("auto_%Y%m%d_%H%M%S")
+        cleaned = f"{cleaned} --name {suffix}"
     return cleaned
 
 

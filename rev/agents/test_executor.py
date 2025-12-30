@@ -15,6 +15,7 @@ from rev.tools.project_types import detect_test_command
 from rev import config
 from rev.core.tool_call_recovery import recover_tool_call_from_text, recover_tool_call_from_text_lenient
 from rev.core.tool_call_retry import retry_tool_call_with_response_format
+from rev.execution import quick_verify
 
 TEST_EXECUTOR_SYSTEM_PROMPT = """You are a specialized Test Executor agent. Your purpose is to run tests, validate implementations, and perform execution checks.
 
@@ -22,26 +23,16 @@ You will be given a task description and repository context. Your goal is to cho
 
 CRITICAL RULES:
 1. You MUST respond with a single tool call in JSON format. Do NOT provide any other text, explanations, or markdown.
-2. 🚫 NEVER EVER run full test suites (npm test, pytest without file path, yarn test, etc.) 🚫
-   - Full test suites take 3+ minutes and often hang or time out
-   - ONLY run tests on specific files (e.g., "npm test -- tests/user.test.js")
-   - If the task doesn't specify a test file, run a build or lint check instead
-3. COMMAND SELECTION PRIORITY (in order):
-   a) If task description specifies a SPECIFIC test file (e.g., "npm test -- tests/user.test.js"), USE THAT EXACT COMMAND
-   b) If task description contains an explicit command with a specific file, USE THAT EXACT COMMAND
-   c) If NO specific test file is mentioned, run a build/lint check instead: "npm run build" or "npx eslint ."
-   d) NEVER default to "npm test" or "pytest" without a file path - these hang the system
-4. NEVER use pytest for Node.js/JavaScript projects (files ending in .js, .ts, .jsx, .tsx)
-5. ALWAYS prefer targeted test execution over running the entire test suite:
-   - If a specific test file is mentioned (tests/user.test.js), run ONLY that file
-   - If multiple test files exist but task is about a specific feature, run only related tests
-   - Running ALL tests wastes time (often 3+ minutes) when you only need to verify one thing
-6. Use the provided 'System Information' (OS, Platform, Shell Type) to choose the correct command syntax.
-7. For complex validation, you are encouraged to run platform-specific scripts (.ps1 for Windows, .sh for POSIX) if they exist or were created.
-8. Prefer `run_tests` for targeted tests and `run_cmd` for general validation or script execution.
-9. If the task is to "install" something, use `run_cmd`.
-10. Your response MUST be a single, valid JSON object representing the tool call.
-11. For Vitest, ALWAYS use a non-watch command that exits (e.g., `npx vitest run <file>` or `npx vitest --run <file>`). Avoid `npx vitest <file>` which starts watch mode.
+2. NEVER run full test suites (npm/yarn/pnpm test, pytest without a file). These hang/time out.
+3. ALWAYS choose a non-interactive, single-file command:
+   - If a test file is mentioned, run ONLY that file (e.g., `npx vitest run tests/user.test.ts`).
+   - If no file is mentioned, pick ONE discovered test file and target it; do NOT emit bare `npx vitest run` or `npm test`.
+   - For Vitest, use `npx vitest run <file>` (or `--run <file>`); avoid watch mode entirely.
+   - For Jest, use `--runTestsByPath <file>`.
+4. Use the provided 'System Information' (OS, Platform, Shell Type) to choose the correct command syntax.
+5. Prefer `run_tests` for targeted tests and `run_cmd` for general validation or script execution.
+6. If the task is to "install" something, use `run_cmd`.
+7. Your response MUST be a single, valid JSON object representing the tool call.
 
 Example 1 - TARGETED test (PREFERRED):
 Task: "Run tests for tests/user_crud.test.js to verify the fix"
@@ -444,8 +435,22 @@ class TestExecutorAgent(BaseAgent):
             reason = self._detect_non_terminating_test_script(cmd, task, context)
         if not reason:
             return None
+
+        # Suggest a safe, targeted command to feed back to the LLM.
+        suggested = None
+        target_path = (
+            self._extract_test_path(task.description or "")
+            or context.get_agent_state("last_failing_test_file", "")
+            or self._find_default_test_path(context)
+        )
+        if target_path:
+            suggested = f"npx vitest run {target_path}"
+        hint = f"{reason}"
+        if suggested:
+            hint += f" | Suggested non-interactive command: {suggested}"
+
         payload = json.dumps(
-            {"rc": 1, "stdout": "", "stderr": reason, "blocked": True, "cmd": cmd},
+            {"rc": 1, "stdout": "", "stderr": hint, "blocked": True, "cmd": cmd},
             ensure_ascii=False,
         )
         return build_subagent_output(
@@ -721,6 +726,23 @@ class TestExecutorAgent(BaseAgent):
             return False
         return bool(re.search(r"(?:test|spec)\.[A-Za-z0-9]+", cmd))
 
+    @staticmethod
+    def _find_default_test_path(context: RevContext) -> Optional[str]:
+        """Find a default test file to target when none is specified."""
+        root = Path(getattr(context, "workspace_root", "") or Path.cwd())
+        try:
+            discovered = quick_verify._discover_test_files(root, limit=3)  # type: ignore[attr-defined]
+        except Exception:
+            discovered = []
+        if not discovered:
+            return None
+        # Prefer TS/JS tests
+        preferred = sorted(
+            discovered,
+            key=lambda p: (0 if str(p).lower().endswith(".ts") else 1, len(str(p))),
+        )
+        return str(preferred[0])
+
     def _maybe_target_test_command(self, cmd: str, task: Task, context: RevContext) -> str:
         if not cmd or not isinstance(cmd, str):
             return cmd
@@ -733,6 +755,8 @@ class TestExecutorAgent(BaseAgent):
         target_path = self._extract_test_path_from_description(task.description or "")
         if not target_path:
             target_path = context.get_agent_state("last_failing_test_file", "")
+        if not target_path:
+            target_path = self._find_default_test_path(context) or ""
         if not target_path:
             return cmd
 
@@ -765,29 +789,25 @@ class TestExecutorAgent(BaseAgent):
 
     def _infer_test_command_from_files(self, root: Path) -> Optional[str | list[str]]:
         try:
-            from rev.execution import quick_verify
-        except Exception:
-            return None
-
-        try:
-            test_paths = quick_verify._discover_test_files(root, limit=3)
+            test_paths = quick_verify._discover_test_files(root, limit=3)  # type: ignore[attr-defined]
         except Exception:
             test_paths = []
 
         if not test_paths:
             return None
 
-        suffix = Path(test_paths[0]).suffix.lower()
+        first = Path(test_paths[0])
+        suffix = first.suffix.lower()
         if suffix in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:
-            return ["npm", "test"]
+            return ["npx", "vitest", "run", str(first)]
         if suffix == ".py":
-            return ["pytest", "-q"]
+            return ["pytest", "-q", str(first)]
         if suffix == ".go":
-            return ["go", "test", "./..."]
+            return ["go", "test", str(first)]
         if suffix == ".rs":
-            return ["cargo", "test"]
+            return ["cargo", "test", str(first)]
         if suffix == ".cs":
-            return ["dotnet", "test"]
+            return ["dotnet", "test", str(first)]
         return None
 
     def _extract_workdir_hint(self, desc: str) -> Optional[str]:
@@ -1004,6 +1024,12 @@ class TestExecutorAgent(BaseAgent):
             return None
 
         desc_lower = (task.description or "").lower()
+        # If we have a test path, prefer a direct Vitest run to avoid npm script flags like --runTestsByPath.
+        if script_name == "test":
+            if test_path:
+                return f"npx vitest run {test_path}"
+            return "npx vitest run"
+
         if "vitest" not in desc_lower:
             return None
 
