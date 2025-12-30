@@ -191,11 +191,13 @@ class TestExecutorAgent(BaseAgent):
                         task_id=task.task_id,
                     )
 
+                # Prefer an explicit command in the task description before any heuristics.
+                explicit_cmd = self._extract_explicit_command(task.description or "")
+                if explicit_cmd:
+                    return self._execute_explicit_command(task, context, explicit_cmd)
+
                 # Only fall back to heuristics if recovery also failed
                 if not config.TEST_EXECUTOR_FALLBACK_ENABLED:
-                    explicit_cmd = self._extract_explicit_command(task.description or "")
-                    if explicit_cmd:
-                        return self._execute_explicit_command(task, context, explicit_cmd)
                     error_payload = json.dumps({
                         "error": "Fallback heuristics disabled; no explicit command found in task description.",
                         "blocked": True,
