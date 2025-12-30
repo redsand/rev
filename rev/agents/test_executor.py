@@ -217,6 +217,16 @@ class TestExecutorAgent(BaseAgent):
                 corrected_cmd = self._validate_and_correct_test_command(cmd, task, context)
                 if corrected_cmd != cmd:
                     print(f"  [!] Correcting test command: {cmd} -> {corrected_cmd}")
+                    try:
+                        log_event = {
+                            "action": "command_correction",
+                            "original": cmd,
+                            "corrected": corrected_cmd,
+                            "task_id": task.task_id,
+                        }
+                        print(f"  [log] {json.dumps(log_event, ensure_ascii=False)}")
+                    except Exception:
+                        pass
                     arguments["cmd"] = corrected_cmd
 
             blocked = self._block_non_terminating_command(tool_name, arguments, task, context)
@@ -231,6 +241,14 @@ class TestExecutorAgent(BaseAgent):
             except Exception:
                 parsed = None
             if isinstance(parsed, dict) and (parsed.get("timed_out") or parsed.get("timeout") or parsed.get("timeout_decision")):
+                # Signal that a remediation should be planned (e.g., safer test command).
+                parsed["needs_fix"] = True
+                parsed["log_note"] = {
+                    "message": "Test command timed out; captured tails for visibility",
+                    "stdout_tail": parsed.get("stdout", "")[-500:] if isinstance(parsed.get("stdout"), str) else "",
+                    "stderr_tail": parsed.get("stderr", "")[-500:] if isinstance(parsed.get("stderr"), str) else "",
+                    "cmd": arguments.get("cmd"),
+                }
                 timeout_seconds = None
                 if isinstance(arguments, dict):
                     timeout_seconds = arguments.get("timeout")
@@ -680,6 +698,15 @@ class TestExecutorAgent(BaseAgent):
             return blocked
 
         print(f"  [i] Using fallback heuristic: {cmd}")
+        try:
+            log_event = {
+                "action": "fallback_heuristic_used",
+                "task_id": task.task_id,
+                "cmd": cmd,
+            }
+            print(f"  [log] {json.dumps(log_event, ensure_ascii=False)}")
+        except Exception:
+            pass
         raw_result = execute_tool("run_cmd", {"cmd": cmd}, agent_name="test_executor")
         return build_subagent_output(
             agent_name="TestExecutorAgent",

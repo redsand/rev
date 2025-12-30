@@ -317,6 +317,8 @@ def _maybe_retry_timeout(
         "timeout_seconds": timeout,
         "stdout_tail": stdout_tail,
         "stderr_tail": stderr_tail,
+        "cmd": cmd_text,
+        "cwd": str(cwd) if cwd else None,
     }
 
     # For tests: avoid blindly re-running with larger timeouts. Surface the suggestion instead.
@@ -328,7 +330,11 @@ def _maybe_retry_timeout(
             "timeout_seconds": timeout,
             "stdout_tail": stdout_tail,
             "stderr_tail": stderr_tail,
+            "cmd": cmd_text,
+            "cwd": str(cwd) if cwd else None,
         }
+        # Flag that a remediation is required; orchestrator/verification can inject a fix task.
+        normalized["needs_fix"] = True
         return normalized
 
     if decision.get("decision") != "rerun":

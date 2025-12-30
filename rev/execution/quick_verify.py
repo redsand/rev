@@ -3773,18 +3773,34 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
             tail_msg = ""
             if stdout_tail or stderr_tail:
                 tail_msg = f" | stdout_tail: {stdout_tail[:200]}... stderr_tail: {stderr_tail[:200]}..."
+            # Mark that a remediation should be planned if the timeout originated from tests.
+            details = dict(payload)
+            details["timeout_count"] = count
+            details["stdout_tail"] = stdout_tail
+            details["stderr_tail"] = stderr_tail
+            # Persist a planner hint so subsequent prompts know a fix is required.
+            context.set_agent_state("timeout_needs_fix_note", True)
+            try:
+                # Nudge planner explicitly via user_feedback to request a safer test command.
+                fb = "Test command timed out; propose an explicit non-watch, file-targeted test command based on package.json scripts before retrying."
+                if hasattr(context, "user_feedback"):
+                    context.user_feedback.append(fb)
+            except Exception:
+                pass
+            if payload.get("needs_fix"):
+                details["needs_fix"] = True
             if count < 2:
                 return VerificationResult(
                     passed=False,
                     message=f"Test command timed out (first occurrence); will retry with adjustments{tail_msg}",
-                    details=payload,
+                    details=details,
                     should_replan=False,
                     inconclusive=True,
                 )
             return VerificationResult(
                 passed=False,
                 message=f"Test command timed out (repeated){tail_msg}",
-                details=payload,
+                details=details,
                 should_replan=True,
             )
 
@@ -3847,6 +3863,9 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
                 "Patch package.json test script to a non-watch single-file command, e.g., \"vitest run tests/user.test.ts\".",
                 "Avoid unsupported Vitest flags like --runTestsByPath.",
             ]
+        elif payload.get("needs_fix"):
+            blocked_reason = "Test command timed out and needs a remediation (e.g., safer command/config)."
+            suspected_issue = suspected_issue or "Test command timed out; likely hanging (watch mode or long-running requests)."
         if blocked_reason:
             return VerificationResult(
                 passed=False,
@@ -3863,6 +3882,7 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
                     "cwd": cwd,
                     "suspected_issue": suspected_issue,
                     "hints": blocked_hints or None,
+                    "needs_fix": payload.get("needs_fix"),
                 },
                 should_replan=True,
                 inconclusive=True,

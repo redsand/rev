@@ -3381,6 +3381,20 @@ class Orchestrator:
                     "Important: The last [TEST] was skipped because no code changed since the last failing test run.\n"
                     "Do NOT propose another [TEST] until a code-changing step (e.g. [EDIT]/[REFACTOR]) is completed.\n\n"
                 )
+            # If a timeout indicated it needs a fix, add a direct note to the planner prompt.
+            timeout_needs_fix = False
+            try:
+                if isinstance(getattr(self, "context", None), RevContext):
+                    needs_fix = self.context.get_agent_state("timeout_needs_fix_note", False)
+                    timeout_needs_fix = bool(needs_fix)
+            except Exception:
+                timeout_needs_fix = False
+            timeout_note = ""
+            if timeout_needs_fix:
+                timeout_note = (
+                    "Timeout diagnostics: The last test command timed out and signaled 'needs_fix'. "
+                    "Propose a safer test command or configuration change (e.g., non-watch, targeted file) before re-running.\n\n"
+                )
         
         history_note = ""
         if iteration == 1 and work_summary != "No actions taken yet.":
@@ -3398,17 +3412,18 @@ class Orchestrator:
             # Clear feedback after incorporating it into the prompt
             self.context.user_feedback = []
 
-        prompt = (
-            f"Original Request: {user_request}\n\n"
-            f"{feedback_note}"
-            f"{work_summary}\n\n"
-            f"{path_hints}\n"
-            f"{agent_notes}\n"
-            f"{failure_notes}\n"
-            f"{blocked_note}"
-            f"{history_note}"
-            "Based on the work completed, what is the single next most important action to take? "
-            "If a previous action failed, propose a different action to achieve the goal.\n"
+            prompt = (
+                f"Original Request: {user_request}\n\n"
+                f"{feedback_note}"
+                f"{work_summary}\n\n"
+                f"{path_hints}\n"
+                f"{agent_notes}\n"
+                f"{failure_notes}\n"
+                f"{blocked_note}"
+                f"{timeout_note}"
+                f"{history_note}"
+                "Based on the work completed, what is the single next most important action to take? "
+                "If a previous action failed, propose a different action to achieve the goal.\n"
             "\n"
             "ACTION SEMANTICS (critical):\n"
             "- Use [READ] or [ANALYZE] when the next step is inspection only (open files, search, inventory imports, understand structure).\n"
@@ -4227,6 +4242,17 @@ class Orchestrator:
                         completed_tasks_log.append(
                             f"[STOPPED] {next_task.description} | Reason: similar test suite already queued ({test_path} ~ {canonical})"
                         )
+                        # Log the decision for visibility in run logs.
+                        decision_log = {
+                            "event": "test_similarity_skip",
+                            "path": test_path,
+                            "canonical": canonical,
+                            "code_change_iteration": last_code_change_iteration,
+                        }
+                        try:
+                            print(f"  [log] {json.dumps(decision_log, ensure_ascii=False)}")
+                        except Exception:
+                            pass
                         _record_test_signature_state(self.context, signature, "superseded")
                         # Suggest cleanup without auto-deleting.
                         if hasattr(self.context, "user_feedback"):
