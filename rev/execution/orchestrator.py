@@ -3412,135 +3412,66 @@ class Orchestrator:
             # Clear feedback after incorporating it into the prompt
             self.context.user_feedback = []
 
-            prompt = (
-                f"Original Request: {user_request}\n\n"
-                f"{feedback_note}"
-                f"{work_summary}\n\n"
-                f"{path_hints}\n"
-                f"{agent_notes}\n"
-                f"{failure_notes}\n"
-                f"{blocked_note}"
-                f"{timeout_note}"
-                f"{history_note}"
-                "Based on the work completed, what is the single next most important action to take? "
-                "If a previous action failed, propose a different action to achieve the goal.\n"
+        prompt = (
+            f"Original Request: {user_request}\n\n"
+            f"{feedback_note}"
+            f"{work_summary}\n\n"
+            f"{path_hints}\n"
+            f"{agent_notes}\n"
+            f"{failure_notes}\n"
+            f"{blocked_note}"
+            f"{timeout_note}"
+            f"{history_note}"
+            "Based on the work completed, what is the single next most important action to take? "
+            "If a previous action failed, propose a different action to achieve the goal.\n"
             "\n"
             "ACTION SEMANTICS (critical):\n"
             "- Use [READ] or [ANALYZE] when the next step is inspection only (open files, search, inventory imports, understand structure).\n"
             "- Use [EDIT]/[ADD]/[CREATE_DIRECTORY]/[REFACTOR] only when you will perform a repo-changing tool call in this step.\n"
             "- Use [TOOL] only to execute an existing built-in tool (e.g., `split_python_module_classes`).\n"
             "- Use [CREATE_TOOL] only when no existing tool can do the job and you must create a new tool.\n"
-                         "- If unsure whether a path exists, choose [READ] first to locate the correct file path(s).\n"
-                         "\n"
-                         "TASK SPECIFICITY (CRITICAL):\n"
-                         "- Be extremely specific in your task description. Include file paths and specific functions/features.\n"
-                         "- If a previous task partially completed a goal (e.g. added 1 of 3 endpoints), the next task description MUST reflect the remaining work (e.g. 'add the REMAINING PUT and DELETE endpoints...').\n"
-                         "- Avoid using the exact same description for multiple consecutive steps; this triggers circuit breakers.\n"
-                         "\n"
-                         "Constraints to avoid duplicating work:\n"             "- CRITICAL: Check the file tree in the history. If the project is already organized into subdirectories, USE THEM. Do NOT create duplicate files or project roots in the top-level directory.\n"
-             "- Do not propose repeating a step that is already complete (e.g., do not re-create a directory that exists).\n"
-             "- CRITICAL: If you have already completed 2+ READ/ANALYZE steps on the same file, you MUST now use [EDIT] to make changes. Do NOT propose another read.\n"
-             "- If the same file/lines have been inspected multiple times, transition to [EDIT] immediately.\n"
-             "- If you are going to use `split_python_module_classes`, do not hand-author the package `__init__.py` first; let the tool generate it.\n"
-             "- After `split_python_module_classes` runs, treat the directory as the source of truth; prefer editing the package files rather than the original monolithic module.\n"
-             "- If a source file was split into a package (directory with __init__.py) and the original single-file path no longer exists, do NOT propose edits to that missing file; operate on the package files that actually exist.\n"
-             "- If the code was split into a package with __init__.py exports, prefer package-export imports at call sites.\n"
-             "- Avoid replacing `from pkg import *` with dozens of per-module imports; only import names actually used.\n"
-             "- Prefer `from package import ExportedSymbol` over `from package.module import ExportedSymbol` when the package exports it.\n"
-             "- SECURITY: Always propose security-minded actions. Never store secrets in plain text. Use proper input validation.\n"
-             "\n"
-             "TEST-DRIVEN DEVELOPMENT (TDD) PRINCIPLES (MANDATORY):\n"
-             "- Write tests BEFORE implementation code. This is non-negotiable.\n"
-             "- If the request involves new functionality, your first few actions must be to [ADD] test files and [TEST] them (expecting failure).\n"
-             "- Only after tests are written and verified as failing should you [EDIT] implementation code.\n"
-             "- Use [TEST] frequently to verify progress. If a test fails, your next action should be to [ANALYZE] the failure or [EDIT] the code to fix it.\n"
-             "\n"
-             "TEST FILE CONSOLIDATION POLICY (CRITICAL):\n"
-             "- NEVER create new test files without first checking what test files already exist.\n"
-             "- BEFORE proposing [ADD] for a new test file, you MUST first:\n"
-             "  1. Use [READ] to list the tests/ directory and see what test files exist\n"
-             "  2. Use [READ] to read existing test files and understand what they cover\n"
-             "  3. ONLY create a new test file if existing files cannot be extended\n"
-             "- PREFER extending existing test files over creating new ones:\n"
-             "  * If tests/user.test.js exists → ADD tests to it (use [EDIT])\n"
-             "  * If tests/api.test.js exists → ADD tests to it (use [EDIT])\n"
-             "  * Multiple test files for the same API/feature = ANTI-PATTERN\n"
-             "- EXAMPLES OF DUPLICATES (avoid these):\n"
-             "  * api.test.js + user_api.test.js → DUPLICATE (consolidate into one)\n"
-             "  * user.test.js + user_crud.test.js → DUPLICATE (consolidate into one)\n"
-             "  * api/users.test.js + tests/user.test.js → DUPLICATE (consolidate into one)\n"
-             "- If verification warns 'Similar files exist', you MUST use [EDIT] on the existing file, not create a new one.\n"
-             "\n"
-             "FAILURE RECOVERY GUIDANCE:\n"
-             "- If an [EDIT] or [REFACTOR] action failed because a tool (like replace_in_file) made no changes (replaced=0), do NOT repeat the same action.\n"
-             "- Instead, use [READ] to inspect the file again and identify why the match failed (check whitespace, indentation, or if the code has changed).\n"
-             "- If a [TEST] fails, read the test output carefully and use [ANALYZE] or [READ] to find the bug before attempting another [EDIT].\n"
-             "\n"
-             "- If history shows work but you haven't inspected it in this run, VERIFY IT FIRST.\n"
-             "- DEPENDENCIES: If you modify a dependency file (e.g. `package.json`, `requirements.txt`), your very next step should be a [TEST] or [ADD] task to INSTALL the dependencies (e.g. `npm install`).\n"
-             f"You MUST choose one of the following action types: {available_actions}\n"
-             "\n"
-             "RESPONSE FORMAT (CRITICAL - follow exactly):\n"
-             "- Respond with EXACTLY ONE action on a SINGLE LINE\n"
-             "- Format: [ACTION_TYPE] brief description of what to do\n"
-             "- Do NOT output multiple actions or a plan - only the SINGLE NEXT step\n"
-             "- Do NOT chain actions like '[READ] file [ANALYZE] content' - pick ONE\n"
-             "- Example: [EDIT] refactor the authentication middleware to use the new session manager\n"
-             "- If the goal has been achieved, respond with only: GOAL_ACHIEVED"
+            "- If unsure whether a path exists, choose [READ] first to locate the correct file path(s).\n"
+            "\n"
+            "TASK SPECIFICITY (CRITICAL):\n"
+            "- Be extremely specific in your task description. Include file paths and specific functions/features.\n"
+            "- If a previous task partially completed a goal, ensure the next task reflects the remaining work only.\n"
+            "- Avoid using the exact same description for multiple consecutive steps; this triggers circuit breakers.\n"
+            "DEPENDENCIES (IMPORTANT):\n"
+            "- If your change requires new dependencies, update the manifest (e.g., package.json) and plan the install step next.\n"
+            "\n"
+            "RESPONSE FORMAT (CRITICAL - follow exactly):\n"
+            "- Respond with EXACTLY ONE action on a SINGLE LINE\n"
+            "- Format: [ACTION_TYPE] brief description of what to do\n"
+            "- Do NOT output multiple actions or a plan - only the SINGLE NEXT step\n"
+            "- Do NOT chain actions like '[READ] file [ANALYZE] content' - pick ONE\n"
+            "- Example: [EDIT] refactor the authentication middleware to use the new session manager\n"
+            "- If the goal has been achieved, respond with only: GOAL_ACHIEVED"
         )
-        
+
         response_data = ollama_chat([{"role": "user", "content": prompt}])
 
-        if "error" in response_data:
-            print(f"  ❌ LLM Error in lightweight planner: {response_data['error']}")
-            if self.context:
-                self.context.set_agent_state("planner_error", response_data["error"])
-                self.context.add_error(f"Lightweight planner LLM error: {response_data['error']}")
-            return None
+        if "error" in response_data or not response_data.get("message"):
+            raise RuntimeError(f"Planner LLM error: {response_data.get('error') if isinstance(response_data, dict) else 'unknown'}")
 
-        response_content = response_data.get("message", {}).get("content", "")
-        if hasattr(self, "debug_logger") and self.debug_logger:
-            self.debug_logger.log("orchestrator", "PLANNER_RESPONSE_RAW", {
-                "content": response_content
-            }, "DEBUG")
+        response_content = response_data.get("message", {}).get("content", "") or ""
+        response_content = response_content.strip()
 
-        if _is_goal_achieved_response(response_content):
-            print(f"  [i] Goal achieved detected in response: \"{response_content.strip()}\"")
-            if hasattr(self, "debug_logger") and self.debug_logger:
-                self.debug_logger.log("orchestrator", "GOAL_ACHIEVED_DETECTED", {
-                    "raw_content": response_content
-                }, "INFO")
-            return None
-        
-        if not response_content or response_content.strip().upper() == "GOAL_ACHIEVED":
-            print(f"  [i] Empty response or explicit GOAL_ACHIEVED detected.")
-            if hasattr(self, "debug_logger") and self.debug_logger:
-                self.debug_logger.log("orchestrator", "EMPTY_OR_GOAL_ACHIEVED_RAW", {
-                    "content": response_content
-                }, "INFO")
-            return None
-        
-        match = re.match(r"[\s]*\[(.*?)\]\s*(.*)", response_content.strip())
-        if not match:
-            print(f"  [!] No action brackets found. Raw response: \"{response_content.strip()}\"")
-            if hasattr(self, "debug_logger") and self.debug_logger:
-                self.debug_logger.log("orchestrator", "NO_BRACKET_MATCH", {
-                    "content": response_content
-                }, "DEBUG")
-            return Task(description=response_content.strip(), action_type="general")
-
-        action_raw = match.group(1)
-        action_type = normalize_action_type(
-            action_raw,
-            available_actions=available_actions,
-        )
-        description = match.group(2).strip()
-
-        if hasattr(self, "debug_logger") and self.debug_logger:
-            self.debug_logger.log("orchestrator", "PARSED_ACTION_TYPE", {
-                "raw": action_raw,
-                "normalized": action_type
-            }, "DEBUG")
+        # Parse action/description from the LLM response
+        description = ""
+        action_type = ""
+        match = re.search(r"\[([A-Z_]+)\]\s*(.*)", response_content, re.DOTALL)
+        if match:
+            action_raw = match.group(1)
+            description = match.group(2).strip()
+            action_type = normalize_action_type(
+                action_raw,
+                available_actions=AgentRegistry.get_registered_action_types(),
+            )
+        else:
+            # Fallback: take first non-empty line as description and default to EDIT
+            lines = [l.strip() for l in response_content.splitlines() if l.strip()]
+            description = lines[0] if lines else response_content
+            action_type = "edit"
 
         # Clean up malformed LLM output that contains multiple actions concatenated
         # e.g. "Open file.[READ] another[ANALYZE] more" -> "Open file."
