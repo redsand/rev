@@ -3806,6 +3806,8 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
         context.agent_state["last_test_iteration"] = context.agent_state.get("current_iteration")
         context.agent_state["last_test_rc"] = rc
         blocked_reason = None
+        blocked_hints: list[str] = []
+        suspected_issue: Optional[str] = None
         if payload.get("blocked") is True:
             blocked_reason = (stderr or stdout or "Command blocked").strip()
         elif "blocked non-terminating vitest command" in output.lower():
@@ -3813,18 +3815,27 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
         # Detect Vitest CLI option errors (e.g., --runTestsByPath not supported) to avoid misleading hints.
         elif "cacerror" in output.lower() and "vitest" in output.lower():
             blocked_reason = "Vitest CLI error: invalid option; test script/command is incorrect."
+            suspected_issue = "Invalid Vitest test script/flags (e.g., unsupported --runTestsByPath)."
+            blocked_hints = [
+                "Patch package.json test script to a non-watch single-file command, e.g., \"vitest run tests/user.test.ts\".",
+                "Avoid unsupported Vitest flags like --runTestsByPath.",
+            ]
         if blocked_reason:
             return VerificationResult(
                 passed=False,
                 message="Verification INCONCLUSIVE: command blocked",
                 details={
                     "rc": rc,
-                    "output": output[:500],
+                    "output": output[:800],
+                    "stdout": stdout[:400],
+                    "stderr": stderr[:400],
                     "blocked": True,
                     "skip_failure_counts": True,
                     "reason": blocked_reason,
                     "cmd": payload.get("cmd") or payload.get("command"),
                     "cwd": cwd,
+                    "suspected_issue": suspected_issue,
+                    "hints": blocked_hints or None,
                 },
                 should_replan=True,
                 inconclusive=True,

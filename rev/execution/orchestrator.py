@@ -1740,6 +1740,46 @@ def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optiona
     target_path = _sanitize_path_candidate(targets[0]) if targets else ""
     tasks: list[Task] = []
 
+    # Special handling: Vitest CLI/script errors (e.g., unsupported --runTestsByPath) should trigger a script fix and targeted rerun.
+    def _is_vitest_cli_error(vr: Optional[VerificationResult]) -> bool:
+        if not vr:
+            return False
+        msg = (vr.message or "").lower()
+        det = str(vr.details or "").lower()
+        return ("vitest" in det or "vitest" in msg) and ("cacerror" in det or "unknown option" in det or "--runtestsbypath" in det)
+
+    if _is_vitest_cli_error(verification_result):
+        tasks.append(
+            Task(
+                description=(
+                    "Update package.json test script to use a non-watch, single-file Vitest command, e.g., "
+                    "\"vitest run tests/user.test.ts\", replacing any invalid flags like --runTestsByPath."
+                ),
+                action_type="edit",
+            )
+        )
+        tasks.append(
+            Task(
+                description="Run npx vitest run tests/user.test.ts to verify tests now run without watch/invalid flags.",
+                action_type="test",
+            )
+        )
+        # Continue with generic diagnostics below as needed
+
+    # If tests refer to server/index entrypoint and it is missing, queue a creation task.
+    if "src/server" in (error_message or "").lower() or "src/index" in (error_message or "").lower():
+        server_ts = config.ROOT / "src" / "server.ts"
+        server_js = config.ROOT / "src" / "server.js"
+        if not server_ts.exists() and not server_js.exists():
+            tasks.append(
+                Task(
+                    description=(
+                        "Create backend entrypoint src/server.ts exporting the Express app and start function so tests can import it."
+                    ),
+                    action_type="add",
+                )
+            )
+
     error_message = verification_result.message if verification_result and verification_result.message else ""
     missing_file_error = "not found" in error_message.lower() or "does not exist" in error_message.lower()
     syntax_error = "syntax error" in error_message.lower()
@@ -4334,7 +4374,7 @@ class Orchestrator:
                 file_counts = Counter(recent_read_files)
                 most_read_file, read_count = file_counts.most_common(1)[0] if file_counts else (None, 0)
 
-                if read_count >= 3:
+                if read_count >= 2:
                     print(f"  [loop-guard] File '{most_read_file}' has been read {read_count} times - suggesting alternative approach.")
                     next_task.action_type = "debug"
                     next_task.description = (

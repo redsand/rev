@@ -37,12 +37,11 @@ from rev.config import ensure_escape_is_cleared, get_escape_interrupt
 from rev.tools.workspace_resolver import normalize_path
 
 
-# Security: Forbidden patterns that indicate shell injection attempts
-FORBIDDEN_RE = re.compile(r"[;&|><`]|(\$\()|\r|\n")
+# Security: Forbidden patterns that indicate shell injection attempts (configurable)
+FORBIDDEN_RE = re.compile(r"[;><`]|(\$\()|\r|\n")
 
 # Security: Forbidden tokens that should never appear in command arguments
-FORBIDDEN_TOKENS = {"&&", "||", ";", "|", "&", ">", "<", ">>", "2>", "1>", "<<",
-                    "2>&1", "1>&2", "`", "$(", "${"}
+FORBIDDEN_TOKENS = {";", "&", ">", "<", ">>", "2>", "1>", "<<", "2>&1", "1>&2", "`", "$(", "${"}
 
 _PATH_TOKEN_RE = re.compile(r"[\\/]|^\.\.?[\\/]|^[A-Za-z]:[\\/]|^~[\\/]")
 _PATH_EXTENSION_RE = re.compile(r"\.[A-Za-z0-9]{1,8}$")
@@ -116,9 +115,10 @@ def _parse_and_validate(cmd: str) -> Tuple[bool, str, List[str]]:
     2. Parse with shlex.split() to get individual tokens
     3. Check that no forbidden tokens appear in arguments
     """
-    # Check 1: Raw string validation for shell metacharacters
-    if FORBIDDEN_RE.search(cmd):
-        return False, "shell metacharacters not allowed (&&, ;, |, >, <, `, $(), etc.)", []
+    # Check 1: Raw string validation for shell metacharacters (configurable)
+    if getattr(config, "forbid_shell_security", False):
+        if FORBIDDEN_RE.search(cmd):
+            return False, "shell metacharacters not allowed (;, |, >, <, `, $(), etc.)", []
 
     # Check 2: Parse command into tokens
     try:
@@ -130,8 +130,9 @@ def _parse_and_validate(cmd: str) -> Tuple[bool, str, List[str]]:
         return False, "empty command", []
 
     # Check 3: Validate no forbidden tokens in arguments
-    if any(tok in FORBIDDEN_TOKENS for tok in args):
-        return False, "shell operators not allowed in arguments", []
+    if getattr(config, "forbid_shell_security", False):
+        if any(tok in FORBIDDEN_TOKENS for tok in args):
+            return False, "shell operators not allowed in arguments", []
 
     return True, "", args
 

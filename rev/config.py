@@ -702,3 +702,7 @@ def is_mcp_server_allowed(server_config: Dict[str, Any]) -> bool:
     # In private mode, only allow non-public servers
     is_public = server_config.get("public", False)
     return not is_public
+# Unified shell security toggle:
+# True  -> block shell metacharacters and dangerous tokens
+# False -> allow (permits &&, ||, |, etc.)
+forbid_shell_security = False
