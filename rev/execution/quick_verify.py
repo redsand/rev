@@ -2071,6 +2071,7 @@ def _build_test_diagnostics(output: str, test_files: list[str], root: Path) -> d
 
     if (root / "package.json").exists() and not (root / "node_modules").exists():
         hints.append("node_modules is missing; install dependencies before running tests.")
+        hints.append("Run `npm install` (or yarn/pnpm) to install the test runner.")
 
     ts_hints = _detect_typescript_setup_issues(discovered, root)
     hints.extend(ts_hints[:2])
@@ -2083,6 +2084,7 @@ def _build_test_diagnostics(output: str, test_files: list[str], root: Path) -> d
         hints.append("Jest CLI error: invalid option; check package.json test script flags.")
     if "enoent" in output_lower and ("node" in output_lower or "npm" in output_lower):
         hints.append("Command failed to start; verify package.json scripts and that the test runner is installed.")
+        hints.append("Install dependencies (npm install) and ensure the test script points to an existing runner.")
     if "playwright" in output_lower and "not found" in output_lower:
         hints.append("Playwright binary missing; install Playwright and run `npx playwright install`.")
 
@@ -3822,6 +3824,7 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
                     "skip_failure_counts": True,
                     "reason": blocked_reason,
                     "cmd": payload.get("cmd") or payload.get("command"),
+                    "cwd": cwd,
                 },
                 should_replan=True,
                 inconclusive=True,
