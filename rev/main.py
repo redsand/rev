@@ -429,8 +429,18 @@ def main():
     if args.clean:
         print("Cleaning temporary files, caches, and logs...")
         if config.REV_DIR.exists():
-            shutil.rmtree(config.REV_DIR)
-            print(f"Removed {config.REV_DIR}")
+            keep_files = {"settings.json", "secrets.json"}
+            for entry in config.REV_DIR.iterdir():
+                # Preserve settings/secrets
+                if entry.name in keep_files:
+                    continue
+                try:
+                    if entry.is_dir():
+                        shutil.rmtree(entry, ignore_errors=False)
+                    else:
+                        entry.unlink()
+                except Exception as e:
+                    print(f"[WARN] Clean could not remove {entry}: {e}")
         print("Clean complete.")
         sys.exit(0)
 
