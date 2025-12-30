@@ -4138,7 +4138,13 @@ class Orchestrator:
                     seen_at = seen_entry.get("code_change_iteration", -1)
                 else:
                     seen_at = -1
-                if isinstance(last_code_change_iteration, int) and isinstance(seen_at, int) and last_code_change_iteration == seen_at:
+                # Allow first-run tests (code_change_iter = -1); only dedupe when we have a valid code-change iteration.
+                if (
+                    isinstance(last_code_change_iteration, int)
+                    and isinstance(seen_at, int)
+                    and last_code_change_iteration >= 0
+                    and last_code_change_iteration == seen_at
+                ):
                     print(f"  [test-dedupe] Skipping duplicate test task with signature: {signature} (code_change_iter={last_code_change_iteration})")
                     next_task.status = TaskStatus.STOPPED
                     next_task.result = json.dumps({
