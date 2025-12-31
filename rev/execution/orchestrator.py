@@ -1853,6 +1853,41 @@ def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optiona
             )
         )
 
+    # If a missing dependency is detected, queue an install task.
+    missing_deps = _extract_missing_dependencies(error_message)
+    installs: list[Task] = []
+    for dep in missing_deps:
+        # Heuristic: dev deps for common tooling
+        is_dev = any(dep.startswith(prefix) for prefix in ("@playwright/", "jest", "ts-jest", "@types/", "vitest"))
+        install_cmd = f"npm install{' -D' if is_dev else ''} {dep}"
+        installs.append(
+            Task(
+                description=f"Install missing dependency '{dep}' using \"{install_cmd}\"",
+                action_type="run",
+            )
+        )
+    tasks.extend(installs)
+
+    # If we just queued installs or edited test files, enqueue a targeted retest of the primary failing test path.
+    primary_test_path = ""
+    if verification_result and isinstance(verification_result.details, dict):
+        primary_test_path = verification_result.details.get("failing_test") or ""
+        if not primary_test_path:
+            discovered = verification_result.details.get("discovered_test_files")
+            if isinstance(discovered, list) and discovered:
+                primary_test_path = discovered[0]
+    if primary_test_path and (installs or task.action_type == "edit" and "test" in (task.description or "").lower()):
+        if primary_test_path.endswith(".ts") or primary_test_path.endswith(".js"):
+            desc = f"Re-run targeted test to validate fixes: npx vitest run {primary_test_path}"
+        else:
+            desc = f"Re-run targeted test to validate fixes: npm test -- {primary_test_path}"
+        tasks.append(
+            Task(
+                description=desc,
+                action_type="test",
+            )
+        )
+
     missing_path = _extract_missing_path_from_error(error_message)
     missing_file_error = (
         "not found" in error_message.lower()
@@ -4234,6 +4269,44 @@ class Orchestrator:
                         continue
                 research_seen[sig] = {"code_change_iteration": last_code_change_iteration}
                 self.context.set_agent_state("research_signature_seen", research_seen)
+
+                # If a read fails with "not found", immediately trigger a structure refresh (single-thread runs).
+                if action_type_normalized == "read":
+                    last_result = next_task.result or ""
+                    parallel_mode = bool(getattr(config, "PARALLEL_MODE_ENABLED", False))
+                    if isinstance(last_result, str) and "not found" in last_result.lower():
+                        if not parallel_mode:
+                            refresh_task = Task(
+                                description="Refresh project structure: list src and tests to locate target files",
+                                action_type="read",
+                            )
+                            completed_tasks_log.append("[INFO] Injecting structure refresh after missing file read")
+                            self.context.plan.tasks.insert(plan_idx + 1, refresh_task)
+                        else:
+                            # In parallel mode, only refresh if repeated misses on the same desc
+                            miss_key = "read_missing_counter"
+                            miss_data = self.context.agent_state.get(miss_key, {})
+                            if not isinstance(miss_data, dict):
+                                miss_data = {}
+                            miss_count = miss_data.get(desc, 0) + 1
+                            miss_data[desc] = miss_count
+                            self.context.set_agent_state(miss_key, miss_data)
+                            if miss_count >= 2:
+                                refresh_task = Task(
+                                    description="Refresh project structure: list src and tests to locate target files",
+                                    action_type="read",
+                                )
+                                completed_tasks_log.append("[INFO] Injecting structure refresh after repeated missing file reads (parallel mode)")
+                                self.context.plan.tasks.insert(plan_idx + 1, refresh_task)
+                                miss_data[desc] = 0
+                                self.context.set_agent_state(miss_key, miss_data)
+                    else:
+                        # Reset counters in parallel mode
+                        miss_key = "read_missing_counter"
+                        miss_data = self.context.agent_state.get(miss_key, {})
+                        if isinstance(miss_data, dict) and desc in miss_data:
+                            miss_data.pop(desc, None)
+                            self.context.set_agent_state(miss_key, miss_data)
             else:
                 consecutive_reads = 0  # Reset on any non-research action
 

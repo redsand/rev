@@ -794,13 +794,13 @@ class CodeWriterAgent(BaseAgent):
             # Directory creation tasks only get create_directory tool
             tool_names = ['create_directory']
         elif task.action_type == "add":
-            # File creation tasks only get write_file tool
-            tool_names = ['write_file']
+            # File creation tasks should prefer write_file, but only if the target does not exist.
+            tool_names = ['write_file', 'apply_patch', 'replace_in_file']
         elif task.action_type == "edit":
-            # File modification tasks may use AST-aware edits for safer Python refactors
+            # File modification tasks should avoid full overwrites; prefer patching tools first.
             tool_names = [
-                'replace_in_file',
                 'apply_patch',
+                'replace_in_file',
                 'write_file',
                 'copy_file',
                 'move_file',
@@ -1146,10 +1146,39 @@ class CodeWriterAgent(BaseAgent):
                         if not retried:
                             print(f"  -> Recovered tool call from text output: {tool_name}")
 
-                        if tool_name in ["write_file", "replace_in_file", "create_directory", "move_file", "copy_file"]:
+                        if tool_name in ["write_file", "replace_in_file", "create_directory", "move_file", "copy_file", "apply_patch"]:
                             self._display_change_preview(tool_name, arguments)
 
                             file_path = arguments.get("path") or arguments.get("dest") or "unknown"
+                            # Guard against overwriting existing files with write_file when the task is an edit/refactor/add.
+                            if (
+                                tool_name == "write_file"
+                                and isinstance(file_path, str)
+                                and file_path.lower() not in {"", "unknown"}
+                            ):
+                                try:
+                                    candidate = (Path(config.ROOT) / file_path).resolve()
+                                    exists = candidate.is_file()
+                                    if exists:
+                                        # If this is not explicitly a new-file action, block overwrite and replan.
+                                        if task.action_type in {"edit", "refactor", "add"}:
+                                            msg = (
+                                                f"Refusing to overwrite existing file '{file_path}' with write_file "
+                                                f"during action_type='{task.action_type}'. Use apply_patch or replace_in_file instead."
+                                            )
+                                            print(f"  [WARN] {msg}")
+                                            if self.should_attempt_recovery(task, context):
+                                                self.request_replan(
+                                                    context,
+                                                    reason="write_file_overwrite_blocked",
+                                                    detailed_reason=msg,
+                                                )
+                                                return self.make_recovery_request("write_file_overwrite_blocked", msg)
+                                            return self.make_failure_signal("write_file_overwrite_blocked", msg)
+                                except Exception:
+                                    # If path resolution fails, continue (we'll let normal validation handle)
+                                    pass
+
                             conflict = _detect_path_conflict(file_path)
                             if conflict:
                                 print(f"  [WARN] {conflict}")
