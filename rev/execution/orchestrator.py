@@ -2188,6 +2188,13 @@ def _enforce_action_tool_constraints(task: Task) -> tuple[bool, Optional[str]]:
     if action not in WRITE_ACTIONS and action != "test":
         return True, None
 
+    # Special-case policy blocks to avoid treating them as tool-execution failures.
+    result_text = ""
+    if isinstance(task.result, str):
+        result_text = task.result.lower()
+    if "write_file_overwrite_blocked" in result_text or "path_conflict" in result_text:
+        return False, "Write action blocked by overwrite policy"
+
     events = getattr(task, "tool_events", None) or []
     if not events:
         if action == "test":

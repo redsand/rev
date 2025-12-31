@@ -79,6 +79,22 @@ def _extract_target_files_from_description(description: str) -> list[str]:
     return paths
 
 
+def _targets_exist(paths: list[str]) -> bool:
+    """Return True if any provided path exists as a file in the workspace."""
+    for raw in paths:
+        if not raw:
+            continue
+        try:
+            candidate = Path(raw)
+            if not candidate.is_absolute():
+                candidate = Path(config.ROOT) / candidate
+            if candidate.is_file():
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _detect_path_conflict(path_str: str) -> Optional[str]:
     """
     Detect common path conflicts such as creating both <name>.ts and <name>/index.ts.
@@ -788,23 +804,27 @@ class CodeWriterAgent(BaseAgent):
         include_python_tools = any(
             path.lower().endswith((".py", ".pyi")) for path in target_files_for_tools
         )
+        target_exists = _targets_exist(target_files_for_tools)
 
         # Determine which tools are appropriate for this action_type
         if task.action_type == "create_directory":
             # Directory creation tasks only get create_directory tool
             tool_names = ['create_directory']
         elif task.action_type == "add":
-            # File creation tasks should prefer write_file, but only if the target does not exist.
-            tool_names = ['write_file', 'apply_patch', 'replace_in_file']
+            # File creation tasks: only allow write_file if the target doesn't already exist.
+            tool_names = ['apply_patch', 'replace_in_file']
+            if not target_exists:
+                tool_names.insert(0, 'write_file')
         elif task.action_type == "edit":
             # File modification tasks should avoid full overwrites; prefer patching tools first.
             tool_names = [
                 'apply_patch',
                 'replace_in_file',
-                'write_file',
                 'copy_file',
                 'move_file',
             ]
+            if not target_exists:
+                tool_names.insert(2, 'write_file')
             if include_python_tools:
                 tool_names = python_tools + tool_names
         elif task.action_type == "refactor":
@@ -994,7 +1014,7 @@ class CodeWriterAgent(BaseAgent):
                         print(f"  -> CodeWriterAgent will call tool '{tool_name}'")
 
                         # Display change preview for file modifying operations
-                        if tool_name in ["write_file", "replace_in_file", "create_directory", "move_file", "copy_file"]:
+                        if tool_name in ["write_file", "replace_in_file", "create_directory", "move_file", "copy_file", "apply_patch"]:
                             self._display_change_preview(tool_name, arguments)
 
                             # Validate import targets before proceeding
@@ -1051,27 +1071,26 @@ class CodeWriterAgent(BaseAgent):
 
                                     # Escalate suggestions based on failure count
                                     if consecutive_replace_failures == 1:
-                                        # First failure: suggest using write_file for more reliable replacement
+                                        # First failure: suggest apply_patch for a precise diff-based edit
                                         noop_msg = (
                                             f"{noop_msg}\n\n"
-                                            f"RECOVERY STEP 1 (Recommended): Switch to write_file tool instead.\n"
-                                            f"- Read the entire current file content\n"
-                                            f"- Make the necessary changes to the content\n"
-                                            f"- Use write_file to replace the entire file with the modified content\n"
-                                            f"This is MORE RELIABLE than replace_in_file for complex changes.\n\n"
+                                            f"RECOVERY STEP 1 (Recommended): Use apply_patch with a unified diff.\n"
+                                            f"- Read the current file content\n"
+                                            f"- Create a minimal diff that updates only the relevant block\n"
+                                            f"- Apply via apply_patch to avoid full overwrites\n\n"
                                             f"Alternative: Verify the exact 'find' text (character-for-character) from the file content provided, "
                                             f"including ALL whitespace and indentation, then retry replace_in_file."
                                         )
                                     elif consecutive_replace_failures >= 2:
-                                        # Second+ failure: strongly recommend write_file
+                                        # Second+ failure: strongly recommend apply_patch with exact context
                                         noop_msg = (
                                             f"{noop_msg}\n\n"
-                                            f"RECOVERY STEP 2 (MANDATORY): You MUST use write_file instead of replace_in_file.\n"
+                                            f"RECOVERY STEP 2 (MANDATORY): Use apply_patch instead of replace_in_file.\n"
                                             f"replace_in_file has failed {consecutive_replace_failures} times. The 'find' pattern is not matching.\n"
                                             f"REQUIRED ACTION:\n"
-                                            f"1. Request read_file for the target file to get complete current content\n"
-                                            f"2. Apply your changes to that content\n"
-                                            f"3. Use write_file with the complete modified content\n"
+                                            f"1. Read the target file to get the exact current lines\n"
+                                            f"2. Craft a unified diff with precise context\n"
+                                            f"3. Apply the diff using apply_patch\n"
                                             f"DO NOT attempt replace_in_file again - it will fail."
                                         )
 
