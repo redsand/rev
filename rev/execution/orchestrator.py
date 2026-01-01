@@ -4073,14 +4073,24 @@ class Orchestrator:
                     if req.get("type") == "INJECT_TASKS":
                         tasks = req.get("details", {}).get("tasks", [])
                         for t in tasks:
-                            desc = (t.get("description") or "").strip()
-                            action = (t.get("action_type") or "general").strip().lower()
+                            # Prefer Task instances; accept dicts defensively
+                            if isinstance(t, Task):
+                                injected_task = t
+                            elif isinstance(t, dict):
+                                injected_task = Task(
+                                    description=t.get("description", ""),
+                                    action_type=t.get("action_type", "general"),
+                                )
+                            else:
+                                continue
+
+                            desc = (injected_task.description or "").strip()
+                            action = (injected_task.action_type or "general").strip().lower()
                             if not desc:
                                 continue
                             sig = f"{action}::{desc.lower()}::iter={last_change}"
                             if sig in seen_sigs:
                                 continue
-                            injected_task = Task(description=desc, action_type=action or "general")
                             injected_task.priority = max(injected_task.priority, 5)
                             pending_injected_tasks.append(injected_task)
                             seen_sigs.add(sig)

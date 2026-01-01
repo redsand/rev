@@ -178,10 +178,12 @@ def _ensure_test_request_for_file(context: RevContext, file_path: Path) -> None:
             return
 
     # Queue a test-creation task
-    tasks = [{
-        "description": f"Add tests for {rel} at {candidates[0]} to cover its functionality.",
-        "action_type": "add",
-    }]
+    tasks = [
+        Task(
+            description=f"Add tests for {rel} at {candidates[0]} to cover its functionality.",
+            action_type="add",
+        )
+    ]
     context.agent_requests.append({"type": "INJECT_TASKS", "details": {"tasks": tasks}})
     state[str(rel)] = current_iter
     context.set_agent_state(_TEST_REQUEST_STATE_KEY, state)
