@@ -1103,6 +1103,41 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
             should_replan=False,
         )
 
+    def _has_header_comment(path: Path) -> bool:
+        """Check for a brief header comment/docstring at the top of newly created source files."""
+        code_suffixes = {".js", ".ts", ".jsx", ".tsx", ".vue", ".py", ".rb", ".go", ".java", ".cs", ".php", ".rs"}
+        if path.suffix.lower() not in code_suffixes:
+            return True  # Non-code files are exempt
+        try:
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except Exception:
+            return True
+        for line in lines[:8]:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if path.suffix.lower() == ".py":
+                return stripped.startswith("#") or stripped.startswith('"""')
+            if path.suffix.lower() == ".vue":
+                return stripped.startswith("<!--")
+            if path.suffix.lower() in {".js", ".ts", ".jsx", ".tsx", ".rs"}:
+                return stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("//!")
+            # Default for other code files: allow C/Java style comments
+            return stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("#")
+        return False
+
+    if not _has_header_comment(file_path):
+        return VerificationResult(
+            passed=False,
+            message=f"New file {file_path.name} is missing the required top-of-file comment describing its purpose.",
+            details={
+                **details,
+                "missing_header_comment": True,
+                "suggestion": "Add a brief header comment at the top describing the file's role.",
+            },
+            should_replan=True,
+        )
+
     _log_syntax_result(context, file_path, ok=True, skipped=False, msg="valid")
     _ensure_test_request_for_file(context, file_path)
     return VerificationResult(

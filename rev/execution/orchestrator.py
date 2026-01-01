@@ -1902,6 +1902,14 @@ def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optiona
                 action_type="test",
             )
         )
+    elif task.action_type and task.action_type.lower() == "test":
+        # If we failed a test task (e.g., due to syntax/env), plan to rerun it after the fix.
+        tasks.append(
+            Task(
+                description=f"Re-run the previous test task after fixing the error: {task.description}",
+                action_type="test",
+            )
+        )
 
     # If a missing dependency is detected, queue an install task.
     missing_deps = _extract_missing_dependencies(error_message)
