@@ -1826,6 +1826,11 @@ def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optiona
                     error_message = combined or error_message
             except Exception:
                 pass
+    if error_message:
+        try:
+            context.add_insight("orchestrator", "last_error_output", error_message[:4000])
+        except Exception:
+            pass
 
     if verification_result and isinstance(verification_result.details, dict):
         similar_files = verification_result.details.get("similar_files")
@@ -1929,13 +1934,53 @@ def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optiona
             )
         )
 
+    # Syntax blocker: Unterminated string literal - enqueue a direct fix on the failing file.
+    if "unterminated string" in error_message.lower():
+        target_fix_path = primary_test_path or target_path
+        if target_fix_path:
+            tasks.append(
+                Task(
+                    description=(
+                        f"Fix unterminated string literal in {target_fix_path}: read the file and correct the invalid string, "
+                        "then rerun the targeted test."
+                    ),
+                    action_type="edit",
+                )
+            )
+            tasks.append(
+                Task(
+                    description=(
+                        f"Re-run targeted test after syntax fix: npx vitest run {target_fix_path}"
+                    ),
+                    action_type="test",
+                )
+            )
+
+    # Broader syntax detection (common parser/compiler messages)
+    syntax_markers = [
+        "syntax error",
+        "unterminated string",
+        "unexpected token",
+        "unexpected end of input",
+        "unexpected end of file",
+        "unexpected end of json",
+        "missing )",
+        "missing }",
+        "unterminated template literal",
+        "unexpected identifier",
+        "unexpected reserved word",
+        "invalid or unexpected token",
+        "parse error",
+        "parsing error",
+    ]
+    syntax_error = any(marker in error_message.lower() for marker in syntax_markers)
+
     missing_path = _extract_missing_path_from_error(error_message)
     missing_file_error = (
         "not found" in error_message.lower()
         or "does not exist" in error_message.lower()
         or bool(missing_path)
     )
-    syntax_error = "syntax error" in error_message.lower()
     if missing_file_error and not _has_project_markers(config.ROOT):
         scaffold_paths = _scaffold_paths_from_task(task)
         if scaffold_paths:
@@ -1954,6 +1999,27 @@ def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optiona
         if candidate:
             candidate_path = config.ROOT / candidate
             if not candidate_path.exists():
+                # If other files with the same name/suffix exist elsewhere, surface them for the LLM to choose.
+                try:
+                    base_name = Path(candidate).name
+                    similar = []
+                    for hit in config.ROOT.rglob(base_name):
+                        if hit.is_file():
+                            rel = str(hit.relative_to(config.ROOT))
+                            similar.append(rel)
+                    if similar:
+                        tasks.append(
+                            Task(
+                                description=(
+                                    f"Found existing files with the same name as missing '{candidate}': {', '.join(similar)}. "
+                                    f"Review the best candidate and extend it instead of creating a duplicate."
+                                ),
+                                action_type="review",
+                            )
+                        )
+                except Exception:
+                    pass
+
                 tasks.append(
                     Task(
                         description=(
@@ -2001,8 +2067,21 @@ def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optiona
                 "Report which test files exist and whether the expected test path is present."
             ),
             action_type="review",
+                )
+            )
+
+    # If no heuristics were added but we have error text, fall back to LLM analysis using the raw error.
+    if not tasks and error_message:
+        tasks.append(
+            Task(
+                description=(
+                    "Analyze the failure using the raw error output and propose the exact fix. "
+                    "Error output:\n"
+                    f"{error_message[:3500]}"
+                ),
+                action_type="analyze",
+            )
         )
-    )
 
     return tasks
 
@@ -5742,7 +5821,7 @@ class Orchestrator:
                     print(f"  {colorize('The LLM returned text instead of calling tools', Colors.BRIGHT_BLACK)}")
 
                     # Circuit breaker: Too many tool execution failures
-                    if tool_failure_count >= 5:
+                    if tool_failure_count >= 3:
                         fallback_model = getattr(config, "EXECUTION_MODEL_FALLBACK", "").strip()
                         auto_switched = bool(context.agent_state.get("auto_switched_execution_model"))
                         if fallback_model and fallback_model != config.EXECUTION_MODEL and not auto_switched:

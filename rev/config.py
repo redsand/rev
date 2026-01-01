@@ -260,7 +260,7 @@ WORKSPACE_ROOT_ONLY = os.getenv("REV_WORKSPACE_ROOT_ONLY", "true").lower() == "t
 
 # Test executor behavior
 # When disabled, avoid guessing commands; only run explicit commands from the task text.
-TEST_EXECUTOR_FALLBACK_ENABLED = os.getenv("REV_TEST_EXECUTOR_FALLBACK_ENABLED", "false").lower() == "true"
+TEST_EXECUTOR_FALLBACK_ENABLED = os.getenv("REV_TEST_EXECUTOR_FALLBACK_ENABLED", "true").lower() == "true"
 TEST_EXECUTOR_COMMAND_CORRECTION_ENABLED = os.getenv("REV_TEST_EXECUTOR_COMMAND_CORRECTION_ENABLED", "false").lower() == "true"
 
 # Explicit approval flag for destructive operations
