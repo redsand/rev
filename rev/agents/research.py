@@ -235,7 +235,8 @@ class ResearchAgent(BaseAgent):
         research_tool_names = [
             'read_file', 'read_file_lines', 'search_code', 'rag_search', 'list_dir', 'tree_view',
             'analyze_code_structures', 'find_symbol_usages', 'analyze_dependencies',
-            'analyze_code_context', 'check_structural_consistency', 'get_file_info'
+            'analyze_code_context', 'check_structural_consistency', 'get_file_info',
+            'mcp_list_servers', 'mcp_call_tool',
         ]
         rendered_context, selected_tools, _bundle = build_context_and_tools(
             task,

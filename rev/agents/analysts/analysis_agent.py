@@ -142,7 +142,8 @@ class AnalysisAgent(BaseAgent):
             'analyze_test_coverage', 'analyze_semantic_diff', 'analyze_code_context',
             'run_all_analysis', 'analyze_code_structures', 'check_structural_consistency',
             'analyze_runtime_logs', 'analyze_performance_regression', 'analyze_error_traces',
-            'read_file', 'read_file_lines', 'search_code', 'list_dir', 'get_file_info'
+            'read_file', 'read_file_lines', 'search_code', 'list_dir', 'get_file_info',
+            'mcp_list_servers', 'mcp_call_tool',
         ]
         rendered_context, selected_tools, _bundle = build_context_and_tools(
             task,

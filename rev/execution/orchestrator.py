@@ -814,6 +814,22 @@ def _normalize_test_task_signature(task: Task) -> str:
     return f"test::{signature}"
 
 
+def _normalize_write_task_signature(task: Task) -> str:
+    """Create a stable signature for write tasks to prevent repeated no-op retries."""
+    paths = _extract_task_paths(task)
+    if paths:
+        normalized_paths = []
+        for path in paths:
+            if not path:
+                continue
+            normalized_paths.append(re.sub(r"\s+", " ", path.strip().lower()))
+        if normalized_paths:
+            return f"write::{'||'.join(normalized_paths)}"
+    target = (task.description or "").strip()
+    target = re.sub(r"\s+", " ", target.lower())
+    return f"write::{target}"
+
+
 def _normalize_structure_read_signature(desc: str) -> str:
     """Normalize structure-listing requests so duplicate directory reads can be skipped."""
     if not desc:
@@ -1811,6 +1827,31 @@ def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optiona
             except Exception:
                 pass
 
+    if verification_result and isinstance(verification_result.details, dict):
+        similar_files = verification_result.details.get("similar_files")
+        if isinstance(similar_files, list) and similar_files:
+            target_path = target_path or verification_result.details.get("file_path") or ""
+            primary = str(similar_files[0])
+            tasks.append(
+                Task(
+                    description=(
+                        f"Extend existing file {primary} with the new functionality instead of creating a duplicate "
+                        f"({target_path or 'new file'})."
+                    ),
+                    action_type="edit",
+                )
+            )
+            if target_path:
+                tasks.append(
+                    Task(
+                        description=(
+                            f"Delete duplicate file {target_path} after merging changes into {primary} to avoid conflicts."
+                        ),
+                        action_type="delete",
+                    )
+                )
+            return tasks
+
     # Special handling: Vitest CLI/script errors (e.g., unsupported --runTestsByPath) should trigger a script fix and targeted rerun.
     def _is_vitest_cli_error(vr: Optional[VerificationResult]) -> bool:
         if not vr:
@@ -1921,19 +1962,6 @@ def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optiona
                         action_type="add",
                     )
                 )
-
-    # If a missing dependency is detected, queue an install task.
-    missing_deps = _extract_missing_dependencies(error_message)
-    for dep in missing_deps:
-        # Heuristic: dev deps for common tooling
-        is_dev = any(dep.startswith(prefix) for prefix in ("@playwright/", "jest", "ts-jest", "@types/", "vitest"))
-        install_cmd = f"npm install{' -D' if is_dev else ''} {dep}"
-        tasks.append(
-            Task(
-                description=f"Install missing dependency '{dep}' using \"{install_cmd}\"",
-                action_type="run",
-            )
-        )
 
     if syntax_error and target_path:
         tasks.append(
@@ -4317,6 +4345,38 @@ class Orchestrator:
             else:
                 consecutive_reads = 0  # Reset on any non-research action
 
+            # Write task dedupe across pending/completed since last code change.
+            if action_type_normalized in WRITE_ACTIONS:
+                write_signature = _normalize_write_task_signature(next_task)
+                next_task._write_signature = write_signature
+                last_code_change_iteration = self.context.agent_state.get("last_code_change_iteration", -1)
+                write_state = self.context.agent_state.get("write_signature_state", {})
+                if not isinstance(write_state, dict):
+                    write_state = {}
+                entry = write_state.get(write_signature)
+                if isinstance(entry, dict):
+                    seen_at = entry.get("code_change_iteration", -1)
+                    status = str(entry.get("status") or "").lower()
+                    if (
+                        isinstance(seen_at, int)
+                        and isinstance(last_code_change_iteration, int)
+                        and seen_at == last_code_change_iteration
+                        and status in {"blocked", "no_tool"}
+                    ):
+                        print(f"  [write-dedupe] Skipping repeated write task: {write_signature}")
+                        next_task.status = TaskStatus.STOPPED
+                        next_task.result = json.dumps({
+                            "skipped": True,
+                            "reason": "write task previously failed without tool execution",
+                            "signature": write_signature,
+                        })
+                        completed_tasks_log.append(
+                            f"[STOPPED] {next_task.description} | Reason: write task blocked (code_change_iter={last_code_change_iteration})"
+                        )
+                        continue
+                write_state[write_signature] = {"code_change_iteration": last_code_change_iteration, "status": "seen"}
+                self.context.set_agent_state("write_signature_state", write_state)
+
             # Test task signature dedupe across pending/completed since last code change
             if action_type_normalized == "test":
                 signature = _normalize_test_task_signature(next_task)
@@ -5660,6 +5720,20 @@ class Orchestrator:
                 task.error = constraint_error
 
                 # RECOVERY LOGIC: Track tool execution failures and provide explicit guidance
+                if "Write action completed without tool execution" in constraint_error or "Write action blocked by overwrite policy" in constraint_error:
+                    action = (task.action_type or "").lower()
+                    if action in WRITE_ACTIONS:
+                        write_signature = getattr(task, "_write_signature", None) or _normalize_write_task_signature(task)
+                        write_state = context.agent_state.get("write_signature_state", {})
+                        if not isinstance(write_state, dict):
+                            write_state = {}
+                        status = "blocked" if "overwrite policy" in constraint_error.lower() else "no_tool"
+                        write_state[write_signature] = {
+                            "code_change_iteration": context.agent_state.get("last_code_change_iteration", -1),
+                            "status": status,
+                        }
+                        context.set_agent_state("write_signature_state", write_state)
+
                 if "Write action completed without tool execution" in constraint_error:
                     tool_failure_count = context.agent_state.get("tool_execution_failure_count", 0)
                     context.set_agent_state("tool_execution_failure_count", tool_failure_count + 1)
@@ -5669,6 +5743,26 @@ class Orchestrator:
 
                     # Circuit breaker: Too many tool execution failures
                     if tool_failure_count >= 5:
+                        fallback_model = getattr(config, "EXECUTION_MODEL_FALLBACK", "").strip()
+                        auto_switched = bool(context.agent_state.get("auto_switched_execution_model"))
+                        if fallback_model and fallback_model != config.EXECUTION_MODEL and not auto_switched:
+                            previous_model = config.EXECUTION_MODEL
+                            config.EXECUTION_MODEL = fallback_model
+                            context.set_agent_state("auto_switched_execution_model", True)
+                            context.set_agent_state("tool_execution_failure_count", 0)
+                            context.add_error(
+                                f"Auto-switched execution model from {previous_model} to {fallback_model} due to tool-call failures"
+                            )
+                            print(f"\n[{colorize('TOOL EXECUTION FAILURES: SWITCHING MODEL', Colors.BRIGHT_YELLOW, bold=True)}]")
+                            print(
+                                colorize(
+                                    f"Switching execution model from {previous_model} to {fallback_model} after repeated tool failures.",
+                                    Colors.BRIGHT_WHITE,
+                                )
+                            )
+                            task.error = f"Switched execution model to fallback '{fallback_model}' after tool-call failures"
+                            return False
+
                         context.set_agent_state("no_retry", True)
                         context.add_error(f"Circuit breaker: {tool_failure_count} consecutive tool execution failures")
                         print(f"\n[{colorize('🛑 CIRCUIT BREAKER: TOOL EXECUTION FAILURES', Colors.BRIGHT_RED, bold=True)}]")
@@ -5706,6 +5800,13 @@ class Orchestrator:
                 pass
             if isinstance(result, str) and (result.startswith("[RECOVERY_REQUESTED]") or result.startswith("[FINAL_FAILURE]") or result.startswith("[USER_REJECTED]")):
                 if result.startswith("[RECOVERY_REQUESTED]"):
+                    retry_reason = result[len("[RECOVERY_REQUESTED]"):].strip()
+                    if retry_reason:
+                        print(f"  [retry_reason] {retry_reason}")
+                        history = context.work_history if isinstance(context.work_history, list) else []
+                        history.append(f"[RETRY] {task.description} | Reason: {retry_reason}")
+                        context.work_history = history
+                        context.set_agent_state("last_retry_reason", retry_reason)
                     task.status = TaskStatus.FAILED
                     task.error = result[len("[RECOVERY_REQUESTED]"):]
                 elif result.startswith("[FINAL_FAILURE]"):

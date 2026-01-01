@@ -245,6 +245,7 @@ if os.getenv("OLLAMA_DEBUG"):
 OLLAMA_BASE_URL = DEFAULT_OLLAMA_BASE_URL
 OLLAMA_MODEL = DEFAULT_OLLAMA_MODEL
 EXECUTION_MODEL = os.getenv("REV_EXECUTION_MODEL", _DEFAULT_MODEL)
+EXECUTION_MODEL_FALLBACK = os.getenv("REV_EXECUTION_MODEL_FALLBACK", "").strip()
 PLANNING_MODEL = os.getenv("REV_PLANNING_MODEL", _DEFAULT_MODEL)
 REVIEW_MODEL = os.getenv("REV_REVIEW_MODEL", _DEFAULT_MODEL)
 RESEARCH_MODEL = os.getenv("REV_RESEARCH_MODEL", _DEFAULT_MODEL)
@@ -501,7 +502,7 @@ DEFAULT_MCP_SERVERS = {
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-memory"],
         "description": "Persistent memory storage for AI context across sessions",
-        "enabled": os.getenv("REV_MCP_MEMORY", "false").lower() == "true",
+        "enabled": os.getenv("REV_MCP_MEMORY", "true").lower() == "true",
         "public": True
     },
     "sequential-thinking": {
@@ -525,7 +526,7 @@ DEFAULT_MCP_SERVERS = {
 # Disabled when PRIVATE_MODE is enabled
 REMOTE_MCP_SERVERS = {
     "deepwiki": {
-        "url": "https://mcp.deepwiki.com/sse",
+        "url": "https://mcp.deepwiki.com/mcp",
         "description": "RAG-as-a-Service for GitHub repositories - code understanding",
         "enabled": os.getenv("REV_MCP_DEEPWIKI", "true").lower() == "true",
         "public": True,
@@ -544,6 +545,13 @@ REMOTE_MCP_SERVERS = {
         "enabled": os.getenv("REV_MCP_SEMGREP", "true").lower() == "true",
         "public": True,
         "category": "security"
+    },
+    "remote-fetch": {
+        "url": "https://remote.mcpservers.org/fetch/mcp",
+        "description": "Remote MCP fetch service for HTTP requests",
+        "enabled": os.getenv("REV_MCP_REMOTE_FETCH", "true").lower() == "true",
+        "public": True,
+        "category": "fetch"
     },
     "cloudflare-docs": {
         "url": "https://docs.mcp.cloudflare.com/sse",

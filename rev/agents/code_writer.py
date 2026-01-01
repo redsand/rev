@@ -79,22 +79,6 @@ def _extract_target_files_from_description(description: str) -> list[str]:
     return paths
 
 
-def _targets_exist(paths: list[str]) -> bool:
-    """Return True if any provided path exists as a file in the workspace."""
-    for raw in paths:
-        if not raw:
-            continue
-        try:
-            candidate = Path(raw)
-            if not candidate.is_absolute():
-                candidate = Path(config.ROOT) / candidate
-            if candidate.is_file():
-                return True
-        except Exception:
-            continue
-    return False
-
-
 def _detect_path_conflict(path_str: str) -> Optional[str]:
     """
     Detect common path conflicts such as creating both <name>.ts and <name>/index.ts.
@@ -804,27 +788,22 @@ class CodeWriterAgent(BaseAgent):
         include_python_tools = any(
             path.lower().endswith((".py", ".pyi")) for path in target_files_for_tools
         )
-        target_exists = _targets_exist(target_files_for_tools)
-
         # Determine which tools are appropriate for this action_type
         if task.action_type == "create_directory":
             # Directory creation tasks only get create_directory tool
             tool_names = ['create_directory']
         elif task.action_type == "add":
-            # File creation tasks: only allow write_file if the target doesn't already exist.
-            tool_names = ['apply_patch', 'replace_in_file']
-            if not target_exists:
-                tool_names.insert(0, 'write_file')
+            # File creation tasks only get write_file tool
+            tool_names = ['write_file']
         elif task.action_type == "edit":
             # File modification tasks should avoid full overwrites; prefer patching tools first.
             tool_names = [
-                'apply_patch',
                 'replace_in_file',
+                'apply_patch',
+                'write_file',
                 'copy_file',
                 'move_file',
             ]
-            if not target_exists:
-                tool_names.insert(2, 'write_file')
             if include_python_tools:
                 tool_names = python_tools + tool_names
         elif task.action_type == "refactor":
@@ -1169,35 +1148,6 @@ class CodeWriterAgent(BaseAgent):
                             self._display_change_preview(tool_name, arguments)
 
                             file_path = arguments.get("path") or arguments.get("dest") or "unknown"
-                            # Guard against overwriting existing files with write_file when the task is an edit/refactor/add.
-                            if (
-                                tool_name == "write_file"
-                                and isinstance(file_path, str)
-                                and file_path.lower() not in {"", "unknown"}
-                            ):
-                                try:
-                                    candidate = (Path(config.ROOT) / file_path).resolve()
-                                    exists = candidate.is_file()
-                                    if exists:
-                                        # If this is not explicitly a new-file action, block overwrite and replan.
-                                        if task.action_type in {"edit", "refactor", "add"}:
-                                            msg = (
-                                                f"Refusing to overwrite existing file '{file_path}' with write_file "
-                                                f"during action_type='{task.action_type}'. Use apply_patch or replace_in_file instead."
-                                            )
-                                            print(f"  [WARN] {msg}")
-                                            if self.should_attempt_recovery(task, context):
-                                                self.request_replan(
-                                                    context,
-                                                    reason="write_file_overwrite_blocked",
-                                                    detailed_reason=msg,
-                                                )
-                                                return self.make_recovery_request("write_file_overwrite_blocked", msg)
-                                            return self.make_failure_signal("write_file_overwrite_blocked", msg)
-                                except Exception:
-                                    # If path resolution fails, continue (we'll let normal validation handle)
-                                    pass
-
                             conflict = _detect_path_conflict(file_path)
                             if conflict:
                                 print(f"  [WARN] {conflict}")

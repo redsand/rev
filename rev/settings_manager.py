@@ -162,6 +162,14 @@ def _parse_non_empty_str(value: Any) -> str:
     return parsed
 
 
+def _parse_optional_str(value: Any) -> str:
+    """Parse a string setting that may be empty (used to clear values)."""
+
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
 def _set_private_mode_runtime(enabled: bool) -> None:
     """Apply private mode changes and refresh MCP server registry."""
 
@@ -222,6 +230,15 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         getter=lambda: config.EXECUTION_MODEL,
         setter=lambda value: setattr(config, "EXECUTION_MODEL", value),
         default=config.EXECUTION_MODEL,
+    ),
+    "execution_model_fallback": RuntimeSetting(
+        key="execution_model_fallback",
+        description="Fallback execution model used after repeated tool failures",
+        section="Models",
+        parser=_parse_optional_str,
+        getter=lambda: config.EXECUTION_MODEL_FALLBACK,
+        setter=lambda value: setattr(config, "EXECUTION_MODEL_FALLBACK", value),
+        default=config.EXECUTION_MODEL_FALLBACK,
     ),
     "planning_model": RuntimeSetting(
         key="planning_model",
@@ -749,7 +766,7 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         parser=_parse_bool,
         getter=lambda: config.DEFAULT_MCP_SERVERS.get("memory", {}).get("enabled", False),
         setter=lambda value: config.DEFAULT_MCP_SERVERS.get("memory", {}).update({"enabled": value}) if "memory" in config.DEFAULT_MCP_SERVERS else None,
-        default=False,
+        default=True,
     ),
     "mcp_sequential_thinking_enabled": RuntimeSetting(
         key="mcp_sequential_thinking_enabled",

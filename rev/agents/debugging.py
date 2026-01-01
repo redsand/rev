@@ -67,7 +67,10 @@ class DebuggingAgent(BaseAgent):
         # Focus on identifying root cause and proposing a fix
         recovery_attempts = self.increment_recovery_attempts(task, context)
 
-        allowed_tool_names = ['write_file', 'replace_in_file', 'read_file', 'search_code', 'rag_search']
+        allowed_tool_names = [
+            'write_file', 'replace_in_file', 'read_file', 'search_code', 'rag_search',
+            'mcp_list_servers', 'mcp_call_tool',
+        ]
         all_tools = get_available_tools()
         rendered_context, selected_tools, _bundle = build_context_and_tools(
             task,
