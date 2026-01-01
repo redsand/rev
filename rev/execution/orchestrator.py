@@ -1429,6 +1429,45 @@ def _package_json_deps(root: Path) -> set[str]:
     return deps
 
 
+def _detect_build_command_for_root(root: Path) -> Optional[str]:
+    """Return a project-appropriate build command if one exists."""
+    try:
+        root = Path(root)
+    except Exception:
+        root = Path.cwd()
+
+    # JS/TS project with build script
+    pkg_scripts = _package_json_scripts(root)
+    if "build" in pkg_scripts:
+        return "npm run build"
+
+    # Go
+    if (root / "go.mod").exists():
+        return "go build ./..."
+
+    # Rust
+    if (root / "Cargo.toml").exists():
+        return "cargo build"
+
+    # .NET
+    if any(root.glob("*.sln")) or any(root.glob("*.csproj")):
+        return "dotnet build"
+
+    # Java
+    if (root / "pom.xml").exists():
+        return "mvn -q -DskipTests package"
+    if (root / "build.gradle").exists() or (root / "build.gradle.kts").exists():
+        if (root / "gradlew").exists():
+            return "./gradlew build -x test"
+        return "gradle build -x test"
+
+    # Python: compileall as a lightweight syntax check
+    if (root / "pyproject.toml").exists() or (root / "setup.py").exists():
+        return "python -m compileall ."
+
+    return None
+
+
 def _has_python_markers(root: Path) -> bool:
     return any(
         (root / marker).exists()
@@ -2039,6 +2078,14 @@ def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optiona
                 action_type="edit",
             )
         )
+        build_cmd = _detect_build_command_for_root(config.ROOT or Path.cwd())
+        if build_cmd:
+            tasks.append(
+                Task(
+                    description=f"Run build to surface syntax errors and exact locations: {build_cmd}",
+                    action_type="run",
+                )
+            )
 
     if target_path:
         tasks.append(

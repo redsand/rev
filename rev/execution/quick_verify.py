@@ -928,69 +928,96 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
         )
 
     # Check if file exists
-    if file_path.exists():
-        # If the resolved path is actually a directory, don't apply file-size semantics.
-        if file_path.is_dir():
-            return VerificationResult(
-                passed=True,
-                message=f"Directory exists: {file_path.name}",
-                details={"directory_path": str(file_path), "is_dir": True},
-            )
-
-        file_size = file_path.stat().st_size
-        details["file_exists"] = True
-        details["file_size"] = file_size
-        details["file_path"] = str(file_path)
-
-        if file_size == 0:
-            return VerificationResult(
-                passed=False,
-                message=f"File created but is empty: {file_path}",
-                details=details,
-                should_replan=True
-            )
-
-        # CRITICAL CHECK: Detect similar/duplicate files and fail verification
-        # This forces replanning to extend existing files instead of creating duplicates
-        payload = _parse_task_result_payload(task.result)
-        if payload and payload.get("is_new_file") and payload.get("similar_files"):
-            similar_list = payload.get("similar_files", [])
-            similar_str = ", ".join(similar_list[:3])
-            context.add_agent_request(
-                "DUPLICATE_FILE_PREVENTION",
-                {
-                    "agent": "VerificationSystem",
-                    "reason": f"Similar files exist: {similar_str}",
-                    "detailed_reason": (
-                        f"DUPLICATE FILE DETECTED: File '{file_path.name}' was created but similar files already exist: {similar_str}. "
-                        f"Instead of creating new files with similar names, EDIT one of the existing files to add the new functionality. "
-                        f"Use action_type='edit' with the most appropriate existing file path."
-                    )
-                }
-            )
-            return VerificationResult(
-                passed=False,
-                message=f"Duplicate file: similar files exist ({similar_str}). Extend existing file instead of creating new one.",
-                details={
-                    **details,
-                    "similar_files": similar_list,
-                    "suggested_action": "extend_existing"
-                },
-                should_replan=True
-            )
-
-        return VerificationResult(
-            passed=True,
-            message=f"File created successfully: {file_path.name}",
-            details=details
-        )
-    else:
+    if not file_path.exists():
         return VerificationResult(
             passed=False,
             message=f"File was not created: {file_path}",
             details={"expected_path": str(file_path)},
             should_replan=True
         )
+
+    # If the resolved path is actually a directory, don't apply file-size semantics.
+    if file_path.is_dir():
+        return VerificationResult(
+            passed=True,
+            message=f"Directory exists: {file_path.name}",
+            details={"directory_path": str(file_path), "is_dir": True},
+        )
+
+    file_size = file_path.stat().st_size
+    details["file_exists"] = True
+    details["file_size"] = file_size
+    details["file_path"] = str(file_path)
+
+    if file_size == 0:
+        return VerificationResult(
+            passed=False,
+            message=f"File created but is empty: {file_path}",
+            details=details,
+            should_replan=True
+        )
+
+    # CRITICAL CHECK: Detect similar/duplicate files and fail verification
+    # This forces replanning to extend existing files instead of creating duplicates
+    payload = _parse_task_result_payload(task.result)
+    if payload and payload.get("is_new_file") and payload.get("similar_files"):
+        similar_list = payload.get("similar_files", [])
+        similar_str = ", ".join(similar_list[:3])
+        context.add_agent_request(
+            "DUPLICATE_FILE_PREVENTION",
+            {
+                "agent": "VerificationSystem",
+                "reason": f"Similar files exist: {similar_str}",
+                "detailed_reason": (
+                    f"DUPLICATE FILE DETECTED: File '{file_path.name}' was created but similar files already exist: {similar_str}. "
+                    f"Instead of creating new files with similar names, EDIT one of the existing files to add the new functionality. "
+                    f"Use action_type='edit' with the most appropriate existing file path."
+                )
+            }
+        )
+        return VerificationResult(
+            passed=False,
+            message=f"Duplicate file: similar files exist ({similar_str}). Extend existing file instead of creating new one.",
+            details={
+                **details,
+                "similar_files": similar_list,
+                "suggested_action": "extend_existing"
+            },
+            should_replan=True
+        )
+
+    # Syntax validation for created file
+    is_valid, error_msg, skipped = _run_syntax_check(file_path)
+    if not is_valid:
+        _log_syntax_result(context, file_path, ok=False, skipped=False, msg=error_msg)
+        return VerificationResult(
+            passed=False,
+            message=f"File creation introduced a syntax error in {file_path.name}",
+            details={
+                **details,
+                "syntax_error": error_msg,
+                "suggestion": "Fix the syntax error in the file",
+            },
+            should_replan=True,
+        )
+    if skipped:
+        _log_syntax_result(context, file_path, ok=True, skipped=True, msg="skipped (no checker available)")
+        return VerificationResult(
+            passed=False,
+            message=f"Syntax check skipped for {file_path.name}; run a project build/typecheck to validate.",
+            details={
+                **details,
+                "syntax_skipped": True,
+            },
+            should_replan=True,
+        )
+
+    _log_syntax_result(context, file_path, ok=True, skipped=False, msg="valid")
+    return VerificationResult(
+        passed=True,
+        message=f"File created successfully and syntax validated: {file_path.name}",
+        details=details
+    )
 
 
 def _extract_path_from_task_result(result: Any) -> Optional[str]:
@@ -3428,11 +3455,12 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
     return results
 
 
-def _run_syntax_check(file_path: Path) -> Tuple[bool, str]:
+def _run_syntax_check(file_path: Path) -> Tuple[bool, str, bool]:
     """Run syntax validation for a file based on its extension.
 
     Returns:
-        (is_valid, error_message) - (True, "") if valid, (False, "error details") if invalid
+        (is_valid, error_message, skipped) - (True, "", False) if valid,
+        (False, "error details", False) if invalid, (True, "", True) if check skipped.
     """
     suffix = file_path.suffix.lower()
 
@@ -3447,10 +3475,10 @@ def _run_syntax_check(file_path: Path) -> Tuple[bool, str]:
                 timeout=5
             )
             if result.returncode == 0:
-                return True, ""
-            return False, f"Python syntax error: {result.stderr.strip()}"
+                return True, "", False
+            return False, f"Python syntax error: {result.stderr.strip()}", False
         except Exception as e:
-            return False, f"Failed to run syntax check: {str(e)}"
+            return False, f"Failed to run syntax check: {str(e)}", False
 
     # JavaScript/TypeScript files
     elif suffix in {'.js', '.jsx', '.mjs', '.cjs'}:
@@ -3464,13 +3492,13 @@ def _run_syntax_check(file_path: Path) -> Tuple[bool, str]:
                 timeout=5
             )
             if result.returncode == 0:
-                return True, ""
-            return False, f"JavaScript syntax error: {result.stderr.strip()}"
+                return True, "", False
+            return False, f"JavaScript syntax error: {result.stderr.strip()}", False
         except FileNotFoundError:
             # Node not available, skip validation
-            return True, ""
+            return True, "", True
         except Exception as e:
-            return False, f"Failed to run syntax check: {str(e)}"
+            return False, f"Failed to run syntax check: {str(e)}", False
 
     elif suffix in {'.ts', '.tsx'}:
         # Try TypeScript compiler if available
@@ -3483,24 +3511,51 @@ def _run_syntax_check(file_path: Path) -> Tuple[bool, str]:
                 timeout=10
             )
             if result.returncode == 0:
-                return True, ""
-            return False, f"TypeScript error: {result.stdout.strip()}"
+                return True, "", False
+            return False, f"TypeScript error: {result.stdout.strip()}", False
         except FileNotFoundError:
             # TypeScript not available, skip validation
-            return True, ""
+            return True, "", True
         except Exception as e:
-            return False, f"Failed to run syntax check: {str(e)}"
+            return False, f"Failed to run syntax check: {str(e)}", False
+
+    elif suffix == '.vue':
+        # Vue SFCs: try vue-tsc only if a Vue project marker exists (package.json with vue dependency)
+        pkg = _load_package_json(Path(config.ROOT) if getattr(config, "ROOT", None) else Path.cwd())
+        deps = set()
+        for field in ("dependencies", "devDependencies", "peerDependencies"):
+            values = pkg.get(field, {})
+            if isinstance(values, dict):
+                deps.update({str(k).strip().lower() for k in values.keys()})
+        is_vue_project = any(dep.startswith("vue") for dep in deps)
+        if not is_vue_project:
+            return True, "", True
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['npx', '--yes', 'vue-tsc', '--noEmit', str(file_path)],
+                capture_output=True,
+                text=True,
+                timeout=15
+            )
+            if result.returncode == 0:
+                return True, "", False
+            return False, f"Vue SFC error: {result.stdout.strip() or result.stderr.strip()}", False
+        except FileNotFoundError:
+            return True, "", True
+        except Exception as e:
+            return False, f"Failed to run syntax check: {str(e)}", False
 
     # JSON files
     elif suffix == '.json':
         try:
             content = file_path.read_text(encoding='utf-8', errors='ignore')
             json.loads(content)
-            return True, ""
+            return True, "", False
         except json.JSONDecodeError as e:
-            return False, f"JSON syntax error: {str(e)}"
+            return False, f"JSON syntax error: {str(e)}", False
         except Exception as e:
-            return False, f"Failed to read JSON: {str(e)}"
+            return False, f"Failed to read JSON: {str(e)}", False
 
     # YAML files
     elif suffix in {'.yml', '.yaml'}:
@@ -3508,12 +3563,12 @@ def _run_syntax_check(file_path: Path) -> Tuple[bool, str]:
             import yaml
             content = file_path.read_text(encoding='utf-8', errors='ignore')
             yaml.safe_load(content)
-            return True, ""
+            return True, "", False
         except ImportError:
             # PyYAML not available, skip validation
-            return True, ""
+            return True, "", True
         except Exception as e:
-            return False, f"YAML syntax error: {str(e)}"
+            return False, f"YAML syntax error: {str(e)}", False
 
     # XML/HTML files
     elif suffix in {'.xml', '.html', '.htm'}:
@@ -3521,13 +3576,47 @@ def _run_syntax_check(file_path: Path) -> Tuple[bool, str]:
             from xml.etree import ElementTree as ET
             content = file_path.read_text(encoding='utf-8', errors='ignore')
             ET.fromstring(content)
-            return True, ""
+            return True, "", False
         except Exception as e:
             # XML parsing can be strict, treat as warning not error
-            return True, f"XML validation warning: {str(e)}"
+            return True, f"XML validation warning: {str(e)}", True
 
     # For other file types, assume valid (no syntax check available)
-    return True, ""
+    return True, "", True
+
+
+def _log_syntax_result(context: RevContext, file_path: Path, ok: bool, skipped: bool, msg: str) -> None:
+    """Log syntax check outcome for visibility in logs/insights."""
+    status = "skipped" if skipped else ("ok" if ok else "error")
+    try:
+        context.add_insight(
+            "syntax_check",
+            str(file_path),
+            {
+                "status": status,
+                "message": msg,
+            },
+        )
+        print(f"  [syntax-check] {file_path}: {status} ({msg})")
+    except Exception:
+        pass
+
+
+def _log_syntax_result(context: RevContext, file_path: Path, ok: bool, skipped: bool, msg: str) -> None:
+    """Log syntax check outcome for visibility in logs/insights."""
+    status = "skipped" if skipped else ("ok" if ok else "error")
+    try:
+        context.add_insight(
+            "syntax_check",
+            str(file_path),
+            {
+                "status": status,
+                "message": msg,
+            },
+        )
+        print(f"  [syntax-check] {file_path}: {status} ({msg})")
+    except Exception:
+        pass
 
 
 def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
@@ -3619,10 +3708,11 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
         )
 
     # Run syntax validation on the edited file
-    is_valid, error_msg = _run_syntax_check(file_path)
+    is_valid, error_msg, skipped = _run_syntax_check(file_path)
 
     if not is_valid:
         # Syntax error detected - edit introduced a syntax error
+        _log_syntax_result(context, file_path, ok=False, skipped=False, msg=error_msg)
         return VerificationResult(
             passed=False,
             message=f"Edit to {file_path.name} introduced a syntax error",
@@ -3634,6 +3724,19 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
             should_replan=True
         )
 
+    if skipped:
+        _log_syntax_result(context, file_path, ok=True, skipped=True, msg="skipped (no checker available)")
+        return VerificationResult(
+            passed=False,
+            message=f"Syntax check skipped for {file_path.name}; run a project build/typecheck to validate.",
+            details={
+                "file_path": str(file_path),
+                "syntax_skipped": True,
+            },
+            should_replan=True,
+        )
+
+    _log_syntax_result(context, file_path, ok=True, skipped=False, msg="valid")
     # File exists and has valid syntax - verification passed!
     return VerificationResult(
         passed=True,
