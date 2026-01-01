@@ -1016,6 +1016,15 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
             should_replan=True
         )
 
+    # Vue SFC sanity: require at least <template> or <script>
+    if not _vue_sfc_has_minimal_blocks(file_path):
+        return VerificationResult(
+            passed=False,
+            message=f"Vue file {file_path.name} is missing <template> or <script> block.",
+            details={"expected_path": str(file_path)},
+            should_replan=True,
+        )
+
     # If the resolved path is actually a directory, don't apply file-size semantics.
     if file_path.is_dir():
         return VerificationResult(
@@ -1102,29 +1111,6 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
             },
             should_replan=False,
         )
-
-    def _has_header_comment(path: Path) -> bool:
-        """Check for a brief header comment/docstring at the top of newly created source files."""
-        code_suffixes = {".js", ".ts", ".jsx", ".tsx", ".vue", ".py", ".rb", ".go", ".java", ".cs", ".php", ".rs"}
-        if path.suffix.lower() not in code_suffixes:
-            return True  # Non-code files are exempt
-        try:
-            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        except Exception:
-            return True
-        for line in lines[:8]:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            if path.suffix.lower() == ".py":
-                return stripped.startswith("#") or stripped.startswith('"""')
-            if path.suffix.lower() == ".vue":
-                return stripped.startswith("<!--")
-            if path.suffix.lower() in {".js", ".ts", ".jsx", ".tsx", ".rs"}:
-                return stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("//!")
-            # Default for other code files: allow C/Java style comments
-            return stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("#")
-        return False
 
     if not _has_header_comment(file_path):
         return VerificationResult(
@@ -2869,23 +2855,8 @@ def _run_validation_command(cmd: str | List[str], *, use_tests_tool: bool = Fals
                 if fallback_res:
                     return fallback_res
 
-            # If the command failed and produced no output, attempt to gather help output for better diagnostics
-            if rc is not None and rc not in (0, 4) and not data.get("stdout") and not data.get("stderr"):
-                try:
-                    if isinstance(cmd, list):
-                        base_cmd = cmd[0]
-                    else:
-                        tokens = shlex.split(cmd)
-                        base_cmd = tokens[0] if tokens else ""
-                        
-                    # Only get help for tools, not for source files
-                    if base_cmd in ("npm", "pip", "pytest", "eslint", "ruff", "mypy", "npx", "node", "python", "go", "cargo"):
-                        help_info = _get_help_output(base_cmd)
-                        if help_info:
-                            data["help_info"] = help_info
-                except:
-                    pass
-                    
+            # If the command failed, keep rc as-is; no "completed" masking
+            
             if _retry_count < 2:
                 stdout = str(data.get("stdout") or "")
                 stderr = str(data.get("stderr") or "")
@@ -3712,6 +3683,42 @@ def _run_syntax_check(file_path: Path) -> Tuple[bool, str, bool]:
     return True, "", True
 
 
+def _has_header_comment(path: Path) -> bool:
+    """Check for a brief header comment/docstring at the top of source files."""
+    code_suffixes = {".js", ".ts", ".jsx", ".tsx", ".vue", ".py", ".rb", ".go", ".java", ".cs", ".php", ".rs"}
+    if path.suffix.lower() not in code_suffixes:
+        return True  # Non-code files are exempt
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return True
+    for line in lines[:8]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if path.suffix.lower() == ".py":
+            return stripped.startswith("#") or stripped.startswith('"""')
+        if path.suffix.lower() == ".vue":
+            return stripped.startswith("<!--")
+        if path.suffix.lower() in {".js", ".ts", ".jsx", ".tsx", ".rs"}:
+            return stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("//!")
+        # Default for other code files: allow C/Java style comments
+        return stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("#")
+    return False
+
+
+def _vue_sfc_has_minimal_blocks(path: Path) -> bool:
+    """Ensure Vue SFC has at least one <template> or <script> block."""
+    if path.suffix.lower() != ".vue":
+        return True
+    try:
+        content = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return True
+    lower = content.lower()
+    return ("<template" in lower) or ("<script" in lower)
+
+
 def _log_syntax_result(context: RevContext, file_path: Path, ok: bool, skipped: bool, msg: str) -> None:
     """Log syntax check outcome for visibility in logs/insights."""
     status = "skipped" if skipped else ("ok" if ok else "error")
@@ -3738,10 +3745,10 @@ def _enqueue_project_typecheck(context: RevContext, tasks: List[Task], reason: s
     cmd = _detect_build_command_for_root(root)
     if not cmd:
         return None
-    # Keep the command clean; append reason only after a delimiter so command extraction stays correct.
-    desc = f"{cmd} -- project typecheck/build to validate syntax"
+    # Keep the command clean; keep reason in description only.
+    desc = f"Run {cmd} for project typecheck/build to validate syntax"
     if reason:
-        desc += f" [{reason}]"
+        desc += f" (reason: {reason})"
     tasks.append(
         Task(
             description=desc,
@@ -3893,6 +3900,18 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
                 "suggested_build_cmd": suggested_cmd,
             },
             should_replan=False,
+        )
+
+    if not _has_header_comment(file_path):
+        return VerificationResult(
+            passed=False,
+            message=f"Edited file {file_path.name} is missing the required top-of-file comment describing its purpose.",
+            details={
+                "file_path": str(file_path),
+                "missing_header_comment": True,
+                "suggestion": "Add a brief header comment at the top describing the file's role.",
+            },
+            should_replan=True,
         )
 
     _log_syntax_result(context, file_path, ok=True, skipped=False, msg="valid")

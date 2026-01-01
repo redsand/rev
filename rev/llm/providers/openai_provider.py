@@ -18,13 +18,18 @@ class OpenAIProvider(LLMProvider):
         self._client = None
         self._responses_only_models: set[str] = set()
         self._no_temperature_models: set[str] = set()
+        # Allow overriding base URL for OpenAI-compatible local backends (LocalAI/vLLM/LM Studio)
+        self.base_url = os.getenv("OPENAI_BASE_URL", "").strip()
 
     def _get_client(self):
         """Lazy initialization of OpenAI client."""
         if self._client is None:
             try:
                 import openai
-                self._client = openai.OpenAI(api_key=self.api_key)
+                client_kwargs = {"api_key": self.api_key}
+                if self.base_url:
+                    client_kwargs["base_url"] = self.base_url
+                self._client = openai.OpenAI(**client_kwargs)
             except ImportError:
                 raise ImportError(
                     "OpenAI package not installed. Install with: pip install openai"

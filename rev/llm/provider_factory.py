@@ -65,6 +65,14 @@ def get_provider(provider_name: Optional[str] = None, force_new: bool = False) -
     elif provider_name == "gemini":
         GeminiProvider = _load_gemini()
         provider = GeminiProvider()
+    elif provider_name in {"localai", "vllm", "lmstudio"}:
+        # Local OpenAI-compatible backends; reuse OpenAIProvider with base URLs set via env
+        # LOCALAI_BASE_URL, VLLM_BASE_URL, LMSTUDIO_BASE_URL (fallback: OPENAI_BASE_URL)
+        os.environ.setdefault(
+            "OPENAI_BASE_URL",
+            os.getenv(f"{provider_name.upper()}_BASE_URL", os.getenv("OPENAI_BASE_URL", "http://localhost:1234/v1"))
+        )
+        provider = OpenAIProvider()
     else:
         # Default to Ollama for all other provider names instead of raising ValueError.
         # This allows for custom provider names (e.g. local proxies) to work
@@ -136,7 +144,7 @@ def list_available_providers() -> list[str]:
     Returns:
         List of provider names
     """
-    return ["ollama", "openai", "anthropic", "gemini"]
+    return ["ollama", "openai", "anthropic", "gemini", "localai", "vllm", "lmstudio"]
 
 
 def validate_provider(provider_name: str) -> bool:

@@ -1959,6 +1959,25 @@ def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optiona
             )
         )
 
+    # Detect test failures due to missing/running server (ECONNREFUSED/port issues)
+    lower_error = (error_message or "").lower()
+    if "econnrefused" in lower_error or "connect econnrefused" in lower_error or "fetch failed" in lower_error:
+        tasks.append(
+            Task(
+                description=(
+                    "Refactor tests to run in-memory using a shared app instance (e.g., supertest(app)) without starting a server; "
+                    "export the application and avoid hard-coded ports. Allow tests to set PORT/TEST_PORT via env."
+                ),
+                action_type="edit",
+            )
+        )
+        tasks.append(
+            Task(
+                description="Run the affected vitest file using in-memory supertest (no dev server) to confirm tests now pass.",
+                action_type="test",
+            )
+        )
+
     # If a missing dependency is detected, queue an install task.
     missing_deps = _extract_missing_dependencies(error_message)
     installs: list[Task] = []
@@ -4066,6 +4085,8 @@ class Orchestrator:
             # Allow one fresh recursive structure read on resume to refresh context
             self.context.set_agent_state("structure_read_seen", {})
             self.context.set_agent_state("research_signature_seen", {})
+            # Reset write dedupe state so failed writes can retry after resume
+            self.context.set_agent_state("write_signature_state", {})
             # Code-change iteration is unknown on resume; permit initial listings
             self.context.set_agent_state("last_code_change_iteration", 0)
 
@@ -4479,6 +4500,7 @@ class Orchestrator:
                         if (
                             isinstance(prior_change, int)
                             and isinstance(last_code_change_iteration, int)
+                            and last_code_change_iteration > 0
                             and prior_change == last_code_change_iteration
                         ):
                             print(f"  [structure-read] Skipping duplicate structure listing (sig={struct_sig}, code_change_iter={last_code_change_iteration})")
@@ -4563,40 +4585,29 @@ class Orchestrator:
                 else:
                     consecutive_reads = 0  # Reset on any non-research action
 
-            # Write task dedupe across pending/completed since last code change.
-            if action_type_normalized in WRITE_ACTIONS:
-                write_signature = getattr(next_task, "_write_signature", None) or _normalize_write_task_signature(next_task)
-                next_task._write_signature = write_signature
-                last_code_change_iteration = self.context.agent_state.get("last_code_change_iteration", -1)
-                write_state = self.context.agent_state.get("write_signature_state", {})
-                if not isinstance(write_state, dict):
-                    write_state = {}
-                entry = write_state.get(write_signature)
-                if isinstance(entry, dict):
-                    seen_at = entry.get("code_change_iteration", -1)
-                    status = str(entry.get("status") or "").lower()
-                    if (
-                        isinstance(seen_at, int)
-                        and isinstance(last_code_change_iteration, int)
-                        and seen_at == last_code_change_iteration
-                        and status in {"blocked", "no_tool"}
-                    ):
-                        print(f"  [write-dedupe] Skipping repeated write task: {write_signature}")
-                        next_task.status = TaskStatus.STOPPED
-                        next_task.result = json.dumps({
-                            "skipped": True,
-                            "reason": "write task previously failed without tool execution",
-                            "signature": write_signature,
-                        })
-                        completed_tasks_log.append(
-                            f"[STOPPED] {next_task.description} | Reason: write task blocked (code_change_iter={last_code_change_iteration})"
-                        )
-                        continue
-                write_state[write_signature] = {"code_change_iteration": last_code_change_iteration, "status": "seen"}
-                self.context.set_agent_state("write_signature_state", write_state)
+            # Write task dedupe disabled: allow retries to ensure forward progress.
 
             # Test task signature dedupe across pending/completed since last code change
             if action_type_normalized == "test":
+                desc_lower = (next_task.description or "").lower()
+                test_path_hint = _extract_test_path_from_text(next_task.description or "")
+                looks_full_suite = (
+                    ("npm test" in desc_lower or "yarn test" in desc_lower or "pnpm test" in desc_lower)
+                    or ("vitest run" in desc_lower and not test_path_hint)
+                    or ("npx vitest" in desc_lower and "run" in desc_lower and not test_path_hint)
+                )
+                allow_full_suite = bool(self.context.agent_state.get("allow_full_suite", False))
+                if looks_full_suite and not allow_full_suite:
+                    next_task.status = TaskStatus.STOPPED
+                    next_task.result = json.dumps({
+                        "skipped": True,
+                        "reason": "full test suite deferred",
+                        "suggestion": "Run targeted Vitest on specific files after code is stable."
+                    })
+                    completed_tasks_log.append(
+                        f"[STOPPED] {next_task.description} | Reason: full test suite deferred; run targeted file-specific tests instead."
+                    )
+                    continue
                 signature = _normalize_test_task_signature(next_task)
                 next_task._normalized_signature = signature
                 last_code_change_iteration = self.context.agent_state.get("last_code_change_iteration", -1)
@@ -5039,6 +5050,14 @@ class Orchestrator:
                     next_task.action_type = "add" if action_type_normalized == "add" else "edit"
                     # Mark to skip write dedupe on next attempt
                     next_task._write_signature = None
+                # Always enforce a tool call for injected writes: instruct to call write_file with target path
+                targets = _extract_task_paths(next_task) or []
+                if targets:
+                    target_hint = targets[0]
+                    next_task.description = (
+                        next_task.description
+                        + f" You MUST call write_file with path '{target_hint}' and minimal failing test content; do NOT return plain text."
+                    )
             if action_type_normalized == "test":
                 blocked_tests = self.context.agent_state.get("blocked_test_signatures", {})
                 if not isinstance(blocked_tests, dict):

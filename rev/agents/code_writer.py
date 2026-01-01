@@ -273,7 +273,8 @@ CRITICAL RULES FOR CODE EXTRACTION:
 10. Naming and documentation for new files:
     - Choose descriptive, unambiguous filenames that reflect the file's purpose.
     - Avoid near-duplicate names; if a similar file exists, EDIT that file instead of creating a new one.
-    - For new files, include a brief header comment/top-of-file note describing its role.
+    - For new files (and files you fully rewrite), include a brief header comment/top-of-file note describing its role/purpose.
+    - Tests should be unit-level where possible (mock external services/DB), or use supertest(app) without starting the server. Avoid hard-coded ports; export the app and use in-memory testing.
 
 SECURITY-MINDED CODING (CRITICAL):
 - Never store passwords, secrets, or API keys as plain strings in code.
