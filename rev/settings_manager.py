@@ -162,6 +162,14 @@ def _parse_non_empty_str(value: Any) -> str:
     return parsed
 
 
+def _parse_optional_str(value: Any) -> str:
+    """Parse a string setting that may be empty (used to clear values)."""
+
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
 def _set_private_mode_runtime(enabled: bool) -> None:
     """Apply private mode changes and refresh MCP server registry."""
 
@@ -223,6 +231,15 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         setter=lambda value: setattr(config, "EXECUTION_MODEL", value),
         default=config.EXECUTION_MODEL,
     ),
+    "execution_model_fallback": RuntimeSetting(
+        key="execution_model_fallback",
+        description="Fallback execution model used after repeated tool failures",
+        section="Models",
+        parser=_parse_optional_str,
+        getter=lambda: config.EXECUTION_MODEL_FALLBACK,
+        setter=lambda value: setattr(config, "EXECUTION_MODEL_FALLBACK", value),
+        default=config.EXECUTION_MODEL_FALLBACK,
+    ),
     "planning_model": RuntimeSetting(
         key="planning_model",
         description="Model used for planning tasks (overrides /model)",
@@ -267,6 +284,24 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         getter=lambda: config.PLANNING_SUPPORTS_TOOLS,
         setter=lambda value: setattr(config, "PLANNING_SUPPORTS_TOOLS", value),
         default=config.PLANNING_SUPPORTS_TOOLS,
+    ),
+    "tdd_enabled": RuntimeSetting(
+        key="tdd_enabled",
+        description="Enable test-driven development enforcement (requires tests to run)",
+        section="Testing",
+        parser=_parse_bool,
+        getter=lambda: getattr(config, "TDD_ENABLED", False),
+        setter=lambda value: setattr(config, "TDD_ENABLED", value),
+        default=getattr(config, "TDD_ENABLED", False),
+    ),
+    "tdd_defer_tests": RuntimeSetting(
+        key="tdd_defer_tests",
+        description="Defer auto-injected TDD test runs until after implementation steps",
+        section="Testing",
+        parser=_parse_bool,
+        getter=lambda: getattr(config, "TDD_DEFER_TEST_EXECUTION", True),
+        setter=lambda value: setattr(config, "TDD_DEFER_TEST_EXECUTION", value),
+        default=getattr(config, "TDD_DEFER_TEST_EXECUTION", True),
     ),
     "research_supports_tools": RuntimeSetting(
         key="research_supports_tools",
@@ -395,6 +430,60 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         getter=lambda: getattr(config, "LOOP_GUARD_ENABLED", True),
         setter=lambda value: setattr(config, "LOOP_GUARD_ENABLED", value),
         default=getattr(config, "LOOP_GUARD_ENABLED", True),
+    ),
+    "workspace_root_only": RuntimeSetting(
+        key="workspace_root_only",
+        description="Restrict operations to the workspace root (REV_WORKSPACE_ROOT_ONLY)",
+        section="Execution Limits",
+        parser=_parse_bool,
+        getter=lambda: getattr(config, "WORKSPACE_ROOT_ONLY", True),
+        setter=lambda value: setattr(config, "WORKSPACE_ROOT_ONLY", value),
+        default=getattr(config, "WORKSPACE_ROOT_ONLY", True),
+    ),
+    "test_executor_fallback_enabled": RuntimeSetting(
+        key="test_executor_fallback_enabled",
+        description="Enable fallback to generic test commands when explicit tool runs fail",
+        section="Testing",
+        parser=_parse_bool,
+        getter=lambda: getattr(config, "TEST_EXECUTOR_FALLBACK_ENABLED", False),
+        setter=lambda value: setattr(config, "TEST_EXECUTOR_FALLBACK_ENABLED", value),
+        default=getattr(config, "TEST_EXECUTOR_FALLBACK_ENABLED", False),
+    ),
+    "test_executor_command_correction_enabled": RuntimeSetting(
+        key="test_executor_command_correction_enabled",
+        description="Enable automatic correction of test commands (heuristic)",
+        section="Testing",
+        parser=_parse_bool,
+        getter=lambda: getattr(config, "TEST_EXECUTOR_COMMAND_CORRECTION_ENABLED", False),
+        setter=lambda value: setattr(config, "TEST_EXECUTOR_COMMAND_CORRECTION_ENABLED", value),
+        default=getattr(config, "TEST_EXECUTOR_COMMAND_CORRECTION_ENABLED", False),
+    ),
+    "context_guard_enabled": RuntimeSetting(
+        key="context_guard_enabled",
+        description="Enable context-guard on retrieved content similarity",
+        section="Safety",
+        parser=_parse_bool,
+        getter=lambda: getattr(config, "ENABLE_CONTEXT_GUARD", True),
+        setter=lambda value: setattr(config, "ENABLE_CONTEXT_GUARD", value),
+        default=getattr(config, "ENABLE_CONTEXT_GUARD", True),
+    ),
+    "context_guard_interactive": RuntimeSetting(
+        key="context_guard_interactive",
+        description="Prompt interactively when context-guard triggers",
+        section="Safety",
+        parser=_parse_bool,
+        getter=lambda: getattr(config, "CONTEXT_GUARD_INTERACTIVE", True),
+        setter=lambda value: setattr(config, "CONTEXT_GUARD_INTERACTIVE", value),
+        default=getattr(config, "CONTEXT_GUARD_INTERACTIVE", True),
+    ),
+    "context_guard_threshold": RuntimeSetting(
+        key="context_guard_threshold",
+        description="Similarity threshold for context-guard (0-1)",
+        section="Safety",
+        parser=_parse_float_between_zero_and_one,
+        getter=lambda: getattr(config, "CONTEXT_GUARD_THRESHOLD", 0.3),
+        setter=lambda value: setattr(config, "CONTEXT_GUARD_THRESHOLD", value),
+        default=getattr(config, "CONTEXT_GUARD_THRESHOLD", 0.3),
     ),
     "preflight_enabled": RuntimeSetting(
         key="preflight_enabled",
@@ -677,7 +766,7 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         parser=_parse_bool,
         getter=lambda: config.DEFAULT_MCP_SERVERS.get("memory", {}).get("enabled", False),
         setter=lambda value: config.DEFAULT_MCP_SERVERS.get("memory", {}).update({"enabled": value}) if "memory" in config.DEFAULT_MCP_SERVERS else None,
-        default=False,
+        default=True,
     ),
     "mcp_sequential_thinking_enabled": RuntimeSetting(
         key="mcp_sequential_thinking_enabled",
@@ -687,6 +776,15 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         getter=lambda: config.DEFAULT_MCP_SERVERS.get("sequential-thinking", {}).get("enabled", True),
         setter=lambda value: config.DEFAULT_MCP_SERVERS.get("sequential-thinking", {}).update({"enabled": value}) if "sequential-thinking" in config.DEFAULT_MCP_SERVERS else None,
         default=True,
+    ),
+    "forbid_shell_security": RuntimeSetting(
+        key="forbid_shell_security",
+        description="Block shell metacharacters and dangerous tokens in commands (False permits &&, ||, |)",
+        section="Execution",
+        parser=_parse_bool,
+        getter=lambda: getattr(config, "forbid_shell_security", False),
+        setter=lambda value: setattr(config, "forbid_shell_security", value),
+        default=getattr(config, "forbid_shell_security", False),
     ),
     "mcp_fetch_enabled": RuntimeSetting(
         key="mcp_fetch_enabled",

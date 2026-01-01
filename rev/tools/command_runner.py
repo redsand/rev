@@ -37,33 +37,64 @@ from rev.config import ensure_escape_is_cleared, get_escape_interrupt
 from rev.tools.workspace_resolver import normalize_path
 
 
-# Security: Forbidden patterns that indicate shell injection attempts
-FORBIDDEN_RE = re.compile(r"[;&|><`]|(\$\()|\r|\n")
+# Security: Forbidden patterns that indicate shell injection attempts (configurable)
+FORBIDDEN_RE = re.compile(r"[;><`]|(\$\()|\r|\n")
 
 # Security: Forbidden tokens that should never appear in command arguments
-FORBIDDEN_TOKENS = {"&&", "||", ";", "|", "&", ">", "<", ">>", "2>", "1>", "<<",
-                    "2>&1", "1>&2", "`", "$(", "${"}
+FORBIDDEN_TOKENS = {";", "&", ">", "<", ">>", "2>", "1>", "<<", "2>&1", "1>&2", "`", "$(", "${"}
 
 _PATH_TOKEN_RE = re.compile(r"[\\/]|^\.\.?[\\/]|^[A-Za-z]:[\\/]|^~[\\/]")
 _PATH_EXTENSION_RE = re.compile(r"\.[A-Za-z0-9]{1,8}$")
 
 
+def _rewrite_windows_aliases(args: List[str]) -> List[str]:
+    """Normalize common POSIX commands to Windows built-ins."""
+    if os.name != "nt" or not args:
+        return args
+
+    cmd = args[0].lower()
+    if cmd == "ls":
+        return ["dir"] + args[1:]
+    if cmd == "cat":
+        return ["type"] + args[1:]
+    if cmd == "pwd":
+        return ["cd"]
+    if cmd == "clear":
+        return ["cls"]
+    return args
+
+
 def _resolve_command(cmd_name: str) -> Optional[str | List[str]]:
     """Resolve a command name to its full path or execution wrapper.
-    
+
     On Windows, this correctly finds .cmd, .bat, and .exe files.
     If a .cmd or .bat file is found, it returns a list prefixed with cmd /c
     to ensure it can be executed with shell=False.
+
+    Windows built-in commands (like ren, rmdir, dir) are also wrapped with cmd /c
+    since they don't exist as standalone executables.
     """
+    # Windows built-in commands that are part of cmd.exe, not standalone executables
+    WINDOWS_BUILTINS = {
+        'dir', 'copy', 'move', 'ren', 'rename', 'del', 'erase',
+        'rmdir', 'rd', 'mkdir', 'md', 'type', 'echo', 'set',
+        'cd', 'chdir', 'cls', 'attrib', 'ver', 'vol', 'path',
+        'prompt', 'date', 'time', 'start', 'call', 'pushd', 'popd'
+    }
+
+    # Check if it's a Windows built-in command
+    if os.name == 'nt' and cmd_name.lower() in WINDOWS_BUILTINS:
+        return ["cmd.exe", "/c", cmd_name]
+
     resolved = shutil.which(cmd_name)
     if not resolved:
         return None
-        
+
     if os.name == 'nt':
         # If it's a batch file, we need cmd /c to run it with shell=False
         if resolved.lower().endswith(('.cmd', '.bat')):
             return ["cmd.exe", "/c", resolved]
-            
+
     return resolved
 
 
@@ -84,9 +115,10 @@ def _parse_and_validate(cmd: str) -> Tuple[bool, str, List[str]]:
     2. Parse with shlex.split() to get individual tokens
     3. Check that no forbidden tokens appear in arguments
     """
-    # Check 1: Raw string validation for shell metacharacters
-    if FORBIDDEN_RE.search(cmd):
-        return False, "shell metacharacters not allowed (&&, ;, |, >, <, `, $(), etc.)", []
+    # Check 1: Raw string validation for shell metacharacters (configurable)
+    if getattr(config, "forbid_shell_security", False):
+        if FORBIDDEN_RE.search(cmd):
+            return False, "shell metacharacters not allowed (;, |, >, <, `, $(), etc.)", []
 
     # Check 2: Parse command into tokens
     try:
@@ -98,8 +130,9 @@ def _parse_and_validate(cmd: str) -> Tuple[bool, str, List[str]]:
         return False, "empty command", []
 
     # Check 3: Validate no forbidden tokens in arguments
-    if any(tok in FORBIDDEN_TOKENS for tok in args):
-        return False, "shell operators not allowed in arguments", []
+    if getattr(config, "forbid_shell_security", False):
+        if any(tok in FORBIDDEN_TOKENS for tok in args):
+            return False, "shell operators not allowed in arguments", []
 
     return True, "", args
 
@@ -118,6 +151,8 @@ def _looks_like_path_token(token: str) -> bool:
     if not token:
         return False
     if token.startswith("-"):
+        return False
+    if os.name == "nt" and re.match(r"^/[A-Za-z0-9]+$", token):
         return False
     if _PATH_TOKEN_RE.search(token):
         return True
@@ -225,6 +260,7 @@ def run_command_safe(
             }
         
         original_cmd_str = " ".join(cmd)
+        args = _rewrite_windows_aliases(args)
     else:
         is_valid, error_msg, args = _parse_and_validate(cmd)
         if not is_valid:
@@ -237,6 +273,7 @@ def run_command_safe(
             }
         original_cmd_str = cmd
 
+    args = _rewrite_windows_aliases(args)
     args = _normalize_command_args(args, resolved_cwd)
     normalized_cmd_str = " ".join(args)
 
@@ -268,8 +305,7 @@ def run_command_safe(
 
         # Support interrupt checking for long-running commands
         if check_interrupt:
-            stdout_data, stderr_data = _communicate_with_interrupt(proc, timeout)
-            interrupted = get_escape_interrupt()
+            stdout_data, stderr_data, timed_out, interrupted = _communicate_with_interrupt(proc, timeout)
         else:
             try:
                 stdout_data, stderr_data = proc.communicate(timeout=timeout)
@@ -288,6 +324,20 @@ def run_command_safe(
 
         if os.getenv("REV_DEBUG_CMD"):
             print(f"  [DEBUG_CMD] Result: rc={proc.returncode}, stdout_len={len(stdout_data or '')}, stderr_len={len(stderr_data or '')}")
+
+        if check_interrupt and timed_out:
+            return {
+                "timeout": timeout,
+                "timed_out": True,
+                "cmd": original_cmd_str,
+                "cmd_normalized": normalized_cmd_str,
+                "cwd": str(resolved_cwd),
+                "rc": proc.returncode if proc.returncode is not None else -1,
+                "stdout": stdout_data or "",
+                "stderr": stderr_data or "",
+                "error": f"command exceeded {timeout}s timeout",
+                "interrupted": interrupted,
+            }
 
         return {
             "rc": proc.returncode,
@@ -320,7 +370,7 @@ def run_command_safe(
 def _communicate_with_interrupt(
     proc: subprocess.Popen,
     timeout: int,
-) -> Tuple[str, str]:
+) -> Tuple[str, str, bool, bool]:
     """Communicate with process while checking for interrupt flag.
 
     Args:
@@ -328,24 +378,27 @@ def _communicate_with_interrupt(
         timeout: Maximum time to wait
 
     Returns:
-        Tuple of (stdout, stderr) as strings
+        Tuple of (stdout, stderr, timed_out, interrupted)
 
     This function polls the process and checks the interrupt flag.
     If interrupted, it terminates the process gracefully, then kills if needed.
     """
     start_time = time.time()
     poll_interval = 0.1  # Check every 100ms
+    timed_out = False
+    interrupted = False
 
     while True:
         # Check if process has finished
         if proc.poll() is not None:
             # Process finished, get remaining output
             stdout, stderr = proc.communicate()
-            return stdout or "", stderr or ""
+            return stdout or "", stderr or "", timed_out, interrupted
 
         # Check for interrupt flag
         if get_escape_interrupt():
             # User requested cancellation
+            interrupted = True
             try:
                 proc.terminate()
                 # Wait briefly for graceful termination
@@ -359,14 +412,15 @@ def _communicate_with_interrupt(
                 pass
 
             stdout, stderr = proc.communicate()
-            return stdout or "", stderr or ""
+            return stdout or "", stderr or "", timed_out, interrupted
 
         # Check for timeout
         elapsed = time.time() - start_time
         if elapsed > timeout:
+            timed_out = True
             proc.kill()
             stdout, stderr = proc.communicate()
-            return stdout or "", stderr or ""
+            return stdout or "", stderr or "", timed_out, interrupted
 
         # Sleep briefly before next check
         time.sleep(poll_interval)

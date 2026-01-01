@@ -245,6 +245,7 @@ if os.getenv("OLLAMA_DEBUG"):
 OLLAMA_BASE_URL = DEFAULT_OLLAMA_BASE_URL
 OLLAMA_MODEL = DEFAULT_OLLAMA_MODEL
 EXECUTION_MODEL = os.getenv("REV_EXECUTION_MODEL", _DEFAULT_MODEL)
+EXECUTION_MODEL_FALLBACK = os.getenv("REV_EXECUTION_MODEL_FALLBACK", "").strip()
 PLANNING_MODEL = os.getenv("REV_PLANNING_MODEL", _DEFAULT_MODEL)
 REVIEW_MODEL = os.getenv("REV_REVIEW_MODEL", _DEFAULT_MODEL)
 RESEARCH_MODEL = os.getenv("REV_RESEARCH_MODEL", _DEFAULT_MODEL)
@@ -252,6 +253,18 @@ DEFAULT_SUPPORTS_TOOLS = os.getenv("REV_MODEL_SUPPORTS_TOOLS", "true").lower() =
 EXECUTION_SUPPORTS_TOOLS = os.getenv("REV_EXECUTION_SUPPORTS_TOOLS", str(DEFAULT_SUPPORTS_TOOLS)).lower() == "true"
 PLANNING_SUPPORTS_TOOLS = os.getenv("REV_PLANNING_SUPPORTS_TOOLS", str(DEFAULT_SUPPORTS_TOOLS)).lower() == "true"
 RESEARCH_SUPPORTS_TOOLS = os.getenv("REV_RESEARCH_SUPPORTS_TOOLS", str(DEFAULT_SUPPORTS_TOOLS)).lower() == "true"
+
+# Workspace path policy
+# When enabled, keep all agents scoped to the workspace root and require workspace-relative paths.
+WORKSPACE_ROOT_ONLY = os.getenv("REV_WORKSPACE_ROOT_ONLY", "true").lower() == "true"
+
+# Test executor behavior
+# When disabled, avoid guessing commands; only run explicit commands from the task text.
+TEST_EXECUTOR_FALLBACK_ENABLED = os.getenv("REV_TEST_EXECUTOR_FALLBACK_ENABLED", "true").lower() == "true"
+TEST_EXECUTOR_COMMAND_CORRECTION_ENABLED = os.getenv("REV_TEST_EXECUTOR_COMMAND_CORRECTION_ENABLED", "false").lower() == "true"
+
+# Explicit approval flag for destructive operations
+EXPLICIT_YES = os.getenv("REV_EXPLICIT_YES", "false").lower() == "true"
 
 # LLM Generation Parameters (for improved tool calling with local models)
 # Lower temperature improves consistency and accuracy for tool calling
@@ -411,12 +424,15 @@ LOOP_GUARD_ENABLED = os.getenv("REV_LOOP_GUARD_ENABLED", "true").strip().lower()
 UCCT_ENABLED = os.getenv("REV_UCCT_ENABLED", "true").strip().lower() != "false"
 # Disabled by default until duplicate directory inclusion bug is fixed
 PREFLIGHT_ENABLED = os.getenv("REV_PREFLIGHT_ENABLED", "false").strip().lower() == "true"
+# Inject initial workspace examination task - disabled by default since decent LLMs naturally research first
+INJECT_INITIAL_RESEARCH = os.getenv("REV_INJECT_INITIAL_RESEARCH", "false").strip().lower() == "true"
 LLM_TRANSACTION_LOG_ENABLED = os.getenv("REV_LLM_TRACE", "false").strip().lower() == "true"
 LLM_TRANSACTION_LOG_PATH = os.getenv(
     "REV_LLM_TRACE_PATH",
     str((REV_DIR / "logs" / "llm_transactions.log").resolve()),
 )
-TDD_ENABLED = os.getenv("REV_TDD_ENABLED", "true").strip().lower() != "false"
+# Default TDD off unless explicitly enabled via REV_TDD_ENABLED=true
+TDD_ENABLED = os.getenv("REV_TDD_ENABLED", "false").strip().lower() == "true"
 TDD_DEFER_TEST_EXECUTION = os.getenv("REV_TDD_DEFER_TESTS", "true").strip().lower() != "false"
 
 EXCLUDE_DIRS = {
@@ -464,7 +480,7 @@ PREFER_REUSE = os.getenv("REV_PREFER_REUSE", "true").lower() == "true"
 WARN_ON_NEW_FILES = os.getenv("REV_WARN_NEW_FILES", "true").lower() == "true"
 REQUIRE_REUSE_JUSTIFICATION = os.getenv("REV_REQUIRE_JUSTIFICATION", "false").lower() == "true"
 MAX_FILES_PER_FEATURE = int(os.getenv("REV_MAX_FILES", "5"))  # Encourage consolidation
-SIMILARITY_THRESHOLD = float(os.getenv("REV_SIMILARITY_THRESHOLD", "0.6"))  # For file name similarity
+SIMILARITY_THRESHOLD = float(os.getenv("REV_SIMILARITY_THRESHOLD", "0.4"))  # For file name similarity (lowered to catch more duplicates)
 
 # Security: Tool Permission Policy (REV-011)
 # PERMISSIONS_FAIL_OPEN: When permission check fails (e.g., malformed policy), should we allow or deny?
@@ -486,7 +502,7 @@ DEFAULT_MCP_SERVERS = {
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-memory"],
         "description": "Persistent memory storage for AI context across sessions",
-        "enabled": os.getenv("REV_MCP_MEMORY", "false").lower() == "true",
+        "enabled": os.getenv("REV_MCP_MEMORY", "true").lower() == "true",
         "public": True
     },
     "sequential-thinking": {
@@ -510,7 +526,7 @@ DEFAULT_MCP_SERVERS = {
 # Disabled when PRIVATE_MODE is enabled
 REMOTE_MCP_SERVERS = {
     "deepwiki": {
-        "url": "https://mcp.deepwiki.com/sse",
+        "url": "https://mcp.deepwiki.com/mcp",
         "description": "RAG-as-a-Service for GitHub repositories - code understanding",
         "enabled": os.getenv("REV_MCP_DEEPWIKI", "true").lower() == "true",
         "public": True,
@@ -529,6 +545,13 @@ REMOTE_MCP_SERVERS = {
         "enabled": os.getenv("REV_MCP_SEMGREP", "true").lower() == "true",
         "public": True,
         "category": "security"
+    },
+    "remote-fetch": {
+        "url": "https://remote.mcpservers.org/fetch/mcp",
+        "description": "Remote MCP fetch service for HTTP requests",
+        "enabled": os.getenv("REV_MCP_REMOTE_FETCH", "true").lower() == "true",
+        "public": True,
+        "category": "fetch"
     },
     "cloudflare-docs": {
         "url": "https://docs.mcp.cloudflare.com/sse",
@@ -687,3 +710,7 @@ def is_mcp_server_allowed(server_config: Dict[str, Any]) -> bool:
     # In private mode, only allow non-public servers
     is_public = server_config.get("public", False)
     return not is_public
+# Unified shell security toggle:
+# True  -> block shell metacharacters and dangerous tokens
+# False -> allow (permits &&, ||, |, etc.)
+forbid_shell_security = False

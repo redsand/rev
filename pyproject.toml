@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rev-agentic"
-version = "2.1.0"
+version = "2.1.1"
 description = "Rev - Autonomous AI Development System with Multi-Agent Orchestration"
 readme = "README.md"
 requires-python = ">=3.8"

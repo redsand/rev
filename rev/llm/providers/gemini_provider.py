@@ -111,14 +111,15 @@ class GeminiProvider(LLMProvider):
         return system_instruction.strip(), converted
 
     def _remove_default_fields(self, schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Recursively remove 'default' fields from schema (Gemini doesn't support them)."""
+        """Recursively remove schema keywords Gemini rejects (default/oneOf/anyOf/allOf)."""
         if not isinstance(schema, dict):
             return schema
 
         result = {}
         for key, value in schema.items():
-            if key == "default":
-                continue  # Skip 'default' fields
+            # Skip unsupported keywords
+            if key in {"default", "oneOf", "anyOf", "allOf"}:
+                continue
             elif isinstance(value, dict):
                 result[key] = self._remove_default_fields(value)
             elif isinstance(value, list):
@@ -131,35 +132,39 @@ class GeminiProvider(LLMProvider):
         return result
 
     def _convert_tools(self, tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
-        """Convert OpenAI-style tool definitions to Gemini format."""
+        """Convert OpenAI-style tool definitions to Gemini format.
+
+        Gemini expects all function declarations in a single tools object:
+        [{"function_declarations": [func1, func2, ...]}]
+        """
         if not tools:
             return []
 
-        converted = []
+        function_declarations = []
         for tool in tools:
             if tool.get("type") == "function":
                 func = tool.get("function", {})
                 # Remove 'default' fields from parameters as Gemini doesn't support them
                 parameters = self._remove_default_fields(func.get("parameters", {}))
-                converted.append({
-                    "function_declarations": [{
-                        "name": func.get("name", ""),
-                        "description": func.get("description", ""),
-                        "parameters": parameters,
-                    }]
+                function_declarations.append({
+                    "name": func.get("name", ""),
+                    "description": func.get("description", ""),
+                    "parameters": parameters,
                 })
 
-        return converted
+        # Return all function declarations in a single tools object
+        if function_declarations:
+            return [{"function_declarations": function_declarations}]
+        return []
 
     def _convert_response(self, response: Any, usage_metadata: Optional[Any] = None) -> Dict[str, Any]:
         """Convert Gemini response to our standard format."""
         content = ""
         tool_calls = []
 
-        # Extract content from response
-        if hasattr(response, "text"):
-            content = response.text
-        elif hasattr(response, "parts"):
+        # ALWAYS check parts first for function calls
+        # response.text might exist but be empty when there are function calls
+        if hasattr(response, "parts"):
             for part in response.parts:
                 if hasattr(part, "text"):
                     content += part.text
@@ -172,6 +177,9 @@ class GeminiProvider(LLMProvider):
                             "arguments": json.dumps(dict(fc.args)),
                         }
                     })
+        elif hasattr(response, "text"):
+            # Fallback to text attribute if no parts
+            content = response.text
 
         result_message = {
             "role": "assistant",
@@ -317,13 +325,8 @@ class GeminiProvider(LLMProvider):
                 if check_user_messages:
                     check_user_messages()
 
-                # Extract text from chunk
-                if hasattr(chunk, "text"):
-                    text = chunk.text
-                    accumulated_content += text
-                    if on_chunk:
-                        on_chunk(text)
-                elif hasattr(chunk, "parts"):
+                # Extract text from chunk - check parts first for function calls
+                if hasattr(chunk, "parts"):
                     for part in chunk.parts:
                         if hasattr(part, "text"):
                             accumulated_content += part.text
@@ -337,6 +340,11 @@ class GeminiProvider(LLMProvider):
                                     "arguments": json.dumps(dict(fc.args)),
                                 }
                             })
+                elif hasattr(chunk, "text"):
+                    text = chunk.text
+                    accumulated_content += text
+                    if on_chunk:
+                        on_chunk(text)
 
             # Get usage from final chunk
             if hasattr(response_stream, "usage_metadata"):

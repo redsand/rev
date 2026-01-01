@@ -30,11 +30,13 @@ class PromptHistory:
         # Separate histories for commands and regular input
         self.command_history: deque = deque(maxlen=max_history)
         self.input_history: deque = deque(maxlen=max_history)
+        self.unified_history: deque = deque(maxlen=max_history)
         
         # Current position in history navigation
         self.history_position: int = 0
         self.current_history: Optional[deque] = None
         self.current_input: str = ""
+        self.last_entry_is_command: bool = False
         
         # Thread safety
         self.lock = threading.Lock()
@@ -52,6 +54,9 @@ class PromptHistory:
             # Avoid duplicate consecutive entries
             if not self.command_history or self.command_history[-1] != command:
                 self.command_history.append(command)
+            if not self.unified_history or self.unified_history[-1] != command:
+                self.unified_history.append(command)
+            self.last_entry_is_command = True
             
             # Reset navigation position
             self.history_position = 0
@@ -70,6 +75,9 @@ class PromptHistory:
             # Avoid duplicate consecutive entries
             if not self.input_history or self.input_history[-1] != user_input:
                 self.input_history.append(user_input)
+            if not self.unified_history or self.unified_history[-1] != user_input:
+                self.unified_history.append(user_input)
+            self.last_entry_is_command = False
             
             # Reset navigation position
             self.history_position = 0
@@ -83,7 +91,7 @@ class PromptHistory:
             current_input: The current input buffer when starting navigation
         """
         with self.lock:
-            self.current_history = self.command_history if is_command else self.input_history
+            self.current_history = self.unified_history
             self.history_position = 0
             self.current_input = current_input
 
@@ -126,9 +134,16 @@ class PromptHistory:
         with self.lock:
             self.command_history.clear()
             self.input_history.clear()
+            self.unified_history.clear()
             self.history_position = 0
             self.current_history = None
             self.current_input = ""
+            self.last_entry_is_command = False
+
+    def last_entry_was_command(self) -> bool:
+        """Return True if the last recorded entry was a command."""
+        with self.lock:
+            return self.last_entry_is_command
 
     def get_command_history(self) -> List[str]:
         """Get command history as a list.
@@ -151,4 +166,4 @@ class PromptHistory:
     def __len__(self) -> int:
         """Get total number of history entries."""
         with self.lock:
-            return len(self.command_history) + len(self.input_history)
+            return len(self.unified_history)

@@ -55,6 +55,7 @@ class DebugLogger:
             log_dir: Directory to store log files (defaults to .rev/logs/)
         """
         self._enabled = enabled
+        self._trace_context: Dict[str, Any] = {}
 
         if enabled:
             # Create log directory
@@ -110,6 +111,22 @@ class DebugLogger:
         if cls._instance is None:
             cls._instance = cls(enabled=False)
         return cls._instance
+
+    def set_trace_context(self, updates: Dict[str, Any], *, replace: bool = False) -> None:
+        """Attach contextual metadata to subsequent LLM/transaction logs."""
+        if not isinstance(updates, dict):
+            return
+        if replace:
+            self._trace_context = {}
+        for key, value in updates.items():
+            if value is None:
+                self._trace_context.pop(key, None)
+            else:
+                self._trace_context[key] = value
+
+    def get_trace_context(self) -> Dict[str, Any]:
+        """Return a copy of the current trace context."""
+        return dict(self._trace_context)
 
     def _setup_logging(self):
         """Set up the logging configuration."""
@@ -331,7 +348,11 @@ class DebugLogger:
                 "messages": messages,
                 "tools": tools,
                 "response": response,
-                "system_state": extra_context
+                "system_state": extra_context,
+                "trace_context": self.get_trace_context(),
+                "tools_enabled": bool(tools),
+                "message_count": msg_count,
+                "last_message_role": last_role,
             }
             content = json.dumps(payload, ensure_ascii=False, indent=2)
             path_val = getattr(config, "LLM_TRANSACTION_LOG_PATH", "")
@@ -369,7 +390,8 @@ class DebugLogger:
             payload = {
                 "event_type": event_type,
                 "timestamp": timestamp,
-                "data": data
+                "data": data,
+                "trace_context": self.get_trace_context()
             }
             content = json.dumps(payload, ensure_ascii=False, indent=2)
             path_val = getattr(config, "LLM_TRANSACTION_LOG_PATH", "")

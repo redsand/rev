@@ -84,6 +84,17 @@ def _handle_tab_completion(prompt: str, buffer: List[str], cursor_pos: int) -> i
     _render_prompt(prompt, buffer, cursor_pos)
     return cursor_pos
 
+
+def _is_command_mode(prompt: str, buffer: List[str]) -> bool:
+    text = ''.join(buffer).lstrip()
+    if text.startswith('/'):
+        return True
+    if text:
+        return False
+    if prompt.strip().endswith('/'):
+        return True
+    return _history.last_entry_was_command()
+
 def get_history() -> PromptHistory:
     """Get the global history instance."""
     return _history
@@ -113,7 +124,6 @@ def _get_input_unix(prompt: str) -> Tuple[str, bool]:
     buffer = []
     cursor_pos = 0
     navigating_history = False
-    is_command = prompt.strip().endswith('/')  # Simple heuristic for command mode
     escape_pressed = False
 
     try:
@@ -127,7 +137,7 @@ def _get_input_unix(prompt: str) -> Tuple[str, bool]:
             # Reset navigation state on any non-arrow key input
             if navigating_history and char not in ('\x1b', '[', 'A', 'B', 'C', 'D'):
                 navigating_history = False
-                _history.start_navigation(is_command, ''.join(buffer))
+                _history.start_navigation(_is_command_mode(prompt, buffer), ''.join(buffer))
 
             # Check for ESC key
             if char == '\x1b':  # ESC key
@@ -150,7 +160,7 @@ def _get_input_unix(prompt: str) -> Tuple[str, bool]:
                             sys.stdout.flush()
                     elif next_chars == '[A':  # Up arrow
                         if not navigating_history:
-                            _history.start_navigation(is_command, ''.join(buffer))
+                            _history.start_navigation(_is_command_mode(prompt, buffer), ''.join(buffer))
                             navigating_history = True
                         
                         previous = _history.get_previous()
@@ -266,7 +276,6 @@ def _get_input_windows(prompt: str) -> Tuple[str, bool]:
     cursor_pos = 0
     escape_pressed = False
     navigating_history = False
-    is_command = prompt.strip().endswith('/')  # Simple heuristic for command mode
     pending_char = None
 
     def _insert_newline() -> None:
@@ -307,7 +316,7 @@ def _get_input_windows(prompt: str) -> Tuple[str, bool]:
                         sys.stdout.flush()
                 elif extended == b'H':  # Up arrow
                     if not navigating_history:
-                        _history.start_navigation(is_command, ''.join(buffer))
+                        _history.start_navigation(_is_command_mode(prompt, buffer), ''.join(buffer))
                         navigating_history = True
                     
                     previous = _history.get_previous()
@@ -338,7 +347,7 @@ def _get_input_windows(prompt: str) -> Tuple[str, bool]:
             # Reset navigation state on any non-arrow key input
             if navigating_history and char not in (b'\x00', b'\xe0'):
                 navigating_history = False
-                _history.start_navigation(is_command, ''.join(buffer))
+                _history.start_navigation(_is_command_mode(prompt, buffer), ''.join(buffer))
 
             # Check for ESC key
             if char == b'\x1b':

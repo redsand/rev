@@ -6,7 +6,7 @@ from rev.agents.base import BaseAgent
 from rev.agents.context_provider import build_context_and_tools
 from rev.agents.subagent_io import build_subagent_output
 from rev.core.context import RevContext
-from rev.core.tool_call_recovery import recover_tool_call_from_text
+from rev.core.tool_call_recovery import recover_tool_call_from_text, recover_tool_call_from_text_lenient
 from rev.core.tool_call_retry import retry_tool_call_with_response_format
 from rev.llm.client import ollama_chat
 from rev.models.task import Task
@@ -95,7 +95,7 @@ class ToolExecutorAgent(BaseAgent):
         if parsed:
             tool_name, tool_args = parsed
             if tool_name in allowed_tool_names:
-                raw_result = execute_tool(tool_name, tool_args)
+                raw_result = execute_tool(tool_name, tool_args, agent_name="ToolExecutorAgent")
                 return build_subagent_output(
                     agent_name="ToolExecutorAgent",
                     tool_name=tool_name,
@@ -129,17 +129,21 @@ class ToolExecutorAgent(BaseAgent):
                 error_type = "empty_response"
                 error_detail = "LLM returned None/empty response"
             elif "message" not in response:
-                error_type = "missing_message_key"
-                error_detail = f"Response missing 'message' key: {list(response.keys())}"
+                if "error" in response:
+                    error_type = "llm_error_payload"
+                    error_detail = str(response.get("error"))
+                else:
+                    error_type = "missing_message_key"
+                    error_detail = f"Response missing 'message' key: {list(response.keys())}"
             elif "tool_calls" not in response["message"]:
                 content = response.get("message", {}).get("content", "") or ""
-                recovered = retry_tool_call_with_response_format(
-                    messages,
-                    selected_tools,
-                    allowed_tools=tool_names,
-                )
+                recovered = recover_tool_call_from_text(content, allowed_tools=tool_names)
+                if not recovered:
+                    recovered = recover_tool_call_from_text_lenient(content, allowed_tools=tool_names)
+                    if recovered:
+                        print("  [WARN] ToolExecutorAgent: using lenient tool call recovery from text output")
                 if recovered:
-                    raw_result = execute_tool(recovered.name, recovered.arguments)
+                    raw_result = execute_tool(recovered.name, recovered.arguments, agent_name="ToolExecutorAgent")
                     return build_subagent_output(
                         agent_name="ToolExecutorAgent",
                         tool_name=recovered.name,
@@ -148,10 +152,13 @@ class ToolExecutorAgent(BaseAgent):
                         context=context,
                         task_id=task.task_id,
                     )
-
-                recovered = recover_tool_call_from_text(content, allowed_tools=tool_names)
+                recovered = retry_tool_call_with_response_format(
+                    messages,
+                    selected_tools,
+                    allowed_tools=tool_names,
+                )
                 if recovered:
-                    raw_result = execute_tool(recovered.name, recovered.arguments)
+                    raw_result = execute_tool(recovered.name, recovered.arguments, agent_name="ToolExecutorAgent")
                     return build_subagent_output(
                         agent_name="ToolExecutorAgent",
                         tool_name=recovered.name,
@@ -186,7 +193,7 @@ class ToolExecutorAgent(BaseAgent):
                             error_type = "unknown_tool"
                             error_detail = f"Tool '{tool_name}' is not available"
                         else:
-                            raw_result = execute_tool(tool_name, tool_args)
+                            raw_result = execute_tool(tool_name, tool_args, agent_name="ToolExecutorAgent")
                             return build_subagent_output(
                                 agent_name="ToolExecutorAgent",
                                 tool_name=tool_name,
@@ -199,19 +206,26 @@ class ToolExecutorAgent(BaseAgent):
             if error_type:
                 if error_type in {"text_instead_of_tool_call", "empty_tool_calls", "missing_tool_calls"}:
                     retried = False
-                    recovered = retry_tool_call_with_response_format(
-                        messages,
-                        selected_tools,
+                    recovered = recover_tool_call_from_text(
+                        response.get("message", {}).get("content", ""),
                         allowed_tools=[t for t in allowed_tool_names if isinstance(t, str)],
                     )
-                    if recovered:
-                        retried = True
-                        print(f"  -> Retried tool call with JSON format: {recovered.name}")
-                    else:
-                        recovered = recover_tool_call_from_text(
+                    if not recovered:
+                        recovered = recover_tool_call_from_text_lenient(
                             response.get("message", {}).get("content", ""),
                             allowed_tools=[t for t in allowed_tool_names if isinstance(t, str)],
                         )
+                        if recovered:
+                            print("  [WARN] ToolExecutorAgent: using lenient tool call recovery from text output")
+                    if not recovered:
+                        recovered = retry_tool_call_with_response_format(
+                            messages,
+                            selected_tools,
+                            allowed_tools=[t for t in allowed_tool_names if isinstance(t, str)],
+                        )
+                        if recovered:
+                            retried = True
+                            print(f"  -> Retried tool call with JSON format: {recovered.name}")
                     if recovered:
                         if not recovered.name:
                             return self.make_failure_signal("missing_tool", "Recovered tool call missing name")
@@ -219,7 +233,7 @@ class ToolExecutorAgent(BaseAgent):
                             return self.make_failure_signal("missing_tool_args", "Recovered tool call missing arguments")
                         if not retried:
                             print(f"  -> Recovered tool call from text output: {recovered.name}")
-                        raw_result = execute_tool(recovered.name, recovered.arguments)
+                        raw_result = execute_tool(recovered.name, recovered.arguments, agent_name="ToolExecutorAgent")
                         return build_subagent_output(
                             agent_name="ToolExecutorAgent",
                             tool_name=recovered.name,

@@ -103,6 +103,30 @@ def _provider_can_try_thinking(provider: Any) -> bool:
     return getattr(provider, "name", "") == "openai"
 
 
+def _is_thinking_param_error(response: Dict[str, Any]) -> bool:
+    """Detect errors that indicate an unsupported "thinking" parameter."""
+    if not isinstance(response, dict):
+        return False
+    error = response.get("error")
+    if not isinstance(error, str):
+        return False
+    lowered = error.lower()
+    if "thinking" not in lowered:
+        return False
+    return any(
+        token in lowered
+        for token in (
+            "unknown field",
+            "unexpected keyword",
+            "unexpected parameter",
+            "unrecognized parameter",
+            "invalid parameter",
+            "not allowed",
+            "unsupported",
+        )
+    )
+
+
 def _call_with_auto_thinking(
     *,
     provider: Any,
@@ -125,7 +149,13 @@ def _call_with_auto_thinking(
 
     # Known supported
     if state is True:
-        return provider.chat(messages=messages, tools=tools, model=model_name, supports_tools=supports_tools, **thinking_kwargs)
+        response = provider.chat(messages=messages, tools=tools, model=model_name, supports_tools=supports_tools, **thinking_kwargs)
+        if _is_thinking_param_error(response):
+            _THINKING_SUPPORT[key] = False
+            fallback = provider.chat(messages=messages, tools=tools, model=model_name, supports_tools=supports_tools, **kwargs)
+            if isinstance(fallback, dict) and "error" not in fallback:
+                return fallback
+        return response
     # Known unsupported
     if state is False:
         return provider.chat(messages=messages, tools=tools, model=model_name, supports_tools=supports_tools, **kwargs)
@@ -135,6 +165,9 @@ def _call_with_auto_thinking(
     if isinstance(response, dict) and "error" not in response:
         _THINKING_SUPPORT[key] = True
         return response
+
+    if _is_thinking_param_error(response):
+        _THINKING_SUPPORT[key] = False
 
     fallback = provider.chat(messages=messages, tools=tools, model=model_name, supports_tools=supports_tools, **kwargs)
     if isinstance(fallback, dict) and "error" not in fallback:
@@ -186,7 +219,7 @@ def _call_stream_with_auto_thinking(
     thinking_kwargs.update(kwargs)
 
     if state is True:
-        return provider.chat_stream(
+        response = provider.chat_stream(
             messages=messages,
             tools=tools,
             model=model_name,
@@ -196,6 +229,21 @@ def _call_stream_with_auto_thinking(
             check_user_messages=check_user_messages,
             **thinking_kwargs,
         )
+        if _is_thinking_param_error(response):
+            _THINKING_SUPPORT[key] = False
+            fallback = provider.chat_stream(
+                messages=messages,
+                tools=tools,
+                model=model_name,
+                supports_tools=supports_tools,
+                on_chunk=on_chunk,
+                check_interrupt=check_interrupt,
+                check_user_messages=check_user_messages,
+                **kwargs,
+            )
+            if isinstance(fallback, dict) and "error" not in fallback:
+                return fallback
+        return response
     if state is False:
         return provider.chat_stream(
             messages=messages,
@@ -221,6 +269,9 @@ def _call_stream_with_auto_thinking(
     if isinstance(response, dict) and "error" not in response:
         _THINKING_SUPPORT[key] = True
         return response
+
+    if _is_thinking_param_error(response):
+        _THINKING_SUPPORT[key] = False
 
     fallback = provider.chat_stream(
         messages=messages,
@@ -508,6 +559,14 @@ def ollama_chat(
     tools_provided = tools is not None and supports_tools
 
     debug_logger = get_logger()
+    try:
+        debug_logger.set_trace_context({
+            "llm_provider": config.LLM_PROVIDER,
+            "supports_tools": supports_tools,
+            "tools_provided": bool(tools),
+        })
+    except Exception:
+        pass
     if getattr(config, "LLM_TRANSACTION_LOG_ENABLED", False):
         try:
             debug_logger.log_llm_transcript(model=model_name, messages=messages, response={"pending": True}, tools=tools)

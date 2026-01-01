@@ -6,17 +6,19 @@ from rev.llm.client import ollama_chat
 from rev.core.context import RevContext
 from rev.execution.safety import is_scary_operation, prompt_scary_operation
 from difflib import unified_diff
-from typing import Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import re
 from pathlib import Path
 
-from rev.core.tool_call_recovery import recover_tool_call_from_text
+from rev.core.tool_call_recovery import recover_tool_call_from_text, recover_tool_call_from_text_lenient, RecoveredToolCall
 from rev.core.tool_call_retry import retry_tool_call_with_response_format
 from rev.agents.context_provider import build_context_and_tools
 from rev.agents.subagent_io import build_subagent_output
 from rev.tools.registry import execute_tool as execute_registry_tool
+from rev.tools import file_ops
 from rev import config
 from rev.execution.ultrathink_prompts import ULTRATHINK_CODE_WRITER_PROMPT
+from rev.tools.workspace_resolver import resolve_workspace_path
 
 
 def _extract_target_files_from_description(description: str) -> list[str]:
@@ -46,16 +48,87 @@ def _extract_target_files_from_description(description: str) -> list[str]:
     # Match bare paths like src/module/file.ext or backend/prisma/schema.prisma
     # Pattern: word chars, slashes, dots, hyphens + dot + extension
     bare_pattern = r'\b([\w./\\-]+\.\w+)\b'
+    allowed_bare = {
+        "package.json",
+        "tsconfig.json",
+        "jsconfig.json",
+        "vite.config.ts",
+        "vitest.config.ts",
+        "jest.config.js",
+        "README.md",
+        "readme.md",
+    }
+    verb_hint = re.compile(r"\b(edit|update|modify|create|add|remove|delete|replace|rename|refactor|fix|read|inspect|open|write)\b", re.IGNORECASE)
     for match in re.finditer(bare_pattern, description, re.IGNORECASE):
         candidate = match.group(1)
-        # Filter out common false positives
-        # Include if it has a path separator (/ or \) OR if it's a multi-character filename
-        if candidate not in paths and not candidate.startswith('.'):
-            # Must have a slash (path) or be a meaningful filename (not just ".ext")
-            if '/' in candidate or '\\' in candidate or len(candidate.split('.')[0]) > 1:
-                paths.append(candidate)
+        if candidate in paths or candidate.startswith('.'):
+            continue
+        end_idx = match.end()
+        if end_idx < len(description) and description[end_idx] == "(":
+            # Avoid method-like tokens such as express.json()
+            continue
+        if '/' in candidate or '\\' in candidate:
+            paths.append(candidate)
+            continue
+        if candidate.lower() in allowed_bare:
+            paths.append(candidate)
+            continue
+        context_start = max(0, match.start() - 25)
+        context = description[context_start:match.start()]
+        if verb_hint.search(context):
+            paths.append(candidate)
 
     return paths
+
+
+def _targets_exist(paths: list[str]) -> bool:
+    """Return True if any provided path exists as a file in the workspace."""
+    for raw in paths:
+        if not raw:
+            continue
+        try:
+            resolved = resolve_workspace_path(raw).abs_path
+            if resolved.is_file():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _detect_path_conflict(path_str: str) -> Optional[str]:
+    """
+    Detect common path conflicts such as creating both <name>.ts and <name>/index.ts.
+    Returns a human-readable warning if a conflict is found.
+    """
+    if not path_str:
+        return None
+    try:
+        base = Path(config.ROOT) / path_str
+    except Exception:
+        return None
+
+    # If creating a file like foo.ts and a directory foo/ already exists with index.* inside, warn.
+    if base.suffix:
+        stem = base.with_suffix("")
+        dir_candidate = stem
+        if dir_candidate.is_dir():
+            index_files = list(dir_candidate.glob("index.*"))
+            if index_files:
+                return (
+                    f"Path conflict: '{path_str}' overlaps with existing directory '{dir_candidate}' "
+                    "that already contains an index.* file. Choose a single entry point."
+                )
+    # If creating a directory and a file with same stem exists, warn.
+    if not base.suffix:
+        file_candidate_ts = base.with_suffix(".ts")
+        file_candidate_js = base.with_suffix(".js")
+        for file_candidate in (file_candidate_ts, file_candidate_js):
+            if file_candidate.is_file():
+                return (
+                    f"Path conflict: target directory '{path_str}' overlaps with existing file '{file_candidate.name}'. "
+                    "Avoid creating both a file and a directory with the same name."
+                )
+    return None
 
 
 def _read_file_content_for_edit(file_path: str, max_lines: int = 2000) -> str | None:
@@ -65,38 +138,53 @@ def _read_file_content_for_edit(file_path: str, max_lines: int = 2000) -> str | 
 
     For files over max_lines, falls back to using write_file strategy instead of replace_in_file.
     """
-    try:
-        result = execute_registry_tool("read_file", {"path": file_path})
+    def _normalize_content(content: str) -> str:
+        lines = content.split('\n')
+        if len(lines) > max_lines:
+            return (
+                content +
+                f"\n\nWARNING: This file has {len(lines)} lines (>{max_lines}). "
+                "For large files, consider using write_file with the complete new content "
+                "instead of replace_in_file, as it's more reliable for extensive changes."
+            )
+        return content
+
+    def _try_read(path_value: str) -> Optional[str]:
+        result = execute_registry_tool("read_file", {"path": path_value})
         if isinstance(result, str):
-            # Check for error in result
             try:
                 result_json = json.loads(result)
-                if isinstance(result_json, dict) and "error" in result_json:
-                    return None
-                # Return the content from the read_file result
-                if isinstance(result_json, dict) and "content" in result_json:
-                    content = result_json["content"]
-                    # Warn if file is large - don't truncate, but suggest alternative approach
-                    lines = content.split('\n')
-                    if len(lines) > max_lines:
-                        return (
-                            content +
-                            f"\n\nWARNING: This file has {len(lines)} lines (>{max_lines}). "
-                            "For large files, consider using write_file with the complete new content "
-                            "instead of replace_in_file, as it's more reliable for extensive changes."
-                        )
-                    return content
+                if isinstance(result_json, dict):
+                    if "error" in result_json:
+                        return None
+                    if result_json.get("is_dir"):
+                        return None
+                    if "content" in result_json:
+                        return _normalize_content(result_json["content"])
+                    if any(key in result_json for key in ("path", "entries", "count", "hint")):
+                        return None
+                    # The file content itself may be valid JSON (e.g. package.json).
+                    return _normalize_content(result)
             except json.JSONDecodeError:
-                # Result is plain text content
-                lines = result.split('\n')
-                if len(lines) > max_lines:
-                    return (
-                        result +
-                        f"\n\nWARNING: This file has {len(lines)} lines (>{max_lines}). "
-                        "For large files, consider using write_file with the complete new content "
-                        "instead of replace_in_file, as it's more reliable for extensive changes."
-                    )
-                return result
+                return _normalize_content(result)
+        return None
+
+    try:
+        content = _try_read(file_path)
+        if content:
+            return content
+
+        # Fallback: resolve relative path against workspace root when workdir is scoped.
+        try:
+            candidate = Path(file_path)
+            if not candidate.is_absolute():
+                root_path = Path(config.ROOT)
+                alt = root_path / candidate
+                content = _try_read(str(alt))
+                if content:
+                    return content
+        except Exception:
+            pass
     except Exception:
         pass
     return None
@@ -116,6 +204,21 @@ def _task_is_command_only(description: str) -> bool:
     )
 
 CODE_WRITER_SYSTEM_PROMPT = """You are a specialized Code Writer agent. Your sole purpose is to execute a single coding task by calling the ONLY available tool for this specific task.
+
+⚠️ CRITICAL WARNING - TOOL EXECUTION IS MANDATORY ⚠️
+YOU MUST CALL A TOOL. DO NOT RETURN EXPLANATORY TEXT. DO NOT DESCRIBE WHAT YOU WOULD DO.
+IF YOU RETURN TEXT INSTEAD OF A TOOL CALL, THE TASK WILL FAIL PERMANENTLY.
+
+Your response must be ONLY a JSON tool call. Example:
+{
+  "tool_name": "write_file",
+  "arguments": {
+    "path": "example.js",
+    "content": "console.log('hello');"
+  }
+}
+
+DO NOT wrap the JSON in markdown. DO NOT add any other text before or after the JSON.
 
 You will be given a task description, action_type, and repository context. Analyze them carefully.
 
@@ -167,6 +270,11 @@ CRITICAL RULES FOR CODE EXTRACTION:
     - All imports and dependencies included
     - Proper error handling and validation
     - Docstrings explaining non-obvious logic
+10. Naming and documentation for new files:
+    - Choose descriptive, unambiguous filenames that reflect the file's purpose.
+    - Avoid near-duplicate names; if a similar file exists, EDIT that file instead of creating a new one.
+    - For new files (and files you fully rewrite), include a brief header comment/top-of-file note describing its role/purpose.
+    - Tests should be unit-level where possible (mock external services/DB), or use supertest(app) without starting the server. Avoid hard-coded ports; export the app and use in-memory testing.
 
 SECURITY-MINDED CODING (CRITICAL):
 - Never store passwords, secrets, or API keys as plain strings in code.
@@ -444,6 +552,81 @@ class CodeWriterAgent(BaseAgent):
             )
         return f"{tool_name}: {arg_msg}"
 
+    def _retry_with_diff_or_file(
+        self,
+        messages: List[Dict[str, str]],
+        *,
+        allowed_tools: List[str],
+    ) -> Optional[RecoveredToolCall]:
+        """Fallback retry asking for unified diff or full file content."""
+        guidance = (
+            "Tool calling failed. Return ONLY one of the following:\n"
+            "1) A unified diff (diff --git or ---/+++ with @@ hunks), OR\n"
+            "2) A fenced file block with the first line 'path: <path>' and the full file content.\n"
+            "Do NOT include commentary."
+        )
+        retry_messages = list(messages) + [{"role": "user", "content": guidance}]
+        response = ollama_chat(retry_messages, tools=None, supports_tools=False)
+        content = ""
+        if isinstance(response, dict):
+            message = response.get("message") or {}
+            if isinstance(message, dict):
+                content = message.get("content") or ""
+        return recover_tool_call_from_text(content, allowed_tools=allowed_tools)
+
+    def _retry_with_write_file(
+        self,
+        messages: List[Dict[str, str]],
+        *,
+        allowed_tools: List[str],
+    ) -> Optional[RecoveredToolCall]:
+        """Fallback retry forcing full file content output."""
+        guidance = (
+            "replace_in_file did not match. Return ONLY a fenced file block with:\n"
+            "path: <path>\n"
+            "<full file content>\n"
+            "Do NOT return a diff or commentary."
+        )
+        retry_messages = list(messages) + [{"role": "user", "content": guidance}]
+        response = ollama_chat(retry_messages, tools=None, supports_tools=False)
+        content = ""
+        if isinstance(response, dict):
+            message = response.get("message") or {}
+            if isinstance(message, dict):
+                content = message.get("content") or ""
+        recovered = recover_tool_call_from_text(content, allowed_tools=allowed_tools)
+        if recovered and recovered.name == "write_file":
+            return recovered
+        return None
+
+    def _retry_with_tool_call_repair(
+        self,
+        messages: List[Dict[str, str]],
+        raw_content: str,
+        *,
+        allowed_tools: List[str],
+        tools: List[Dict[str, Any]],
+    ) -> Optional[RecoveredToolCall]:
+        """Attempt to repair a tool call when the model returned JSON-like text."""
+        if not raw_content:
+            return None
+        if not any(token in raw_content for token in ("tool_name", "\"arguments\"", "\"function\"")):
+            return None
+        guidance = (
+            "Your previous response attempted a tool call but was invalid or truncated. "
+            "Use it as a hint and return ONLY a valid JSON tool call object with "
+            "\"tool_name\" and \"arguments\". No commentary."
+        )
+        repair_messages = list(messages) + [
+            {"role": "assistant", "content": raw_content},
+            {"role": "user", "content": guidance},
+        ]
+        return retry_tool_call_with_response_format(
+            repair_messages,
+            tools,
+            allowed_tools=allowed_tools,
+        )
+
     def _color_diff_line(self, line: str) -> str:
         """Apply color coding to diff lines (matching linear mode formatting)."""
         if line.startswith("+++") or line.startswith("---"):
@@ -564,9 +747,10 @@ class CodeWriterAgent(BaseAgent):
 
     def _prompt_for_approval(self, tool_name: str, file_path: str, context: 'RevContext' = None) -> bool:
         """Prompt user to approve the change (matching linear mode behavior)."""
-        # If auto_approve is set in context, skip user prompts
+        # If auto_approve is set in context, skip user prompts unless deleting without --yes.
         if context and context.auto_approve:
-            return True
+            if tool_name != "delete_file" or getattr(config, "EXPLICIT_YES", False):
+                return True
 
         # Check if this is a scary operation
         is_scary, scary_reason = is_scary_operation(tool_name, {"file_path": file_path})
@@ -614,7 +798,18 @@ class CodeWriterAgent(BaseAgent):
 
         # Constrain available tools based on task action_type
         all_tools = get_available_tools()
-
+        python_tools = [
+            'rewrite_python_imports',
+            'rewrite_python_keyword_args',
+            'rename_imported_symbols',
+            'move_imported_symbols',
+            'rewrite_python_function_parameters',
+        ]
+        target_files_for_tools = _extract_target_files_from_description(task.description)
+        include_python_tools = any(
+            path.lower().endswith((".py", ".pyi")) for path in target_files_for_tools
+        )
+        target_exists = _targets_exist(target_files_for_tools)
         # Determine which tools are appropriate for this action_type
         if task.action_type == "create_directory":
             # Directory creation tasks only get create_directory tool
@@ -623,38 +818,36 @@ class CodeWriterAgent(BaseAgent):
             # File creation tasks only get write_file tool
             tool_names = ['write_file']
         elif task.action_type == "edit":
-            # File modification tasks may use AST-aware edits for safer Python refactors
+            # File modification tasks should avoid full overwrites; prefer patching tools first.
             tool_names = [
-                'rewrite_python_imports',
-                'rewrite_python_keyword_args',
-                'rename_imported_symbols',
-                'move_imported_symbols',
-                'rewrite_python_function_parameters',
                 'replace_in_file',
                 'apply_patch',
                 'write_file',
                 'copy_file',
                 'move_file',
             ]
+            if include_python_tools:
+                tool_names = python_tools + tool_names
         elif task.action_type == "refactor":
             # Refactoring may need to create or modify files
             tool_names = [
                 'write_file',
                 'apply_patch',
-                'rewrite_python_imports',
-                'rewrite_python_keyword_args',
-                'rename_imported_symbols',
-                'move_imported_symbols',
-                'rewrite_python_function_parameters',
                 'replace_in_file',
                 'copy_file',
                 'move_file',
             ]
+            if include_python_tools:
+                tool_names = python_tools + tool_names
+        elif task.action_type in {"move", "rename"}:
+            # Move/rename should only use move_file to prevent accidental rewrites.
+            tool_names = ['move_file']
         else:
             # Unknown action types get all tools (fallback)
             tool_names = ['write_file', 'replace_in_file', 'create_directory', 'copy_file', 'move_file']
 
         available_tools = [tool for tool in all_tools if tool['function']['name'] in tool_names]
+        recovery_allowed_tools = list(tool_names) if tool_names else [t["function"]["name"] for t in available_tools]
         rendered_context, selected_tools, _bundle = build_context_and_tools(
             task,
             context,
@@ -767,6 +960,28 @@ class CodeWriterAgent(BaseAgent):
                     f"{separator}\n"
                 )
 
+        # For action_type="add": prevent duplicates by checking similar existing files.
+        if task.action_type == "add":
+            target_files = target_files_for_tools or _extract_target_files_from_description(task.description)
+            if not target_files:
+                return self.make_failure_signal("missing_target", "No target file specified for add/create task")
+            # If any target already exists, fail fast.
+            if _targets_exist(target_files):
+                return self.make_failure_signal("target_exists", "Target file already exists; use edit instead")
+            similar_hits = []
+            for target in target_files:
+                try:
+                    check = file_ops._check_for_similar_files(target)  # type: ignore
+                    if check.get("similar_files"):
+                        similar_hits.extend(check["similar_files"])
+                except Exception:
+                    continue
+            if similar_hits:
+                return self.make_recovery_request(
+                    "similar_file_exists",
+                    f"Similar files exist for target(s): {', '.join(similar_hits[:3])}. Edit an existing file instead of creating a duplicate."
+                )
+
         # Select system prompt based on ultrathink mode
         system_prompt = CODE_WRITER_SYSTEM_PROMPT
         if config.ULTRATHINK_MODE == "on":
@@ -822,7 +1037,7 @@ class CodeWriterAgent(BaseAgent):
                         print(f"  -> CodeWriterAgent will call tool '{tool_name}'")
 
                         # Display change preview for file modifying operations
-                        if tool_name in ["write_file", "replace_in_file", "create_directory", "move_file", "copy_file"]:
+                        if tool_name in ["write_file", "replace_in_file", "create_directory", "move_file", "copy_file", "apply_patch"]:
                             self._display_change_preview(tool_name, arguments)
 
                             # Validate import targets before proceeding
@@ -879,27 +1094,26 @@ class CodeWriterAgent(BaseAgent):
 
                                     # Escalate suggestions based on failure count
                                     if consecutive_replace_failures == 1:
-                                        # First failure: suggest using write_file for more reliable replacement
+                                        # First failure: suggest apply_patch for a precise diff-based edit
                                         noop_msg = (
                                             f"{noop_msg}\n\n"
-                                            f"RECOVERY STEP 1 (Recommended): Switch to write_file tool instead.\n"
-                                            f"- Read the entire current file content\n"
-                                            f"- Make the necessary changes to the content\n"
-                                            f"- Use write_file to replace the entire file with the modified content\n"
-                                            f"This is MORE RELIABLE than replace_in_file for complex changes.\n\n"
+                                            f"RECOVERY STEP 1 (Recommended): Use apply_patch with a unified diff.\n"
+                                            f"- Read the current file content\n"
+                                            f"- Create a minimal diff that updates only the relevant block\n"
+                                            f"- Apply via apply_patch to avoid full overwrites\n\n"
                                             f"Alternative: Verify the exact 'find' text (character-for-character) from the file content provided, "
                                             f"including ALL whitespace and indentation, then retry replace_in_file."
                                         )
                                     elif consecutive_replace_failures >= 2:
-                                        # Second+ failure: strongly recommend write_file
+                                        # Second+ failure: strongly recommend apply_patch with exact context
                                         noop_msg = (
                                             f"{noop_msg}\n\n"
-                                            f"RECOVERY STEP 2 (MANDATORY): You MUST use write_file instead of replace_in_file.\n"
+                                            f"RECOVERY STEP 2 (MANDATORY): Use apply_patch instead of replace_in_file.\n"
                                             f"replace_in_file has failed {consecutive_replace_failures} times. The 'find' pattern is not matching.\n"
                                             f"REQUIRED ACTION:\n"
-                                            f"1. Request read_file for the target file to get complete current content\n"
-                                            f"2. Apply your changes to that content\n"
-                                            f"3. Use write_file with the complete modified content\n"
+                                            f"1. Read the target file to get the exact current lines\n"
+                                            f"2. Craft a unified diff with precise context\n"
+                                            f"3. Apply the diff using apply_patch\n"
                                             f"DO NOT attempt replace_in_file again - it will fail."
                                         )
 
@@ -929,18 +1143,40 @@ class CodeWriterAgent(BaseAgent):
             if error_type:
                 if error_type in {"text_instead_of_tool_call", "empty_tool_calls", "missing_tool_calls"}:
                     retried = False
-                    recovered = retry_tool_call_with_response_format(
-                        messages,
-                        available_tools,
-                        allowed_tools=[t["function"]["name"] for t in available_tools],
+                    recovered = recover_tool_call_from_text(
+                        response.get("message", {}).get("content", ""),
+                        allowed_tools=recovery_allowed_tools,
                     )
-                    if recovered:
-                        retried = True
-                        print(f"  -> Retried tool call with JSON format: {recovered.name}")
-                    else:
-                        recovered = recover_tool_call_from_text(
+                    if not recovered:
+                        recovered = recover_tool_call_from_text_lenient(
                             response.get("message", {}).get("content", ""),
-                            allowed_tools=[t["function"]["name"] for t in available_tools],
+                            allowed_tools=recovery_allowed_tools,
+                        )
+                        if recovered:
+                            print("  [WARN] CodeWriterAgent: using lenient tool call recovery from text output")
+                    if not recovered:
+                        raw_content = response.get("message", {}).get("content", "") if isinstance(response, dict) else ""
+                        if raw_content:
+                            print("  [WARN] CodeWriterAgent: attempting tool call repair from text output")
+                        recovered = self._retry_with_tool_call_repair(
+                            messages,
+                            raw_content,
+                            allowed_tools=recovery_allowed_tools,
+                            tools=available_tools,
+                        )
+                    if not recovered:
+                        recovered = retry_tool_call_with_response_format(
+                            messages,
+                            available_tools,
+                            allowed_tools=recovery_allowed_tools,
+                        )
+                        if recovered:
+                            retried = True
+                            print(f"  -> Retried tool call with JSON format: {recovered.name}")
+                    if not recovered:
+                        recovered = self._retry_with_diff_or_file(
+                            messages,
+                            allowed_tools=recovery_allowed_tools,
                         )
                     if recovered:
                         tool_name = recovered.name
@@ -952,10 +1188,21 @@ class CodeWriterAgent(BaseAgent):
                         if not retried:
                             print(f"  -> Recovered tool call from text output: {tool_name}")
 
-                        if tool_name in ["write_file", "replace_in_file", "create_directory", "move_file", "copy_file"]:
+                        if tool_name in ["write_file", "replace_in_file", "create_directory", "move_file", "copy_file", "apply_patch"]:
                             self._display_change_preview(tool_name, arguments)
 
                             file_path = arguments.get("path") or arguments.get("dest") or "unknown"
+                            conflict = _detect_path_conflict(file_path)
+                            if conflict:
+                                print(f"  [WARN] {conflict}")
+                                if self.should_attempt_recovery(task, context):
+                                    self.request_replan(
+                                        context,
+                                        reason="path_conflict",
+                                        detailed_reason=conflict,
+                                    )
+                                    return self.make_recovery_request("path_conflict", conflict)
+                                return self.make_failure_signal("path_conflict", conflict)
                             if tool_name == "write_file":
                                 content = arguments.get("content", "")
                                 is_valid, warning_msg = self._validate_import_targets(file_path, content)
@@ -999,6 +1246,58 @@ class CodeWriterAgent(BaseAgent):
                             print(f"  Tool made no changes: {noop_msg}")
                             if self.should_attempt_recovery(task, context):
                                 if tool_name == "replace_in_file":
+                                    recovery_key = f"replace_noop_write::{task.task_id or 'unknown'}::{arguments.get('path', '')}"
+                                    already_attempted = context.agent_state.get(recovery_key, False)
+                                    if not already_attempted:
+                                        context.set_agent_state(recovery_key, True)
+                                        recovered = self._retry_with_write_file(
+                                            messages,
+                                            allowed_tools=recovery_allowed_tools,
+                                        )
+                                        if recovered and recovered.name == "write_file":
+                                            tool_name = recovered.name
+                                            arguments = recovered.arguments
+                                            self._display_change_preview(tool_name, arguments)
+
+                                            file_path = arguments.get("path") or arguments.get("dest") or "unknown"
+                                            content = arguments.get("content", "")
+                                            is_valid, warning_msg = self._validate_import_targets(file_path, content)
+                                            if not is_valid:
+                                                print("\n  [WARN] Import validation warning:")
+                                                print(f"  {warning_msg}")
+                                                print("  Note: This file has imports that may not exist. Proceed with caution.")
+
+                                            if not self._prompt_for_approval(tool_name, file_path, context):
+                                                print("  [REJECTED] Change rejected by user")
+                                                return "[USER_REJECTED] Change was not approved by user"
+
+                                            ok_args, arg_msg = self._validate_tool_args(tool_name, arguments)
+                                            if not ok_args:
+                                                print(f"  Invalid tool args: {arg_msg}")
+                                                return self.make_failure_signal("invalid_tool_args", arg_msg)
+
+                                            print(f"  Applying {tool_name} to {arguments.get('path', 'file')}...")
+                                            raw_result = execute_tool(tool_name, arguments, agent_name="code_writer")
+                                            has_error, error_msg = self._tool_result_has_error(raw_result)
+                                            if has_error:
+                                                print(f"  Tool reported error: {error_msg}")
+                                                return self.make_failure_signal("tool_error", error_msg)
+
+                                            is_noop, noop_msg = self._tool_result_is_noop(tool_name, raw_result)
+                                            if is_noop:
+                                                print(f"  Tool made no changes: {noop_msg}")
+                                                return self.make_failure_signal("tool_noop", noop_msg)
+
+                                            print(f"  ✓ Successfully applied {tool_name}")
+                                            return build_subagent_output(
+                                                agent_name="CodeWriterAgent",
+                                                tool_name=tool_name,
+                                                tool_args=arguments,
+                                                tool_output=raw_result,
+                                                context=context,
+                                                task_id=task.task_id,
+                                            )
+
                                     # Track consecutive replace_in_file failures to escalate recovery suggestions
                                     consecutive_replace_failures = context.agent_state.get("consecutive_replace_failures", 0)
                                     consecutive_replace_failures += 1

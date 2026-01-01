@@ -205,101 +205,34 @@ class ModelCommand(CommandHandler):
             output.append(create_item("Active Model", colorize(config.OLLAMA_MODEL, Colors.BRIGHT_CYAN, bold=True)))
             output.append(create_item("Provider", f"{current_provider} (detected: {detected_provider})"))
 
-            # Show Ollama models
-            output.append(create_section("Ollama Models (Local)"))
-            import requests
-            try:
-                response = requests.get(f"{config.OLLAMA_BASE_URL}/api/tags", timeout=5)
-                if response.status_code == 200:
-                    models = response.json().get("models", [])
-                    if models:
-                        models_sorted = sorted(models, key=lambda x: x['name'])
-                        for model in models_sorted:
-                            model_name = model['name']
-                            is_current = model_name == config.OLLAMA_MODEL
-
-                            size_bytes = model.get('size', 0)
-                            size_str = f"{size_bytes / 1_000_000_000:.1f}GB" if size_bytes > 1_000_000_000 else f"{size_bytes / 1_000_000:.0f}MB"
-
-                            if is_current:
-                                marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN)
-                                name_colored = colorize(model_name, Colors.BRIGHT_CYAN, bold=True)
-                            else:
-                                marker = "  "
-                                name_colored = model_name
-
-                            output.append(f"  {marker}{name_colored:<45} {colorize(size_str, Colors.BRIGHT_BLACK)}")
-                    else:
-                        output.append(create_bullet_item("No models found", 'warning'))
-                        output.append(f"  {colorize('Pull a model with: ollama pull <model_name>', Colors.DIM)}")
-                else:
-                    output.append(create_bullet_item(f"Failed to fetch models (HTTP {response.status_code})", 'cross'))
-            except Exception as e:
-                output.append(create_bullet_item(f"Error connecting to Ollama: {str(e)[:50]}", 'cross'))
-
-            # Show commercial provider models - only if API keys are configured
+            output.append(create_section(f"{current_provider.capitalize()} Models"))
             from rev.secrets_manager import get_api_key
 
-            # Check which API keys are set
-            openai_api_key = get_api_key("openai")
-            anthropic_api_key = get_api_key("anthropic")
-            gemini_api_key = get_api_key("gemini")
+            if current_provider in {"openai", "anthropic", "gemini"}:
+                api_key = get_api_key(current_provider)
+                if not api_key:
+                    output.append(create_bullet_item(f"No API key set for {current_provider}", 'warning'))
+                    output.append(f"  {colorize(f'Set with: /api-key set {current_provider}', Colors.DIM)}")
+                    output.append(f"\n  {colorize('Usage: /model <model_name>', Colors.DIM)}")
+                    output.append(f"  {colorize('Provider controlled by: /set llm_provider <provider>', Colors.DIM)}")
+                    return "\n".join(output)
 
-            has_commercial_providers = openai_api_key or anthropic_api_key or gemini_api_key
-
-            if has_commercial_providers:
-                output.append(create_section("Commercial Providers"))
-
-            # OpenAI - only show if API key is set
-            if openai_api_key:
-                output.append(f"\n  {colorize('OpenAI (ChatGPT):', Colors.BRIGHT_WHITE, bold=True)}")
-                openai_models = ["gpt-4-turbo-preview", "gpt-4", "gpt-3.5-turbo", "gpt-3.5-turbo-16k"]
-                for model in openai_models:
-                    is_current = model == config.OLLAMA_MODEL
-                    marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN) if is_current else "    "
-                    name_colored = colorize(model, Colors.BRIGHT_CYAN, bold=True) if is_current else model
-                    output.append(f"  {marker}{name_colored}")
-
-            # Anthropic - only show if API key is set
-            if anthropic_api_key:
-                output.append(f"\n  {colorize('Anthropic (Claude):', Colors.BRIGHT_WHITE, bold=True)}")
-                anthropic_models = ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229", "claude-3-sonnet-20240229"]
-                for model in anthropic_models:
-                    is_current = model == config.OLLAMA_MODEL
-                    marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN) if is_current else "    "
-                    name_colored = colorize(model, Colors.BRIGHT_CYAN, bold=True) if is_current else model
-                    output.append(f"  {marker}{name_colored}")
-
-            # Gemini - only show if API key is set, dynamically fetch models
-            if gemini_api_key:
-                output.append(f"\n  {colorize('Google Gemini:', Colors.BRIGHT_WHITE, bold=True)}")
-                try:
-                    # Dynamically fetch available Gemini models (silent mode to avoid debug prints)
-                    from rev.llm.providers.gemini_provider import GeminiProvider
-                    provider = GeminiProvider(api_key=gemini_api_key, silent=True)
-                    gemini_models = provider.get_model_list()
-
-                    if gemini_models:
-                        for model in gemini_models:
-                            is_current = model == config.OLLAMA_MODEL
-                            marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN) if is_current else "    "
-                            name_colored = colorize(model, Colors.BRIGHT_CYAN, bold=True) if is_current else model
-                            output.append(f"  {marker}{name_colored}")
-                    else:
-                        output.append(f"    {colorize('No models available', Colors.DIM)}")
-                except Exception as e:
-                    # Fallback to default list if API call fails
-                    output.append(f"    {colorize(f'Unable to fetch models: {str(e)[:50]}', Colors.BRIGHT_BLACK)}")
-                    fallback_models = ["gemini-2.0-flash-exp", "gemini-1.5-pro", "gemini-1.5-flash"]
-                    for model in fallback_models:
+            try:
+                provider = get_provider(current_provider, force_new=True)
+                model_list = provider.get_model_list()
+                if model_list:
+                    for model in sorted(model_list):
                         is_current = model == config.OLLAMA_MODEL
                         marker = colorize(f"{Symbols.ARROW} ", Colors.BRIGHT_GREEN) if is_current else "    "
                         name_colored = colorize(model, Colors.BRIGHT_CYAN, bold=True) if is_current else model
                         output.append(f"  {marker}{name_colored}")
+                else:
+                    output.append(create_bullet_item("No models available", 'warning'))
+            except Exception as e:
+                output.append(create_bullet_item(f"Unable to fetch models: {str(e)[:80]}", 'cross'))
 
             output.append(f"\n  {colorize('Usage: /model <model_name>', Colors.DIM)}")
-            output.append(f"  {colorize('Provider auto-detected from model name', Colors.DIM)}")
-            output.append(f"  {colorize('Set API keys with: /api-key set <provider>', Colors.DIM)}")
+            output.append(f"  {colorize('Provider controlled by: /set llm_provider <provider>', Colors.DIM)}")
             return "\n".join(output)
 
         # Change model
@@ -521,6 +454,41 @@ class ExitCommand(CommandHandler):
     def execute(self, args: List[str], session_context: Dict[str, Any]) -> str:
         # Return special marker to indicate exit
         return "__EXIT__"
+
+
+class HistoryCommand(CommandHandler):
+    """Show command history."""
+
+    def __init__(self):
+        super().__init__(
+            "history",
+            "Show command and input history",
+            aliases=["h"]
+        )
+
+    def execute(self, args: List[str], session_context: Dict[str, Any]) -> str:
+        from rev.terminal.history import get_history
+
+        history = get_history()
+        output = [create_header("Command History", width=80)]
+
+        cmd_history = history.get_command_history()
+        input_history = history.get_input_history()
+
+        if cmd_history:
+            output.append(create_section("Commands"))
+            for i, cmd in enumerate(cmd_history, 1):
+                output.append(f"  {i:3}. {cmd}")
+
+        if input_history:
+            output.append(create_section("Inputs"))
+            for i, inp in enumerate(input_history, 1):
+                output.append(f"  {i:3}. {inp[:80]}{'...' if len(inp) > 80 else ''}")
+
+        if not cmd_history and not input_history:
+            output.append("  No history yet")
+
+        return "\n".join(output)
 
 
 class DoctorCommand(CommandHandler):
@@ -1143,6 +1111,7 @@ def _build_command_registry() -> Dict[str, CommandHandler]:
         SaveCommand(),
         ResetCommand(),
         ExitCommand(),
+        HistoryCommand(),
         DoctorCommand(),
         AddDirCommand(),
         InitCommand(),

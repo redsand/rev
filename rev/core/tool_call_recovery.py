@@ -57,6 +57,61 @@ def _extract_json_snippet(text: str) -> Optional[str]:
     return text[start : end + 1].strip()
 
 
+def _extract_patch_from_text(text: str) -> Optional[str]:
+    if not text:
+        return None
+
+    diff_match = re.search(r"```diff\s+(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    if diff_match:
+        return diff_match.group(1).strip()
+
+    if "*** Begin Patch" in text and "*** End Patch" in text:
+        start = text.find("*** Begin Patch")
+        end = text.rfind("*** End Patch")
+        if start >= 0 and end >= start:
+            return text[start : end + len("*** End Patch")].strip()
+
+    raw_match = re.search(r"^diff --git.*", text, re.DOTALL | re.MULTILINE)
+    if raw_match:
+        return raw_match.group(0).strip()
+
+    return None
+
+
+def _extract_file_from_text(text: str) -> Optional[Tuple[str, str]]:
+    if not text:
+        return None
+
+    fence = re.search(r"```[\w+-]*\s+([\s\S]*?)```", text)
+    if not fence:
+        return None
+
+    block = fence.group(1)
+    lines = block.splitlines()
+    if not lines:
+        return None
+
+    first_line = lines[0].strip()
+    path = None
+    if any(first_line.lower().startswith(marker) for marker in ("path:", "file:", "filepath:")):
+        path = first_line.split(":", 1)[1].strip()
+        body = "\n".join(lines[1:])
+    elif (
+        "." in first_line
+        and " " not in first_line
+        and first_line.lower().endswith((".py", ".js", ".ts", ".md", ".json", ".yaml", ".yml", ".txt"))
+    ):
+        path = first_line
+        body = "\n".join(lines[1:])
+    else:
+        return None
+
+    body = body.rstrip("\n")
+    if not path or not body:
+        return None
+    return path, body
+
+
 def _coerce_args(value: Any) -> Optional[Dict[str, Any]]:
     if value is None:
         return None
@@ -102,28 +157,171 @@ def recover_tool_call_from_text(
     """Recover a single tool call from text content, if present."""
 
     snippet = _extract_json_snippet(content)
+    if snippet:
+        try:
+            parsed = json.loads(snippet)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            # Guard: avoid re-executing tool calls embedded in sub-agent outputs.
+            if "tool_name" in parsed and "tool_args" in parsed:
+                return None
+
+    allowed = set(allowed_tools) if allowed_tools is not None else None
+
+    patch = _extract_patch_from_text(content or "")
+    if patch and (allowed is None or "apply_patch" in allowed):
+        return RecoveredToolCall(name="apply_patch", arguments={"patch": patch})
+
+    file_block = _extract_file_from_text(content or "")
+    if file_block and (allowed is None or "write_file" in allowed):
+        path, body = file_block
+        return RecoveredToolCall(name="write_file", arguments={"path": path, "content": body})
+
     if not snippet:
         return None
 
-    try:
-        parsed = json.loads(snippet)
-    except json.JSONDecodeError:
+    if not isinstance(parsed, (dict, list)):
         return None
 
-    candidates = []
-    if isinstance(parsed, dict):
-        candidates = [parsed]
-    elif isinstance(parsed, list):
-        candidates = [x for x in parsed if isinstance(x, dict)]
-    else:
-        return None
+    candidates = [parsed] if isinstance(parsed, dict) else [x for x in parsed if isinstance(x, dict)]
 
     for candidate in candidates:
         recovered = _parse_tool_call_object(candidate)
         if not recovered:
             continue
-        if allowed_tools is not None and recovered.name not in set(allowed_tools):
+        if allowed is not None and recovered.name not in allowed:
             continue
         return recovered
+
+    return None
+
+
+def _extract_tool_name_lenient(text: str) -> Optional[str]:
+    if not text:
+        return None
+    patterns = [
+        r'"tool_name"\s*:\s*"([^"]+)"',
+        r'"name"\s*:\s*"([^"]+)"',
+        r'"tool"\s*:\s*"([^"]+)"',
+        r'"function"\s*:\s*{\s*"name"\s*:\s*"([^"]+)"',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            name = match.group(1).strip()
+            if name:
+                return name
+    return None
+
+
+def _decode_json_string_fragment(value: str) -> str:
+    if value is None:
+        return ""
+    try:
+        return json.loads(f"\"{value}\"")
+    except Exception:
+        return value
+
+
+def _extract_json_string_value(text: str, key: str) -> Optional[str]:
+    if not text or not key:
+        return None
+    pattern = rf'"{re.escape(key)}"\s*:\s*"'
+    match = re.search(pattern, text)
+    if not match:
+        return None
+    start = match.end()
+    escaped = False
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == "\"":
+            raw_value = text[start:idx]
+            return _decode_json_string_fragment(raw_value)
+    raw_value = text[start:]
+    return _decode_json_string_fragment(raw_value.rstrip())
+
+
+def _extract_arguments_object(text: str) -> Optional[Dict[str, Any]]:
+    if not text:
+        return None
+    match = re.search(r'"arguments"\s*:\s*{', text)
+    if not match:
+        return None
+    start = match.end() - 1
+    depth = 0
+    end = None
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = idx + 1
+                break
+    if end is None:
+        return None
+    snippet = text[start:end]
+    try:
+        parsed = json.loads(snippet)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def recover_tool_call_from_text_lenient(
+    content: str,
+    *,
+    allowed_tools: Optional[Iterable[str]] = None,
+) -> Optional[RecoveredToolCall]:
+    """Best-effort recovery for JSON-like tool calls (handles truncated output)."""
+    if not content:
+        return None
+    tool_name = _extract_tool_name_lenient(content)
+    if not tool_name:
+        return None
+    allowed = set(allowed_tools) if allowed_tools is not None else None
+    if allowed is not None and tool_name not in allowed:
+        return None
+
+    args_obj = _extract_arguments_object(content)
+    if args_obj is not None:
+        return RecoveredToolCall(name=tool_name, arguments=args_obj)
+
+    tool_lower = tool_name.lower()
+    if tool_lower in {"write_file", "append_to_file"}:
+        path = _extract_json_string_value(content, "path")
+        content_value = _extract_json_string_value(content, "content")
+        if path and content_value is not None:
+            return RecoveredToolCall(name=tool_name, arguments={"path": path, "content": content_value})
+        return None
+
+    if tool_lower == "replace_in_file":
+        path = _extract_json_string_value(content, "path")
+        find_value = _extract_json_string_value(content, "find") or _extract_json_string_value(content, "old_string")
+        replace_value = _extract_json_string_value(content, "replace") or _extract_json_string_value(content, "new_string")
+        if path and find_value is not None and replace_value is not None:
+            return RecoveredToolCall(name=tool_name, arguments={"path": path, "find": find_value, "replace": replace_value})
+        return None
+
+    if tool_lower in {"move_file", "copy_file"}:
+        src = _extract_json_string_value(content, "src") or _extract_json_string_value(content, "source")
+        dest = _extract_json_string_value(content, "dest") or _extract_json_string_value(content, "path")
+        if src and dest:
+            return RecoveredToolCall(name=tool_name, arguments={"src": src, "dest": dest})
+        return None
+
+    if tool_lower in {"delete_file", "read_file", "get_file_info", "file_exists"}:
+        path = _extract_json_string_value(content, "path")
+        if path:
+            return RecoveredToolCall(name=tool_name, arguments={"path": path})
+        return None
 
     return None

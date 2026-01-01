@@ -10,7 +10,18 @@ import threading
 import queue
 import time
 import re
+import os
+from pathlib import Path
 from typing import Callable, Optional
+
+
+# Global reference to active TUI instance (for menu callbacks)
+_active_tui: Optional['TUI'] = None
+
+
+def get_active_tui() -> Optional['TUI']:
+    """Get the currently active TUI instance, if any."""
+    return _active_tui
 
 
 class TuiStream:
@@ -100,6 +111,21 @@ class TUI:
         self._scroll_pos = 0 # Horizontal scroll for input
         self._worker: Optional[threading.Thread] = None
 
+        # Command history (last 100 commands)
+        self._command_history: list[str] = []
+        self._history_pos = -1  # Position in history when browsing (-1 = not browsing)
+        self._history_temp = ""  # Temp storage for current input when browsing history
+        self._history_file = Path.home() / ".rev" / "history"
+
+        # Scrollback control
+        self._log_scroll_offset = 0  # How many lines scrolled up from bottom
+
+        # Curses screen reference (set when curses starts)
+        self._stdscr = None
+
+        # Load persistent history
+        self._load_history()
+
     def log(self, text: str) -> None:
         """Queue text for append to scrollback (thread-safe)."""
         if text is None:
@@ -114,9 +140,15 @@ class TUI:
 
     def run(self, on_input: Callable[[str], None], *, initial_input: Optional[str] = None, on_feedback: Optional[Callable[[str], bool]] = None) -> None:
         """Start the curses UI and dispatch input lines to on_input."""
+        global _active_tui
+        _active_tui = self  # Set global reference
+
         self._on_feedback = on_feedback
 
         def _curses_main(stdscr):
+            # Store stdscr reference for menu functionality
+            self._stdscr = stdscr
+
             # Initialize colors
             curses.start_color()
             curses.use_default_colors()
@@ -154,11 +186,26 @@ class TUI:
             self._render_input()
 
             if initial_input and initial_input.strip():
+                # Add initial command to history
+                self._command_history.append(initial_input)
+                if len(self._command_history) > 100:
+                    self._command_history.pop(0)
+
                 self.log("\x1b[95m" + self.prompt + "\x1b[0m" + initial_input)
                 self._start_worker(on_input, initial_input)
 
             while not self._stop.is_set():
                 self._drain_log_queue()
+
+                # Ensure cursor is in input window at correct position
+                if self._input_win:
+                    try:
+                        prompt_len = len(self.prompt)
+                        cursor_x = prompt_len + (self._cursor_pos - self._scroll_pos)
+                        self._input_win.move(0, cursor_x)
+                        self._input_win.refresh()
+                    except curses.error:
+                        pass
 
                 try:
                     ch = stdscr.getch()
@@ -178,10 +225,23 @@ class TUI:
                     self._input_buffer = ""
                     self._cursor_pos = 0
                     self._scroll_pos = 0
+                    self._history_pos = -1  # Reset history browsing
                     self._render_input()
+
                     if line.strip():
+                        # Add to command history (keep last 100)
+                        self._command_history.append(line)
+                        if len(self._command_history) > 100:
+                            self._command_history.pop(0)
+
+                        # Save history immediately for persistence
+                        self._save_history()
+
                         # Log with prompt color
                         self.log("\x1b[95m" + self.prompt + "\x1b[0m" + line)
+
+                        # Pass ALL input to the callback
+                        # The REPL's _handle_input_line will process commands via execute_command()
                         self._start_worker(on_input, line)
                     continue
                 if ch in (27,):  # ESC
@@ -198,6 +258,51 @@ class TUI:
                         self._input_buffer = self._input_buffer[:self._cursor_pos] + self._input_buffer[self._cursor_pos+1:]
                         self._render_input()
                     continue
+                if ch == curses.KEY_UP:
+                    # Browse command history backward (older commands)
+                    if self._command_history:
+                        if self._history_pos == -1:
+                            # Just started browsing - save current input
+                            self._history_temp = self._input_buffer
+                            self._history_pos = len(self._command_history) - 1
+                        elif self._history_pos > 0:
+                            self._history_pos -= 1
+
+                        self._input_buffer = self._command_history[self._history_pos]
+                        self._cursor_pos = len(self._input_buffer)
+                        self._render_input()
+                    continue
+
+                if ch == curses.KEY_DOWN:
+                    # Browse command history forward (newer commands)
+                    if self._history_pos >= 0:
+                        if self._history_pos < len(self._command_history) - 1:
+                            self._history_pos += 1
+                            self._input_buffer = self._command_history[self._history_pos]
+                        else:
+                            # Reached end - restore temp input
+                            self._history_pos = -1
+                            self._input_buffer = self._history_temp
+
+                        self._cursor_pos = len(self._input_buffer)
+                        self._render_input()
+                    continue
+
+                if ch == curses.KEY_PPAGE:  # Page Up
+                    # Scroll log up (show older messages)
+                    max_y, _ = self._log_win.getmaxyx() if self._log_win else (0, 0)
+                    max_scroll = max(0, len(self.lines) - max_y)
+                    self._log_scroll_offset = min(self._log_scroll_offset + max_y // 2, max_scroll)
+                    self._refresh_log()
+                    continue
+
+                if ch == curses.KEY_NPAGE:  # Page Down
+                    # Scroll log down (show newer messages)
+                    max_y, _ = self._log_win.getmaxyx() if self._log_win else (0, 0)
+                    self._log_scroll_offset = max(self._log_scroll_offset - max_y // 2, 0)
+                    self._refresh_log()
+                    continue
+
                 if ch == curses.KEY_LEFT:
                     if self._cursor_pos > 0:
                         self._cursor_pos -= 1
@@ -223,8 +328,120 @@ class TUI:
 
         curses.wrapper(_curses_main)
 
+    def show_menu(self, title: str, options: list[str]) -> int:
+        """
+        Display a curses menu with up/down navigation.
+
+        Args:
+            title: The menu title
+            options: List of option strings
+
+        Returns:
+            The index of the selected option (0-based), or -1 if cancelled
+        """
+        if not hasattr(self, '_stdscr') or self._stdscr is None:
+            # TUI not initialized yet, fall back to index 0
+            return 0
+
+        selected_idx = [0]  # Use list to allow modification in nested function
+        done = [False]
+
+        # Display title once
+        self.log(f"\n\x1b[96m{title}\x1b[0m")
+
+        # Calculate menu start position (track where menu begins in lines)
+        menu_start_line = len(self.lines)
+
+        # Initial menu display
+        for i, option in enumerate(options):
+            if i == selected_idx[0]:
+                self.log(f"\x1b[7m  {option}\x1b[0m")  # Reverse video for selected
+            else:
+                self.log(f"  {option}")
+
+        # Force refresh
+        self._refresh_log()
+
+        # Menu interaction loop
+        while not done[0]:
+            try:
+                ch = self._stdscr.getch()
+            except Exception:
+                time.sleep(0.01)
+                continue
+
+            if ch == curses.KEY_UP and selected_idx[0] > 0:
+                selected_idx[0] -= 1
+                # Redraw menu options
+                for i, option in enumerate(options):
+                    line_idx = menu_start_line + i
+                    if line_idx < len(self.lines):
+                        if i == selected_idx[0]:
+                            self.lines[line_idx] = f"\x1b[7m  {option}\x1b[0m"
+                        else:
+                            self.lines[line_idx] = f"  {option}"
+                self._refresh_log()
+
+            elif ch == curses.KEY_DOWN and selected_idx[0] < len(options) - 1:
+                selected_idx[0] += 1
+                # Redraw menu options
+                for i, option in enumerate(options):
+                    line_idx = menu_start_line + i
+                    if line_idx < len(self.lines):
+                        if i == selected_idx[0]:
+                            self.lines[line_idx] = f"\x1b[7m  {option}\x1b[0m"
+                        else:
+                            self.lines[line_idx] = f"  {option}"
+                self._refresh_log()
+
+            elif ch in (curses.KEY_ENTER, 10, 13):
+                # Remove menu lines
+                del self.lines[menu_start_line:menu_start_line + len(options)]
+                # Show selection
+                self.log(f"\x1b[92m✓ Selected: {options[selected_idx[0]]}\x1b[0m\n")
+                self._refresh_log()
+                done[0] = True
+                return selected_idx[0]
+
+            elif ch == 27:  # ESC
+                # Remove menu lines
+                del self.lines[menu_start_line:menu_start_line + len(options)]
+                self.log(f"\x1b[93m✗ Cancelled\x1b[0m\n")
+                self._refresh_log()
+                done[0] = True
+                return -1
+
+        return -1
+
     def stop(self) -> None:
+        global _active_tui
         self._stop.set()
+        # Save history on exit
+        self._save_history()
+        # Clear global reference
+        if _active_tui is self:
+            _active_tui = None
+
+    def _load_history(self) -> None:
+        """Load command history from persistent storage."""
+        try:
+            if self._history_file.exists():
+                with open(self._history_file, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                    # Load last 100 commands
+                    self._command_history = [line.rstrip('\n') for line in lines[-100:]]
+        except Exception:
+            pass  # Silently fail if can't load history
+
+    def _save_history(self) -> None:
+        """Save command history to persistent storage."""
+        try:
+            self._history_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._history_file, 'w', encoding='utf-8') as f:
+                for cmd in self._command_history:
+                    f.write(cmd + '\n')
+        except Exception:
+            pass  # Silently fail if can't save history
 
     # Internal helpers
     def _start_worker(self, on_input: Callable[[str], None], line: str) -> None:
@@ -257,6 +474,8 @@ class TUI:
         except queue.Empty:
             pass
         if changed:
+            # Reset scroll to bottom when new content arrives
+            self._log_scroll_offset = 0
             self._refresh_log()
 
     def _resize_windows(self) -> None:
@@ -283,8 +502,13 @@ class TUI:
             return
         self._log_win.erase()
         max_y, max_x = self._log_win.getmaxyx()
-        start = max(0, len(self.lines) - max_y)
-        for idx, line in enumerate(self.lines[start:]):
+
+        # Calculate start position based on scroll offset
+        # If scrolled up, show older messages; otherwise show newest
+        end_pos = len(self.lines) - self._log_scroll_offset
+        start = max(0, end_pos - max_y)
+
+        for idx, line in enumerate(self.lines[start:end_pos]):
             segments = _parse_ansi(line)
             x = 0
             for text, color_pair in segments:
@@ -294,6 +518,16 @@ class TUI:
                         x += len(text)
                 except curses.error:
                     pass
+
+        # Show scroll indicator if not at bottom
+        if self._log_scroll_offset > 0:
+            try:
+                indicator = f" ▲ -{self._log_scroll_offset} lines "
+                self._log_win.addstr(max_y - 1, max_x - len(indicator) - 1, indicator,
+                                   curses.color_pair(3) | curses.A_REVERSE)
+            except curses.error:
+                pass
+
         self._log_win.refresh()
 
     def _render_input(self) -> None:

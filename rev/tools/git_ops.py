@@ -9,7 +9,7 @@ import re
 import shlex
 import subprocess
 import tempfile
-from typing import Optional, Iterable
+from typing import Optional, Iterable, Tuple, Dict, Any
 
 # Patches larger than this many characters often hit context limits in agent prompts
 # or produce opaque failures. When we detect a patch above this size that still
@@ -20,9 +20,25 @@ _LARGE_PATCH_HINT_THRESHOLD = 120_000
 from rev import config
 from rev.debug_logger import prune_old_logs
 from rev.tools.utils import quote_cmd_arg
+from rev.llm.client import ollama_chat
 
 # Backward compatibility for tests
 ROOT = config.ROOT
+
+_DEFAULT_RUN_CMD_TIMEOUT = 300
+_DEFAULT_RUN_TESTS_TIMEOUT = 600
+_LLM_TIMEOUT_ANALYSIS_MIN_SECONDS = 300
+_LLM_TIMEOUT_ANALYSIS_MAX_SECONDS = 3600
+_LLM_TIMEOUT_OUTPUT_LIMIT = 2000
+
+_TIMEOUT_ANALYSIS_SYSTEM_PROMPT = (
+    "You are a command-timeout triage assistant. "
+    "Decide if a timed-out command is likely long-running (should rerun with a longer timeout) "
+    "or stuck in non-terminating watch/server mode (should stop). "
+    "Return ONLY JSON with: decision ('rerun' or 'stop'), suggested_timeout_seconds (int, "
+    "only if decision='rerun'), mode ('long_running' or 'watch' or 'unknown'), reason, "
+    "and suggested_command (string, optional) if a different command should be run instead."
+)
 
 
 # ========== Helper Function ==========
@@ -91,6 +107,277 @@ def _tail_file(path: pathlib.Path, limit: int) -> str:
         else:
             handle.seek(0)
         return handle.read()
+
+
+def _truncate_text(value: str, limit: int) -> str:
+    if not value:
+        return ""
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[-limit:]
+
+
+def _parse_timeout_decision(content: str) -> Optional[Dict[str, Any]]:
+    if not content:
+        return None
+    text = content.strip()
+    candidates = [text]
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        candidates.append(match.group(0))
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _extract_test_path_from_command(cmd_text: str) -> Optional[str]:
+    if not cmd_text:
+        return None
+    matches = re.findall(r"([A-Za-z0-9_./\\\\-]+\\.(?:test|spec)\\.[A-Za-z0-9]+)", cmd_text)
+    if not matches:
+        return None
+    return max(matches, key=len)
+
+
+def _normalize_timeout_decision(payload: Dict[str, Any]) -> Dict[str, Any]:
+    decision_raw = str(payload.get("decision") or payload.get("action") or payload.get("status") or "").strip().lower()
+    mode_raw = str(payload.get("mode") or payload.get("classification") or payload.get("category") or "").strip().lower()
+    reason = str(payload.get("reason") or "").strip()
+    suggested_command_raw = (
+        payload.get("suggested_command")
+        or payload.get("suggested_cmd")
+        or payload.get("alternate_command")
+        or payload.get("rerun_command")
+    )
+    suggested_command = None
+    if isinstance(suggested_command_raw, (str, list)):
+        suggested_command = suggested_command_raw
+
+    decision = decision_raw
+    if decision in {"retry", "rerun", "continue", "extend"}:
+        decision = "rerun"
+    if decision in {"stop", "cancel", "abort", "halt", "watch", "wait"}:
+        decision = "stop"
+
+    if decision not in {"rerun", "stop"}:
+        if mode_raw in {"watch", "non_terminating", "non-terminating", "server"}:
+            decision = "stop"
+        elif mode_raw in {"long_running", "long-running"}:
+            decision = "rerun"
+
+    suggested = (
+        payload.get("suggested_timeout_seconds")
+        or payload.get("suggested_timeout")
+        or payload.get("timeout_seconds")
+        or payload.get("timeout")
+    )
+    suggested_timeout: Optional[int] = None
+    try:
+        if suggested is not None:
+            suggested_timeout = int(suggested)
+    except Exception:
+        suggested_timeout = None
+
+    return {
+        "decision": decision if decision in {"rerun", "stop"} else "stop",
+        "suggested_timeout_seconds": suggested_timeout,
+        "mode": mode_raw or "unknown",
+        "reason": reason,
+        "suggested_command": suggested_command,
+    }
+
+
+def _detect_watch_mode(output: str) -> bool:
+    if not output:
+        return False
+    lowered = output.lower()
+    watch_markers = (
+        "watching for file changes",
+        "waiting for file changes",
+        "press q to quit",
+        "press h to show help",
+        "dev server running",
+        "localhost:",
+        "127.0.0.1:",
+        "waiting for changes",
+        "ready in",
+        "watch mode",
+        "listening on",
+    )
+    return any(marker in lowered for marker in watch_markers)
+
+
+def _suggest_non_watch_command(cmd_text: str) -> Optional[str]:
+    if not cmd_text:
+        return None
+    lowered = cmd_text.lower()
+    if "vitest" not in lowered:
+        return None
+    if " vitest run" in lowered or "vitest --run" in lowered:
+        return None
+    test_path = _extract_test_path_from_command(cmd_text)
+    if test_path:
+        return f"npx vitest run {test_path}"
+    return "npx vitest run"
+
+
+def _clamp_timeout(value: int, minimum: int, maximum: int) -> int:
+    try:
+        return max(minimum, min(int(value), maximum))
+    except Exception:
+        return minimum
+
+
+def _analyze_timeout_with_llm(
+    cmd_text: str,
+    timeout: int,
+    stdout_tail: str,
+    stderr_tail: str,
+) -> Optional[Dict[str, Any]]:
+    user_prompt = (
+        f"Command: {cmd_text}\n"
+        f"TimeoutSeconds: {timeout}\n"
+        "StdoutTail:\n"
+        f"{stdout_tail}\n"
+        "StderrTail:\n"
+        f"{stderr_tail}\n"
+        "If output suggests watch/server mode or waiting for file changes, choose decision='stop'. "
+        "If output suggests active tests/builds that just need more time, choose decision='rerun' "
+        "and provide suggested_timeout_seconds. "
+        "If a different command should be run instead (for example, a non-watch test command), "
+        "include suggested_command."
+    )
+    response = ollama_chat(
+        [
+            {"role": "system", "content": _TIMEOUT_ANALYSIS_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        tools=None,
+        model=config.EXECUTION_MODEL,
+        supports_tools=False,
+        temperature=0.2,
+    )
+    if not response or "error" in response:
+        return None
+    content = response.get("message", {}).get("content", "")
+    payload = _parse_timeout_decision(content)
+    if not payload:
+        return None
+    return _normalize_timeout_decision(payload)
+
+
+def _maybe_retry_timeout(
+    cmd: str | list[str],
+    timeout: int,
+    cwd: Optional[pathlib.Path],
+    result: Dict[str, Any],
+    *,
+    is_tests: bool = False,
+) -> Dict[str, Any]:
+    if not isinstance(result, dict):
+        return result
+    if not (result.get("timed_out") or result.get("timeout")):
+        return result
+    if timeout < _LLM_TIMEOUT_ANALYSIS_MIN_SECONDS:
+        return result
+
+    cmd_text = " ".join(cmd) if isinstance(cmd, list) else str(cmd or "")
+    stdout_tail = _truncate_text(result.get("stdout", ""), _LLM_TIMEOUT_OUTPUT_LIMIT)
+    stderr_tail = _truncate_text(result.get("stderr", ""), _LLM_TIMEOUT_OUTPUT_LIMIT)
+    combined_output = f"{stdout_tail}\n{stderr_tail}".strip()
+
+    decision = _analyze_timeout_with_llm(cmd_text, timeout, stdout_tail, stderr_tail)
+    decision_source = "llm"
+    if not decision:
+        decision_source = "heuristic"
+        if _detect_watch_mode(combined_output):
+            suggested_command = _suggest_non_watch_command(cmd_text)
+            decision = {
+                "decision": "stop",
+                "mode": "watch",
+                "reason": "output indicates watch/server mode",
+                "suggested_command": suggested_command,
+            }
+        else:
+            decision = {
+                "decision": "rerun",
+                "mode": "unknown",
+                "reason": "no watch-mode indicators; retrying with extended timeout",
+            }
+
+    normalized = dict(result)
+    normalized["timeout_decision"] = {**decision, "source": decision_source, "stdout_tail": stdout_tail, "stderr_tail": stderr_tail}
+    normalized["timeout_initial"] = {
+        "timeout_seconds": timeout,
+        "stdout_tail": stdout_tail,
+        "stderr_tail": stderr_tail,
+        "cmd": cmd_text,
+        "cwd": str(cwd) if cwd else None,
+    }
+
+    # For tests: avoid blindly re-running with larger timeouts. Surface the suggestion instead.
+    if is_tests and decision.get("decision") == "rerun":
+        normalized["blocked"] = True
+        normalized["reason"] = decision.get("reason") or "Test command timed out"
+        normalized["timeout_decision"] = {**decision, "source": decision_source, "stdout_tail": stdout_tail, "stderr_tail": stderr_tail}
+        normalized["timeout_initial"] = {
+            "timeout_seconds": timeout,
+            "stdout_tail": stdout_tail,
+            "stderr_tail": stderr_tail,
+            "cmd": cmd_text,
+            "cwd": str(cwd) if cwd else None,
+        }
+        # Flag that a remediation is required; orchestrator/verification can inject a fix task.
+        normalized["needs_fix"] = True
+        return normalized
+
+    if decision.get("decision") != "rerun":
+        normalized["blocked"] = True
+        if decision.get("reason"):
+            normalized["reason"] = decision.get("reason")
+        return normalized
+
+    suggested = decision.get("suggested_timeout_seconds")
+    if suggested is None:
+        suggested = timeout * 2
+
+    rerun_timeout = _clamp_timeout(
+        suggested,
+        minimum=max(timeout + 30, _LLM_TIMEOUT_ANALYSIS_MIN_SECONDS),
+        maximum=_LLM_TIMEOUT_ANALYSIS_MAX_SECONDS,
+    )
+    if rerun_timeout <= timeout:
+        rerun_timeout = min(timeout * 2, _LLM_TIMEOUT_ANALYSIS_MAX_SECONDS)
+
+    rerun_cmd = cmd
+    suggested_command = decision.get("suggested_command")
+    if isinstance(suggested_command, (str, list)) and suggested_command:
+        rerun_cmd = suggested_command
+
+    from rev.tools.command_runner import run_command_safe
+
+    rerun_result = run_command_safe(
+        rerun_cmd,
+        timeout=rerun_timeout,
+        cwd=cwd,
+        capture_output=True,
+        check_interrupt=True,
+    )
+    if isinstance(rerun_result, dict):
+        rerun_result["timeout_retry"] = {
+            "timeout_seconds": rerun_timeout,
+            "is_tests": is_tests,
+            "command": " ".join(rerun_cmd) if isinstance(rerun_cmd, list) else str(rerun_cmd),
+        }
+        rerun_result["timeout_decision"] = normalized.get("timeout_decision")
+        rerun_result["timeout_initial"] = normalized.get("timeout_initial")
+    return rerun_result if isinstance(rerun_result, dict) else normalized
 
 
 def _working_tree_snapshot() -> str:
@@ -231,6 +518,360 @@ def _normalize_patch_text(patch: str) -> str:
     return normalized
 
 
+def _split_codex_hunks(lines: list[str]) -> list[list[str]]:
+    hunks: list[list[str]] = []
+    current: list[str] = []
+    for line in lines:
+        if line.startswith("@@"):
+            if current:
+                hunks.append(current)
+                current = []
+            continue
+        if line.startswith("\\"):
+            continue
+        current.append(line)
+    if current:
+        hunks.append(current)
+    return hunks
+
+
+def _parse_codex_patch(patch: str) -> Tuple[Optional[list[dict]], Optional[str]]:
+    lines = patch.splitlines()
+    start_idx = None
+    end_idx = None
+    for idx, line in enumerate(lines):
+        if line.strip() == "*** Begin Patch":
+            start_idx = idx + 1
+            continue
+        if line.strip() == "*** End Patch":
+            end_idx = idx
+            break
+
+    if start_idx is None or end_idx is None or end_idx < start_idx:
+        return None, "Invalid Codex patch: missing Begin/End markers"
+
+    ops: list[dict] = []
+    idx = start_idx
+    while idx < end_idx:
+        line = lines[idx]
+        if not line.strip():
+            idx += 1
+            continue
+        if line.startswith("*** Update File: "):
+            path = line[len("*** Update File: "):].strip()
+            idx += 1
+            move_to = None
+            if idx < end_idx and lines[idx].startswith("*** Move to: "):
+                move_to = lines[idx][len("*** Move to: "):].strip()
+                idx += 1
+            hunk_lines: list[str] = []
+            while idx < end_idx and not lines[idx].startswith("*** "):
+                hunk_lines.append(lines[idx])
+                idx += 1
+            ops.append({
+                "type": "update",
+                "path": path,
+                "move_to": move_to,
+                "hunks": _split_codex_hunks(hunk_lines),
+            })
+            continue
+        if line.startswith("*** Add File: "):
+            path = line[len("*** Add File: "):].strip()
+            idx += 1
+            content_lines: list[str] = []
+            while idx < end_idx and not lines[idx].startswith("*** "):
+                content_lines.append(lines[idx])
+                idx += 1
+            ops.append({"type": "add", "path": path, "lines": content_lines})
+            continue
+        if line.startswith("*** Delete File: "):
+            path = line[len("*** Delete File: "):].strip()
+            idx += 1
+            ops.append({"type": "delete", "path": path})
+            continue
+        return None, f"Invalid Codex patch line: {line}"
+
+    return ops, None
+
+
+def _find_subsequence(haystack: list[str], needle: list[str], start: int = 0) -> Optional[int]:
+    if not needle:
+        return start
+    max_idx = len(haystack) - len(needle)
+    for idx in range(start, max_idx + 1):
+        if haystack[idx:idx + len(needle)] == needle:
+            return idx
+    return None
+
+
+def _apply_codex_update(file_lines: list[str], hunks: list[list[str]]) -> Tuple[Optional[list[str]], Optional[str]]:
+    cursor = 0
+    for hunk in hunks:
+        source: list[str] = []
+        target: list[str] = []
+        for line in hunk:
+            if line == "":
+                source.append("")
+                target.append("")
+                continue
+            prefix = line[:1]
+            body = line[1:]
+            if prefix == " ":
+                source.append(body)
+                target.append(body)
+            elif prefix == "-":
+                source.append(body)
+            elif prefix == "+":
+                target.append(body)
+            else:
+                return None, f"Invalid hunk line: {line}"
+
+        if not source:
+            file_lines[cursor:cursor] = target
+            cursor += len(target)
+            continue
+
+        match_idx = _find_subsequence(file_lines, source, start=cursor)
+        if match_idx is None:
+            return None, "Hunk context not found in target file"
+
+        file_lines[match_idx:match_idx + len(source)] = target
+        cursor = match_idx + len(target)
+
+    return file_lines, None
+
+
+def _apply_codex_patch(patch: str, dry_run: bool) -> dict:
+    ops, error = _parse_codex_patch(patch)
+    if error:
+        return {
+            "success": False,
+            "rc": 1,
+            "stdout": "",
+            "stderr": "",
+            "dry_run": dry_run,
+            "phase": "check",
+            "error": error,
+        }
+
+    touched_paths = set()
+    for op in ops or []:
+        path = op.get("path")
+        if isinstance(path, str):
+            touched_paths.add(path)
+        move_to = op.get("move_to")
+        if isinstance(move_to, str):
+            touched_paths.add(move_to)
+
+    def _resolve_path(path: str) -> Tuple[Optional[pathlib.Path], Optional[str]]:
+        try:
+            from rev.tools.workspace_resolver import resolve_workspace_path
+            resolved = resolve_workspace_path(path, purpose="apply_patch")
+            return resolved.abs_path, None
+        except Exception as exc:
+            return None, str(exc)
+
+    for rel_path in touched_paths:
+        full_path, err = _resolve_path(rel_path)
+        if err:
+            return {
+                "success": False,
+                "rc": 1,
+                "stdout": "",
+                "stderr": "",
+                "dry_run": dry_run,
+                "phase": "check",
+                "error": err,
+            }
+
+    changed = False
+
+    for op in ops or []:
+        op_type = op.get("type")
+        rel_path = op.get("path")
+        if not isinstance(rel_path, str) or not rel_path:
+            return {
+                "success": False,
+                "rc": 1,
+                "stdout": "",
+                "stderr": "",
+                "dry_run": dry_run,
+                "phase": "check",
+                "error": "Missing file path in Codex patch",
+            }
+
+        full_path, err = _resolve_path(rel_path)
+        if err:
+            return {
+                "success": False,
+                "rc": 1,
+                "stdout": "",
+                "stderr": "",
+                "dry_run": dry_run,
+                "phase": "check",
+                "error": err,
+            }
+
+        if op_type == "add":
+            content_lines = op.get("lines", [])
+            if not isinstance(content_lines, list):
+                return {
+                    "success": False,
+                    "rc": 1,
+                    "stdout": "",
+                    "stderr": "",
+                    "dry_run": dry_run,
+                    "phase": "check",
+                    "error": f"Invalid add file content for {rel_path}",
+                }
+            file_lines: list[str] = []
+            for line in content_lines:
+                if not isinstance(line, str):
+                    return {
+                        "success": False,
+                        "rc": 1,
+                        "stdout": "",
+                        "stderr": "",
+                        "dry_run": dry_run,
+                        "phase": "check",
+                        "error": f"Invalid add line for {rel_path}",
+                    }
+                if line == "":
+                    file_lines.append("")
+                elif line.startswith("+"):
+                    file_lines.append(line[1:])
+                else:
+                    return {
+                        "success": False,
+                        "rc": 1,
+                        "stdout": "",
+                        "stderr": "",
+                        "dry_run": dry_run,
+                        "phase": "check",
+                        "error": f"Invalid add line for {rel_path}: {line}",
+                    }
+
+            new_content = "\n".join(file_lines)
+            if file_lines:
+                new_content += "\n"
+            existing = full_path.read_text(encoding="utf-8", errors="ignore") if full_path.exists() else None
+            if existing == new_content:
+                continue
+            changed = True
+            if dry_run:
+                continue
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            full_path.write_text(new_content, encoding="utf-8")
+            continue
+
+        if op_type == "delete":
+            if not full_path.exists():
+                continue
+            changed = True
+            if dry_run:
+                continue
+            full_path.unlink()
+            continue
+
+        if op_type == "update":
+            if not full_path.exists():
+                return {
+                    "success": False,
+                    "rc": 1,
+                    "stdout": "",
+                    "stderr": "",
+                    "dry_run": dry_run,
+                    "phase": "check",
+                    "error": f"File not found: {rel_path}",
+                }
+            original_text = full_path.read_text(encoding="utf-8", errors="ignore")
+            file_lines = original_text.splitlines()
+            ends_with_newline = original_text.endswith("\n")
+            hunks = op.get("hunks", [])
+            if not isinstance(hunks, list):
+                return {
+                    "success": False,
+                    "rc": 1,
+                    "stdout": "",
+                    "stderr": "",
+                    "dry_run": dry_run,
+                    "phase": "check",
+                    "error": f"Invalid hunks for {rel_path}",
+                }
+            updated_lines, err = _apply_codex_update(list(file_lines), hunks)
+            if err:
+                return {
+                    "success": False,
+                    "rc": 1,
+                    "stdout": "",
+                    "stderr": "",
+                    "dry_run": dry_run,
+                    "phase": "check",
+                    "error": f"{rel_path}: {err}",
+                }
+            new_content = "\n".join(updated_lines)
+            if ends_with_newline:
+                new_content += "\n"
+            if new_content != original_text:
+                changed = True
+                if not dry_run:
+                    full_path.write_text(new_content, encoding="utf-8")
+
+            move_to = op.get("move_to")
+            if isinstance(move_to, str) and move_to.strip():
+                dest_path, err = _resolve_path(move_to)
+                if err:
+                    return {
+                        "success": False,
+                        "rc": 1,
+                        "stdout": "",
+                        "stderr": "",
+                        "dry_run": dry_run,
+                        "phase": "check",
+                        "error": err,
+                    }
+                if dest_path.exists():
+                    dest_text = dest_path.read_text(encoding="utf-8", errors="ignore")
+                    if dest_text != new_content:
+                        return {
+                            "success": False,
+                            "rc": 1,
+                            "stdout": "",
+                            "stderr": "",
+                            "dry_run": dry_run,
+                            "phase": "check",
+                            "error": f"Destination exists: {move_to}",
+                        }
+                changed = True
+                if dry_run:
+                    pass
+                else:
+                    dest_path.parent.mkdir(parents=True, exist_ok=True)
+                    full_path.replace(dest_path)
+            continue
+
+        return {
+            "success": False,
+            "rc": 1,
+            "stdout": "",
+            "stderr": "",
+            "dry_run": dry_run,
+            "phase": "check",
+            "error": f"Unsupported Codex patch operation: {op_type}",
+        }
+
+    already_applied = not changed
+    return {
+        "success": True,
+        "rc": 0,
+        "stdout": "",
+        "stderr": "",
+        "dry_run": dry_run,
+        "phase": "apply" if not dry_run else "check",
+        "already_applied": already_applied,
+    }
+
+
 def is_git_repo() -> bool:
     """Check if the current directory is a git repository."""
     # Check for .git directory or file (worktree) first to avoid running subprocess unnecessarily
@@ -272,20 +913,7 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
 
     normalized_patch = _normalize_patch_text(patch)
     if normalized_patch.lstrip().startswith("*** Begin Patch"):
-        return json.dumps(
-            {
-                "success": False,
-                "rc": 1,
-                "stdout": "",
-                "stderr": "",
-                "dry_run": dry_run,
-                "phase": "check",
-                "error": (
-                    "Unsupported patch format: received a Codex '*** Begin Patch' block. "
-                    "Provide a unified diff (diff --git / ---/+++ with @@ hunks) for apply_patch."
-                ),
-            }
-        )
+        return json.dumps(_apply_codex_patch(normalized_patch, dry_run))
     if not normalized_patch.endswith("\n"):
         normalized_patch = f"{normalized_patch}\n"
 
@@ -649,7 +1277,7 @@ def git_branch(action: str = "list", branch_name: str = None) -> str:
 
 # ========== Additional Git Operations ==========
 
-def run_cmd(cmd: str | list[str], timeout: int = 300, cwd: Optional[pathlib.Path] = None) -> str:
+def run_cmd(cmd: str | list[str], timeout: int = _DEFAULT_RUN_CMD_TIMEOUT, cwd: Optional[pathlib.Path] = None) -> str:
     """Run a shell command safely with security validation.
 
     Security:
@@ -710,10 +1338,11 @@ def run_cmd(cmd: str | list[str], timeout: int = 300, cwd: Optional[pathlib.Path
         capture_output=True,
         check_interrupt=True,
     )
+    result = _maybe_retry_timeout(cmd, timeout, cwd, result, is_tests=False)
     return json.dumps(result)
 
 
-def run_tests(cmd: str | list[str] = "pytest -q", timeout: int = 600, cwd: Optional[pathlib.Path] = None) -> str:
+def run_tests(cmd: str | list[str] = "pytest -q", timeout: int = _DEFAULT_RUN_TESTS_TIMEOUT, cwd: Optional[pathlib.Path] = None) -> str:
     """Run test suite safely with security validation.
 
     Security:
@@ -735,6 +1364,7 @@ def run_tests(cmd: str | list[str] = "pytest -q", timeout: int = 600, cwd: Optio
         capture_output=True,
         check_interrupt=True,
     )
+    result = _maybe_retry_timeout(cmd, timeout, cwd, result, is_tests=True)
     return json.dumps(result)
 
 

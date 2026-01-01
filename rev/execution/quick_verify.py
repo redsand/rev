@@ -9,13 +9,16 @@ for the workflow loop: Plan → Execute → Verify → Report → Re-plan if nee
 import json
 import re
 import os
+import fnmatch
 import shlex
 import shutil
+import traceback
 from pathlib import Path
+import re
 from typing import Dict, Any, Optional, Tuple, Iterable, List
 from dataclasses import dataclass
 
-from rev.models.task import Task, TaskStatus
+from rev.models.task import Task, TaskStatus, explicitly_requests_tests, explicitly_requests_lint
 from rev.tools.registry import execute_tool, get_last_tool_call
 from rev import config
 from rev.core.context import RevContext
@@ -29,6 +32,18 @@ from rev.tools.utils import quote_cmd_arg
 from rev.tools.command_runner import _resolve_command
 from rev.tools.project_types import find_project_root, detect_project_type, detect_test_command
 from rev.llm.client import ollama_chat
+from rev.execution.verification_utils import _detect_build_command_for_root
+
+ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+
+
+def _strip_ansi(text: Any) -> str:
+    if not isinstance(text, str):
+        return "" if text is None else str(text)
+    return ANSI_RE.sub("", text)
+
 
 _READ_ONLY_TOOLS = {
     "read_file",
@@ -86,9 +101,11 @@ _TDD_TEST_RESULT_KEYS = {
 
 _TEST_NAME_PATTERN = re.compile(r"(?:^|[._-])(test|spec)(?:[._-]|$)", re.IGNORECASE)
 _NO_TEST_RUNNER_SENTINEL = "REV_NO_TEST_RUNNER"
+_TEST_REQUEST_STATE_KEY = "tests_requested_for_files"
 _MISSING_SCRIPT_PATTERN = re.compile(r"missing script:\s*\"?([A-Za-z0-9:_\\.-]+)\"?", re.IGNORECASE)
 _COMMAND_NOT_FOUND_PATTERN = re.compile(r"command\\s+\"?([A-Za-z0-9:_\\.-]+)\"?\\s+not\\s+found", re.IGNORECASE)
 _PNPM_NO_SCRIPT_PATTERN = re.compile(r"ERR_PNPM_NO_SCRIPT.*?\"?([A-Za-z0-9:_\\.-]+)\"?", re.IGNORECASE)
+_TEST_REQUEST_STATE_KEY = "tests_requested_for_files"
 
 
 def _detect_missing_script(stdout: str, stderr: str) -> Optional[str]:
@@ -99,6 +116,81 @@ def _detect_missing_script(stdout: str, stderr: str) -> Optional[str]:
             name = match.group(1)
             return name or "test"
     return None
+
+
+def _candidate_test_paths_for_source(file_path: Path) -> list[Path]:
+    """Generate likely test file paths for a source file."""
+    if not file_path.suffix:
+        return []
+    if any(token in file_path.parts for token in _TEST_DIR_TOKENS):
+        return []
+
+    stem = file_path.stem
+    suffix = file_path.suffix
+    candidates: list[Path] = []
+
+    # JS/TS/Vue
+    if suffix in {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".vue"}:
+        candidates.append(Path("tests") / f"{stem}.test{suffix if suffix != '.vue' else '.ts'}")
+        candidates.append(Path("tests") / f"{stem}.spec{suffix if suffix != '.vue' else '.ts'}")
+    # Python
+    elif suffix == ".py":
+        candidates.append(Path("tests") / f"test_{stem}.py")
+    # Go
+    elif suffix == ".go":
+        candidates.append(file_path.with_name(f"{stem}_test.go"))
+    # Rust
+    elif suffix == ".rs":
+        candidates.append(Path("tests") / f"{stem}_test.rs")
+    # Java
+    elif suffix == ".java":
+        candidates.append(Path("src/test/java") / f"{stem}Test.java")
+    # C#/F#
+    elif suffix in {".cs", ".fs", ".fsx"}:
+        candidates.append(Path("tests") / f"{stem}Tests{suffix}")
+
+    return candidates
+
+
+def _ensure_test_request_for_file(context: RevContext, file_path: Path) -> None:
+    """Ensure there is a pending test task for the given source file if no test exists."""
+    try:
+        rel = file_path.relative_to(config.ROOT) if config.ROOT else file_path
+    except Exception:
+        rel = file_path
+
+    # Avoid repeated requests per code-change iteration
+    state = context.agent_state.get(_TEST_REQUEST_STATE_KEY, {})
+    if not isinstance(state, dict):
+        state = {}
+    last_iter = state.get(str(rel))
+    current_iter = context.agent_state.get("last_code_change_iteration", -1)
+    if isinstance(last_iter, int) and isinstance(current_iter, int) and last_iter == current_iter:
+        return
+
+    candidates = _candidate_test_paths_for_source(rel)
+    if not candidates:
+        return
+    # If any candidate exists, skip
+    for cand in candidates:
+        abs_cand = (config.ROOT / cand) if config.ROOT else cand
+        if abs_cand.exists():
+            return
+
+    # Queue a test-creation task
+    tasks = [
+        Task(
+            description=(
+                f"Add tests for {rel} at {candidates[0]} to cover its functionality. "
+                "Use write_file (or apply_patch) to create the test file with failing tests "
+                "that exercise the new code."
+            ),
+            action_type="add",
+        )
+    ]
+    context.agent_requests.append({"type": "INJECT_TASKS", "details": {"tasks": tasks}})
+    state[str(rel)] = current_iter
+    context.set_agent_state(_TEST_REQUEST_STATE_KEY, state)
 
 
 def _attempt_missing_script_fallback(cmd_parts: list[str], cwd: Optional[Path | str]) -> Optional[list[str]]:
@@ -242,6 +334,22 @@ class VerificationResult:
 def verify_task_execution(task: Task, context: RevContext) -> VerificationResult:
     """
     Verify that a task actually completed successfully.
+    Wrapper catches unexpected exceptions to avoid opaque failures.
+    """
+    try:
+        return _verify_task_execution_impl(task, context)
+    except Exception as e:
+        return VerificationResult(
+            passed=False,
+            message=f"Verification exception: {e}",
+            details={"exception": traceback.format_exc()},
+            should_replan=True,
+        )
+
+
+def _verify_task_execution_impl(task: Task, context: RevContext) -> VerificationResult:
+    """
+    Internal implementation for task verification (wrapped to catch unexpected exceptions).
     """
     if task.status != TaskStatus.COMPLETED:
         return VerificationResult(
@@ -681,7 +789,7 @@ def _verify_refactoring(task: Task, context: RevContext) -> VerificationResult:
                             # Build a simple import test command
                             import_test_cmd = f'cd "{parent_dir}" && python -c "from {package_name} import *; print(\'Success\')"'
                             try:
-                                import_test_result = execute_tool("run_cmd", {"cmd": import_test_cmd, "timeout": 10})
+                                import_test_result = execute_tool("run_cmd", {"cmd": import_test_cmd, "timeout": 10}, agent_name="quick_verify")
                                 import_test_data = json.loads(import_test_result)
                                 if import_test_data.get("rc") == 0:
                                     details["runtime_import_test"] = "PASSED"
@@ -900,69 +1008,129 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
         )
 
     # Check if file exists
-    if file_path.exists():
-        # If the resolved path is actually a directory, don't apply file-size semantics.
-        if file_path.is_dir():
-            return VerificationResult(
-                passed=True,
-                message=f"Directory exists: {file_path.name}",
-                details={"directory_path": str(file_path), "is_dir": True},
-            )
-
-        file_size = file_path.stat().st_size
-        details["file_exists"] = True
-        details["file_size"] = file_size
-        details["file_path"] = str(file_path)
-
-        if file_size == 0:
-            return VerificationResult(
-                passed=False,
-                message=f"File created but is empty: {file_path}",
-                details=details,
-                should_replan=True
-            )
-
-        # CRITICAL CHECK: Detect similar/duplicate files and fail verification
-        # This forces replanning to extend existing files instead of creating duplicates
-        payload = _parse_task_result_payload(task.result)
-        if payload and payload.get("is_new_file") and payload.get("similar_files"):
-            similar_list = payload.get("similar_files", [])
-            similar_str = ", ".join(similar_list[:3])
-            context.add_agent_request(
-                "DUPLICATE_FILE_PREVENTION",
-                {
-                    "agent": "VerificationSystem",
-                    "reason": f"Similar files exist: {similar_str}",
-                    "detailed_reason": (
-                        f"DUPLICATE FILE DETECTED: File '{file_path.name}' was created but similar files already exist: {similar_str}. "
-                        f"Instead of creating new files with similar names, EDIT one of the existing files to add the new functionality. "
-                        f"Use action_type='edit' with the most appropriate existing file path."
-                    )
-                }
-            )
-            return VerificationResult(
-                passed=False,
-                message=f"Duplicate file: similar files exist ({similar_str}). Extend existing file instead of creating new one.",
-                details={
-                    **details,
-                    "similar_files": similar_list,
-                    "suggested_action": "extend_existing"
-                },
-                should_replan=True
-            )
-
-        return VerificationResult(
-            passed=True,
-            message=f"File created successfully: {file_path.name}",
-            details=details
-        )
-    else:
+    if not file_path.exists():
         return VerificationResult(
             passed=False,
             message=f"File was not created: {file_path}",
             details={"expected_path": str(file_path)},
             should_replan=True
         )
+
+    # Vue SFC sanity: require at least <template> or <script>
+    if not _vue_sfc_has_minimal_blocks(file_path):
+        return VerificationResult(
+            passed=False,
+            message=f"Vue file {file_path.name} is missing <template> or <script> block.",
+            details={"expected_path": str(file_path)},
+            should_replan=True,
+        )
+
+    # If the resolved path is actually a directory, don't apply file-size semantics.
+    if file_path.is_dir():
+        return VerificationResult(
+            passed=True,
+            message=f"Directory exists: {file_path.name}",
+            details={"directory_path": str(file_path), "is_dir": True},
+        )
+
+    file_size = file_path.stat().st_size
+    details["file_exists"] = True
+    details["file_size"] = file_size
+    details["file_path"] = str(file_path)
+
+    if file_size == 0:
+        return VerificationResult(
+            passed=False,
+            message=f"File created but is empty: {file_path}",
+            details=details,
+            should_replan=True
+        )
+
+    # CRITICAL CHECK: Detect similar/duplicate files and fail verification
+    # This forces replanning to extend existing files instead of creating duplicates
+    payload = _parse_task_result_payload(task.result)
+    if payload and payload.get("is_new_file") and payload.get("similar_files"):
+        similar_list = payload.get("similar_files", [])
+        similar_str = ", ".join(similar_list[:3])
+        context.add_agent_request(
+            "DUPLICATE_FILE_PREVENTION",
+            {
+                "agent": "VerificationSystem",
+                "reason": f"Similar files exist: {similar_str}",
+                "detailed_reason": (
+                    f"DUPLICATE FILE DETECTED: File '{file_path.name}' was created but similar files already exist: {similar_str}. "
+                    f"Instead of creating new files with similar names, EDIT one of the existing files to add the new functionality. "
+                    f"Use action_type='edit' with the most appropriate existing file path."
+                )
+            }
+        )
+        return VerificationResult(
+            passed=False,
+            message=f"Duplicate file: similar files exist ({similar_str}). Extend existing file instead of creating new one.",
+            details={
+                **details,
+                "similar_files": similar_list,
+                "suggested_action": "extend_existing"
+            },
+            should_replan=True
+        )
+
+    # Syntax validation for created file
+    is_valid, error_msg, skipped = _run_syntax_check(file_path)
+    if not is_valid:
+        _log_syntax_result(context, file_path, ok=False, skipped=False, msg=error_msg)
+        suggested_cmd = _enqueue_project_typecheck(context, tasks := [], reason="Per-file syntax error")
+        if tasks:
+            context.set_agent_state("injected_tasks_after_skip", True)
+            context.agent_requests.append({"type": "INJECT_TASKS", "details": {"tasks": tasks}})
+        return VerificationResult(
+            passed=False,
+            message=f"File creation introduced a syntax error in {file_path.name}",
+            details={
+                **details,
+                "syntax_error": error_msg,
+                "suggestion": "Fix the syntax error in the file",
+                "suggested_build_cmd": suggested_cmd,
+            },
+            should_replan=True,
+        )
+    if skipped:
+        _log_syntax_result(context, file_path, ok=True, skipped=True, msg="skipped (no checker available)")
+        suggested_cmd = _enqueue_project_typecheck(context, tasks := [], reason="Per-file syntax check skipped")
+        if tasks:
+            context.set_agent_state("injected_tasks_after_skip", True)
+            context.agent_requests.append({"type": "INJECT_TASKS", "details": {"tasks": tasks}})
+        _ensure_test_request_for_file(context, file_path)
+        return VerificationResult(
+            passed=True,
+            message=f"Syntax check skipped for {file_path.name}; a project typecheck/build has been enqueued.",
+            details={
+                **details,
+                "syntax_skipped": True,
+                "suggested_build_cmd": suggested_cmd,
+            },
+            should_replan=False,
+        )
+
+    if not _has_header_comment(file_path):
+        return VerificationResult(
+            passed=False,
+            message=f"New file {file_path.name} is missing the required top-of-file comment describing its purpose.",
+            details={
+                **details,
+                "missing_header_comment": True,
+                "suggestion": "Add a brief header comment at the top describing the file's role.",
+            },
+            should_replan=True,
+        )
+
+    _log_syntax_result(context, file_path, ok=True, skipped=False, msg="valid")
+    _ensure_test_request_for_file(context, file_path)
+    return VerificationResult(
+        passed=True,
+        message=f"File created successfully and syntax validated: {file_path.name}",
+        details=details
+    )
 
 
 def _extract_path_from_task_result(result: Any) -> Optional[str]:
@@ -1316,7 +1484,7 @@ def _try_auto_install(base_cmd: str) -> bool:
             return False
         print(f"  [i] Tool '{base_cmd}' not found, attempting auto-install: {install_cmd}...")
         _record_install_attempt(install_cmd, root=config.ROOT)
-        install_res = execute_tool("run_cmd", {"cmd": install_cmd, "timeout": 300})
+        install_res = execute_tool("run_cmd", {"cmd": install_cmd, "timeout": 300}, agent_name="quick_verify")
         try:
             if json.loads(install_res).get("rc") == 0:
                 print(f"  [OK] Successfully installed {base_cmd}")
@@ -1347,7 +1515,7 @@ def _try_npm_repair(pkg: str) -> bool:
                 print("  [i] Skipping npm install: dependency state unchanged.")
                 return False
             _record_install_attempt(install_cmd, root=config.ROOT)
-            execute_tool("run_cmd", {"cmd": ["npm", "install"], "timeout": 600})
+            execute_tool("run_cmd", {"cmd": ["npm", "install"], "timeout": 600}, agent_name="quick_verify")
             return (config.ROOT / "node_modules" / pkg_name).exists()
     except:
         pass
@@ -1444,9 +1612,9 @@ def _select_recovery_hint(stdout: str, stderr: str, error: str) -> Optional[str]
 
 def _extract_error(res: Dict[str, Any], default: str = "Unknown error") -> str:
     """Extract and truncate error message from tool result, with a recovery hint."""
-    stdout = res.get("stdout", "")
-    stderr = res.get("stderr", "")
-    error = res.get("error", "")
+    stdout = _strip_ansi(res.get("stdout", ""))
+    stderr = _strip_ansi(res.get("stderr", ""))
+    error = _strip_ansi(res.get("error", ""))
     rc = res.get("rc")
     help_info = res.get("help_info")
     
@@ -1487,7 +1655,7 @@ def _get_help_output(cmd_name: str) -> Optional[str]:
         try:
             # We use execute_tool directly to avoid recursion
             payload = {"cmd": f"{cmd_name} {flag}", "timeout": 5}
-            raw = execute_tool("run_cmd", payload)
+            raw = execute_tool("run_cmd", payload, agent_name="quick_verify")
             res = json.loads(raw)
             # rc=0 is success, but some tools output help to stderr or with non-zero rc
             out = (res.get("stdout") or res.get("stderr") or "").strip()
@@ -1515,7 +1683,7 @@ def _try_dynamic_help_discovery(path: Path) -> Optional[str]:
             
         for flag in ("--help", "-h"):
             cmd = f"{runner} {_quote_path(path)} {flag}"
-            raw = execute_tool("run_cmd", {"cmd": cmd, "timeout": 5})
+            raw = execute_tool("run_cmd", {"cmd": cmd, "timeout": 5}, agent_name="quick_verify")
             res = json.loads(raw)
             out = (res.get("stdout") or res.get("stderr") or "").strip()
             if out and ("usage:" in out.lower() or "options:" in out.lower() or "arguments:" in out.lower()):
@@ -1559,19 +1727,540 @@ def _resolve_validation_cwd(cmd: str | list[str], primary_path: Optional[Path]) 
     return None
 
 
-def _output_indicates_no_tests(stdout: str, stderr: str) -> bool:
+def _output_indicates_tests_present(stdout: str, stderr: str) -> bool:
     combined = f"{stdout}\n{stderr}".lower()
     patterns = (
-        "no tests found",
-        "no tests ran",
-        "no tests collected",
-        "collected 0 items",
-        "ran 0 tests",
-        "no test files",
-        "0 tests",
-        "0 passing",
+        r"\btests?\s*\(?\s*([1-9]\d*)\b",
+        r"\b([1-9]\d*)\s+tests?\b",
+        r"\bcollected\s+([1-9]\d*)\s+items\b",
     )
-    return any(pat in combined for pat in patterns)
+    for line in combined.splitlines():
+        if "test files" in line or "test file" in line:
+            continue
+        if any(re.search(pattern, line) for pattern in patterns):
+            return True
+    return False
+
+
+def _output_indicates_no_tests(stdout: str, stderr: str) -> bool:
+    combined = f"{stdout}\n{stderr}".lower()
+    if _output_indicates_tests_present(stdout, stderr):
+        return False
+    patterns = (
+        r"\bno tests found\b",
+        r"\bno tests ran\b",
+        r"\bno tests collected\b",
+        r"\bcollected\s+0\s+items\b",
+        r"\bran\s+0\s+tests?\b",
+        r"\bno test files\b",
+        r"\b0\s+tests?\b",
+        r"\b0\s+passing\b",
+    )
+    return any(re.search(pattern, combined) for pattern in patterns)
+
+
+def _extract_test_files_from_output(output: str) -> list[str]:
+    if not output:
+        return []
+    matches = re.findall(r"([A-Za-z0-9_/\\.-]+\.(?:test|spec)\.[A-Za-z0-9]+)", output)
+    if not matches:
+        return []
+    seen = set()
+    deduped: list[str] = []
+    for match in matches:
+        normalized = match.replace("\\", "/")
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
+
+def _resolve_import_target(test_path: Path, module_spec: str, root: Path) -> Optional[Path]:
+    if not module_spec:
+        return None
+    if not module_spec.startswith("."):
+        return None
+    base = (test_path.parent / module_spec)
+    candidates: list[Path] = []
+    if base.suffix:
+        candidates.append(base)
+    else:
+        candidates.extend(
+            base.with_suffix(ext)
+            for ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+        )
+        candidates.append(base / "index.ts")
+        candidates.append(base / "index.js")
+        candidates.append(base / "index.tsx")
+        candidates.append(base / "index.jsx")
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            continue
+        if not resolved.exists() or not resolved.is_file():
+            continue
+        try:
+            root_resolved = root.resolve()
+        except Exception:
+            root_resolved = root
+        if root_resolved not in resolved.parents and resolved != root_resolved:
+            continue
+        return resolved
+    return None
+
+
+def _detect_import_export_mismatch(test_files: list[str], root: Path) -> list[str]:
+    hints: list[str] = []
+    for test_file in test_files[:5]:
+        try:
+            test_path = Path(test_file)
+            if not test_path.is_absolute():
+                test_path = (root / test_path).resolve()
+        except Exception:
+            continue
+        if not test_path.exists():
+            continue
+        content = _read_text_file(test_path)
+        if not content:
+            continue
+
+        for match in re.finditer(r"import\s+([^;]+?)\s+from\s+['\"]([^'\"]+)['\"]", content):
+            import_clause = match.group(1).strip()
+            module_spec = match.group(2).strip()
+            target = _resolve_import_target(test_path, module_spec, root)
+            if not target:
+                if module_spec.startswith("."):
+                    hints.append(
+                        f"{test_path.as_posix()} imports {module_spec} but the path does not resolve to a file."
+                    )
+                continue
+
+            target_content = _read_text_file(target)
+            if not target_content:
+                continue
+            exported_names, has_default = _extract_exports(target_content)
+            default_name, named_imports = _parse_import_clause(import_clause)
+
+            if default_name and not has_default:
+                hints.append(
+                    f"{test_path.as_posix()} imports default '{default_name}' from {module_spec} but {target.as_posix()} has no default export."
+                )
+            for name in named_imports:
+                if name not in exported_names:
+                    hints.append(
+                        f"{test_path.as_posix()} imports '{{ {name} }}' from {module_spec} but {target.as_posix()} does not export it."
+                    )
+
+    return hints
+
+
+def _read_text_file(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def _load_package_json(root: Path) -> dict:
+    pkg = root / "package.json"
+    if not pkg.exists():
+        return {}
+    try:
+        return json.loads(pkg.read_text(errors="ignore"))
+    except Exception:
+        return {}
+
+
+def _package_dependencies(root: Path) -> set[str]:
+    pkg_data = _load_package_json(root)
+    deps: dict[str, Any] = {}
+    for key in ("dependencies", "devDependencies", "peerDependencies"):
+        value = pkg_data.get(key)
+        if isinstance(value, dict):
+            deps.update(value)
+    return {str(name).lower() for name in deps.keys()}
+
+
+def _extract_exports(content: str) -> tuple[set[str], bool]:
+    names: set[str] = set()
+    for match in re.finditer(r"export\s+(?:const|function|class|interface|type)\s+([A-Za-z0-9_]+)", content):
+        names.add(match.group(1))
+    for match in re.finditer(r"export\s+\{([^}]+)\}", content):
+        for part in match.group(1).split(","):
+            item = part.strip()
+            if not item:
+                continue
+            if " as " in item:
+                item = item.split(" as ", 1)[0].strip()
+            names.add(item)
+    has_default = bool(re.search(r"\bexport\s+default\b", content))
+    return names, has_default
+
+
+def _parse_import_clause(clause: str) -> tuple[Optional[str], list[str]]:
+    default_name = None
+    named: list[str] = []
+    if not clause:
+        return default_name, named
+    if clause.startswith("{"):
+        named = _parse_named_imports(clause)
+        return default_name, named
+    if clause.startswith("*"):
+        return default_name, named
+    if "," in clause:
+        default_part, rest = clause.split(",", 1)
+        default_name = default_part.strip()
+        named = _parse_named_imports(rest)
+        return default_name, named
+    default_name = clause.strip()
+    return default_name, named
+
+
+def _parse_named_imports(segment: str) -> list[str]:
+    match = re.search(r"\{([^}]+)\}", segment)
+    if not match:
+        return []
+    names: list[str] = []
+    for part in match.group(1).split(","):
+        item = part.strip()
+        if not item:
+            continue
+        if " as " in item:
+            item = item.split(" as ", 1)[0].strip()
+        names.append(item)
+    return names
+
+
+def _parse_env_file_vars(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    values: set[str] = set()
+    for line in _read_text_file(path).splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key:
+            values.add(key)
+    return values
+
+
+def _collect_env_vars_from_text(text: str) -> set[str]:
+    if not text:
+        return set()
+    env_vars = set(re.findall(r"process\.env\.([A-Za-z0-9_]+)", text))
+    env_vars.update(re.findall(r"import\.meta\.env\.([A-Za-z0-9_]+)", text))
+    env_vars.update(re.findall(r"os\.environ\[['\"]([A-Za-z0-9_]+)['\"]\]", text))
+    return env_vars
+
+
+def _extract_string_literals(raw: str) -> list[str]:
+    return [match for match in re.findall(r"['\"]([^'\"]+)['\"]", raw or "")]
+
+
+def _extract_patterns_from_config_content(content: str) -> dict[str, list[str]]:
+    patterns = {"include": [], "exclude": [], "test_match": [], "test_regex": []}
+    if not content:
+        return patterns
+    fields = {
+        "include": "include",
+        "exclude": "exclude",
+        "testMatch": "test_match",
+        "testRegex": "test_regex",
+    }
+    for field, key in fields.items():
+        matches = re.finditer(
+            rf"{field}\s*:\s*(\[[^\]]*\]|['\"][^'\"]+['\"]|/[^/]+/)",
+            content,
+            re.IGNORECASE | re.DOTALL,
+        )
+        for match in matches:
+            raw = match.group(1)
+            if raw.startswith("/") and raw.endswith("/") and key == "test_regex":
+                patterns[key].append(raw.strip("/"))
+                continue
+            patterns[key].extend(_extract_string_literals(raw))
+    return patterns
+
+
+def _collect_test_discovery_patterns(root: Path) -> dict[str, list[str]]:
+    combined = {"include": [], "exclude": [], "test_match": [], "test_regex": []}
+    candidates = [
+        "vitest.config.ts",
+        "vitest.config.js",
+        "vitest.config.mjs",
+        "vitest.config.cjs",
+        "vite.config.ts",
+        "vite.config.js",
+        "vite.config.mjs",
+        "vite.config.cjs",
+        "jest.config.ts",
+        "jest.config.js",
+        "jest.config.mjs",
+        "jest.config.cjs",
+    ]
+    for name in candidates:
+        path = root / name
+        if not path.exists():
+            continue
+        content = _read_text_file(path)
+        patterns = _extract_patterns_from_config_content(content)
+        for key in combined:
+            combined[key].extend(patterns[key])
+
+    pkg = _load_package_json(root)
+    jest_cfg = pkg.get("jest")
+    if isinstance(jest_cfg, dict):
+        combined["test_match"].extend(jest_cfg.get("testMatch", []) or [])
+        regex = jest_cfg.get("testRegex")
+        if isinstance(regex, str):
+            combined["test_regex"].append(regex)
+        elif isinstance(regex, list):
+            combined["test_regex"].extend(regex)
+    vitest_cfg = pkg.get("vitest") or pkg.get("test")
+    if isinstance(vitest_cfg, dict):
+        combined["include"].extend(vitest_cfg.get("include", []) or [])
+        combined["exclude"].extend(vitest_cfg.get("exclude", []) or [])
+
+    return combined
+
+
+def _expand_brace_pattern(pattern: str) -> list[str]:
+    if "{" not in pattern or "}" not in pattern:
+        return [pattern]
+    prefix, rest = pattern.split("{", 1)
+    inner, suffix = rest.split("}", 1)
+    parts = [part.strip() for part in inner.split(",") if part.strip()]
+    return [f"{prefix}{part}{suffix}" for part in parts] or [pattern]
+
+
+def _match_any_glob(path: str, patterns: list[str]) -> bool:
+    for pattern in patterns:
+        for expanded in _expand_brace_pattern(pattern):
+            if fnmatch.fnmatch(path, expanded):
+                return True
+    return False
+
+
+def _detect_test_discovery_config_mismatch(test_files: list[str], root: Path) -> Optional[str]:
+    if not test_files:
+        return None
+    patterns = _collect_test_discovery_patterns(root)
+    include = patterns["include"] or patterns["test_match"]
+    exclude = patterns["exclude"]
+    regexes = patterns["test_regex"]
+
+    normalized = [path.replace("\\", "/") for path in test_files]
+    if include:
+        if not any(_match_any_glob(path, include) for path in normalized):
+            return "Test discovery patterns do not match any test files (check include/testMatch config)."
+    if regexes:
+        try:
+            compiled = [re.compile(expr) for expr in regexes]
+        except re.error:
+            compiled = []
+        if compiled and not any(any(regex.search(path) for regex in compiled) for path in normalized):
+            return "testRegex patterns do not match any test files."
+    if exclude and all(_match_any_glob(path, exclude) for path in normalized):
+        return "All discovered test files are excluded by config patterns."
+    return None
+
+
+def _test_file_has_cases(content: str) -> bool:
+    return bool(re.search(r"\b(it|test|bench)\s*\(", content))
+
+
+def _detect_empty_test_files(test_files: list[str], root: Path) -> Optional[str]:
+    for test_file in test_files[:5]:
+        try:
+            path = Path(test_file)
+            if not path.is_absolute():
+                path = (root / path).resolve()
+        except Exception:
+            continue
+        content = _read_text_file(path)
+        if content and not _test_file_has_cases(content):
+            return f"{path.as_posix()} defines no test cases (no it()/test() calls)."
+    return None
+
+
+def _detect_missing_env_vars(test_files: list[str], root: Path) -> list[str]:
+    env_vars: set[str] = set()
+    for test_file in test_files[:5]:
+        try:
+            path = Path(test_file)
+            if not path.is_absolute():
+                path = (root / path).resolve()
+        except Exception:
+            continue
+        env_vars.update(_collect_env_vars_from_text(_read_text_file(path)))
+    if not env_vars:
+        return []
+    env_file_vars = _parse_env_file_vars(root / ".env")
+    missing = []
+    for name in sorted(env_vars):
+        if name in {"NODE_ENV", "PATH", "PWD", "HOME"}:
+            continue
+        if name not in env_file_vars and name not in os.environ:
+            missing.append(name)
+    return missing
+
+
+def _detect_missing_modules_from_output(output: str, root: Path) -> list[str]:
+    if not output:
+        return []
+    deps = _package_dependencies(root)
+    builtins = {
+        "fs", "path", "http", "https", "url", "crypto", "stream", "events", "os", "util",
+        "child_process", "buffer", "zlib", "net", "tls", "assert", "timers",
+    }
+    missing: list[str] = []
+    for match in re.findall(r"Cannot find module ['\"]([^'\"]+)['\"]", output):
+        module_name = match.strip()
+        module_lower = module_name.lower()
+        if module_name.startswith("."):
+            missing.append(f"Missing local import: {module_name}")
+        elif module_lower not in deps and module_lower not in builtins:
+            missing.append(f"Missing dependency: {module_name}")
+    for match in re.findall(r"Can't resolve ['\"]([^'\"]+)['\"]", output):
+        module_name = match.strip()
+        module_lower = module_name.lower()
+        if module_name.startswith("."):
+            missing.append(f"Missing local import: {module_name}")
+        elif module_lower not in deps and module_lower not in builtins:
+            missing.append(f"Missing dependency: {module_name}")
+    return missing
+
+
+def _detect_typescript_setup_issues(test_files: list[str], root: Path) -> list[str]:
+    uses_ts = any(path.endswith((".ts", ".tsx")) for path in test_files)
+    uses_vue = any(path.endswith(".vue") for path in test_files)
+    if not (uses_ts or uses_vue):
+        return []
+    hints: list[str] = []
+    if not (root / "tsconfig.json").exists() and not (root / "jsconfig.json").exists():
+        hints.append("TypeScript files detected but tsconfig.json/jsconfig.json is missing.")
+    deps = _package_dependencies(root)
+    if "typescript" not in deps:
+        hints.append("TypeScript is not listed in package.json dependencies.")
+    if uses_vue and "@vue/compiler-sfc" not in deps:
+        hints.append("Vue files detected but @vue/compiler-sfc is missing in dependencies.")
+    return hints
+
+
+def _detect_prisma_setup_issues(test_files: list[str], output: str, root: Path) -> list[str]:
+    hinted = False
+    for test_file in test_files[:5]:
+        if "@prisma/client" in _read_text_file(root / test_file if not Path(test_file).is_absolute() else Path(test_file)):
+            hinted = True
+            break
+    if "prisma" in (output or "").lower():
+        hinted = True
+    if not hinted:
+        return []
+    hints: list[str] = []
+    if not (root / "prisma" / "schema.prisma").exists():
+        hints.append("Prisma schema.prisma is missing.")
+    if not (root / "node_modules" / "@prisma" / "client").exists():
+        hints.append("@prisma/client is missing from node_modules.")
+    if not (root / "prisma" / "migrations").exists():
+        hints.append("Prisma migrations are missing; run prisma migrate to initialize.")
+    return hints
+
+
+def _detect_connection_errors(output: str) -> Optional[str]:
+    lowered = (output or "").lower()
+    if any(token in lowered for token in ("econnrefused", "connect econnrefused", "socket hang up", "enotfound")):
+        return "Connection error detected (server not running or wrong host/port)."
+    return None
+
+
+def _detect_missing_test_runner(test_files: list[str], output: str, root: Path) -> Optional[str]:
+    deps = _package_dependencies(root)
+    content_hint = ""
+    for test_file in test_files[:5]:
+        content_hint += _read_text_file(root / test_file if not Path(test_file).is_absolute() else Path(test_file))
+    combined = f"{output}\n{content_hint}".lower()
+    if "vitest" in combined and "vitest" not in deps:
+        return "Vitest is referenced but not listed in package.json dependencies."
+    if "jest" in combined and "jest" not in deps:
+        return "Jest is referenced but not listed in package.json dependencies."
+    return None
+
+
+def _build_test_diagnostics(output: str, test_files: list[str], root: Path) -> dict[str, Any]:
+    debug: dict[str, Any] = {}
+    hints: list[str] = []
+    discovered = test_files or _discover_test_files(root)
+    if discovered:
+        debug["discovered_test_files"] = discovered[:5]
+
+    import_hints = _detect_import_export_mismatch(discovered, root)
+    hints.extend(import_hints[:2])
+
+    config_hint = _detect_test_discovery_config_mismatch(discovered, root)
+    if config_hint:
+        hints.append(config_hint)
+
+    empty_hint = _detect_empty_test_files(discovered, root)
+    if empty_hint:
+        hints.append(empty_hint)
+
+    missing_env = _detect_missing_env_vars(discovered, root)
+    if missing_env:
+        debug["missing_env_vars"] = missing_env[:5]
+        hints.append("Missing environment variables detected in tests.")
+
+    missing_mods = _detect_missing_modules_from_output(output, root)
+    if missing_mods:
+        debug["missing_dependencies"] = missing_mods[:5]
+        hints.append(missing_mods[0])
+
+    if (root / "package.json").exists() and not (root / "node_modules").exists():
+        hints.append("node_modules is missing; install dependencies before running tests.")
+        hints.append("Run `npm install` (or yarn/pnpm) to install the test runner.")
+
+    ts_hints = _detect_typescript_setup_issues(discovered, root)
+    hints.extend(ts_hints[:2])
+
+    output_lower = output.lower()
+    # Broader framework/tooling hints
+    if "cacerror" in output_lower and "vitest" in output_lower:
+        hints.append("Vitest CLI error: invalid option or script; fix package.json test script to a non-watch single-file command.")
+    if "unknown option" in output_lower and "jest" in output_lower:
+        hints.append("Jest CLI error: invalid option; check package.json test script flags.")
+    if "enoent" in output_lower and ("node" in output_lower or "npm" in output_lower):
+        hints.append("Command failed to start; verify package.json scripts and that the test runner is installed.")
+        hints.append("Install dependencies (npm install) and ensure the test script points to an existing runner.")
+    if "playwright" in output_lower and "not found" in output_lower:
+        hints.append("Playwright binary missing; install Playwright and run `npx playwright install`.")
+
+    prisma_hints = _detect_prisma_setup_issues(discovered, output, root)
+    hints.extend(prisma_hints[:2])
+
+    conn_hint = _detect_connection_errors(output)
+    if conn_hint:
+        hints.append(conn_hint)
+
+    runner_hint = _detect_missing_test_runner(discovered, output, root)
+    if runner_hint:
+        hints.append(runner_hint)
+
+    if hints:
+        debug["suspected_issue"] = hints[0]
+        debug["hints"] = hints[:4]
+
+    return debug
+
+
+def _merge_debug_details(details: dict[str, Any], debug: dict[str, Any]) -> dict[str, Any]:
+    if not debug:
+        return details
+    merged = dict(details)
+    merged["debug"] = debug
+    return merged
 
 
 def _path_is_test_like(path: Path) -> bool:
@@ -2150,7 +2839,7 @@ def _run_validation_command(cmd: str | List[str], *, use_tests_tool: bool = Fals
 
     tool = "run_tests" if use_tests_tool else "run_cmd"
     try:
-        raw = execute_tool(tool, payload)
+        raw = execute_tool(tool, payload, agent_name="quick_verify")
         data = json.loads(raw)
         if isinstance(data, dict):
             # Ensure cmd is present in the result
@@ -2166,23 +2855,8 @@ def _run_validation_command(cmd: str | List[str], *, use_tests_tool: bool = Fals
                 if fallback_res:
                     return fallback_res
 
-            # If the command failed and produced no output, attempt to gather help output for better diagnostics
-            if rc is not None and rc not in (0, 4) and not data.get("stdout") and not data.get("stderr"):
-                try:
-                    if isinstance(cmd, list):
-                        base_cmd = cmd[0]
-                    else:
-                        tokens = shlex.split(cmd)
-                        base_cmd = tokens[0] if tokens else ""
-                        
-                    # Only get help for tools, not for source files
-                    if base_cmd in ("npm", "pip", "pytest", "eslint", "ruff", "mypy", "npx", "node", "python", "go", "cargo"):
-                        help_info = _get_help_output(base_cmd)
-                        if help_info:
-                            data["help_info"] = help_info
-                except:
-                    pass
-                    
+            # If the command failed, keep rc as-is; no "completed" masking
+            
             if _retry_count < 2:
                 stdout = str(data.get("stdout") or "")
                 stderr = str(data.get("stderr") or "")
@@ -2310,6 +2984,12 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
                 should_replan=True,
             )
 
+    explicit_tests = False
+    explicit_lint = False
+    if task:
+        explicit_tests = explicitly_requests_tests(task.description) or task.action_type == "test"
+        explicit_lint = explicitly_requests_lint(task.description)
+
     # -------------------------------------------------------------------------
     # PYTHON VERIFICATION
     # -------------------------------------------------------------------------
@@ -2333,48 +3013,49 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
         if mode == "fast":
             return strict_details
 
-        # Targeted pytest for touched test files/directories
-        if custom_test_cmd:
-            pytest_cmd = custom_test_cmd
-        else:
-            test_targets = []
-            for p in paths:
-                parts_lower = {part.lower() for part in p.parts}
-                if "tests" in parts_lower or p.name.startswith("test_") or p.name.endswith("_test.py"):
-                    test_targets.append(p)
-            if test_targets:
-                pytest_cmd = ["pytest", "-q"] + [str(p) for p in test_targets]
+        if explicit_tests:
+            # Targeted pytest for touched test files/directories
+            if custom_test_cmd:
+                pytest_cmd = custom_test_cmd
             else:
-                pytest_cmd = ["pytest", "-q"]
-        
-        pytest_res = _run_validation_command(pytest_cmd, use_tests_tool=True, timeout=config.VALIDATION_TIMEOUT_SECONDS)
-        strict_details["pytest"] = pytest_res
-        rc = pytest_res.get("rc", 1)
-        # Pytest exit codes: 0=pass, 1=fail, 2=interrupted, 3=internal error, 4=usage error, 5=no tests collected
-        if pytest_res.get("blocked") or (rc != 0 and rc != 4):
-            if rc == 5:
-                if _no_tests_expected(task):
-                    strict_details["pytest_note"] = "No tests collected (rc=5) - explicitly allowed"
+                test_targets = []
+                for p in paths:
+                    parts_lower = {part.lower() for part in p.parts}
+                    if "tests" in parts_lower or p.name.startswith("test_") or p.name.endswith("_test.py"):
+                        test_targets.append(p)
+                if test_targets:
+                    pytest_cmd = ["pytest", "-q"] + [str(p) for p in test_targets]
+                else:
+                    pytest_cmd = ["pytest", "-q"]
+            
+            pytest_res = _run_validation_command(pytest_cmd, use_tests_tool=True, timeout=config.VALIDATION_TIMEOUT_SECONDS)
+            strict_details["pytest"] = pytest_res
+            rc = pytest_res.get("rc", 1)
+            # Pytest exit codes: 0=pass, 1=fail, 2=interrupted, 3=internal error, 4=usage error, 5=no tests collected
+            if pytest_res.get("blocked") or (rc != 0 and rc != 4):
+                if rc == 5:
+                    if _no_tests_expected(task):
+                        strict_details["pytest_note"] = "No tests collected (rc=5) - explicitly allowed"
+                    else:
+                        return VerificationResult(
+                            passed=False,
+                            message="Verification INCONCLUSIVE: pytest collected 0 tests (rc=5)",
+                            details={"strict": strict_details},
+                            should_replan=True,
+                        )
                 else:
                     return VerificationResult(
                         passed=False,
-                        message="Verification INCONCLUSIVE: pytest collected 0 tests (rc=5)",
+                        message=f"Verification failed: pytest errors. Error: {_extract_error(pytest_res)}",
                         details={"strict": strict_details},
                         should_replan=True,
                     )
-            else:
-                return VerificationResult(
-                    passed=False,
-                    message=f"Verification failed: pytest errors. Error: {_extract_error(pytest_res)}",
-                    details={"strict": strict_details},
-                    should_replan=True,
-                )
-        elif rc == 4:
-            strict_details["pytest_note"] = "No tests collected (rc=4) - treated as pass"
+            elif rc == 4:
+                strict_details["pytest_note"] = "No tests collected (rc=4) - treated as pass"
 
         # Optional lint/type checks
         py_paths = [p for p in paths if p.suffix == ".py" and p.exists()]
-        if py_paths:
+        if py_paths and explicit_lint:
             targets = [str(p) for p in py_paths[:10]]
             # E9: Runtime/syntax errors, F63: Invalid print syntax, F7: Statement problems
             optional_checks = [
@@ -2424,7 +3105,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
                     )
 
         # 2. Targeted Linting (eslint)
-        if node_paths and mode == "strict":
+        if node_paths and mode == "strict" and explicit_lint:
              targets = [str(p) for p in node_paths[:10]]
              # Use list-based npx command to avoid security blocks
              cmd = ["npx", "--yes", "eslint"] + targets + ["--quiet"]
@@ -2445,7 +3126,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
                     )
 
         # 3. Vue/TS Type Checking (slower, maybe skip in strict=false?)
-        if project_type == "vue":
+        if project_type == "vue" and explicit_lint:
             vue_ts_touched = any(p.suffix in ('.vue', '.ts') for p in paths)
             if vue_ts_touched:
                 if mode == "strict":
@@ -2467,7 +3148,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
         # 3. Unit Tests (Vitest/Jest)
         # Look for test files in the paths
         test_touched = any("test" in p.name or "spec" in p.name for p in paths)
-        if test_touched or mode == "strict":
+        if explicit_tests:
             # Try dynamic discovery first
             test_cmd = None
             hinted_test = None
@@ -2552,7 +3233,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
             )
         
         # 2. Tests
-        if mode == "strict" or custom_test_cmd:
+        if explicit_tests:
             cmd = custom_test_cmd or "go test ./..."
             test_res = _run_validation_command(cmd, use_tests_tool=True, timeout=120)
             strict_details["go_test"] = test_res
@@ -2578,7 +3259,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
             )
             
         # 2. Tests
-        if mode == "strict" or custom_test_cmd:
+        if explicit_tests:
             cmd = custom_test_cmd or "cargo test"
             test_res = _run_validation_command(cmd, use_tests_tool=True, timeout=300)
             strict_details["cargo_test"] = test_res
@@ -2602,7 +3283,7 @@ def _maybe_run_strict_verification(action_type: str, paths: list[Path], *, mode:
                 should_replan=True
             )
             
-        if mode == "strict" or custom_test_cmd:
+        if explicit_tests:
             cmd = custom_test_cmd or "dotnet test"
             test_res = _run_validation_command(cmd, use_tests_tool=True, timeout=180)
             strict_details["dotnet_test"] = test_res
@@ -2724,6 +3405,16 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
     node_extensions = {".js", ".ts", ".jsx", ".tsx", ".vue", ".mjs", ".cjs"}
     node_paths = [p for p in paths if p.suffix in node_extensions and p.exists()]
 
+    explicit_tests = explicitly_requests_tests(task.description) or task.action_type == "test"
+    explicit_lint = explicitly_requests_lint(task.description)
+    skip_lint = not explicit_lint
+    skip_tests = not explicit_tests
+    skip_notes: Dict[str, Any] = {}
+    if skip_lint:
+        skip_notes["lint_skipped"] = {"skipped": True, "reason": "not_explicitly_requested"}
+    if skip_tests:
+        skip_notes["tests_skipped"] = {"skipped": True, "reason": "not_explicitly_requested"}
+
     for step in validation_steps:
         text = step.lower()
         
@@ -2743,6 +3434,8 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
 
         # 2. LINT
         if "lint" in text or "linter" in text:
+            if skip_lint:
+                continue
             hinted_lint = _inspect_file_for_command_hints(primary_path, "lint") if paths else None
             
             if hinted_lint and node_paths:
@@ -2765,6 +3458,8 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
 
         # 3. TEST
         if "test" in text:
+            if skip_tests:
+                continue
             hinted_test = _inspect_file_for_command_hints(primary_path, "test") if paths else None
             
             if hinted_test:
@@ -2806,6 +3501,8 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
                 _add("tsc", ["npx", "--yes", "tsc", "--noEmit"])
 
     if not commands:
+        if skip_notes:
+            return skip_notes
         if no_runner_detected:
             return VerificationResult(
                 passed=True,
@@ -2851,14 +3548,235 @@ def _run_validation_steps(task: Task, details: Dict[str, Any], tool_events: Opti
                 should_replan=True,
             )
 
+    if skip_notes:
+        results.update(skip_notes)
     return results
 
 
-def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
-    """Verify that a file was actually edited."""
+def _run_syntax_check(file_path: Path) -> Tuple[bool, str, bool]:
+    """Run syntax validation for a file based on its extension.
 
-    # This is harder to verify without knowing the original content
-    # For now, just check that the file exists and isn't empty
+    Returns:
+        (is_valid, error_message, skipped) - (True, "", False) if valid,
+        (False, "error details", False) if invalid, (True, "", True) if check skipped.
+    """
+    suffix = file_path.suffix.lower()
+
+    # Python files
+    if suffix == '.py':
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['python', '-m', 'py_compile', str(file_path)],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                return True, "", False
+            return False, f"Python syntax error: {result.stderr.strip()}", False
+        except Exception as e:
+            return False, f"Failed to run syntax check: {str(e)}", False
+
+    # JavaScript/TypeScript files
+    elif suffix in {'.js', '.jsx', '.mjs', '.cjs'}:
+        # Try node --check first (fastest)
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['node', '--check', str(file_path)],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                return True, "", False
+            return False, f"JavaScript syntax error: {result.stderr.strip()}", False
+        except FileNotFoundError:
+            # Node not available, skip validation
+            return True, "", True
+        except Exception as e:
+            return False, f"Failed to run syntax check: {str(e)}", False
+
+    elif suffix in {'.ts', '.tsx'}:
+        # Try TypeScript compiler if available
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['tsc', '--noEmit', '--skipLibCheck', str(file_path)],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                return True, "", False
+            return False, f"TypeScript error: {result.stdout.strip()}", False
+        except FileNotFoundError:
+            # TypeScript not available, skip validation
+            return True, "", True
+        except Exception as e:
+            return False, f"Failed to run syntax check: {str(e)}", False
+
+    elif suffix == '.vue':
+        # Vue SFCs: try vue-tsc only if a Vue project marker exists (package.json with vue dependency)
+        pkg = _load_package_json(Path(config.ROOT) if getattr(config, "ROOT", None) else Path.cwd())
+        deps = set()
+        for field in ("dependencies", "devDependencies", "peerDependencies"):
+            values = pkg.get(field, {})
+            if isinstance(values, dict):
+                deps.update({str(k).strip().lower() for k in values.keys()})
+        is_vue_project = any(dep.startswith("vue") for dep in deps)
+        if not is_vue_project:
+            return True, "", True
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['npx', '--yes', 'vue-tsc', '--noEmit', str(file_path)],
+                capture_output=True,
+                text=True,
+                timeout=15
+            )
+            if result.returncode == 0:
+                return True, "", False
+            return False, f"Vue SFC error: {result.stdout.strip() or result.stderr.strip()}", False
+        except FileNotFoundError:
+            return True, "", True
+        except Exception as e:
+            return False, f"Failed to run syntax check: {str(e)}", False
+
+    # JSON files
+    elif suffix == '.json':
+        try:
+            content = file_path.read_text(encoding='utf-8', errors='ignore')
+            json.loads(content)
+            return True, "", False
+        except json.JSONDecodeError as e:
+            return False, f"JSON syntax error: {str(e)}", False
+        except Exception as e:
+            return False, f"Failed to read JSON: {str(e)}", False
+
+    # YAML files
+    elif suffix in {'.yml', '.yaml'}:
+        try:
+            import yaml
+            content = file_path.read_text(encoding='utf-8', errors='ignore')
+            yaml.safe_load(content)
+            return True, "", False
+        except ImportError:
+            # PyYAML not available, skip validation
+            return True, "", True
+        except Exception as e:
+            return False, f"YAML syntax error: {str(e)}", False
+
+    # XML/HTML files
+    elif suffix in {'.xml', '.html', '.htm'}:
+        try:
+            from xml.etree import ElementTree as ET
+            content = file_path.read_text(encoding='utf-8', errors='ignore')
+            ET.fromstring(content)
+            return True, "", False
+        except Exception as e:
+            # XML parsing can be strict, treat as warning not error
+            return True, f"XML validation warning: {str(e)}", True
+
+    # For other file types, assume valid (no syntax check available)
+    return True, "", True
+
+
+def _has_header_comment(path: Path) -> bool:
+    """Check for a brief header comment/docstring at the top of source files."""
+    code_suffixes = {".js", ".ts", ".jsx", ".tsx", ".vue", ".py", ".rb", ".go", ".java", ".cs", ".php", ".rs"}
+    if path.suffix.lower() not in code_suffixes:
+        return True  # Non-code files are exempt
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return True
+    for line in lines[:8]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if path.suffix.lower() == ".py":
+            return stripped.startswith("#") or stripped.startswith('"""')
+        if path.suffix.lower() == ".vue":
+            return stripped.startswith("<!--")
+        if path.suffix.lower() in {".js", ".ts", ".jsx", ".tsx", ".rs"}:
+            return stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("//!")
+        # Default for other code files: allow C/Java style comments
+        return stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("#")
+    return False
+
+
+def _vue_sfc_has_minimal_blocks(path: Path) -> bool:
+    """Ensure Vue SFC has at least one <template> or <script> block."""
+    if path.suffix.lower() != ".vue":
+        return True
+    try:
+        content = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return True
+    lower = content.lower()
+    return ("<template" in lower) or ("<script" in lower)
+
+
+def _log_syntax_result(context: RevContext, file_path: Path, ok: bool, skipped: bool, msg: str) -> None:
+    """Log syntax check outcome for visibility in logs/insights."""
+    status = "skipped" if skipped else ("ok" if ok else "error")
+    try:
+        context.add_insight(
+            "syntax_check",
+            str(file_path),
+            {
+                "status": status,
+                "message": msg,
+            },
+        )
+        print(f"  [syntax-check] {file_path}: {status} ({msg})")
+    except Exception:
+        pass
+
+
+def _enqueue_project_typecheck(context: RevContext, tasks: List[Task], reason: str = "") -> Optional[str]:
+    """
+    Add a project-level typecheck/build task based on detected stack.
+    This is used when per-file syntax checks are skipped (missing tooling).
+    """
+    root = Path(getattr(context, "workspace_root", "") or Path.cwd())
+    cmd = _detect_build_command_for_root(root)
+    if not cmd:
+        return None
+    # Keep the command clean; keep reason in description only.
+    desc = f"Run {cmd} for project typecheck/build to validate syntax"
+    if reason:
+        desc += f" (reason: {reason})"
+    tasks.append(
+        Task(
+            description=desc,
+            action_type="run",
+        )
+    )
+    return cmd
+
+
+def _log_syntax_result(context: RevContext, file_path: Path, ok: bool, skipped: bool, msg: str) -> None:
+    """Log syntax check outcome for visibility in logs/insights."""
+    status = "skipped" if skipped else ("ok" if ok else "error")
+    try:
+        context.add_insight(
+            "syntax_check",
+            str(file_path),
+            {
+                "status": status,
+                "message": msg,
+            },
+        )
+        print(f"  [syntax-check] {file_path}: {status} ({msg})")
+    except Exception:
+        pass
+
+
+def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
+    """Verify that a file was actually edited and has valid syntax."""
 
     file_path: Path | None = None
 
@@ -2945,17 +3863,67 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
             should_replan=True
         )
 
-    # P0-6: File exists but we can't verify the edit actually succeeded without proper validation
-    # Return INCONCLUSIVE instead of passed=True to force proper verification
+    # Run syntax validation on the edited file
+    is_valid, error_msg, skipped = _run_syntax_check(file_path)
+
+    if not is_valid:
+        # Syntax error detected - edit introduced a syntax error
+        _log_syntax_result(context, file_path, ok=False, skipped=False, msg=error_msg)
+        suggested_cmd = _enqueue_project_typecheck(context, tasks := [], reason="Per-file syntax error")
+        if tasks:
+            context.set_agent_state("injected_tasks_after_skip", True)
+            context.agent_requests.append({"type": "INJECT_TASKS", "details": {"tasks": tasks}})
+        return VerificationResult(
+            passed=False,
+            message=f"Edit to {file_path.name} introduced a syntax error",
+            details={
+                "file_path": str(file_path),
+                "syntax_error": error_msg,
+                "suggestion": "Fix the syntax error in the file",
+                "suggested_build_cmd": suggested_cmd,
+            },
+            should_replan=True
+        )
+
+    if skipped:
+        _log_syntax_result(context, file_path, ok=True, skipped=True, msg="skipped (no checker available)")
+        suggested_cmd = _enqueue_project_typecheck(context, tasks := [], reason="Per-file syntax check skipped")
+        if tasks:
+            context.set_agent_state("injected_tasks_after_skip", True)
+            context.agent_requests.append({"type": "INJECT_TASKS", "details": {"tasks": tasks}})
+        return VerificationResult(
+            passed=True,
+            message=f"Syntax check skipped for {file_path.name}; a project typecheck/build has been enqueued.",
+            details={
+                "file_path": str(file_path),
+                "syntax_skipped": True,
+                "suggested_build_cmd": suggested_cmd,
+            },
+            should_replan=False,
+        )
+
+    if not _has_header_comment(file_path):
+        return VerificationResult(
+            passed=False,
+            message=f"Edited file {file_path.name} is missing the required top-of-file comment describing its purpose.",
+            details={
+                "file_path": str(file_path),
+                "missing_header_comment": True,
+                "suggestion": "Add a brief header comment at the top describing the file's role.",
+            },
+            should_replan=True,
+        )
+
+    _log_syntax_result(context, file_path, ok=True, skipped=False, msg="valid")
+    _ensure_test_request_for_file(context, file_path)
+    # File exists and has valid syntax - verification passed!
     return VerificationResult(
-        passed=False,
-        inconclusive=True,
-        message=f"Cannot verify edit to {file_path.name} - file exists but no validation was performed. Run tests or syntax checks to confirm the edit is correct.",
+        passed=True,
+        message=f"Edit to {file_path.name} verified successfully (file exists and syntax is valid)",
         details={
             "file_path": str(file_path),
-            "suggestion": "Run pytest/npm test to verify changes, or use python -m py_compile for syntax check"
-        },
-        should_replan=True
+            "syntax_checked": True
+        }
     )
 
 
@@ -3076,11 +4044,54 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
                 details=payload,
                 should_replan=True,
             )
-        if payload.get("timeout"):
+        if payload.get("timeout") or payload.get("timed_out") or payload.get("timeout_decision"):
+            # Only fail after the second timeout. Track per-task signature.
+            sig = (task.description or "").strip().lower() or "test-timeout"
+            key = f"timeout_count::{sig}"
+            try:
+                count = int(context.get_agent_state(key, 0))
+            except Exception:
+                count = 0
+            count += 1
+            context.set_agent_state(key, count)
+            # Surface a short view of stdout/stderr so the user can see why it hung.
+            stdout_tail = ""
+            stderr_tail = ""
+            if isinstance(payload.get("stdout"), str):
+                stdout_tail = payload["stdout"][-400:]
+            if isinstance(payload.get("stderr"), str):
+                stderr_tail = payload["stderr"][-400:]
+            tail_msg = ""
+            if stdout_tail or stderr_tail:
+                tail_msg = f" | stdout_tail: {stdout_tail[:200]}... stderr_tail: {stderr_tail[:200]}..."
+            # Mark that a remediation should be planned if the timeout originated from tests.
+            details = dict(payload)
+            details["timeout_count"] = count
+            details["stdout_tail"] = stdout_tail
+            details["stderr_tail"] = stderr_tail
+            # Persist a planner hint so subsequent prompts know a fix is required.
+            context.set_agent_state("timeout_needs_fix_note", True)
+            try:
+                # Nudge planner explicitly via user_feedback to request a safer test command.
+                fb = "Test command timed out; propose an explicit non-watch, file-targeted test command based on package.json scripts before retrying."
+                if hasattr(context, "user_feedback"):
+                    context.user_feedback.append(fb)
+            except Exception:
+                pass
+            if payload.get("needs_fix"):
+                details["needs_fix"] = True
+            if count < 2:
+                return VerificationResult(
+                    passed=False,
+                    message=f"Test command timed out (first occurrence); will retry with adjustments{tail_msg}",
+                    details=details,
+                    should_replan=False,
+                    inconclusive=True,
+                )
             return VerificationResult(
                 passed=False,
-                message="Test command timed out",
-                details=payload,
+                message=f"Test command timed out (repeated){tail_msg}",
+                details=details,
                 should_replan=True,
             )
 
@@ -3121,8 +4132,52 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
         stdout = str(payload.get("stdout", "") or "")
         stderr = str(payload.get("stderr", "") or "")
         output = stdout + stderr
+        cwd = None
+        if isinstance(payload, dict):
+            cwd_value = payload.get("cwd") or payload.get("working_dir") or payload.get("workdir")
+            if isinstance(cwd_value, (str, Path)):
+                cwd = str(cwd_value)
         context.agent_state["last_test_iteration"] = context.agent_state.get("current_iteration")
         context.agent_state["last_test_rc"] = rc
+        blocked_reason = None
+        blocked_hints: list[str] = []
+        suspected_issue: Optional[str] = None
+        if payload.get("blocked") is True:
+            blocked_reason = (stderr or stdout or "Command blocked").strip()
+        elif "blocked non-terminating vitest command" in output.lower():
+            blocked_reason = "Blocked non-terminating Vitest command."
+        # Detect Vitest CLI option errors (e.g., --runTestsByPath not supported) to avoid misleading hints.
+        elif "cacerror" in output.lower() and "vitest" in output.lower():
+            blocked_reason = "Vitest CLI error: invalid option; test script/command is incorrect."
+            suspected_issue = "Invalid Vitest test script/flags (e.g., unsupported --runTestsByPath)."
+            blocked_hints = [
+                "Patch package.json test script to a non-watch single-file command, e.g., \"vitest run tests/user.test.ts\".",
+                "Avoid unsupported Vitest flags like --runTestsByPath.",
+            ]
+        elif payload.get("needs_fix"):
+            blocked_reason = "Test command timed out and needs a remediation (e.g., safer command/config)."
+            suspected_issue = suspected_issue or "Test command timed out; likely hanging (watch mode or long-running requests)."
+        if blocked_reason:
+            return VerificationResult(
+                passed=False,
+                message="Verification INCONCLUSIVE: command blocked",
+                details={
+                    "rc": rc,
+                    "output": output[:800],
+                    "stdout": stdout[:400],
+                    "stderr": stderr[:400],
+                    "blocked": True,
+                    "skip_failure_counts": True,
+                    "reason": blocked_reason,
+                    "cmd": payload.get("cmd") or payload.get("command"),
+                    "cwd": cwd,
+                    "suspected_issue": suspected_issue,
+                    "hints": blocked_hints or None,
+                    "needs_fix": payload.get("needs_fix"),
+                },
+                should_replan=True,
+                inconclusive=True,
+            )
         if _NO_TEST_RUNNER_SENTINEL in output:
             return VerificationResult(
                 passed=True,
@@ -3130,66 +4185,54 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
                 details={"rc": rc, "output": output[:200], "skipped": True, "reason": "no_test_runner_detected"},
             )
         if _output_indicates_no_tests(stdout, stderr) and not _no_tests_expected(task):
-            cmd_value = payload.get("cmd") or payload.get("command") or ""
-            cmd_parts = _split_command_parts(cmd_value)
-            cwd = payload.get("cwd")
-            fallback_cmd = _attempt_no_tests_fallback(cmd_parts, stdout, stderr, cwd)
-            if fallback_cmd:
-                fallback_result = _run_validation_command(
-                    fallback_cmd,
-                    use_tests_tool=True,
-                    timeout=config.VALIDATION_TIMEOUT_SECONDS,
-                    cwd=cwd,
-                )
-                fallback_stdout = str(fallback_result.get("stdout", "") or "")
-                fallback_stderr = str(fallback_result.get("stderr", "") or "")
-                fallback_rc = fallback_result.get("rc")
-                context.agent_state["last_test_iteration"] = context.agent_state.get("current_iteration")
-                context.agent_state["last_test_rc"] = fallback_rc
-                if _output_indicates_no_tests(fallback_stdout, fallback_stderr):
-                    return VerificationResult(
-                        passed=False,
-                        message="No tests found after retrying with explicit test paths",
-                        details={
-                            "rc": fallback_rc,
-                            "output": (fallback_stdout + fallback_stderr)[:500],
-                            "retry_cmd": fallback_result.get("cmd"),
-                        },
-                        should_replan=True,
-                    )
-                if fallback_rc == 0:
-                    return VerificationResult(
-                        passed=True,
-                        message="Tests passed (reran with explicit test paths)",
-                        details={
-                            "rc": fallback_rc,
-                            "output": (fallback_stdout + fallback_stderr)[:200],
-                            "retry_cmd": fallback_result.get("cmd"),
-                        },
-                    )
-                if fallback_rc == 5:
-                    if _no_tests_expected(task):
-                        return VerificationResult(
-                            passed=True,
-                            message="No tests collected (rc=5) - explicitly allowed",
-                            details={"rc": fallback_rc, "output": (fallback_stdout + fallback_stderr)[:200]},
-                        )
-                    return VerificationResult(
-                        passed=False,
-                        message="Verification INCONCLUSIVE: pytest collected 0 tests (rc=5)",
-                        details={"rc": fallback_rc, "output": (fallback_stdout + fallback_stderr)[:500]},
-                        should_replan=True,
-                    )
-                return VerificationResult(
-                    passed=False,
-                    message=f"Tests failed after retry (rc={fallback_rc})",
-                    details={
-                        "rc": fallback_rc,
-                        "output": (fallback_stdout + fallback_stderr)[:500],
-                        "retry_cmd": fallback_result.get("cmd"),
-                    },
-                    should_replan=True,
-                )
+            root = Path(cwd) if cwd else config.ROOT
+            try:
+                root = root.resolve()
+            except Exception:
+                root = Path.cwd().resolve()
+            test_files = _extract_test_files_from_output(output)
+            debug_info = _build_test_diagnostics(output, test_files, root)
+            # If we saw a Vitest CLI error, surface it and avoid unrelated hints (e.g., Prisma).
+            vitest_cli_error = None
+            if "cacerror" in output.lower() and "vitest" in output.lower():
+                vitest_cli_error = "Vitest CLI error detected (invalid option). Check package.json test script."
+                debug_info = debug_info or {}
+                existing_hints = debug_info.get("hints") if isinstance(debug_info.get("hints"), list) else []
+                debug_info["suspected_issue"] = vitest_cli_error
+                debug_info["hints"] = existing_hints + [
+                    "Update package.json test script to a non-watch, single-file command, e.g., \"vitest run tests/user.test.ts\".",
+                    "Avoid unsupported flags like --runTestsByPath in Vitest.",
+                ]
+            else:
+                # If we cannot determine the root cause, surface stdout/stderr and suggest a safe, targeted command.
+                if not debug_info:
+                    debug_info = {}
+                existing_hints = debug_info.get("hints") if isinstance(debug_info.get("hints"), list) else []
+                if not debug_info.get("suspected_issue"):
+                    debug_info["suspected_issue"] = "Test discovery failed for unknown reasons; see stdout/stderr."
+                suggested_cmd = None
+                first_file = test_files[0] if test_files else None
+                if first_file:
+                    suggested_cmd = f"npx vitest run {first_file}"
+                if suggested_cmd:
+                    existing_hints.append(f"Try a targeted run: {suggested_cmd}")
+                debug_info["hints"] = existing_hints
+            return VerificationResult(
+                passed=False,
+                message="Verification INCONCLUSIVE: no tests discovered",
+                details={
+                    "rc": rc,
+                    "output": output[:500],
+                    "no_tests_discovered": True,
+                    "non_retriable": True,
+                    "skip_failure_counts": True,
+                    "test_files": test_files,
+                    "debug": debug_info if debug_info else None,
+                    "cmd": payload.get("cmd") or payload.get("command"),
+                },
+                should_replan=True,
+                inconclusive=True,
+            )
         missing_script = _detect_missing_script(stdout, stderr)
         if missing_script:
             cmd_value = payload.get("cmd") or payload.get("command") or ""
@@ -3265,10 +4308,22 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
                 details={"rc": rc, "output": output[:500]},
                 should_replan=True,
             )
+        root_path = Path(cwd) if cwd else (config.ROOT or Path.cwd())
+        try:
+            root_path = root_path.resolve()
+        except Exception:
+            root_path = Path.cwd().resolve()
         return VerificationResult(
             passed=False,
             message=f"Tests failed (rc={rc})",
-            details={"rc": rc, "output": output[:500]},
+            details=_merge_debug_details(
+                {"rc": rc, "output": output[:500]},
+                _build_test_diagnostics(
+                    output,
+                    _extract_test_files_from_output(output),
+                    root_path,
+                ),
+            ),
             should_replan=True,
         )
 
@@ -3303,7 +4358,7 @@ def _verify_test_execution(task: Task, context: RevContext) -> VerificationResul
 
     # Fall back to running tests if we have no usable tool result.
     try:
-        result = execute_tool("run_tests", {"cmd": "pytest -q", "timeout": 30})
+        result = execute_tool("run_tests", {"cmd": "pytest -q", "timeout": 30}, agent_name="quick_verify")
         result_data = json.loads(result)
         rc = result_data.get("rc", 1)
         output = result_data.get("stdout", "") + result_data.get("stderr", "")

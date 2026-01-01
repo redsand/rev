@@ -4,7 +4,7 @@ from rev.models.task import Task
 from rev.tools.registry import execute_tool, get_available_tools
 from rev.llm.client import ollama_chat
 from rev.core.context import RevContext
-from rev.core.tool_call_recovery import recover_tool_call_from_text
+from rev.core.tool_call_recovery import recover_tool_call_from_text, recover_tool_call_from_text_lenient
 from rev.core.tool_call_retry import retry_tool_call_with_response_format
 from rev.agents.context_provider import build_context_and_tools
 
@@ -148,7 +148,7 @@ class ToolCreationAgent(BaseAgent):
 
                     if not error_type:
                         print(f"  -> ToolCreationAgent will call tool '{tool_name}' with arguments: {arguments}")
-                        result = execute_tool(tool_name, arguments)
+                        result = execute_tool(tool_name, arguments, agent_name="ToolCreationAgent")
 
                         # Store info about created tool
                         if tool_name == "write_file" and "file_path" in arguments:
@@ -163,19 +163,26 @@ class ToolCreationAgent(BaseAgent):
             if error_type:
                 if error_type in {"text_instead_of_tool_call", "empty_tool_calls", "missing_tool_calls"}:
                     retried = False
-                    recovered = retry_tool_call_with_response_format(
-                        messages,
-                        available_tools,
+                    recovered = recover_tool_call_from_text(
+                        response.get("message", {}).get("content", ""),
                         allowed_tools=[t["function"]["name"] for t in available_tools],
                     )
-                    if recovered:
-                        retried = True
-                        print(f"  -> Retried tool call with JSON format: {recovered.name}")
-                    else:
-                        recovered = recover_tool_call_from_text(
+                    if not recovered:
+                        recovered = recover_tool_call_from_text_lenient(
                             response.get("message", {}).get("content", ""),
                             allowed_tools=[t["function"]["name"] for t in available_tools],
                         )
+                        if recovered:
+                            print("  [WARN] ToolCreationAgent: using lenient tool call recovery from text output")
+                    if not recovered:
+                        recovered = retry_tool_call_with_response_format(
+                            messages,
+                            available_tools,
+                            allowed_tools=[t["function"]["name"] for t in available_tools],
+                        )
+                        if recovered:
+                            retried = True
+                            print(f"  -> Retried tool call with JSON format: {recovered.name}")
                     if recovered:
                         if not recovered.name:
                             return self.make_failure_signal("missing_tool", "Recovered tool call missing name")
@@ -183,7 +190,7 @@ class ToolCreationAgent(BaseAgent):
                             return self.make_failure_signal("missing_tool_args", "Recovered tool call missing arguments")
                         if not retried:
                             print(f"  -> Recovered tool call from text output: {recovered.name}")
-                        return execute_tool(recovered.name, recovered.arguments)
+                        return execute_tool(recovered.name, recovered.arguments, agent_name="ToolCreationAgent")
 
                 print(f"  [WARN] ToolCreationAgent: {error_detail}")
 

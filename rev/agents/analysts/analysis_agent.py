@@ -5,7 +5,7 @@ from rev.models.task import Task
 from rev.tools.registry import execute_tool, get_available_tools
 from rev.llm.client import ollama_chat
 from rev.core.context import RevContext
-from rev.core.tool_call_recovery import recover_tool_call_from_text
+from rev.core.tool_call_recovery import recover_tool_call_from_text, recover_tool_call_from_text_lenient
 from rev.core.tool_call_retry import retry_tool_call_with_response_format
 from rev.agents.context_provider import build_context_and_tools
 from rev.agents.subagent_io import build_subagent_output
@@ -43,6 +43,7 @@ def _extract_snippet(tool_name: str, tool_args: dict, raw_result: Any) -> str:
                 search = execute_tool(
                     "search_code",
                     {"pattern": "register|pkgutil|importlib|getmembers|registry", "include": include, "regex": True},
+                    agent_name="AnalysisAgent",
                 )
                 payload = json.loads(search) if isinstance(search, str) else {}
                 matches = payload.get("matches") or []
@@ -54,6 +55,7 @@ def _extract_snippet(tool_name: str, tool_args: dict, raw_result: Any) -> str:
                         window = execute_tool(
                             "read_file_lines",
                             {"path": file, "start": max(1, line - 3), "end": line + 3},
+                            agent_name="AnalysisAgent",
                         )
                         if isinstance(window, str) and window.strip():
                             return window
@@ -140,7 +142,8 @@ class AnalysisAgent(BaseAgent):
             'analyze_test_coverage', 'analyze_semantic_diff', 'analyze_code_context',
             'run_all_analysis', 'analyze_code_structures', 'check_structural_consistency',
             'analyze_runtime_logs', 'analyze_performance_regression', 'analyze_error_traces',
-            'read_file', 'read_file_lines', 'search_code', 'list_dir', 'get_file_info'
+            'read_file', 'read_file_lines', 'search_code', 'list_dir', 'get_file_info',
+            'mcp_list_servers', 'mcp_call_tool',
         ]
         rendered_context, selected_tools, _bundle = build_context_and_tools(
             task,
@@ -206,7 +209,7 @@ class AnalysisAgent(BaseAgent):
 
                     if not error_type:
                         print(f"  -> AnalysisAgent will call tool '{tool_name}' with arguments: {arguments}")
-                        result = execute_tool(tool_name, arguments)
+                        result = execute_tool(tool_name, arguments, agent_name="AnalysisAgent")
 
                         snippet = _extract_snippet(tool_name, arguments, result)
                         context.add_insight("analysis_agent", f"task_{task.task_id}_analysis", {
@@ -226,19 +229,26 @@ class AnalysisAgent(BaseAgent):
             if error_type:
                 if error_type in {"text_instead_of_tool_call", "empty_tool_calls", "missing_tool_calls"}:
                     retried = False
-                    recovered = retry_tool_call_with_response_format(
-                        messages,
-                        available_tools,
+                    recovered = recover_tool_call_from_text(
+                        response.get("message", {}).get("content", ""),
                         allowed_tools=[t["function"]["name"] for t in get_available_tools()],
                     )
-                    if recovered:
-                        retried = True
-                        print(f"  -> Retried tool call with JSON format: {recovered.name}")
-                    else:
-                        recovered = recover_tool_call_from_text(
+                    if not recovered:
+                        recovered = recover_tool_call_from_text_lenient(
                             response.get("message", {}).get("content", ""),
                             allowed_tools=[t["function"]["name"] for t in get_available_tools()],
                         )
+                        if recovered:
+                            print("  [WARN] AnalysisAgent: using lenient tool call recovery from text output")
+                    if not recovered:
+                        recovered = retry_tool_call_with_response_format(
+                            messages,
+                            available_tools,
+                            allowed_tools=[t["function"]["name"] for t in get_available_tools()],
+                        )
+                        if recovered:
+                            retried = True
+                            print(f"  -> Retried tool call with JSON format: {recovered.name}")
                     if recovered:
                         if not recovered.name:
                             return self.make_failure_signal("missing_tool", "Recovered tool call missing name")
@@ -256,10 +266,10 @@ class AnalysisAgent(BaseAgent):
                             for path in tool_args.get("paths", []):
                                 if not isinstance(path, str):
                                     continue
-                                outputs[path] = execute_tool("read_file", {"path": path})
+                                outputs[path] = execute_tool("read_file", {"path": path}, agent_name="AnalysisAgent")
                             raw_result = json.dumps(outputs)
                         else:
-                            raw_result = execute_tool(recovered.name, tool_args)
+                            raw_result = execute_tool(recovered.name, tool_args, agent_name="AnalysisAgent")
 
                         snippet = _extract_snippet(recovered.name, tool_args, raw_result)
                         context.add_insight("analysis_agent", f"task_{task.task_id}_analysis", {

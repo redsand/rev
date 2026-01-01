@@ -233,7 +233,7 @@ def _verify_curl_smoke_test(
     try:
         # Use run_cmd via tool registry if possible, or subprocess
         from rev.tools.registry import execute_tool
-        result_json = execute_tool("run_cmd", {"cmd": deliverable.command, "timeout": 30})
+        result_json = execute_tool("run_cmd", {"cmd": deliverable.command, "timeout": 30}, agent_name="DoDVerifier")
         result = json.loads(result_json)
 
         if result.get("rc") == 0:

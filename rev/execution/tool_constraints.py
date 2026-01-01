@@ -13,6 +13,7 @@ WRITE_ACTIONS: Set[str] = {
     "refactor",
     "delete",
     "rename",
+    "move",
     "fix",
     "create_directory",
 }

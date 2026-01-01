@@ -153,11 +153,93 @@ def _calculate_similarity(str1: str, str2: str) -> float:
     return 1.0 - (distance / max_len)
 
 
-def _check_for_similar_files(path: str) -> dict:
+def _extract_test_patterns(content: str) -> set:
+    """Extract test patterns (endpoints, features) from test file content.
+
+    Returns set of patterns like: {'POST /api/users', 'GET /api/login', 'user registration'}
+    """
+    import re
+    patterns = set()
+
+    # Extract HTTP method + endpoint patterns
+    # Matches: POST /api/users, GET /api/login, etc.
+    endpoint_patterns = re.findall(r'(POST|GET|PUT|DELETE|PATCH)\s+[\'"`]([/\w-]+)[\'"`]', content, re.IGNORECASE)
+    for method, endpoint in endpoint_patterns:
+        patterns.add(f"{method.upper()} {endpoint}")
+
+    # Extract describe/test/it block names that indicate features
+    # Matches: describe('User API', ...), it('should register user', ...)
+    feature_patterns = re.findall(r'(?:describe|test|it)\s*\(\s*[\'"`]([^\'"`]+)[\'"`]', content)
+    for feature in feature_patterns:
+        # Normalize feature names
+        feature_lower = feature.lower()
+        # Skip generic names
+        if feature_lower not in {'api', 'test', 'tests', 'should', 'it'}:
+            patterns.add(feature_lower)
+
+    return patterns
+
+
+def _check_test_file_overlap(new_file_path: str, new_content: str) -> list:
+    """Check if a new test file overlaps with existing test files.
+
+    Returns list of overlapping test files with overlap percentage.
+    """
+    try:
+        p = _safe_path(new_file_path)
+        parent_dir = p.parent
+
+        # Extract patterns from new file
+        new_patterns = _extract_test_patterns(new_content)
+
+        if not new_patterns:
+            return []
+
+        overlapping_files = []
+
+        # Check all existing test files in same directory
+        if parent_dir.exists():
+            for existing in parent_dir.iterdir():
+                if not existing.is_file() or existing == p:
+                    continue
+
+                # Only check test files
+                if not any(marker in existing.name.lower() for marker in ['.test.', '.spec.', '_test.', '_spec.']):
+                    continue
+
+                try:
+                    existing_content = existing.read_text(encoding='utf-8', errors='ignore')
+                    existing_patterns = _extract_test_patterns(existing_content)
+
+                    if not existing_patterns:
+                        continue
+
+                    # Calculate overlap
+                    overlap = new_patterns & existing_patterns  # Intersection
+                    if overlap:
+                        overlap_pct = len(overlap) / len(new_patterns)
+
+                        # If >30% of patterns overlap, flag as duplicate
+                        if overlap_pct >= 0.3:
+                            overlapping_files.append({
+                                "path": _rel_to_root(existing),
+                                "overlap": f"{overlap_pct:.0%}",
+                                "shared_patterns": list(overlap)[:5]  # Sample of overlapping patterns
+                            })
+                except Exception:
+                    continue
+
+        return overlapping_files
+    except Exception:
+        return []
+
+
+def _check_for_similar_files(path: str, content: str = None) -> dict:
     """Check if similar files exist that could be used instead (Phase 2).
 
     Args:
         path: Path to the file being created
+        content: Optional file content (for semantic analysis of test files)
 
     Returns:
         Dict with 'warnings' and 'similar_files' if found
@@ -174,20 +256,40 @@ def _check_for_similar_files(path: str) -> dict:
         warnings = []
         similar_files = []
 
-        # Check for files with similar names in same directory
+        # Check for files with similar names in same directory.
+        # Only flag as similar if the stem matches (to avoid false positives like eslint.config.js vs jest.config.js).
         if parent_dir.exists():
             for existing in parent_dir.iterdir():
                 if not existing.is_file() or existing == p:
                     continue
 
-                # Check file extension matches
-                if existing.suffix == p.suffix:
-                    similarity = _calculate_similarity(existing.stem, filestem)
-                    if similarity >= SIMILARITY_THRESHOLD:
-                        similar_files.append({
-                            "path": _rel_to_root(existing),
-                            "similarity": f"{similarity:.1%}"
-                        })
+                if existing.suffix != p.suffix:
+                    continue
+                if existing.stem != filestem:
+                    continue
+
+                similarity = _calculate_similarity(existing.stem, filestem)
+                if similarity >= SIMILARITY_THRESHOLD:
+                    similar_files.append({
+                        "path": _rel_to_root(existing),
+                        "similarity": f"{similarity:.1%}"
+                    })
+
+        # ENHANCED: For test files, also check semantic overlap (same endpoints/features being tested)
+        is_test_file = any(marker in filename.lower() for marker in ['.test.', '.spec.', '_test.', '_spec.'])
+        if is_test_file and content:
+            overlapping_tests = _check_test_file_overlap(path, content)
+
+            for overlap_info in overlapping_tests:
+                # Add to similar files list if not already there
+                overlap_path = overlap_info["path"]
+                if not any(s["path"] == overlap_path for s in similar_files):
+                    similar_files.append({
+                        "path": overlap_path,
+                        "similarity": overlap_info["overlap"],
+                        "reason": "semantic overlap",
+                        "shared_patterns": overlap_info.get("shared_patterns", [])
+                    })
 
         if similar_files:
             files_str = ", ".join(f"{s['path']} ({s['similarity']})" for s in similar_files[:3])
@@ -280,8 +382,8 @@ def write_file(path: str, content: str) -> str:
         check_result = {"warnings": [], "similar_files": []}
 
         if is_new:
-            # Run similarity check for new files
-            check_result = _check_for_similar_files(path)
+            # Run similarity check for new files (pass content for semantic analysis)
+            check_result = _check_for_similar_files(path, content=content)
 
             if check_result.get('warnings'):
                 # Log warnings (visible to user/LLM)
@@ -335,7 +437,19 @@ def list_dir(pattern: str = "**/*") -> str:
             p = p.rstrip("/\\")
             pattern = f"{p}/**/*" if p else "**/*"
     files = _iter_files(pattern, include_dirs=True)
-    rels = sorted(_rel_to_root(p).replace("\\", "/") for p in files)[:LIST_LIMIT]
+
+    hidden_pattern = None
+    if isinstance(pattern, str):
+        normalized = pattern.strip().strip('"').strip("'")
+        if normalized == "*":
+            hidden_pattern = ".*"
+        elif normalized.endswith("**/*") or normalized.endswith("/*"):
+            hidden_pattern = normalized[:-1] + ".*"
+
+    if hidden_pattern:
+        files.extend(_iter_files(hidden_pattern, include_dirs=True))
+
+    rels = sorted({ _rel_to_root(p).replace("\\", "/") for p in files })[:LIST_LIMIT]
     return json.dumps({"count": len(rels), "files": rels})
 
 
@@ -645,6 +759,7 @@ def tree_view(path: str = ".", max_depth: int = 3, max_files: int = 100) -> str:
 
             try:
                 items = sorted(dir_path.iterdir(), key=lambda x: (not x.is_dir(), x.name))
+                items = [item for item in items if not item.name.startswith(".")]
                 for idx, item in enumerate(items):
                     if count >= max_files:
                         break

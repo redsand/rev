@@ -51,9 +51,9 @@ def main():
 
     # Ensure rev data directory exists
     config.REV_DIR.mkdir(parents=True, exist_ok=True)
-    # Always-on run log (separate from --debug structured logging)
+    # Run log is started lazily after we know we're not doing --clean/--clear
     from rev.run_log import start_run_log, write_run_log_line
-    run_log_path = start_run_log()
+    run_log_path = None
 
     # Initialize cache system
     cache_dir = config.CACHE_DIR
@@ -258,6 +258,12 @@ def main():
         help="Clean all temporary files, caches, and logs"
     )
     parser.add_argument(
+        "--clear",
+        action="store_true",
+        dest="clean",
+        help="Alias for --clean (clean all temporary files, caches, and logs)"
+    )
+    parser.add_argument(
         "-v",
         "--version",
         action="store_true",
@@ -303,6 +309,7 @@ def main():
 
 
     args = parser.parse_args()
+    config.EXPLICIT_YES = bool(args.yes)
     # Windows: ensure ANSI output is handled correctly in classic consoles.
     try:
         if os.name == "nt":
@@ -315,11 +322,21 @@ def main():
     use_tui_main = args.tui or os.getenv("REV_TUI", "").lower() in {"1", "true", "yes", "on"}
     buffered_logs: list[str] = []
     initial_command: Optional[str] = None
+    clean_mode = bool(args.clean)
+
+    # Start run log only if not cleaning/clearing to avoid locking the log file being deleted.
+    if not clean_mode:
+        try:
+            run_log_path = start_run_log()
+        except Exception:
+            run_log_path = None
+
     def _log(msg: str):
         if use_tui_main:
             try:
-                # In TUI startup we buffer instead of printing; still persist to run log.
-                write_run_log_line(msg)
+                # In TUI startup we buffer instead of printing; still persist to run log (unless cleaning).
+                if run_log_path and not clean_mode:
+                    write_run_log_line(msg)
             except Exception:
                 pass
         if use_tui_main:
@@ -379,6 +396,12 @@ def main():
         enable_prompt_optimization = True
         auto_optimize_prompt = True
 
+    # CRITICAL: In TUI mode, must use auto-optimize to avoid blocking input() calls
+    # TUI uses curses and stdin is not available for input() prompts
+    use_tui = args.tui or os.getenv("REV_TUI", "").lower() == "true"
+    if use_tui and enable_prompt_optimization:
+        auto_optimize_prompt = True  # Force auto-optimize in TUI mode
+
     # Determine ContextGuard settings
     # Priority: CLI flags > Environment variables > defaults
     enable_context_guard = True  # Default
@@ -398,6 +421,10 @@ def main():
     if args.context_guard_auto:
         context_guard_interactive = False
 
+    # CRITICAL: In TUI mode, disable interactive prompts for ContextGuard too
+    if use_tui and enable_context_guard:
+        context_guard_interactive = False  # Auto-approve in TUI mode
+
     context_guard_threshold = args.context_guard_threshold
 
     config.PREFLIGHT_ENABLED = args.preflight
@@ -412,8 +439,18 @@ def main():
     if args.clean:
         print("Cleaning temporary files, caches, and logs...")
         if config.REV_DIR.exists():
-            shutil.rmtree(config.REV_DIR)
-            print(f"Removed {config.REV_DIR}")
+            keep_files = {"settings.json", "secrets.json"}
+            for entry in config.REV_DIR.iterdir():
+                # Preserve settings/secrets
+                if entry.name in keep_files:
+                    continue
+                try:
+                    if entry.is_dir():
+                        shutil.rmtree(entry, ignore_errors=False)
+                    else:
+                        entry.unlink()
+                except Exception as e:
+                    print(f"[WARN] Clean could not remove {entry}: {e}")
         print("Clean complete.")
         sys.exit(0)
 

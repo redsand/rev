@@ -28,7 +28,7 @@ index 0000000..1111111 100644
     assert calls == []
 
 
-def test_text_fallbacks_reject_codex_patch_format(monkeypatch):
+def test_text_fallbacks_accept_codex_patch_format(monkeypatch):
     calls = []
 
     def fake_execute_tool(tool_name, tool_args):
@@ -46,9 +46,8 @@ def test_text_fallbacks_reject_codex_patch_format(monkeypatch):
 *** End Patch"""
 
     applied = executor._apply_text_fallbacks(content, "edit", messages, None, None, None)
-    assert applied is False
-    assert calls == []
-    assert any("Unsupported" in m.get("content", "") or "unified diff" in m.get("content", "") for m in messages if m.get("role") == "user")
+    assert applied is True
+    assert calls and calls[0][0] == "apply_patch"
 
 
 def test_text_fallbacks_apply_unified_diff_in_edit_tasks(monkeypatch):
@@ -74,4 +73,3 @@ index 0000000..1111111 100644
     applied = executor._apply_text_fallbacks(content, "edit", messages, None, None, None)
     assert applied is True
     assert calls and calls[0][0] == "apply_patch"
-

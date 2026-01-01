@@ -118,11 +118,37 @@ class TestGitOperationErrors:
         # Should handle error gracefully - check for error or stderr
         assert "error" in result or "stderr" in result or "rc" in result or isinstance(result, dict)
 
-    def test_apply_patch_rejects_codex_patch_format(self):
-        """Test that Codex '*** Begin Patch' blocks are rejected with a clear error."""
-        result = json.loads(rev.apply_patch("*** Begin Patch\n*** End Patch\n"))
-        assert "error" in result
-        assert "Unsupported patch format" in result["error"]
+    def test_apply_patch_accepts_codex_patch_format(self):
+        """Test that Codex '*** Begin Patch' blocks are supported."""
+        import uuid
+        from pathlib import Path
+
+        tmp_dir = Path(rev.config.ROOT) / "tests_tmp_edge_cases"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        target = tmp_dir / f"codex_patch_{uuid.uuid4().hex}.txt"
+        target.write_text("old\n", encoding="utf-8")
+        rel = target.relative_to(rev.config.ROOT)
+
+        patch = (
+            "*** Begin Patch\n"
+            f"*** Update File: {rel}\n"
+            "@@\n"
+            "-old\n"
+            "+new\n"
+            "*** End Patch\n"
+        )
+
+        try:
+            result = json.loads(rev.apply_patch(patch))
+            assert result.get("success") is True
+            assert target.read_text(encoding="utf-8") == "new\n"
+        finally:
+            try:
+                target.unlink()
+                if tmp_dir.exists() and not any(tmp_dir.iterdir()):
+                    tmp_dir.rmdir()
+            except Exception:
+                pass
 
     def test_git_commit_no_changes(self):
         """Test committing with no changes."""

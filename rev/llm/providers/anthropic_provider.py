@@ -3,6 +3,7 @@
 import os
 from typing import Any, Callable, Dict, List, Optional
 
+from rev import config
 from rev.debug_logger import get_logger
 from .base import LLMProvider, ErrorClass, ProviderError, RetryConfig
 
@@ -13,7 +14,7 @@ class AnthropicProvider(LLMProvider):
     def __init__(self, api_key: Optional[str] = None):
         super().__init__()
         self.name = "anthropic"
-        self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY", "")
+        self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY", "") or config.ANTHROPIC_API_KEY
         self._client = None
 
     def _get_client(self):
