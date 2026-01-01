@@ -74,6 +74,7 @@ from rev.workspace import get_workspace
 from rev.core.text_tool_shim import maybe_execute_tool_call_from_text
 from rev.agents.subagent_io import build_subagent_output
 from rev.execution.action_normalizer import normalize_action_type
+from rev.execution.verification_utils import _detect_build_command_for_root
 from rev.execution.tool_constraints import allowed_tools_for_action, has_write_tool, WRITE_ACTIONS
 from rev.terminal.formatting import colorize, Colors, Symbols
 from difflib import SequenceMatcher
@@ -1430,9 +1431,6 @@ def _package_json_deps(root: Path) -> set[str]:
         if isinstance(values, dict):
             deps.update({str(key).strip().lower() for key in values.keys() if isinstance(key, str)})
     return deps
-
-
-from rev.execution.verification_utils import _detect_build_command_for_root
 
 
 def _has_python_markers(root: Path) -> bool:
@@ -3972,6 +3970,7 @@ class Orchestrator:
         repeat_same_action: int = 0
         forced_next_task: Optional[Task] = None
         pending_resume_tasks: List[Task] = []
+        pending_injected_tasks: List[Task] = []
         budget_warning_shown: bool = False
 
         # PERFORMANCE FIX 1: Track consecutive research tasks to prevent endless loops
@@ -4062,10 +4061,44 @@ class Orchestrator:
                     print(f"  [tdd] Skipping test injection - no specific failing test identified")
                     self.context.set_agent_state("tdd_require_test", False)
 
+            # Harvest agent requests that asked for explicit task injections (e.g., syntax->typecheck, targeted tests)
+            if self.context and self.context.agent_requests:
+                remaining_reqs = []
+                injected_sig_key = "injected_task_sigs"
+                seen_sigs_raw = self.context.agent_state.get(injected_sig_key, [])
+                seen_sigs = set(seen_sigs_raw if isinstance(seen_sigs_raw, list) else [])
+                last_change = self.context.agent_state.get("last_code_change_iteration", -1)
+
+                for req in self.context.agent_requests:
+                    if req.get("type") == "INJECT_TASKS":
+                        tasks = req.get("details", {}).get("tasks", [])
+                        for t in tasks:
+                            desc = (t.get("description") or "").strip()
+                            action = (t.get("action_type") or "general").strip().lower()
+                            if not desc:
+                                continue
+                            sig = f"{action}::{desc.lower()}::iter={last_change}"
+                            if sig in seen_sigs:
+                                continue
+                            injected_task = Task(description=desc, action_type=action or "general")
+                            injected_task.priority = max(injected_task.priority, 5)
+                            pending_injected_tasks.append(injected_task)
+                            seen_sigs.add(sig)
+                            print(f"  [inject] Queued injected task: [{injected_task.action_type}] {desc[:80]}")
+                        continue
+                    remaining_reqs.append(req)
+
+                self.context.agent_requests = remaining_reqs
+                self.context.set_agent_state(injected_sig_key, list(seen_sigs))
+
             if not forced_next_task:
                 diagnostic_task = _pop_diagnostic_task(self.context)
                 if diagnostic_task:
                     forced_next_task = diagnostic_task
+
+            if not forced_next_task and pending_injected_tasks:
+                forced_next_task = pending_injected_tasks.pop(0)
+                print(f"  [inject] Running injected task: [{forced_next_task.action_type.upper()}] {forced_next_task.description[:80]}")
 
             if not forced_next_task and pending_resume_tasks:
                 forced_next_task = pending_resume_tasks.pop(0)
