@@ -843,14 +843,62 @@ def _normalize_structure_read_signature(desc: str) -> str:
     path_matches = re.findall(r"(?:\\.?/?[\\w.-]+/)+(?:[\\w.-]+)?", lowered)
     if path_matches:
         key = path_matches[0]
-    elif "src" in lowered:
-        key = "src"
-    elif "tests" in lowered or "test" in lowered:
-        key = "tests"
     else:
-        key = "workspace-root"
+        # Capture tokens like "prisma directory", "backend folder", etc.
+        dir_token = None
+        m = re.search(r"\b([\w.-]+)\s+(?:directory|folder)\b", lowered)
+        if m:
+            dir_token = m.group(1)
+        # Fallback keywords
+        if not dir_token:
+            for token in ("prisma", "schema", "backend", "frontend", "src", "app", "server", "client", "tests", "test"):
+                if token in lowered:
+                    dir_token = token
+                    break
+
+        if dir_token:
+            key = dir_token
+        elif "src" in lowered:
+            key = "src"
+        elif "tests" in lowered or "test" in lowered:
+            key = "tests"
+        else:
+            key = "workspace-root"
+
     key = re.sub(r"\s+", " ", key.strip("/ "))
     return f"structure::{key}::rec={int(recursive)}"
+
+
+def _summarize_structure(root: Path, max_entries: int = 50, max_depth: int = 2) -> str:
+    """Return a short, depth-limited structure summary for planner context."""
+    entries: list[str] = []
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            depth = Path(dirpath).relative_to(root).parts
+            if len(depth) > max_depth:
+                # Prune deep traversal
+                dirnames[:] = []
+                continue
+            rel_dir = "." if dirpath == str(root) else str(Path(dirpath).relative_to(root))
+            for d in sorted(dirnames):
+                if d.startswith(".") or d in ("node_modules", ".git", ".rev"):
+                    continue
+                entries.append(f"{rel_dir}/{d}/")
+                if len(entries) >= max_entries:
+                    break
+            if len(entries) >= max_entries:
+                break
+            for f in sorted(filenames):
+                if f.startswith("."):
+                    continue
+                entries.append(f"{rel_dir}/{f}")
+                if len(entries) >= max_entries:
+                    break
+            if len(entries) >= max_entries:
+                break
+    except Exception:
+        return ""
+    return "\n".join(entries[:max_entries])
 
 
 def _record_test_signature_state(context: RevContext, signature: str, status: str) -> None:
@@ -3673,6 +3721,21 @@ class Orchestrator:
                 "Instead, perform a [READ] or [ANALYZE] step to verify that the work from the previous session is still correct and consistent with the current filesystem state.\n\n"
             )
 
+        # Provide a compact structure summary to discourage hallucinated paths
+        struct_note = ""
+        try:
+            summary_iter = self.context.agent_state.get("structure_summary_iter", -1)
+            if summary_iter != iteration:
+                summary = _summarize_structure(self.project_root)
+                if summary:
+                    self.context.agent_state["structure_summary"] = summary
+                    self.context.agent_state["structure_summary_iter"] = iteration
+            summary = self.context.agent_state.get("structure_summary", "")
+            if summary:
+                struct_note = "Known project paths (depth-limited):\n" + summary + "\n\n"
+        except Exception:
+            pass
+
         feedback_note = ""
         if self.context and self.context.user_feedback:
             feedback_note = "\nDIRECT USER GUIDANCE (Priority - follow these instructions now):\n"
@@ -3687,6 +3750,7 @@ class Orchestrator:
             f"{feedback_note}"
             f"{work_summary}\n\n"
             f"{path_hints}\n"
+            f"{struct_note}"
             f"{agent_notes}\n"
             f"{failure_notes}\n"
             f"{blocked_note}"
@@ -3999,6 +4063,11 @@ class Orchestrator:
                     f"  [resume] Deduped pending READ tasks: {len(pending_resume_tasks)} -> {len(deduped_resume_tasks)}"
                 )
             pending_resume_tasks = deduped_resume_tasks
+            # Allow one fresh recursive structure read on resume to refresh context
+            self.context.set_agent_state("structure_read_seen", {})
+            self.context.set_agent_state("research_signature_seen", {})
+            # Code-change iteration is unknown on resume; permit initial listings
+            self.context.set_agent_state("last_code_change_iteration", 0)
 
         while True:
             iteration += 1
@@ -4458,49 +4527,45 @@ class Orchestrator:
             else:
                 consecutive_reads = 0  # Reset on any non-research action
 
-                # If a read fails with "not found", immediately trigger a structure refresh (single-thread runs).
+                # If a read fails with "not found", immediately trigger a targeted structure refresh and block repeats until the file exists.
                 if action_type_normalized == "read":
                     last_result = next_task.result or ""
                     parallel_mode = bool(getattr(config, "PARALLEL_MODE_ENABLED", False))
                     if isinstance(last_result, str) and "not found" in last_result.lower():
-                        if not parallel_mode:
-                            refresh_task = Task(
-                                description="Refresh project structure recursively: list src/** and tests/** to locate target files",
-                                action_type="read",
-                            )
-                            completed_tasks_log.append("[INFO] Injecting structure refresh after missing file read")
-                            self.context.plan.tasks.insert(plan_idx + 1, refresh_task)
-                        else:
-                            # In parallel mode, only refresh if repeated misses on the same desc
-                            miss_key = "read_missing_counter"
-                            miss_data = self.context.agent_state.get(miss_key, {})
-                            if not isinstance(miss_data, dict):
-                                miss_data = {}
-                            miss_count = miss_data.get(desc, 0) + 1
-                            miss_data[desc] = miss_count
-                            self.context.set_agent_state(miss_key, miss_data)
-                            if miss_count >= 2:
-                                refresh_task = Task(
-                                    description="Refresh project structure recursively: list src/** and tests/** to locate target files",
-                                    action_type="read",
-                                )
-                                completed_tasks_log.append("[INFO] Injecting structure refresh after repeated missing file reads (parallel mode)")
-                                self.context.plan.tasks.insert(plan_idx + 1, refresh_task)
-                                miss_data[desc] = 0
-                                self.context.set_agent_state(miss_key, miss_data)
-                    else:
-                        # Reset counters in parallel mode
-                        miss_key = "read_missing_counter"
-                        miss_data = self.context.agent_state.get(miss_key, {})
-                        if isinstance(miss_data, dict) and desc in miss_data:
-                            miss_data.pop(desc, None)
-                            self.context.set_agent_state(miss_key, miss_data)
+                        # Derive a parent dir pattern to refresh
+                        parent_hint = None
+                        try:
+                            targets = _extract_task_paths(next_task)
+                            if targets:
+                                candidate = Path(_sanitize_path_candidate(targets[0]))
+                                parent_hint = candidate.parent.as_posix()
+                        except Exception:
+                            parent_hint = None
+                        refresh_desc = (
+                            f"Refresh project structure recursively for {parent_hint or 'src/** and tests/**'} "
+                            "to locate target files"
+                        )
+                        refresh_task = Task(description=refresh_desc, action_type="read")
+                        completed_tasks_log.append("[INFO] Injecting structure refresh after missing file read")
+                        self.context.plan.tasks.insert(plan_idx + 1, refresh_task)
+
+                        # Block repeats of this missing path until code-change iteration advances
+                        missing_key = "blocked_missing_reads"
+                        blocked = self.context.agent_state.get(missing_key, {})
+                        if not isinstance(blocked, dict):
+                            blocked = {}
+                        signature = f"read::{(next_task.description or '').strip().lower()}"
+                        blocked[signature] = {
+                            "code_change_iteration": self.context.agent_state.get("last_code_change_iteration", -1)
+                        }
+                        self.context.set_agent_state(missing_key, blocked)
+                        continue
                 else:
                     consecutive_reads = 0  # Reset on any non-research action
 
             # Write task dedupe across pending/completed since last code change.
             if action_type_normalized in WRITE_ACTIONS:
-                write_signature = _normalize_write_task_signature(next_task)
+                write_signature = getattr(next_task, "_write_signature", None) or _normalize_write_task_signature(next_task)
                 next_task._write_signature = write_signature
                 last_code_change_iteration = self.context.agent_state.get("last_code_change_iteration", -1)
                 write_state = self.context.agent_state.get("write_signature_state", {})
@@ -4966,11 +5031,14 @@ class Orchestrator:
             ):
                 # If prior attempts failed without tool execution, force a default write tool
                 if next_task.result and isinstance(next_task.result, str) and "Write action completed without tool execution" in next_task.result:
+                    # Force a concrete write_file fallback
                     next_task.description = (
                         next_task.description
-                        + " (If tool call fails, directly use write_file with minimal stub content.)"
+                        + " If tool call fails again, directly use write_file with a minimal failing test stub."
                     )
                     next_task.action_type = "add" if action_type_normalized == "add" else "edit"
+                    # Mark to skip write dedupe on next attempt
+                    next_task._write_signature = None
             if action_type_normalized == "test":
                 blocked_tests = self.context.agent_state.get("blocked_test_signatures", {})
                 if not isinstance(blocked_tests, dict):

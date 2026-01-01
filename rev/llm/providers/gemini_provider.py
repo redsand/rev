@@ -111,14 +111,15 @@ class GeminiProvider(LLMProvider):
         return system_instruction.strip(), converted
 
     def _remove_default_fields(self, schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Recursively remove 'default' fields from schema (Gemini doesn't support them)."""
+        """Recursively remove schema keywords Gemini rejects (default/oneOf/anyOf/allOf)."""
         if not isinstance(schema, dict):
             return schema
 
         result = {}
         for key, value in schema.items():
-            if key == "default":
-                continue  # Skip 'default' fields
+            # Skip unsupported keywords
+            if key in {"default", "oneOf", "anyOf", "allOf"}:
+                continue
             elif isinstance(value, dict):
                 result[key] = self._remove_default_fields(value)
             elif isinstance(value, list):
