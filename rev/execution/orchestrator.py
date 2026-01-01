@@ -4091,6 +4091,9 @@ class Orchestrator:
                             sig = f"{action}::{desc.lower()}::iter={last_change}"
                             if sig in seen_sigs:
                                 continue
+                            # Mark injected tasks as self-healing: allow one auto-retry with tool forcing
+                            injected_task.breaking_change = False
+                            injected_task.impact_scope.append("injected")
                             injected_task.priority = max(injected_task.priority, 5)
                             pending_injected_tasks.append(injected_task)
                             seen_sigs.add(sig)
@@ -4444,6 +4447,8 @@ class Orchestrator:
                         continue
                 research_seen[sig] = {"code_change_iteration": last_code_change_iteration}
                 self.context.set_agent_state("research_signature_seen", research_seen)
+            else:
+                consecutive_reads = 0  # Reset on any non-research action
 
                 # If a read fails with "not found", immediately trigger a structure refresh (single-thread runs).
                 if action_type_normalized == "read":
@@ -4482,8 +4487,8 @@ class Orchestrator:
                         if isinstance(miss_data, dict) and desc in miss_data:
                             miss_data.pop(desc, None)
                             self.context.set_agent_state(miss_key, miss_data)
-            else:
-                consecutive_reads = 0  # Reset on any non-research action
+                else:
+                    consecutive_reads = 0  # Reset on any non-research action
 
             # Write task dedupe across pending/completed since last code change.
             if action_type_normalized in WRITE_ACTIONS:
@@ -4946,6 +4951,18 @@ class Orchestrator:
             verification_result = None
             deferred_tdd_test = False
             action_type_normalized = (next_task.action_type or "").strip().lower()
+            # Auto-repair for injected add/write tasks that failed due to missing tool calls:
+            if (
+                action_type_normalized in {"add", "edit", "refactor"}
+                and "injected" in getattr(next_task, "impact_scope", [])
+            ):
+                # If prior attempts failed without tool execution, force a default write tool
+                if next_task.result and isinstance(next_task.result, str) and "Write action completed without tool execution" in next_task.result:
+                    next_task.description = (
+                        next_task.description
+                        + " (If tool call fails, directly use write_file with minimal stub content.)"
+                    )
+                    next_task.action_type = "add" if action_type_normalized == "add" else "edit"
             if action_type_normalized == "test":
                 blocked_tests = self.context.agent_state.get("blocked_test_signatures", {})
                 if not isinstance(blocked_tests, dict):

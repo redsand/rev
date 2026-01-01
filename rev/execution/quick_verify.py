@@ -180,7 +180,11 @@ def _ensure_test_request_for_file(context: RevContext, file_path: Path) -> None:
     # Queue a test-creation task
     tasks = [
         Task(
-            description=f"Add tests for {rel} at {candidates[0]} to cover its functionality.",
+            description=(
+                f"Add tests for {rel} at {candidates[0]} to cover its functionality. "
+                "Use write_file (or apply_patch) to create the test file with failing tests "
+                "that exercise the new code."
+            ),
             action_type="add",
         )
     ]
@@ -3699,9 +3703,10 @@ def _enqueue_project_typecheck(context: RevContext, tasks: List[Task], reason: s
     cmd = _detect_build_command_for_root(root)
     if not cmd:
         return None
-    desc = f"Run project typecheck/build to validate syntax: {cmd}"
+    # Keep the command clean; append reason only after a delimiter so command extraction stays correct.
+    desc = f"{cmd} -- project typecheck/build to validate syntax"
     if reason:
-        desc += f" (reason: {reason})"
+        desc += f" [{reason}]"
     tasks.append(
         Task(
             description=desc,

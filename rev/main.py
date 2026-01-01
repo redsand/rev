@@ -51,9 +51,9 @@ def main():
 
     # Ensure rev data directory exists
     config.REV_DIR.mkdir(parents=True, exist_ok=True)
-    # Always-on run log (separate from --debug structured logging)
+    # Run log is started lazily after we know we're not doing --clean/--clear
     from rev.run_log import start_run_log, write_run_log_line
-    run_log_path = start_run_log()
+    run_log_path = None
 
     # Initialize cache system
     cache_dir = config.CACHE_DIR
@@ -322,11 +322,21 @@ def main():
     use_tui_main = args.tui or os.getenv("REV_TUI", "").lower() in {"1", "true", "yes", "on"}
     buffered_logs: list[str] = []
     initial_command: Optional[str] = None
+    clean_mode = bool(args.clean)
+
+    # Start run log only if not cleaning/clearing to avoid locking the log file being deleted.
+    if not clean_mode:
+        try:
+            run_log_path = start_run_log()
+        except Exception:
+            run_log_path = None
+
     def _log(msg: str):
         if use_tui_main:
             try:
-                # In TUI startup we buffer instead of printing; still persist to run log.
-                write_run_log_line(msg)
+                # In TUI startup we buffer instead of printing; still persist to run log (unless cleaning).
+                if run_log_path and not clean_mode:
+                    write_run_log_line(msg)
             except Exception:
                 pass
         if use_tui_main:
