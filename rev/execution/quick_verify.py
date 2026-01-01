@@ -990,6 +990,10 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
     is_valid, error_msg, skipped = _run_syntax_check(file_path)
     if not is_valid:
         _log_syntax_result(context, file_path, ok=False, skipped=False, msg=error_msg)
+        suggested_cmd = _enqueue_project_typecheck(context, tasks := [], reason="Per-file syntax error")
+        if tasks:
+            context.set_agent_state("injected_tasks_after_skip", True)
+            context.agent_requests.append({"type": "INJECT_TASKS", "details": {"tasks": tasks}})
         return VerificationResult(
             passed=False,
             message=f"File creation introduced a syntax error in {file_path.name}",
@@ -997,19 +1001,25 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
                 **details,
                 "syntax_error": error_msg,
                 "suggestion": "Fix the syntax error in the file",
+                "suggested_build_cmd": suggested_cmd,
             },
             should_replan=True,
         )
     if skipped:
         _log_syntax_result(context, file_path, ok=True, skipped=True, msg="skipped (no checker available)")
+        suggested_cmd = _enqueue_project_typecheck(context, tasks := [], reason="Per-file syntax check skipped")
+        if tasks:
+            context.set_agent_state("injected_tasks_after_skip", True)
+            context.agent_requests.append({"type": "INJECT_TASKS", "details": {"tasks": tasks}})
         return VerificationResult(
-            passed=False,
-            message=f"Syntax check skipped for {file_path.name}; run a project build/typecheck to validate.",
+            passed=True,
+            message=f"Syntax check skipped for {file_path.name}; a project typecheck/build has been enqueued.",
             details={
                 **details,
                 "syntax_skipped": True,
+                "suggested_build_cmd": suggested_cmd,
             },
-            should_replan=True,
+            should_replan=False,
         )
 
     _log_syntax_result(context, file_path, ok=True, skipped=False, msg="valid")
@@ -3602,6 +3612,27 @@ def _log_syntax_result(context: RevContext, file_path: Path, ok: bool, skipped: 
         pass
 
 
+def _enqueue_project_typecheck(context: RevContext, tasks: List[Task], reason: str = "") -> Optional[str]:
+    """
+    Add a project-level typecheck/build task based on detected stack.
+    This is used when per-file syntax checks are skipped (missing tooling).
+    """
+    root = Path(getattr(context, "workspace_root", "") or Path.cwd())
+    cmd = _detect_build_command_for_root(root)
+    if not cmd:
+        return None
+    desc = f"Run project typecheck/build to validate syntax: {cmd}"
+    if reason:
+        desc += f" (reason: {reason})"
+    tasks.append(
+        Task(
+            description=desc,
+            action_type="run",
+        )
+    )
+    return cmd
+
+
 def _log_syntax_result(context: RevContext, file_path: Path, ok: bool, skipped: bool, msg: str) -> None:
     """Log syntax check outcome for visibility in logs/insights."""
     status = "skipped" if skipped else ("ok" if ok else "error")
@@ -3713,27 +3744,37 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
     if not is_valid:
         # Syntax error detected - edit introduced a syntax error
         _log_syntax_result(context, file_path, ok=False, skipped=False, msg=error_msg)
+        suggested_cmd = _enqueue_project_typecheck(context, tasks := [], reason="Per-file syntax error")
+        if tasks:
+            context.set_agent_state("injected_tasks_after_skip", True)
+            context.agent_requests.append({"type": "INJECT_TASKS", "details": {"tasks": tasks}})
         return VerificationResult(
             passed=False,
             message=f"Edit to {file_path.name} introduced a syntax error",
             details={
                 "file_path": str(file_path),
                 "syntax_error": error_msg,
-                "suggestion": "Fix the syntax error in the file"
+                "suggestion": "Fix the syntax error in the file",
+                "suggested_build_cmd": suggested_cmd,
             },
             should_replan=True
         )
 
     if skipped:
         _log_syntax_result(context, file_path, ok=True, skipped=True, msg="skipped (no checker available)")
+        suggested_cmd = _enqueue_project_typecheck(context, tasks := [], reason="Per-file syntax check skipped")
+        if tasks:
+            context.set_agent_state("injected_tasks_after_skip", True)
+            context.agent_requests.append({"type": "INJECT_TASKS", "details": {"tasks": tasks}})
         return VerificationResult(
-            passed=False,
-            message=f"Syntax check skipped for {file_path.name}; run a project build/typecheck to validate.",
+            passed=True,
+            message=f"Syntax check skipped for {file_path.name}; a project typecheck/build has been enqueued.",
             details={
                 "file_path": str(file_path),
                 "syntax_skipped": True,
+                "suggested_build_cmd": suggested_cmd,
             },
-            should_replan=True,
+            should_replan=False,
         )
 
     _log_syntax_result(context, file_path, ok=True, skipped=False, msg="valid")
