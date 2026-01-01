@@ -32,8 +32,11 @@ from rev.tools.utils import quote_cmd_arg
 from rev.tools.command_runner import _resolve_command
 from rev.tools.project_types import find_project_root, detect_project_type, detect_test_command
 from rev.llm.client import ollama_chat
+from rev.execution.verification_utils import _detect_build_command_for_root
 
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
 
 
 def _strip_ansi(text: Any) -> str:
@@ -98,9 +101,11 @@ _TDD_TEST_RESULT_KEYS = {
 
 _TEST_NAME_PATTERN = re.compile(r"(?:^|[._-])(test|spec)(?:[._-]|$)", re.IGNORECASE)
 _NO_TEST_RUNNER_SENTINEL = "REV_NO_TEST_RUNNER"
+_TEST_REQUEST_STATE_KEY = "tests_requested_for_files"
 _MISSING_SCRIPT_PATTERN = re.compile(r"missing script:\s*\"?([A-Za-z0-9:_\\.-]+)\"?", re.IGNORECASE)
 _COMMAND_NOT_FOUND_PATTERN = re.compile(r"command\\s+\"?([A-Za-z0-9:_\\.-]+)\"?\\s+not\\s+found", re.IGNORECASE)
 _PNPM_NO_SCRIPT_PATTERN = re.compile(r"ERR_PNPM_NO_SCRIPT.*?\"?([A-Za-z0-9:_\\.-]+)\"?", re.IGNORECASE)
+_TEST_REQUEST_STATE_KEY = "tests_requested_for_files"
 
 
 def _detect_missing_script(stdout: str, stderr: str) -> Optional[str]:
@@ -111,6 +116,75 @@ def _detect_missing_script(stdout: str, stderr: str) -> Optional[str]:
             name = match.group(1)
             return name or "test"
     return None
+
+
+def _candidate_test_paths_for_source(file_path: Path) -> list[Path]:
+    """Generate likely test file paths for a source file."""
+    if not file_path.suffix:
+        return []
+    if any(token in file_path.parts for token in _TEST_DIR_TOKENS):
+        return []
+
+    stem = file_path.stem
+    suffix = file_path.suffix
+    candidates: list[Path] = []
+
+    # JS/TS/Vue
+    if suffix in {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".vue"}:
+        candidates.append(Path("tests") / f"{stem}.test{suffix if suffix != '.vue' else '.ts'}")
+        candidates.append(Path("tests") / f"{stem}.spec{suffix if suffix != '.vue' else '.ts'}")
+    # Python
+    elif suffix == ".py":
+        candidates.append(Path("tests") / f"test_{stem}.py")
+    # Go
+    elif suffix == ".go":
+        candidates.append(file_path.with_name(f"{stem}_test.go"))
+    # Rust
+    elif suffix == ".rs":
+        candidates.append(Path("tests") / f"{stem}_test.rs")
+    # Java
+    elif suffix == ".java":
+        candidates.append(Path("src/test/java") / f"{stem}Test.java")
+    # C#/F#
+    elif suffix in {".cs", ".fs", ".fsx"}:
+        candidates.append(Path("tests") / f"{stem}Tests{suffix}")
+
+    return candidates
+
+
+def _ensure_test_request_for_file(context: RevContext, file_path: Path) -> None:
+    """Ensure there is a pending test task for the given source file if no test exists."""
+    try:
+        rel = file_path.relative_to(config.ROOT) if config.ROOT else file_path
+    except Exception:
+        rel = file_path
+
+    # Avoid repeated requests per code-change iteration
+    state = context.agent_state.get(_TEST_REQUEST_STATE_KEY, {})
+    if not isinstance(state, dict):
+        state = {}
+    last_iter = state.get(str(rel))
+    current_iter = context.agent_state.get("last_code_change_iteration", -1)
+    if isinstance(last_iter, int) and isinstance(current_iter, int) and last_iter == current_iter:
+        return
+
+    candidates = _candidate_test_paths_for_source(rel)
+    if not candidates:
+        return
+    # If any candidate exists, skip
+    for cand in candidates:
+        abs_cand = (config.ROOT / cand) if config.ROOT else cand
+        if abs_cand.exists():
+            return
+
+    # Queue a test-creation task
+    tasks = [{
+        "description": f"Add tests for {rel} at {candidates[0]} to cover its functionality.",
+        "action_type": "add",
+    }]
+    context.agent_requests.append({"type": "INJECT_TASKS", "details": {"tasks": tasks}})
+    state[str(rel)] = current_iter
+    context.set_agent_state(_TEST_REQUEST_STATE_KEY, state)
 
 
 def _attempt_missing_script_fallback(cmd_parts: list[str], cwd: Optional[Path | str]) -> Optional[list[str]]:
@@ -1011,6 +1085,7 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
         if tasks:
             context.set_agent_state("injected_tasks_after_skip", True)
             context.agent_requests.append({"type": "INJECT_TASKS", "details": {"tasks": tasks}})
+        _ensure_test_request_for_file(context, file_path)
         return VerificationResult(
             passed=True,
             message=f"Syntax check skipped for {file_path.name}; a project typecheck/build has been enqueued.",
@@ -1023,6 +1098,7 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
         )
 
     _log_syntax_result(context, file_path, ok=True, skipped=False, msg="valid")
+    _ensure_test_request_for_file(context, file_path)
     return VerificationResult(
         passed=True,
         message=f"File created successfully and syntax validated: {file_path.name}",
@@ -3778,6 +3854,7 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
         )
 
     _log_syntax_result(context, file_path, ok=True, skipped=False, msg="valid")
+    _ensure_test_request_for_file(context, file_path)
     # File exists and has valid syntax - verification passed!
     return VerificationResult(
         passed=True,

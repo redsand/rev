@@ -15,8 +15,10 @@ from rev.core.tool_call_retry import retry_tool_call_with_response_format
 from rev.agents.context_provider import build_context_and_tools
 from rev.agents.subagent_io import build_subagent_output
 from rev.tools.registry import execute_tool as execute_registry_tool
+from rev.tools import file_ops
 from rev import config
 from rev.execution.ultrathink_prompts import ULTRATHINK_CODE_WRITER_PROMPT
+from rev.tools.workspace_resolver import resolve_workspace_path
 
 
 def _extract_target_files_from_description(description: str) -> list[str]:
@@ -77,6 +79,20 @@ def _extract_target_files_from_description(description: str) -> list[str]:
             paths.append(candidate)
 
     return paths
+
+
+def _targets_exist(paths: list[str]) -> bool:
+    """Return True if any provided path exists as a file in the workspace."""
+    for raw in paths:
+        if not raw:
+            continue
+        try:
+            resolved = resolve_workspace_path(raw).abs_path
+            if resolved.is_file():
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def _detect_path_conflict(path_str: str) -> Optional[str]:
@@ -254,6 +270,10 @@ CRITICAL RULES FOR CODE EXTRACTION:
     - All imports and dependencies included
     - Proper error handling and validation
     - Docstrings explaining non-obvious logic
+10. Naming and documentation for new files:
+    - Choose descriptive, unambiguous filenames that reflect the file's purpose.
+    - Avoid near-duplicate names; if a similar file exists, EDIT that file instead of creating a new one.
+    - For new files, include a brief header comment/top-of-file note describing its role.
 
 SECURITY-MINDED CODING (CRITICAL):
 - Never store passwords, secrets, or API keys as plain strings in code.
@@ -788,6 +808,7 @@ class CodeWriterAgent(BaseAgent):
         include_python_tools = any(
             path.lower().endswith((".py", ".pyi")) for path in target_files_for_tools
         )
+        target_exists = _targets_exist(target_files_for_tools)
         # Determine which tools are appropriate for this action_type
         if task.action_type == "create_directory":
             # Directory creation tasks only get create_directory tool
@@ -936,6 +957,28 @@ class CodeWriterAgent(BaseAgent):
                     "5. If the text you need to edit is NOT visible above, use write_file instead\n"
                     "6. Verify your 'find' text appears EXACTLY in the file content above before submitting\n"
                     f"{separator}\n"
+                )
+
+        # For action_type="add": prevent duplicates by checking similar existing files.
+        if task.action_type == "add":
+            target_files = target_files_for_tools or _extract_target_files_from_description(task.description)
+            if not target_files:
+                return self.make_failure_signal("missing_target", "No target file specified for add/create task")
+            # If any target already exists, fail fast.
+            if _targets_exist(target_files):
+                return self.make_failure_signal("target_exists", "Target file already exists; use edit instead")
+            similar_hits = []
+            for target in target_files:
+                try:
+                    check = file_ops._check_for_similar_files(target)  # type: ignore
+                    if check.get("similar_files"):
+                        similar_hits.extend(check["similar_files"])
+                except Exception:
+                    continue
+            if similar_hits:
+                return self.make_recovery_request(
+                    "similar_file_exists",
+                    f"Similar files exist for target(s): {', '.join(similar_hits[:3])}. Edit an existing file instead of creating a duplicate."
                 )
 
         # Select system prompt based on ultrathink mode

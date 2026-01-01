@@ -835,6 +835,9 @@ def _normalize_structure_read_signature(desc: str) -> str:
     if not desc:
         return "structure::<empty>"
     lowered = desc.lower()
+    # Detect recursion intent
+    recursive = "**" in lowered or "recursive" in lowered or "tree" in lowered
+
     # Preserve path-like tokens; drop filler words.
     path_matches = re.findall(r"(?:\\.?/?[\\w.-]+/)+(?:[\\w.-]+)?", lowered)
     if path_matches:
@@ -846,7 +849,7 @@ def _normalize_structure_read_signature(desc: str) -> str:
     else:
         key = "workspace-root"
     key = re.sub(r"\s+", " ", key.strip("/ "))
-    return f"structure::{key}"
+    return f"structure::{key}::rec={int(recursive)}"
 
 
 def _record_test_signature_state(context: RevContext, signature: str, status: str) -> None:
@@ -1429,43 +1432,7 @@ def _package_json_deps(root: Path) -> set[str]:
     return deps
 
 
-def _detect_build_command_for_root(root: Path) -> Optional[str]:
-    """Return a project-appropriate build command if one exists."""
-    try:
-        root = Path(root)
-    except Exception:
-        root = Path.cwd()
-
-    # JS/TS project with build script
-    pkg_scripts = _package_json_scripts(root)
-    if "build" in pkg_scripts:
-        return "npm run build"
-
-    # Go
-    if (root / "go.mod").exists():
-        return "go build ./..."
-
-    # Rust
-    if (root / "Cargo.toml").exists():
-        return "cargo build"
-
-    # .NET
-    if any(root.glob("*.sln")) or any(root.glob("*.csproj")):
-        return "dotnet build"
-
-    # Java
-    if (root / "pom.xml").exists():
-        return "mvn -q -DskipTests package"
-    if (root / "build.gradle").exists() or (root / "build.gradle.kts").exists():
-        if (root / "gradlew").exists():
-            return "./gradlew build -x test"
-        return "gradle build -x test"
-
-    # Python: compileall as a lightweight syntax check
-    if (root / "pyproject.toml").exists() or (root / "setup.py").exists():
-        return "python -m compileall ."
-
-    return None
+from rev.execution.verification_utils import _detect_build_command_for_root
 
 
 def _has_python_markers(root: Path) -> bool:
@@ -4403,6 +4370,10 @@ class Orchestrator:
                                 f"[STOPPED] {next_task.description} | Reason: structure listing already done (code_change_iter={last_code_change_iteration}, sig={struct_sig})"
                             )
                             continue
+                    # If we already did a shallow read, allow one recursive read (rec=1) before skipping.
+                    sig_base = struct_sig.rsplit("::rec=", 1)[0]
+                    if isinstance(prior, dict) and "rec=0" in struct_sig and f"{sig_base}::rec=1" in structure_seen:
+                        pass
                     structure_seen[struct_sig] = {"code_change_iteration": last_code_change_iteration}
                     self.context.set_agent_state("structure_read_seen", structure_seen)
 
@@ -4438,7 +4409,7 @@ class Orchestrator:
                     if isinstance(last_result, str) and "not found" in last_result.lower():
                         if not parallel_mode:
                             refresh_task = Task(
-                                description="Refresh project structure: list src and tests to locate target files",
+                                description="Refresh project structure recursively: list src/** and tests/** to locate target files",
                                 action_type="read",
                             )
                             completed_tasks_log.append("[INFO] Injecting structure refresh after missing file read")
@@ -4454,7 +4425,7 @@ class Orchestrator:
                             self.context.set_agent_state(miss_key, miss_data)
                             if miss_count >= 2:
                                 refresh_task = Task(
-                                    description="Refresh project structure: list src and tests to locate target files",
+                                    description="Refresh project structure recursively: list src/** and tests/** to locate target files",
                                     action_type="read",
                                 )
                                 completed_tasks_log.append("[INFO] Injecting structure refresh after repeated missing file reads (parallel mode)")
