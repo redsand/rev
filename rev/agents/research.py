@@ -358,13 +358,20 @@ class ResearchAgent(BaseAgent):
                             if _has_empty_path_arg(tool_name, arguments if isinstance(arguments, dict) else {}):
                                 error_detail = "read/list call requested with empty path; use list_dir or provide a real path."
                                 print(f"  [WARN] ResearchAgent: {error_detail}")
+                                try:
+                                    context.add_insight("research_agent", "empty_path_guard", {
+                                        "task": task.task_id,
+                                        "detail": error_detail,
+                                    })
+                                except Exception:
+                                    pass
                                 if self.should_attempt_recovery(task, context):
                                     self.request_replan(
                                         context,
                                         reason="empty_path",
                                         detailed_reason=(
                                             f"{error_detail}\n"
-                                            "RECOVERY: Use tree_view/list_dir to locate the path, then retry with that path."
+                                            "RECOVERY: Run list_dir on the suspected directory (e.g., list_dir src/**) to discover the correct path, then retry with that path."
                                         ),
                                     )
                                     return self.make_recovery_request("empty_path", error_detail)
@@ -407,13 +414,20 @@ class ResearchAgent(BaseAgent):
                             if _has_empty_path_arg(recovered.name, recovered.arguments if isinstance(recovered.arguments, dict) else {}):
                                 error_detail = "read/list call requested with empty path; use list_dir or provide a real path."
                                 print(f"  [WARN] ResearchAgent: {error_detail}")
+                                try:
+                                    context.add_insight("research_agent", "empty_path_guard", {
+                                        "task": task.task_id,
+                                        "detail": error_detail,
+                                    })
+                                except Exception:
+                                    pass
                                 if self.should_attempt_recovery(task, context):
                                     self.request_replan(
                                         context,
                                         reason="empty_path",
                                         detailed_reason=(
                                             f"{error_detail}\n"
-                                            "RECOVERY: Use tree_view/list_dir to locate the path, then retry with that path."
+                                            "RECOVERY: Run list_dir on the suspected directory (e.g., list_dir src/**) to discover the correct path, then retry with that path."
                                         ),
                                     )
                                     return self.make_recovery_request("empty_path", error_detail)
@@ -454,13 +468,20 @@ class ResearchAgent(BaseAgent):
                             if _has_empty_path_arg(retry.name, retry.arguments if isinstance(retry.arguments, dict) else {}):
                                 error_detail = "read/list call requested with empty path; use list_dir or provide a real path."
                                 print(f"  [WARN] ResearchAgent: {error_detail}")
+                                try:
+                                    context.add_insight("research_agent", "empty_path_guard", {
+                                        "task": task.task_id,
+                                        "detail": error_detail,
+                                    })
+                                except Exception:
+                                    pass
                                 if self.should_attempt_recovery(task, context):
                                     self.request_replan(
                                         context,
                                         reason="empty_path",
                                         detailed_reason=(
                                             f"{error_detail}\n"
-                                            "RECOVERY: Use tree_view/list_dir to locate the path, then retry with that path."
+                                            "RECOVERY: Run list_dir on the suspected directory (e.g., list_dir src/**) to discover the correct path, then retry with that path."
                                         ),
                                     )
                                     return self.make_recovery_request("empty_path", error_detail)

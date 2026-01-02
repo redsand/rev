@@ -918,11 +918,32 @@ class CodeWriterAgent(BaseAgent):
             # Fail fast if no files could be read successfully
             if not files_read_successfully and target_files:
                 primary_file = target_files[0]
+                # Collect quick existence/size hints for better guidance
+                attempt_notes = []
+                empty_detected = False
+                for raw_path in target_files[:3]:
+                    try:
+                        resolved = resolve_workspace_path(raw_path).abs_path
+                        if resolved.exists():
+                            if resolved.is_file():
+                                size = resolved.stat().st_size
+                                attempt_notes.append(f"{raw_path} (exists, size={size} bytes)")
+                                if size == 0:
+                                    empty_detected = True
+                            else:
+                                attempt_notes.append(f"{raw_path} (exists, but is a directory)")
+                        else:
+                            attempt_notes.append(f"{raw_path} (not found)")
+                    except Exception:
+                        attempt_notes.append(f"{raw_path} (path resolution failed)")
+                attempt_hint = "; ".join(attempt_notes)
                 error_msg = (
                     f"Cannot read target file '{primary_file}' for EDIT task. "
-                    f"File may not exist or is unreadable."
+                    f"File may not exist or is unreadable. Attempts: {attempt_hint}"
                 )
                 print(f"  [ERROR] {error_msg}")
+                if empty_detected:
+                    print("  [INFO] Detected empty target file; consider using write_file to supply full content.")
                 if self.should_attempt_recovery(task, context):
                     self.request_replan(
                         context,
@@ -931,6 +952,7 @@ class CodeWriterAgent(BaseAgent):
                             f"{error_msg}\n\n"
                             f"RECOVERY: If '{primary_file}' does not exist yet, use action_type='add' to create it. "
                             f"If the file exists but has a different path, verify the correct path using 'read_file' or 'list_dir'. "
+                            f"If the file exists but is empty, switch to write_file with the full desired content. "
                             f"Do NOT proceed with EDIT action on non-existent files."
                         )
                     )
