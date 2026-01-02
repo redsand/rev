@@ -313,14 +313,25 @@ def run_command_safe(
             except subprocess.TimeoutExpired:
                 proc.kill()
                 stdout_data, stderr_data = proc.communicate()
-                return {
+                result = {
                     "timeout": timeout,
                     "cmd": original_cmd_str,
                     "cmd_normalized": normalized_cmd_str,
                     "cwd": str(resolved_cwd),
                     "rc": -1,
+                    "stdout": stdout_data or "",
+                    "stderr": stderr_data or "",
                     "error": f"command exceeded {timeout}s timeout",
                 }
+
+                # Enhance timeout error with diagnostic information
+                try:
+                    from rev.execution.timeout_recovery import enhance_timeout_error
+                    result = enhance_timeout_error(result)
+                except Exception:
+                    pass  # Graceful degradation if diagnosis fails
+
+                return result
 
         if os.getenv("REV_DEBUG_CMD"):
             print(f"  [DEBUG_CMD] Result: rc={proc.returncode}, stdout_len={len(stdout_data or '')}, stderr_len={len(stderr_data or '')}")

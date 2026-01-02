@@ -21,23 +21,113 @@ from rev.execution.ultrathink_prompts import ULTRATHINK_CODE_WRITER_PROMPT
 from rev.tools.workspace_resolver import resolve_workspace_path
 
 
-def _looks_like_code_reference(text: str) -> bool:
-    """Check if text looks like a code reference (e.g., api.method.name) rather than a file path.
+def _looks_like_code_reference(text: str, context: str = "") -> bool:
+    """Check if text looks like a code reference rather than a file path.
 
-    Returns True if the text has multiple dots but no path separators.
+    Args:
+        text: The candidate string (e.g., "app.listen", "src/file.ts")
+        context: Surrounding text for additional context clues
+
+    Returns:
+        True if this is likely a code reference, not a file path
     """
     if not text:
         return False
 
+    # Has path separators? Likely a real file path
+    has_path_sep = ('/' in text or '\\' in text)
+    if has_path_sep:
+        return False  # src/file.ts is a file path
+
     # Count dots
     dot_count = text.count('.')
 
-    # Has path separators?
-    has_path_sep = ('/' in text or '\\' in text)
+    # 2+ dots without path separators = definitely code reference
+    # Examples: api.interceptors.request, express.json.stringify
+    if dot_count >= 2:
+        return True
 
-    # If there are 2+ dots and no path separators, it's likely a code reference
-    # Examples: api.interceptors.request.use, express.json.stringify
-    return dot_count >= 2 and not has_path_sep
+    # For single-dot patterns, check additional signals
+    if dot_count == 1:
+        # Split into parts
+        parts = text.split('.')
+        if len(parts) == 2:
+            name, extension = parts
+
+            # 1. Check if "name" is a common variable/object name pattern
+            # This catches: app.listen, express.json, console.log, test.environment, etc.
+            common_var_names = {
+                'app', 'obj', 'this', 'self', 'that', 'req', 'res',
+                'ctx', 'config', 'options', 'params', 'data', 'server',
+                'client', 'router', 'express', 'fastify', 'koa',
+                'console', 'process', 'window', 'document', 'global',
+                'module', 'exports', 'require', 'import', 'JSON',
+                'Math', 'Date', 'Array', 'Object', 'String', 'Number',
+                'Promise', 'Error', 'Buffer',
+                'test', 'tests', 'env', 'environment', 'settings',
+                'props', 'state', 'store', 'theme', 'user', 'session'
+            }
+            if name.lower() in common_var_names or name in common_var_names:
+                return True
+
+            # 2. Check for common method/property names
+            # This catches cases where variable name isn't in the list above
+            common_code_names = {
+                'listen', 'main', 'module', 'exports', 'require', 'import',
+                'prototype', 'constructor', 'toString', 'valueOf',
+                'length', 'push', 'pop', 'shift', 'map', 'filter',
+                'reduce', 'forEach', 'find', 'includes',
+                'log', 'error', 'warn', 'info', 'debug',
+                'parse', 'stringify', 'join', 'split',
+                'get', 'set', 'post', 'put', 'delete', 'patch',
+                'use', 'apply', 'call', 'bind', 'then', 'catch',
+                'next', 'send', 'status', 'text',
+                'locals', 'session', 'cookies', 'query', 'params',
+                'body', 'headers', 'path', 'url', 'method',
+                'environment', 'timeout', 'retries', 'coverage', 'globals',
+                'config', 'name', 'value', 'type', 'id', 'key'
+            }
+            if extension.lower() in common_code_names:
+                return True
+
+            # 3. Check context for code-related keywords
+            if context:
+                context_lower = context.lower()
+                code_keywords = [
+                    'call', 'method', 'function', 'property', 'instance',
+                    'guard', 'wrap', 'invoke', 'execute', 'trigger',
+                    'behind', 'inside', 'within', 'unconditional',
+                    'removing', 'guarding', 'middleware'
+                ]
+                if any(keyword in context_lower for keyword in code_keywords):
+                    return True
+
+            # 4. Check if this is a file extension (after ruling out code patterns)
+            # Only check file extensions as a last resort to avoid false positives
+            common_file_extensions = {
+                'js', 'ts', 'jsx', 'tsx', 'py', 'java', 'c', 'cpp', 'h', 'hpp',
+                'cs', 'go', 'rs', 'rb', 'php', 'swift', 'kt', 'scala',
+                'json', 'yaml', 'yml', 'toml', 'xml', 'html', 'css', 'scss', 'sass',
+                'md', 'txt', 'conf', 'cfg', 'ini', 'env',
+                'vue', 'svelte', 'astro',
+                'sql', 'prisma', 'graphql', 'proto',
+                'sh', 'bash', 'ps1', 'bat', 'cmd'
+            }
+            # Special check: if it's a known file pattern like "package.json", "tsconfig.json"
+            # these should be treated as files
+            known_config_files = {
+                'package', 'tsconfig', 'jsconfig', 'vite.config', 'vitest.config',
+                'jest.config', 'webpack.config', 'rollup.config', 'babel.config',
+                '.eslintrc', 'prettier.config', 'tailwind.config'
+            }
+            if name.lower() in known_config_files and extension.lower() in common_file_extensions:
+                return False  # This is a config file, not code
+
+            # If extension is a file extension and we haven't identified it as code, it's a file
+            if extension.lower() in common_file_extensions:
+                return False
+
+    return False
 
 
 def _extract_target_files_from_description(description: str) -> list[str]:
@@ -54,13 +144,16 @@ def _extract_target_files_from_description(description: str) -> list[str]:
     paths = []
 
     # Match backticked paths like `src/module/file.ext` (any extension)
-    # But exclude code references like `api.interceptors.request.use`
+    # But exclude code references like `api.interceptors.request.use` or `app.listen`
     backtick_pattern = r'`([^`]+\.\w+)`'
     for match in re.finditer(backtick_pattern, description, re.IGNORECASE):
         candidate = match.group(1)
-        # Filter out code references: if there are multiple dots but no path separators,
-        # it's likely a code reference (e.g., api.method.name) not a file path
-        if _looks_like_code_reference(candidate):
+        # Extract context around the match (50 chars before and after)
+        context_start = max(0, match.start() - 50)
+        context_end = min(len(description), match.end() + 50)
+        context = description[context_start:context_end]
+        # Filter out code references
+        if _looks_like_code_reference(candidate, context):
             continue
         paths.append(candidate)
 
@@ -70,7 +163,11 @@ def _extract_target_files_from_description(description: str) -> list[str]:
         candidate = match.group(1)
         if candidate in paths:
             continue
-        if _looks_like_code_reference(candidate):
+        # Extract context around the match
+        context_start = max(0, match.start() - 50)
+        context_end = min(len(description), match.end() + 50)
+        context = description[context_start:context_end]
+        if _looks_like_code_reference(candidate, context):
             continue
         paths.append(candidate)
 
@@ -92,8 +189,12 @@ def _extract_target_files_from_description(description: str) -> list[str]:
         candidate = match.group(1)
         if candidate in paths or candidate.startswith('.'):
             continue
-        # Skip code references (multiple dots, no path separators)
-        if _looks_like_code_reference(candidate):
+        # Extract context around the match for code reference detection
+        context_start = max(0, match.start() - 50)
+        context_end = min(len(description), match.end() + 50)
+        context = description[context_start:context_end]
+        # Skip code references (check with context)
+        if _looks_like_code_reference(candidate, context):
             continue
         end_idx = match.end()
         if end_idx < len(description) and description[end_idx] == "(":
@@ -105,9 +206,10 @@ def _extract_target_files_from_description(description: str) -> list[str]:
         if candidate.lower() in allowed_bare:
             paths.append(candidate)
             continue
-        context_start = max(0, match.start() - 25)
-        context = description[context_start:match.start()]
-        if verb_hint.search(context):
+        # Check for file-related verbs in preceding context
+        verb_context_start = max(0, match.start() - 25)
+        verb_context = description[verb_context_start:match.start()]
+        if verb_hint.search(verb_context):
             paths.append(candidate)
 
     return paths

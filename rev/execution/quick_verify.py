@@ -453,19 +453,29 @@ def _verify_task_execution_impl(task: Task, context: RevContext) -> Verification
                     remediation = "Missing dependency detected; install the missing package(s) before re-running the build."
                 if remediation is None and (stderr or stdout):
                     remediation = "Command failed; review stderr for root cause and ask LLM for remediation."
+
+                # Extract timeout_diagnosis if present (from timeout_recovery.py)
+                timeout_diagnosis = payload.get("timeout_diagnosis")
+
+                details_dict = {
+                    "tool": tool_name,
+                    "rc": rc,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "hint_detected": hint_hit,
+                    "remediation": remediation,
+                    "stderr_full": stderr,
+                    "stdout_full": stdout,
+                }
+
+                # Add timeout diagnosis to details if present
+                if timeout_diagnosis:
+                    details_dict["timeout_diagnosis"] = timeout_diagnosis
+
                 return VerificationResult(
                     passed=False,
                     message=msg,
-                    details={
-                        "tool": tool_name,
-                        "rc": rc,
-                        "stdout": stdout,
-                        "stderr": stderr,
-                        "hint_detected": hint_hit,
-                        "remediation": remediation,
-                        "stderr_full": stderr,
-                        "stdout_full": stdout,
-                    },
+                    details=details_dict,
                     should_replan=True,
                 )
     verification_mode = _get_verification_mode()
@@ -2506,29 +2516,9 @@ def _normalized_tokens(cmd_parts: list[str]) -> list[str]:
 
 
 def _detect_test_runner(cmd_parts: list[str], stdout: str = "", stderr: str = "") -> str:
-    combined = f"{stdout}\n{stderr}".lower()
-    if "jest" in combined:
-        return "jest"
-    if "vitest" in combined:
-        return "vitest"
-    if "pytest" in combined or "collected 0 items" in combined:
-        return "pytest"
-    if "unittest" in combined:
-        return "unittest"
-    if "phpunit" in combined:
-        return "phpunit"
-    if "rspec" in combined:
-        return "rspec"
-    if "gradle" in combined:
-        return "gradle"
-    if "maven" in combined or "surefire" in combined:
-        return "maven"
-    if "dotnet" in combined or "mstest" in combined or "xunit" in combined or "nunit" in combined:
-        return "dotnet"
-    if "dart" in combined:
-        return "dart"
-    if "flutter" in combined:
-        return "flutter"
+    # CRITICAL: Check command first, THEN output
+    # This prevents false detection when output mentions other frameworks
+    # (e.g., vitest command that outputs "consider using jest" shouldn't be detected as jest)
 
     tokens = _normalized_tokens(cmd_parts)
     if not tokens:
@@ -2587,6 +2577,32 @@ def _detect_test_runner(cmd_parts: list[str], stdout: str = "", stderr: str = ""
     if "dart" in tokens and "test" in tokens:
         return "dart"
     if "flutter" in tokens and "test" in tokens:
+        return "flutter"
+
+    # Fallback: Check output ONLY if framework not found in command
+    # This is less reliable as output may mention other frameworks in errors/warnings
+    combined = f"{stdout}\n{stderr}".lower()
+    if "vitest" in combined:
+        return "vitest"
+    if "jest" in combined:
+        return "jest"
+    if "pytest" in combined or "collected 0 items" in combined:
+        return "pytest"
+    if "unittest" in combined:
+        return "unittest"
+    if "phpunit" in combined:
+        return "phpunit"
+    if "rspec" in combined:
+        return "rspec"
+    if "gradle" in combined:
+        return "gradle"
+    if "maven" in combined or "surefire" in combined:
+        return "maven"
+    if "dotnet" in combined or "mstest" in combined or "xunit" in combined or "nunit" in combined:
+        return "dotnet"
+    if "dart" in combined:
+        return "dart"
+    if "flutter" in combined:
         return "flutter"
 
     return "unknown"

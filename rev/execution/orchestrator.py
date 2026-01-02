@@ -1923,6 +1923,44 @@ def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optiona
                 )
             return tasks
 
+    # Special handling: Watch mode timeout detection (from timeout_recovery.py)
+    def _has_watch_mode_timeout(vr: Optional[VerificationResult]) -> tuple[bool, Optional[str]]:
+        """Check if verification result contains watch mode timeout diagnosis."""
+        if not vr or not isinstance(vr.details, dict):
+            return False, None
+
+        timeout_diag = vr.details.get("timeout_diagnosis")
+        if not timeout_diag or not isinstance(timeout_diag, dict):
+            return False, None
+
+        is_watch = timeout_diag.get("is_watch_mode", False)
+        suggested_fix = timeout_diag.get("suggested_fix")
+
+        return is_watch, suggested_fix
+
+    has_watch_timeout, watch_fix_suggestion = _has_watch_mode_timeout(verification_result)
+    if has_watch_timeout and watch_fix_suggestion:
+        # Extract test script name if mentioned
+        test_script_hint = ""
+        if "package.json" in watch_fix_suggestion.lower():
+            test_script_hint = " test script in"
+
+        tasks.append(
+            Task(
+                description=(
+                    f"Update package.json{test_script_hint} to fix watch mode issue: {watch_fix_suggestion}"
+                ),
+                action_type="edit",
+            )
+        )
+        tasks.append(
+            Task(
+                description="Run tests again to verify they complete without watch mode timeout",
+                action_type="test",
+            )
+        )
+        return tasks  # Return early - watch mode is the root cause
+
     # Special handling: Vitest CLI/script errors (e.g., unsupported --runTestsByPath) should trigger a script fix and targeted rerun.
     def _is_vitest_cli_error(vr: Optional[VerificationResult]) -> bool:
         if not vr:
