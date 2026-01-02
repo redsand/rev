@@ -7,6 +7,7 @@ TF-IDF-like scoring for code retrieval without requiring external libraries.
 """
 
 import re
+import fnmatch
 import json
 import math
 import time
@@ -347,19 +348,39 @@ class SimpleCodeRetriever(BaseCodeRetriever):
         # Tokenize query
         query_terms = self._tokenize(question)
 
+        # Pre-compile file pattern (regex or glob) to avoid per-chunk failures
+        file_pattern_regex = None
+        if filters and filters.get("file_pattern"):
+            raw_pattern = str(filters["file_pattern"]).strip()
+            normalized_pattern = raw_pattern.replace("\\", "/")
+            try:
+                file_pattern_regex = re.compile(normalized_pattern)
+            except re.error:
+                # Fallback: treat pattern as a glob and translate to regex
+                try:
+                    file_pattern_regex = re.compile(fnmatch.translate(normalized_pattern))
+                except re.error:
+                    print(f"    Warning: Invalid file_pattern filter '{raw_pattern}'; ignoring this filter")
+                    file_pattern_regex = None
+
+        def _passes_filters(chunk: CodeChunk, *, skip_file_pattern: bool = False) -> bool:
+            if not filters:
+                return True
+            if "language" in filters and chunk.metadata.get("language") != filters["language"]:
+                return False
+            if "chunk_type" in filters and chunk.chunk_type != filters["chunk_type"]:
+                return False
+            if file_pattern_regex and not skip_file_pattern:
+                normalized_path = chunk.path.replace("\\", "/")
+                if not file_pattern_regex.search(normalized_path):
+                    return False
+            return True
+
         # Score all chunks
         scored_chunks = []
         for chunk in self.chunks:
-            # Apply filters
-            if filters:
-                if "language" in filters and chunk.metadata.get("language") != filters["language"]:
-                    continue
-                if "chunk_type" in filters and chunk.chunk_type != filters["chunk_type"]:
-                    continue
-                if "file_pattern" in filters:
-                    pattern = filters["file_pattern"]
-                    if not re.search(pattern, chunk.path):
-                        continue
+            if not _passes_filters(chunk):
+                continue
 
             # Compute score
             score = self._compute_tfidf_score(query_terms, chunk)
@@ -367,6 +388,16 @@ class SimpleCodeRetriever(BaseCodeRetriever):
             if score > 0:
                 chunk.score = score
                 scored_chunks.append(chunk)
+
+        # Fallback: if file_pattern filtering produced nothing, retry without that filter to avoid assuming code lives in ./src.
+        if not scored_chunks and file_pattern_regex:
+            for chunk in self.chunks:
+                if not _passes_filters(chunk, skip_file_pattern=True):
+                    continue
+                score = self._compute_tfidf_score(query_terms, chunk)
+                if score > 0:
+                    chunk.score = score
+                    scored_chunks.append(chunk)
 
         # Sort by score descending
         scored_chunks.sort(key=lambda c: c.score, reverse=True)

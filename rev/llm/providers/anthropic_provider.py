@@ -162,14 +162,14 @@ class AnthropicProvider(LLMProvider):
             "model": model_name,
             "messages": converted_messages,
             "max_tokens": int(os.getenv("ANTHROPIC_MAX_TOKENS", "8192")),
-            "temperature": float(os.getenv("ANTHROPIC_TEMPERATURE", "0.1")),
+            "temperature": float(os.getenv("ANTHROPIC_TEMPERATURE", str(config.ANTHROPIC_TEMPERATURE))),
         }
 
         if system_message:
             request_params["system"] = system_message
 
         # Add tools if provided and supported
-        if tools and supports_tools:
+        if tools:
             anthropic_tools = self._convert_tools(tools)
             if anthropic_tools:
                 request_params["tools"] = anthropic_tools
@@ -211,13 +211,13 @@ class AnthropicProvider(LLMProvider):
             "model": model_name,
             "messages": converted_messages,
             "max_tokens": int(os.getenv("ANTHROPIC_MAX_TOKENS", "8192")),
-            "temperature": float(os.getenv("ANTHROPIC_TEMPERATURE", "0.1")),
+            "temperature": float(os.getenv("ANTHROPIC_TEMPERATURE", str(config.ANTHROPIC_TEMPERATURE))),
         }
 
         if system_message:
             request_params["system"] = system_message
 
-        if tools and supports_tools:
+        if tools:
             anthropic_tools = self._convert_tools(tools)
             if anthropic_tools:
                 request_params["tools"] = anthropic_tools

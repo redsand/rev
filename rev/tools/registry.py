@@ -91,6 +91,7 @@ from rev.tools.python_ast_ops import (
 from rev.tools.cache_ops import (
     get_cache_stats, clear_caches, persist_caches
 )
+from rev.tools import web_tools
 
 
 def rag_search(query: str, k: int = 10, filters: dict = None) -> str:
@@ -194,6 +195,9 @@ _TIMEOUT_PROTECTED_TOOLS = {
     "detect_secrets",
     "check_license_compliance",
     "split_python_module_classes",
+    "web_search",
+    "fetch_url",
+    "find_files",
 }
 
 _COMMAND_TOKENS = {
@@ -488,9 +492,23 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         "git_status": lambda args: git_status(),
         "git_log": lambda args: git_log(args.get("count", 10), args.get("oneline", False)),
         "git_branch": lambda args: git_branch(args.get("action", "list"), args.get("branch_name")),
-        "run_cmd": lambda args: run_cmd(args["cmd"], args.get("timeout", 300), args.get("cwd")),
-        "run_tests": lambda args: run_tests(args.get("cmd", "pytest -q"), args.get("timeout", 600), args.get("cwd")),
+        "run_cmd": lambda args: run_cmd(
+            args["cmd"] if "cmd" in args else args.get("command"),
+            args.get("timeout", 300),
+            args.get("cwd"),
+            background=args.get("background", False),
+            env=args.get("env"),
+        ) if ("cmd" in args or "command" in args) else json.dumps(
+            {"error": "missing required field: cmd", "rc": -1}
+        ),
+        "run_tests": lambda args: run_tests(
+            args.get("cmd", args.get("command", "pytest -q")),
+            args.get("timeout", 600),
+            args.get("cwd"),
+        ),
         "get_repo_context": lambda args: get_repo_context(args.get("commits", 6)),
+        "list_background_processes": lambda args: list_background_processes(),
+        "kill_background_process": lambda args: kill_background_process(args["pid"]),
 
         # Utility tools
         "install_package": lambda args: install_package(args["package"]),
@@ -499,6 +517,9 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         "run_python_diagnostic": lambda args: run_python_diagnostic(args["script"], args.get("description", "")),
         "inspect_module_hierarchy": lambda args: inspect_module_hierarchy(args["module_path"]),
         "get_system_info": lambda args: get_system_info(),
+        "web_search": lambda args: web_tools.web_search(args["query"], args.get("limit", 5)),
+        "fetch_url": lambda args: web_tools.fetch_url(args["url"], args.get("timeout", 10), args.get("max_bytes", 200000)),
+        "find_files": lambda args: web_tools.find_files(args.get("pattern", "**/*"), args.get("include_dirs", False), args.get("max_results", 200)),
 
         # SSH operations
         "ssh_connect": lambda args: ssh_connect(args["host"], args["username"], args.get("password"), args.get("key_file"), args.get("port", 22)),
@@ -766,6 +787,16 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "executor") 
     except Exception:
         pass
 
+    # Plan-only mode: do not execute tools, return a stub response
+    if getattr(config, "TOOL_EXECUTION_MODE", "normal") == "plan-only":
+        return json.dumps({
+            "skipped": True,
+            "reason": "plan-only mode (tool execution disabled)",
+            "tool": name,
+            "args": args,
+            "blocked": True,
+        })
+
     # Compatibility shim: normalize common alternate argument names that some models emit
     # (e.g. "file_path" vs the canonical "path") so tools don't KeyError.
     if isinstance(args, dict):
@@ -917,19 +948,22 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "executor") 
             perm_result = permission_mgr.check_permission(agent_name, name, args)
 
             if not perm_result.allowed:
-                error_msg = f"Permission denied: {agent_name} cannot use {name}. Reason: {perm_result.reason}"
-                permission_mgr.log_denial(agent_name, name, args, perm_result.reason)
+                if getattr(config, "TOOL_EXECUTION_MODE", "normal") == "auto-accept":
+                    logger.warning(f"[AUTO-ACCEPT] Bypassing permission denial for {name}: {perm_result.reason}")
+                else:
+                    error_msg = f"Permission denied: {agent_name} cannot use {name}. Reason: {perm_result.reason}"
+                    permission_mgr.log_denial(agent_name, name, args, perm_result.reason)
 
-                # Log the denial
-                logger.warning(f"[PERMISSION DENIED] {error_msg}")
-                get_logger().log_transaction_event("PERMISSION_DENIED", {
-                    "agent": agent_name,
-                    "tool": name,
-                    "arguments": args,
-                    "reason": perm_result.reason
-                })
+                    # Log the denial
+                    logger.warning(f"[PERMISSION DENIED] {error_msg}")
+                    get_logger().log_transaction_event("PERMISSION_DENIED", {
+                        "agent": agent_name,
+                        "tool": name,
+                        "arguments": args,
+                        "reason": perm_result.reason
+                    })
 
-                return json.dumps({"error": error_msg, "permission_denied": True})
+                    return json.dumps({"error": error_msg, "permission_denied": True})
 
             # Log successful permission check for high/critical risk tools
             if perm_result.risk_level and perm_result.risk_level.value in ["high", "critical"]:
@@ -1695,9 +1729,36 @@ def get_available_tools() -> list:
                             "description": "Command to execute"
                         },
                         "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 300},
-                        "cwd": {"type": "string", "description": "Working directory (relative to workspace)"}
+                        "cwd": {"type": "string", "description": "Working directory (relative to workspace)"},
+                        "background": {"type": "boolean", "description": "Run command in background and return immediately", "default": False},
+                        "env": {"type": "object", "description": "Optional environment variable overrides (key/value)"}
                     },
                     "required": ["cmd"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_background_processes",
+                "description": "List background processes started by rev",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "kill_background_process",
+                "description": "Kill a background process started by rev (only allowed for tracked PIDs)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pid": {"type": "integer", "description": "PID of the background process to kill"}
+                    },
+                    "required": ["pid"]
                 }
             }
         },
@@ -1806,6 +1867,52 @@ def get_available_tools() -> list:
                         "module_path": {"type": "string", "description": "Python import path to inspect (e.g., 'lib.analysts')"}
                     },
                     "required": ["module_path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Attempt a web search. If network access is disabled, returns a structured error advising to use MCP search tools.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query"},
+                        "limit": {"type": "integer", "description": "Number of results", "default": 5}
+                    },
+                    "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "fetch_url",
+                "description": "Fetch the contents of a URL (best-effort). Returns a structured error if network access is blocked.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "URL to fetch"},
+                        "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 10},
+                        "max_bytes": {"type": "integer", "description": "Maximum bytes to read", "default": 200000}
+                    },
+                    "required": ["url"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "find_files",
+                "description": "Find files matching a glob pattern within allowed roots. Honors exclusion rules.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {"type": "string", "description": "Glob pattern", "default": "**/*"},
+                        "include_dirs": {"type": "boolean", "description": "Include directories in results", "default": False},
+                        "max_results": {"type": "integer", "description": "Maximum results to return", "default": 200}
+                    }
                 }
             }
         },
@@ -2511,3 +2618,20 @@ def get_available_tools() -> list:
 
     _enforce_registry_guard(tools)
     return tools
+
+
+def get_tool_stats() -> Dict[str, Any]:
+    """Return simple tool stats for logging/telemetry."""
+    tools = get_available_tools()
+    stats: Dict[str, Any] = {
+        "total_tools": len(tools),
+    }
+    # Include MCP server visibility if available (best-effort)
+    try:  # pragma: no cover - runtime environment may not have MCP
+        from rev.mcp.client import mcp_client  # type: ignore
+
+        stats["mcp_server_count"] = len(getattr(mcp_client, "servers", {}))
+    except Exception:
+        stats["mcp_server_count"] = None
+
+    return stats

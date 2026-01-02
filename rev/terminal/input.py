@@ -17,15 +17,20 @@ import sys
 import platform
 import threading
 import time
+from pathlib import Path
 from typing import List, Tuple
 from rev.terminal.history import PromptHistory
 
+from rev import config
 from rev.config import set_escape_interrupt
 from rev.settings_manager import get_runtime_settings_snapshot
 from rev.terminal.commands import COMMAND_HANDLERS
 
-# Global history instance
-_history = PromptHistory()
+# Global history instance (persisted per-workspace if enabled)
+_history_file = Path(config.HISTORY_FILE) if getattr(config, "HISTORY_FILE", None) else None
+if _history_file and not str(_history_file).strip():
+    _history_file = None
+_history = PromptHistory(max_history=getattr(config, "HISTORY_SIZE", 100), history_file=_history_file)
 
 
 def _get_command_suggestions() -> List[str]:

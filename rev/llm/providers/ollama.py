@@ -225,10 +225,12 @@ class OllamaProvider(LLMProvider):
 
         model_name = model or config.OLLAMA_MODEL
         supports_tools = config.DEFAULT_SUPPORTS_TOOLS if supports_tools is None else supports_tools
+        if tools:
+            supports_tools = True
 
         # Get cache
         llm_cache = get_llm_cache() or LLMResponseCache()
-        tools_provided = tools is not None and supports_tools
+        tools_provided = tools is not None
 
         # Check cache
         cached_response = llm_cache.get_response(messages, tools if tools_provided else None, model_name)
@@ -470,7 +472,9 @@ class OllamaProvider(LLMProvider):
 
         model_name = model or config.OLLAMA_MODEL
         supports_tools = config.DEFAULT_SUPPORTS_TOOLS if supports_tools is None else supports_tools
-        tools_provided = tools is not None and supports_tools
+        if tools:
+            supports_tools = True
+        tools_provided = tools is not None
 
         url = f"{self.base_url}/api/chat"
         is_cloud_model = model_name.endswith("-cloud") or model_name.endswith(":cloud")

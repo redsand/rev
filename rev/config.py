@@ -210,7 +210,7 @@ def _get_primary_provider_and_model():
         provider_models = {
             "gemini": os.getenv("GEMINI_MODEL", "gemini-3-flash-preview"),
             "anthropic": os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"),
-            "openai": os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview"),
+            "openai": os.getenv("OPENAI_MODEL", "gpt-5.2-mini"),
             "ollama": DEFAULT_OLLAMA_MODEL,
         }
         return explicit_provider, provider_models.get(explicit_provider, DEFAULT_OLLAMA_MODEL)
@@ -228,7 +228,7 @@ def _get_primary_provider_and_model():
     # Check OpenAI credentials
     openai_key = os.getenv("OPENAI_API_KEY", "").strip()
     if openai_key:
-        return "openai", os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview")
+        return "openai", os.getenv("OPENAI_MODEL", "gpt-5.2-mini")
 
     # Default to Ollama
     return "ollama", DEFAULT_OLLAMA_MODEL
@@ -245,6 +245,7 @@ if os.getenv("OLLAMA_DEBUG"):
 OLLAMA_BASE_URL = DEFAULT_OLLAMA_BASE_URL
 OLLAMA_MODEL = DEFAULT_OLLAMA_MODEL
 EXECUTION_MODEL = os.getenv("REV_EXECUTION_MODEL", _DEFAULT_MODEL)
+# Auto-switch target if repeated tool-call failures occur (env override supported)
 EXECUTION_MODEL_FALLBACK = os.getenv("REV_EXECUTION_MODEL_FALLBACK", "").strip()
 PLANNING_MODEL = os.getenv("REV_PLANNING_MODEL", _DEFAULT_MODEL)
 REVIEW_MODEL = os.getenv("REV_REVIEW_MODEL", _DEFAULT_MODEL)
@@ -267,9 +268,12 @@ TEST_EXECUTOR_COMMAND_CORRECTION_ENABLED = os.getenv("REV_TEST_EXECUTOR_COMMAND_
 EXPLICIT_YES = os.getenv("REV_EXPLICIT_YES", "false").lower() == "true"
 
 # LLM Generation Parameters (for improved tool calling with local models)
-# Lower temperature improves consistency and accuracy for tool calling
-# Recommended: 0.1 for tool calling, 0.7 for creative tasks
-OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.1"))
+# Default to 1.0 for broad model compatibility; set lower (e.g., 0.1-0.3) if your
+# provider/model prefers cooler temperatures for tool-calling reliability.
+# The global TEMPERATURE is the source of truth; provider-specific temperatures
+# inherit from it unless explicitly overridden by env vars.
+TEMPERATURE = float(os.getenv("REV_TEMPERATURE", os.getenv("OPENAI_TEMPERATURE", "1.0")))
+OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", str(TEMPERATURE)))
 
 # Context window size (num_ctx) - recommended 8K-16K for tool calling
 # Higher values allow for more context but use more memory
@@ -301,6 +305,14 @@ ULTRATHINK_MODE = os.getenv("REV_ULTRATHINK_MODE", "off").strip().lower()
 if ULTRATHINK_MODE not in {"on", "off"}:
     ULTRATHINK_MODE = "off"
 
+# Auto-enable Ultrathink for select models (e.g., GLM-4.6/4.7) unless explicitly disabled
+ULTRATHINK_AUTO_MODELS = {
+    "glm-4.7",
+    "glm-4.7:cloud",
+    "glm-4.6",
+    "glm-4.6:cloud",
+}
+
 # Maximum tokens for ultrathink mode (allows for extended reasoning)
 # Higher values enable deeper analysis but use more tokens
 ULTRATHINK_MAX_TOKENS = int(os.getenv("REV_ULTRATHINK_MAX_TOKENS", "15000"))
@@ -320,6 +332,8 @@ EXECUTION_PROVIDER = os.getenv("REV_EXECUTION_PROVIDER", LLM_PROVIDER)
 PLANNING_PROVIDER = os.getenv("REV_PLANNING_PROVIDER", LLM_PROVIDER)
 RESEARCH_PROVIDER = os.getenv("REV_RESEARCH_PROVIDER", LLM_PROVIDER)
 EXECUTION_MODE = os.getenv("REV_EXECUTION_MODE", "sub-agent").lower()
+# Tool execution mode: normal | auto-accept | plan-only (no tool execution)
+TOOL_EXECUTION_MODE = os.getenv("REV_TOOL_MODE", "normal").lower()
 
 def set_execution_mode(mode: str) -> bool:
     """Set the execution mode for the current session.
@@ -357,21 +371,38 @@ def get_execution_mode() -> str:
     """
     return EXECUTION_MODE
 
+def set_tool_mode(mode: str) -> bool:
+    """Set the tool execution mode (normal | auto-accept | plan-only)."""
+    global TOOL_EXECUTION_MODE
+    mode = mode.lower().strip()
+    valid_modes = ["normal", "auto-accept", "plan-only"]
+    if mode not in valid_modes:
+        print(f"[X] Invalid tool mode: '{mode}'. Valid modes: {', '.join(valid_modes)}")
+        return False
+    TOOL_EXECUTION_MODE = mode
+    os.environ["REV_TOOL_MODE"] = mode
+    print(f"[OK] Tool mode set to: {mode}")
+    return True
+
+def get_tool_mode() -> str:
+    """Get the current tool execution mode."""
+    return TOOL_EXECUTION_MODE
+
 # OpenAI Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview")
-OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.1"))
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.2-mini")
+OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", str(TEMPERATURE)))
 
 # Anthropic (Claude) Configuration
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
-ANTHROPIC_TEMPERATURE = float(os.getenv("ANTHROPIC_TEMPERATURE", "0.1"))
+ANTHROPIC_TEMPERATURE = float(os.getenv("ANTHROPIC_TEMPERATURE", str(TEMPERATURE)))
 ANTHROPIC_MAX_TOKENS = int(os.getenv("ANTHROPIC_MAX_TOKENS", "8192"))
 
 # Google Gemini Configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
-GEMINI_TEMPERATURE = float(os.getenv("GEMINI_TEMPERATURE", "0.1"))
+GEMINI_TEMPERATURE = float(os.getenv("GEMINI_TEMPERATURE", str(TEMPERATURE)))
 GEMINI_TOP_P = float(os.getenv("GEMINI_TOP_P", "0.9"))
 GEMINI_TOP_K = int(os.getenv("GEMINI_TOP_K", "40"))
 GEMINI_MAX_OUTPUT_TOKENS = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "8192"))
@@ -435,6 +466,11 @@ LLM_TRANSACTION_LOG_PATH = os.getenv(
 TDD_ENABLED = os.getenv("REV_TDD_ENABLED", "false").strip().lower() == "true"
 TDD_DEFER_TEST_EXECUTION = os.getenv("REV_TDD_DEFER_TESTS", "true").strip().lower() != "false"
 
+# Uncertainty detection - prompts user for guidance when Rev is uncertain
+UNCERTAINTY_DETECTION_ENABLED = os.getenv("REV_UNCERTAINTY_DETECTION_ENABLED", "true").strip().lower() == "true"
+UNCERTAINTY_THRESHOLD = int(os.getenv("REV_UNCERTAINTY_THRESHOLD", "5"))  # Score to trigger guidance request
+UNCERTAINTY_AUTO_SKIP_THRESHOLD = int(os.getenv("REV_UNCERTAINTY_AUTO_SKIP_THRESHOLD", "10"))  # Score to auto-skip
+
 EXCLUDE_DIRS = {
     ".git", ".hg", ".svn", ".idea", ".vscode", "__pycache__", ".pytest_cache",
     "node_modules", "dist", "build", ".next", "out", "coverage", ".cache",
@@ -491,6 +527,7 @@ PERMISSIONS_FAIL_OPEN = os.getenv("REV_PERMISSIONS_FAIL_OPEN", "false").lower() 
 # MCP (Model Context Protocol) Configuration
 # PRIVATE_MODE: When enabled, disables all public MCP servers for secure/confidential code work
 # Set REV_PRIVATE_MODE=true or use /private command to enable
+MCP_ENABLED = os.getenv("REV_MCP_ENABLED", "true").strip().lower() != "false"
 DEFAULT_PRIVATE_MODE = os.getenv("REV_PRIVATE_MODE", "false").lower() == "true"
 PRIVATE_MODE = DEFAULT_PRIVATE_MODE
 
@@ -632,6 +669,22 @@ def set_model(model_name: str) -> None:
     EXECUTION_MODEL = model_name
     PLANNING_MODEL = model_name
     RESEARCH_MODEL = model_name
+
+
+def set_llm_provider(provider: str) -> None:
+    """
+    Update the active LLM provider for all phases (execution, planning, research).
+
+    This keeps all phases aligned with the selected provider unless explicitly
+    overridden by env vars/CLI for a specific phase.
+    """
+    global LLM_PROVIDER, EXECUTION_PROVIDER, PLANNING_PROVIDER, RESEARCH_PROVIDER
+    provider = (provider or "").strip().lower()
+    if provider:
+        LLM_PROVIDER = provider
+        EXECUTION_PROVIDER = provider
+        PLANNING_PROVIDER = provider
+        RESEARCH_PROVIDER = provider
 
 
 def get_system_info_cached() -> Dict[str, Any]:

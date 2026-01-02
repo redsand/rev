@@ -240,6 +240,15 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         setter=lambda value: setattr(config, "EXECUTION_MODEL_FALLBACK", value),
         default=config.EXECUTION_MODEL_FALLBACK,
     ),
+    "tool_mode": RuntimeSetting(
+        key="tool_mode",
+        description="Tool execution mode: normal | auto-accept | plan-only",
+        section="Execution",
+        parser=_parse_non_empty_str,
+        getter=lambda: config.TOOL_EXECUTION_MODE,
+        setter=lambda value: config.set_tool_mode(value),
+        default=config.TOOL_EXECUTION_MODE,
+    ),
     "planning_model": RuntimeSetting(
         key="planning_model",
         description="Model used for planning tasks (overrides /model)",
@@ -317,9 +326,15 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         description="LLM temperature (0.0-2.0; lower = more deterministic)",
         section="LLM Generation",
         parser=_parse_temperature,
-        getter=lambda: config.OLLAMA_TEMPERATURE,
-        setter=lambda value: setattr(config, "OLLAMA_TEMPERATURE", value),
-        default=0.1,
+        getter=lambda: config.TEMPERATURE,
+        setter=lambda value: (
+            setattr(config, "TEMPERATURE", value),
+            setattr(config, "OLLAMA_TEMPERATURE", value),
+            setattr(config, "OPENAI_TEMPERATURE", value),
+            setattr(config, "ANTHROPIC_TEMPERATURE", value),
+            setattr(config, "GEMINI_TEMPERATURE", value),
+        ),
+        default=1.0,
     ),
     "num_ctx": RuntimeSetting(
         key="num_ctx",
@@ -741,13 +756,13 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
     ),
     "llm_provider": RuntimeSetting(
         key="llm_provider",
-        description="Active LLM provider (ollama, openai, anthropic, gemini)",
+        description="Active LLM provider (ollama, openai, anthropic, gemini, localai, vllm, lmstudio)",
         section="API Keys",
         parser=lambda value: _parse_choice(
-            value, choices={"ollama", "openai", "anthropic", "gemini"}
+            value, choices={"ollama", "openai", "anthropic", "gemini", "localai", "vllm", "lmstudio"}
         ),
         getter=lambda: config.LLM_PROVIDER,
-        setter=lambda value: setattr(config, "LLM_PROVIDER", value),
+        setter=lambda value: config.set_llm_provider(value),
         default=config.LLM_PROVIDER,
     ),
     "private_mode": RuntimeSetting(
@@ -758,6 +773,15 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         getter=lambda: config.get_private_mode(),
         setter=_set_private_mode_runtime,
         default=config.DEFAULT_PRIVATE_MODE,
+    ),
+    "mcp_enabled": RuntimeSetting(
+        key="mcp_enabled",
+        description="Enable MCP server loading and registration at startup",
+        section="MCP Servers",
+        parser=_parse_bool,
+        getter=lambda: getattr(config, "MCP_ENABLED", True),
+        setter=lambda value: setattr(config, "MCP_ENABLED", bool(value)),
+        default=getattr(config, "MCP_ENABLED", True),
     ),
     "mcp_memory_enabled": RuntimeSetting(
         key="mcp_memory_enabled",
@@ -960,6 +984,10 @@ def apply_saved_settings(session_context: Optional[Dict[str, Any]] = None) -> Op
 
     if settings.get("runtime_settings"):
         apply_runtime_settings(settings.get("runtime_settings", {}))
+
+    # Keep phase providers aligned with llm_provider unless explicitly overridden later
+    if config.LLM_PROVIDER:
+        config.set_llm_provider(config.LLM_PROVIDER)
 
     # Reload MCP servers if private mode changed
     if config.get_private_mode() != private_mode_before:

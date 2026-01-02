@@ -11,8 +11,11 @@ import queue
 import time
 import re
 import os
+import os.path
 from pathlib import Path
 from typing import Callable, Optional
+
+from rev.terminal.input import _get_command_suggestions
 
 
 # Global reference to active TUI instance (for menu callbacks)
@@ -22,6 +25,37 @@ _active_tui: Optional['TUI'] = None
 def get_active_tui() -> Optional['TUI']:
     """Get the currently active TUI instance, if any."""
     return _active_tui
+
+
+def autocomplete_slash_command(buffer: str) -> tuple[str, list[str]]:
+    """
+    Return an autocompleted buffer and the list of matching commands.
+
+    Args:
+        buffer: Current input buffer.
+
+    Returns:
+        (new_buffer, matches)
+        - new_buffer: updated buffer (may be unchanged)
+        - matches: list of matching commands (with leading '/')
+    """
+    if not buffer.startswith("/"):
+        return buffer, []
+
+    commands = _get_command_suggestions()
+    matches = [cmd for cmd in commands if cmd.startswith(buffer)]
+    if not matches:
+        return buffer, []
+
+    # If single match, complete fully
+    if len(matches) == 1:
+        return matches[0] + " ", matches
+
+    # Multiple matches: extend to common prefix
+    common = os.path.commonprefix(matches)
+    if len(common) > len(buffer):
+        return common, matches
+    return buffer, matches
 
 
 class TuiStream:
@@ -184,6 +218,12 @@ class TUI:
             self._screen = stdscr
             self._resize_windows()
             self._render_input()
+            try:
+                # Lightweight command discovery hint
+                commands_preview = ", ".join(_get_command_suggestions()[:8])
+                self.log(f"\x1b[94m[TUI] Tab for autocomplete. Commands: {commands_preview}\x1b[0m")
+            except Exception:
+                pass
 
             if initial_input and initial_input.strip():
                 # Add initial command to history
@@ -252,6 +292,17 @@ class TUI:
                         self._input_buffer = self._input_buffer[:self._cursor_pos-1] + self._input_buffer[self._cursor_pos:]
                         self._cursor_pos -= 1
                         self._render_input()
+                    continue
+                if ch == 9:  # Tab for autocomplete
+                    new_buf, matches = autocomplete_slash_command(self._input_buffer[:self._cursor_pos])
+                    if matches:
+                        # Update buffer and move cursor to end of new buffer prefix
+                        remainder = self._input_buffer[self._cursor_pos:]
+                        self._input_buffer = new_buf + remainder
+                        self._cursor_pos = len(new_buf)
+                        self._render_input()
+                        if len(matches) > 1:
+                            self.log(f"\x1b[96m[TUI] Commands: {', '.join(matches)}\x1b[0m")
                     continue
                 if ch == curses.KEY_DC: # Delete
                     if self._cursor_pos < len(self._input_buffer):

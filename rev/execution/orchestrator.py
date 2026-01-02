@@ -184,21 +184,35 @@ def _extract_file_path_from_description(desc: str) -> Optional[str]:
 
     # Match common path patterns
     # Support most common source, config, and data extensions
-    ext = r"(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1)"
+    ext = r"(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1|vue)"
     patterns = [
         rf'`([^`]+\.{ext})`',  # backticked paths
         rf'"([^"]+\.{ext})"',  # quoted paths
         rf'\b([A-Za-z]:\\[^\s]+\.{ext})\b',  # Windows absolute
         rf'\b(/[^\s]+\.{ext})\b',  # Unix absolute
-        rf'\b([\w./\\-]+\.{ext})\b',  # relative paths
+        rf'([\w./\\-]+\.\b{ext}\b)',  # relative with separators
+        rf'([\w./\\-]+\.{ext})',  # fallback relative
     ]
 
+    matches = []
     for pattern in patterns:
-        match = re.search(pattern, desc, re.IGNORECASE)
-        if match:
-            return match.group(1)
+        for match in re.finditer(pattern, desc, re.IGNORECASE):
+            try:
+                val = match.group(1)
+            except Exception:
+                continue
+            if val:
+                matches.append(val.strip())
 
-    return None
+    if not matches:
+        return None
+
+    # Prefer matches containing a path separator; fallback to longest.
+    def score(val: str) -> tuple[int, int]:
+        has_sep = 1 if ("/" in val or "\\" in val) else 0
+        return (has_sep, len(val))
+
+    return max(matches, key=score)
 
 
 def _extract_line_range_from_description(desc: str) -> Optional[str]:
@@ -1439,7 +1453,7 @@ def _sanitize_path_candidate(raw: str) -> str:
     """Extract a filesystem path token from a command-like string."""
     if not raw:
         return ""
-    text = raw.strip().strip("`\"'")
+    text = raw.strip().strip("`\"'.,;:)")
     path_pattern = r"(?:[A-Za-z]:\\[^\s\"']+|/[^\s\"']+|[\w./\\-]+\.[A-Za-z0-9]{1,6})"
     matches = re.findall(path_pattern, text)
     if not matches:
@@ -1909,6 +1923,44 @@ def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optiona
                 )
             return tasks
 
+    # Special handling: Watch mode timeout detection (from timeout_recovery.py)
+    def _has_watch_mode_timeout(vr: Optional[VerificationResult]) -> tuple[bool, Optional[str]]:
+        """Check if verification result contains watch mode timeout diagnosis."""
+        if not vr or not isinstance(vr.details, dict):
+            return False, None
+
+        timeout_diag = vr.details.get("timeout_diagnosis")
+        if not timeout_diag or not isinstance(timeout_diag, dict):
+            return False, None
+
+        is_watch = timeout_diag.get("is_watch_mode", False)
+        suggested_fix = timeout_diag.get("suggested_fix")
+
+        return is_watch, suggested_fix
+
+    has_watch_timeout, watch_fix_suggestion = _has_watch_mode_timeout(verification_result)
+    if has_watch_timeout and watch_fix_suggestion:
+        # Extract test script name if mentioned
+        test_script_hint = ""
+        if "package.json" in watch_fix_suggestion.lower():
+            test_script_hint = " test script in"
+
+        tasks.append(
+            Task(
+                description=(
+                    f"Update package.json{test_script_hint} to fix watch mode issue: {watch_fix_suggestion}"
+                ),
+                action_type="edit",
+            )
+        )
+        tasks.append(
+            Task(
+                description="Run tests again to verify they complete without watch mode timeout",
+                action_type="test",
+            )
+        )
+        return tasks  # Return early - watch mode is the root cause
+
     # Special handling: Vitest CLI/script errors (e.g., unsupported --runTestsByPath) should trigger a script fix and targeted rerun.
     def _is_vitest_cli_error(vr: Optional[VerificationResult]) -> bool:
         if not vr:
@@ -2118,14 +2170,21 @@ def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optiona
                 action_type="edit",
             )
         )
-        build_cmd = _detect_build_command_for_root(config.ROOT or Path.cwd())
-        if build_cmd:
-            tasks.append(
-                Task(
-                    description=f"Run build to surface syntax errors and exact locations: {build_cmd}",
-                    action_type="run",
+
+        # Skip build for test-related tasks - run tests directly instead
+        is_test_task = task.action_type and task.action_type.lower() == "test"
+        is_test_file = target_path and ("/test" in target_path or "\\test" in target_path or target_path.endswith(".test.ts") or target_path.endswith(".test.js") or target_path.endswith(".spec.ts") or target_path.endswith(".spec.js") or target_path.endswith("_test.py") or target_path.endswith("test_.py"))
+
+        if not (is_test_task or is_test_file):
+            # Only run build for non-test code
+            build_cmd = _detect_build_command_for_root(config.ROOT or Path.cwd())
+            if build_cmd:
+                tasks.append(
+                    Task(
+                        description=f"Run build to surface syntax errors and exact locations: {build_cmd}",
+                        action_type="run",
+                    )
                 )
-            )
 
     if target_path:
         tasks.append(
@@ -2533,6 +2592,19 @@ def _choose_best_path_match_with_context(*, original: str, matches: List[str], d
     if _context_score(ranked[0])[0] == _context_score(ranked[1])[0]:
         return None
     return ranked[0]
+
+
+def _find_path_matches(root: Path, basename: str, limit: int = 50) -> List[Path]:
+    """Find files matching a basename under a root path (case-insensitive)."""
+    matches: List[Path] = []
+    basename_lower = basename.lower()
+    for dirpath, _, filenames in os.walk(root):
+        for fn in filenames:
+            if fn.lower() == basename_lower:
+                matches.append(Path(dirpath) / fn)
+                if len(matches) >= limit:
+                    return matches
+    return matches
 
 
 def _coerce_command_intent_to_test(task: Task) -> tuple[bool, List[str]]:
@@ -4066,7 +4138,7 @@ class Orchestrator:
 
         # PERFORMANCE FIX 1: Track consecutive research tasks to prevent endless loops
         consecutive_reads: int = 0
-        MAX_CONSECUTIVE_READS: int = 20  # Allow max 20 consecutive READ tasks
+        MAX_CONSECUTIVE_READS: int = 40  # Allow max 40 consecutive READ/RESEARCH tasks
 
         if self.context.resume and self.context.resume_plan and self.context.plan:
             for task in self.context.plan.tasks:
@@ -4497,11 +4569,14 @@ class Orchestrator:
                     prior = structure_seen.get(struct_sig)
                     if isinstance(prior, dict):
                         prior_change = prior.get("code_change_iteration", -1)
+                        # Only block duplicates once a code change iteration has been recorded.
+                        # Allow redundant listings during initial planning/resume (code_change_iteration = -1)
+                        # so the agent can recover missing paths.
                         if (
                             isinstance(prior_change, int)
                             and isinstance(last_code_change_iteration, int)
-                            and last_code_change_iteration > 0
                             and prior_change == last_code_change_iteration
+                            and last_code_change_iteration >= 0
                         ):
                             print(f"  [structure-read] Skipping duplicate structure listing (sig={struct_sig}, code_change_iter={last_code_change_iteration})")
                             next_task.status = TaskStatus.STOPPED
@@ -4546,6 +4621,98 @@ class Orchestrator:
                         continue
                 research_seen[sig] = {"code_change_iteration": last_code_change_iteration}
                 self.context.set_agent_state("research_signature_seen", research_seen)
+
+                # If the task is targeting specific files, short-circuit when they do not exist to avoid loops.
+                targets = _extract_task_paths(next_task) or []
+                missing_targets: list[str] = []
+                existing_targets: list[str] = []
+                for raw in targets:
+                    try:
+                        # Normalize leading slashes and workspace prefix to workspace-relative
+                        candidate = _sanitize_path_candidate(raw)
+                        if candidate.startswith("/"):
+                            candidate = candidate.lstrip("/")
+                        if candidate.lower().startswith(str(config.ROOT).replace("\\", "/").lower()):
+                            try:
+                                candidate = str(Path(candidate).relative_to(config.ROOT)).replace("\\", "/")
+                            except Exception:
+                                candidate = candidate
+                        alt = (Path(config.ROOT) / candidate).resolve()
+                        if alt.exists():
+                            candidate = str(alt.relative_to(config.ROOT)).replace("\\", "/")
+                            existing_targets.append(candidate)
+                            continue
+                        resolved = resolve_workspace_path(candidate).abs_path
+                        if resolved.exists():
+                            existing_targets.append(candidate)
+                        else:
+                            missing_targets.append(candidate)
+                    except Exception as e:
+                        print(f"  [research-dedupe] Path resolution exception for '{raw}': {e}")
+                        missing_targets.append(_sanitize_path_candidate(raw))
+                # Only block if ALL extracted targets are missing
+                if targets and existing_targets == [] and missing_targets:
+                    # Try to auto-correct by searching for basename matches under allowed roots
+                    alt_matches: list[str] = []
+                    for cand in missing_targets:
+                        base = Path(_sanitize_path_candidate(cand)).name
+                        if not base:
+                            continue
+                        for root in get_workspace().get_allowed_roots():
+                            hits = _find_path_matches(root, base, limit=50)
+                            alt_matches.extend([h.as_posix() for h in hits])
+                    alt_matches = sorted(set(alt_matches))
+                    replacement = _choose_best_path_match_with_context(
+                        original=missing_targets[0],
+                        matches=alt_matches,
+                        description=next_task.description or "",
+                    )
+                    if replacement:
+                        try:
+                            rep_path = Path(replacement)
+                            try:
+                                rep_rel = rep_path.relative_to(Path(config.ROOT)).as_posix()
+                            except Exception:
+                                rep_rel = rep_path.as_posix()
+                            normalized_replacement = rep_rel
+                            desc = next_task.description or ""
+                            desc = desc.replace(missing_targets[0], normalized_replacement)
+                            next_task.description = desc
+                            print(f"  [research-dedupe] Auto-corrected missing path '{missing_targets[0]}' -> '{normalized_replacement}'")
+                            # Requeue the corrected task at current position and continue
+                            self.context.plan.tasks.insert(plan_idx, next_task)
+                            continue
+                        except Exception:
+                            pass
+                    display_missing = [
+                        Path(_sanitize_path_candidate(m)).as_posix().lstrip("/")
+                        if m else ""
+                        for m in missing_targets
+                    ]
+                    display_missing = [m for m in display_missing if m]
+                    display_msg = ", ".join(display_missing) if display_missing else ", ".join(missing_targets)
+                    msg = (
+                        f"Target file(s) not found: {display_msg}. "
+                        "Create the file(s) or adjust the path instead of repeating reads."
+                    )
+                    print(f"  [research-dedupe] Skipping read on missing targets: {msg}")
+                    next_task.status = TaskStatus.STOPPED
+                    next_task.result = json.dumps({
+                        "skipped": True,
+                        "reason": "target_missing",
+                        "missing": display_missing or missing_targets,
+                    })
+                    completed_tasks_log.append(f"[STOPPED] {next_task.description} | Reason: missing targets ({display_msg})")
+                    # Request a replan to create/locate the missing files.
+                    self.context.add_agent_request(
+                        "REPLAN_REQUEST",
+                        {
+                            "agent": "Orchestrator",
+                            "reason": "missing_target_path",
+                            "detailed_reason": msg,
+                        },
+                    )
+                    continue
             else:
                 consecutive_reads = 0  # Reset on any non-research action
 
@@ -5423,6 +5590,70 @@ class Orchestrator:
                             if failure_counts[failure_sig] > 1:
                                 print(f"  [circuit-breaker] Same error detected {failure_counts[failure_sig]}x: {error_sig}")
 
+                            # Uncertainty detection: Check if we should request user guidance
+                            if config.UNCERTAINTY_DETECTION_ENABLED and failure_counts[failure_sig] >= 2:
+                                from rev.execution.uncertainty_detector import detect_uncertainty
+                                from rev.execution.user_guidance import request_user_guidance, format_guidance_for_task
+
+                                # Collect previous error messages for better detection
+                                previous_errors = []
+                                error_history_key = f"error_history::{failure_sig}"
+                                if error_history_key in self.context.agent_state:
+                                    previous_errors = self.context.agent_state[error_history_key]
+
+                                # Store current error in history
+                                current_error = next_task.error or ""
+                                if not isinstance(previous_errors, list):
+                                    previous_errors = []
+                                previous_errors.append(current_error)
+                                self.context.set_agent_state(error_history_key, previous_errors[-5:])  # Keep last 5
+
+                                # Detect uncertainty
+                                uncertainty_score, uncertainty_signals = detect_uncertainty(
+                                    task=next_task,
+                                    retry_count=failure_counts[failure_sig],
+                                    verification_result=verification_result,
+                                    previous_errors=previous_errors
+                                )
+
+                                # Request guidance if threshold reached
+                                if uncertainty_score >= config.UNCERTAINTY_THRESHOLD:
+                                    guidance_response = request_user_guidance(
+                                        uncertainty_signals=uncertainty_signals,
+                                        task=next_task,
+                                        context={
+                                            "retry_count": failure_counts[failure_sig],
+                                            "uncertainty_score": uncertainty_score
+                                        }
+                                    )
+
+                                    if guidance_response:
+                                        if guidance_response.action == "abort":
+                                            print(f"  [{colorize('USER GUIDANCE', Colors.BRIGHT_YELLOW)}] Aborting execution")
+                                            return False
+                                        elif guidance_response.action == "skip":
+                                            print(f"  [{colorize('USER GUIDANCE', Colors.BRIGHT_YELLOW)}] Skipping task")
+                                            # Mark task as completed and continue
+                                            next_task.status = TaskStatus.COMPLETED
+                                            continue
+                                        elif guidance_response.action == "retry" and guidance_response.guidance:
+                                            # User provided guidance - inject it into task
+                                            print(f"  [{colorize('USER GUIDANCE', Colors.BRIGHT_GREEN)}] {guidance_response.guidance[:100]}")
+                                            next_task.description += format_guidance_for_task(guidance_response.guidance, next_task)
+                                            # Reset failure count to give guided approach a chance
+                                            failure_counts[failure_sig] = 0
+                                            # Add to agent requests
+                                            self.context.add_agent_request(
+                                                "USER_GUIDANCE",
+                                                {
+                                                    "agent": "User",
+                                                    "reason": "User provided guidance after uncertainty detected",
+                                                    "guidance": guidance_response.guidance
+                                                }
+                                            )
+                                            iteration -= 1  # Retry with guidance
+                                            continue
+
                             if failure_counts[failure_sig] == 2:
                                 diag_key = f"diagnostic::{failure_sig}"
                                 already_injected = self.context.agent_state.get(diag_key, False)
@@ -5500,11 +5731,54 @@ class Orchestrator:
                                     failure_sig,
                                     failure_counts[failure_sig],
                                 )
+
+                                # Last resort: Request user guidance before circuit breaker
+                                if config.UNCERTAINTY_DETECTION_ENABLED:
+                                    from rev.execution.uncertainty_detector import UncertaintySignal
+                                    from rev.execution.user_guidance import request_user_guidance, format_guidance_for_task
+
+                                    print(f"\n[{colorize('🛑 CIRCUIT BREAKER: RECOVERY LIMIT EXCEEDED', Colors.BRIGHT_RED, bold=True)}]")
+                                    print(f"{colorize(f'Made {total_recovery_attempts} recovery attempts across all errors.', Colors.BRIGHT_WHITE)}")
+                                    print(f"{colorize('This indicates a fundamental issue that cannot be auto-fixed.', Colors.BRIGHT_WHITE)}")
+
+                                    # Create a high-severity uncertainty signal for circuit breaker
+                                    circuit_breaker_signal = UncertaintySignal(
+                                        signal_type="circuit_breaker",
+                                        reason=f"Circuit breaker triggered after {total_recovery_attempts} recovery attempts",
+                                        score=10,  # Maximum score
+                                        context={"total_attempts": total_recovery_attempts, "summary": summary}
+                                    )
+
+                                    guidance_response = request_user_guidance(
+                                        uncertainty_signals=[circuit_breaker_signal],
+                                        task=next_task,
+                                        context={
+                                            "circuit_breaker": True,
+                                            "total_recovery_attempts": total_recovery_attempts
+                                        }
+                                    )
+
+                                    if guidance_response and guidance_response.action == "retry" and guidance_response.guidance:
+                                        # User provided override guidance - give it one more try
+                                        print(f"  [{colorize('USER OVERRIDE', Colors.BRIGHT_GREEN)}] {guidance_response.guidance[:100]}")
+                                        next_task.description += format_guidance_for_task(guidance_response.guidance, next_task)
+                                        # Reset counters to give user guidance a fair chance
+                                        self.context.set_agent_state("total_recovery_attempts", 0)
+                                        failure_counts[failure_sig] = 0
+                                        self.context.add_agent_request(
+                                            "USER_CIRCUIT_BREAKER_OVERRIDE",
+                                            {
+                                                "agent": "User",
+                                                "reason": "User provided override guidance at circuit breaker",
+                                                "guidance": guidance_response.guidance
+                                            }
+                                        )
+                                        iteration -= 1  # Retry with user guidance
+                                        continue
+
+                                # If no guidance or user chose to abort, trigger circuit breaker
                                 self.context.set_agent_state("no_retry", True)
                                 self.context.add_error(summary)
-                                print(f"\n[{colorize('🛑 CIRCUIT BREAKER: RECOVERY LIMIT EXCEEDED', Colors.BRIGHT_RED, bold=True)}]")
-                                print(f"{colorize(f'Made {total_recovery_attempts} recovery attempts across all errors.', Colors.BRIGHT_WHITE)}")
-                                print(f"{colorize('This indicates a fundamental issue that cannot be auto-fixed.', Colors.BRIGHT_WHITE)}")
                                 print(f"{colorize('Manual intervention required.', Colors.BRIGHT_YELLOW)}\n")
                                 print(f"{colorize(Symbols.INFO, Colors.BRIGHT_BLUE)} {summary}")
                                 return False
@@ -5650,17 +5924,69 @@ class Orchestrator:
                 # Summarize the result of the last tool event
                 event = next_task.tool_events[-1]
                 tool_output = event.get('raw_result')
+                tool_name = event.get('tool', '')
+
                 if isinstance(tool_output, str):
                     summary = tool_output.strip()
+
+                    # Smart truncation: parse command results to prioritize error information
+                    if tool_name in ('run_cmd', 'run_tests', 'run_property_tests'):
+                        try:
+                            result_data = json.loads(summary)
+                            if isinstance(result_data, dict):
+                                rc = result_data.get('rc', 0)
+                                stderr = result_data.get('stderr', '').strip()
+                                stdout = result_data.get('stdout', '').strip()
+
+                                # For failed commands, prioritize stderr (contains error messages)
+                                if rc != 0 and stderr:
+                                    # Extract the most relevant error portion
+                                    # Keep up to 2000 chars of stderr for build/test errors
+                                    if len(stderr) > 2000:
+                                        # Try to find error markers and keep content around them
+                                        error_markers = ['error:', 'Error:', 'ERROR:', 'failed', 'Failed', 'FAILED']
+                                        best_section = stderr[-2000:]  # Default to end
+
+                                        for marker in error_markers:
+                                            idx = stderr.rfind(marker)
+                                            if idx > 0:
+                                                # Get context around the error
+                                                start = max(0, idx - 500)
+                                                end = min(len(stderr), idx + 1500)
+                                                best_section = stderr[start:end]
+                                                if start > 0:
+                                                    best_section = '...' + best_section
+                                                if end < len(stderr):
+                                                    best_section = best_section + '...'
+                                                break
+
+                                        summary = json.dumps({
+                                            'rc': rc,
+                                            'stderr': best_section,
+                                            'stdout': stdout[:500] if stdout else ''
+                                        })
+                                    # else: keep full result if under 2000 chars
+                                elif rc == 0:
+                                    # Success - brief summary is fine
+                                    summary = json.dumps({
+                                        'rc': 0,
+                                        'stdout': stdout[:800] if len(stdout) > 800 else stdout
+                                    })
+                        except (json.JSONDecodeError, ValueError):
+                            # Not JSON or invalid - treat as plain string
+                            pass
+
                     # If the error is already in the summary, don't repeat it
                     if error_detail and error_detail in summary:
                         output_detail = summary
                         error_detail = ""
                     else:
                         output_detail = summary
-                    
-                    if len(output_detail) > 300:
-                        output_detail = output_detail[:300] + '...'
+
+                    # Generous limits: 2500 chars for command output, 800 for other tools
+                    limit = 2500 if tool_name in ('run_cmd', 'run_tests', 'run_property_tests') else 800
+                    if len(output_detail) > limit:
+                        output_detail = output_detail[:limit] + '...'
 
             if error_detail:
                 log_entry += f" | Reason: {error_detail}"

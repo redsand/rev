@@ -32,8 +32,10 @@
     "detect_secrets",
     "execute_python",
     "extract_constants",
+    "fetch_url",
     "file_exists",
     "find_dead_code",
+    "find_files",
     "find_symbol_usages",
     "generate_property_tests",
     "generate_repro_case",
@@ -49,6 +51,8 @@
     "git_status",
     "inspect_module_hierarchy",
     "install_package",
+    "kill_background_process",
+    "list_background_processes",
     "list_dir",
     "mcp_add_server",
     "mcp_call_tool",
@@ -92,6 +96,7 @@
     "validate_ci_config",
     "verify_migrations",
     "web_fetch",
+    "web_search",
     "write_file"
   ]
 }

@@ -276,7 +276,7 @@ class ConfigCommand(CommandHandler):
         output.append(f"  Search limit:      {config.SEARCH_MATCH_LIMIT}")
         output.append(f"  SSH available:     {config.SSH_AVAILABLE}")
         output.append(f"\nLLM Generation Parameters:")
-        output.append(f"  Temperature:       {config.OLLAMA_TEMPERATURE}")
+        output.append(f"  Temperature:       {config.TEMPERATURE}")
         output.append(f"  Context window:    {config.OLLAMA_NUM_CTX:,} tokens")
         output.append(f"  Top-p:             {config.OLLAMA_TOP_P}")
         output.append(f"  Top-k:             {config.OLLAMA_TOP_K}")
@@ -467,8 +467,8 @@ class HistoryCommand(CommandHandler):
         )
 
     def execute(self, args: List[str], session_context: Dict[str, Any]) -> str:
-        from rev.terminal.history import get_history
-
+        # Use the global history instance from input.py (handles persistence)
+        from rev.terminal.input import get_history
         history = get_history()
         output = [create_header("Command History", width=80)]
 

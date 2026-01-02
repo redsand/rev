@@ -41,7 +41,8 @@
       "Bash(dir \"C:\\\\Users\\\\champ\\\\source\\\\repos\\\\test-app\\\\.rev\\\\logs\" /B /O-D)",
       "Bash(wmic process where \"name=''python.exe''\" get commandline,processid)",
       "Bash(dir /b /o-d \"C:\\\\Users\\\\champ\\\\source\\\\repos\\\\test-app\\\\.rev\\\\logs\\\\rev_run*.log\")",
-      "Bash(cmd.exe /c \"dir /b /o-d C:\\\\Users\\\\champ\\\\source\\\\repos\\\\test-app\\\\.rev\\\\logs\\\\rev_run*.log 2>nul\")"
+      "Bash(cmd.exe /c \"dir /b /o-d C:\\\\Users\\\\champ\\\\source\\\\repos\\\\test-app\\\\.rev\\\\logs\\\\rev_run*.log 2>nul\")",
+      "Bash(powershell:*)"
     ]
   }
 }

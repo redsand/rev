@@ -1623,8 +1623,15 @@ def planning_mode(
     if coding_mode:
         system_prompt += CODING_PLANNING_SUFFIX
 
-    # Apply ultrathink mode if enabled
-    if config.ULTRATHINK_MODE == "on":
+    # Apply ultrathink mode if enabled or auto for specific models
+    active_ultrathink = config.ULTRATHINK_MODE == "on"
+    if not active_ultrathink:
+        if config.ULTRATHINK_MODE != "off":
+            active_ultrathink = True
+        elif getattr(config, "EXECUTION_MODEL", "").split(":")[0] in config.ULTRATHINK_AUTO_MODELS:
+            active_ultrathink = True
+
+    if active_ultrathink:
         system_prompt = get_ultrathink_prompt(system_prompt, 'planning')
         print("  🧠 ULTRATHINK MODE ENABLED - Using enhanced planning prompt")
 

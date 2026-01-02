@@ -37,6 +37,16 @@ from rev.execution.verification_utils import _detect_build_command_for_root
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
+def _normalize_status(status_val) -> TaskStatus:
+    """Normalize various status representations to TaskStatus."""
+    if isinstance(status_val, TaskStatus):
+        return status_val
+    if isinstance(status_val, str):
+        try:
+            return TaskStatus(status_val.lower())
+        except Exception:
+            pass
+    return TaskStatus.PENDING
 
 
 def _strip_ansi(text: Any) -> str:
@@ -351,6 +361,7 @@ def _verify_task_execution_impl(task: Task, context: RevContext) -> Verification
     """
     Internal implementation for task verification (wrapped to catch unexpected exceptions).
     """
+    task.status = _normalize_status(getattr(task, "status", TaskStatus.PENDING))
     if task.status != TaskStatus.COMPLETED:
         return VerificationResult(
             passed=False,
@@ -393,6 +404,80 @@ def _verify_task_execution_impl(task: Task, context: RevContext) -> Verification
                 details={"tool": ev.get("tool"), "artifact_ref": ev.get("artifact_ref")},
                 should_replan=True,
             )
+
+    # Global guard: any run_cmd/run_tests with nonzero rc should fail verification (all action types).
+    for ev in reversed(list(events)):
+        tool_name = str(ev.get("tool") or "").lower()
+        if tool_name in {"run_cmd", "run_tests"}:
+            raw = ev.get("raw_result")
+            if isinstance(raw, dict):
+                payload = raw
+            else:
+                try:
+                    payload = json.loads(raw or "{}")
+                except Exception:
+                    payload = {}
+            rc = payload.get("rc")
+            stdout = payload.get("stdout") or ""
+            stderr = payload.get("stderr") or ""
+            text = f"{stdout}\n{stderr}".lower()
+            failure_hints = (
+                "build failed",
+                "error during build",
+                "npm err!",
+                "npm error",
+                "failed with exit code",
+                "[vite:vue]",
+                "module not found",
+                "failed to resolve import",
+                "cannot find module",
+                "resolve import",
+                "unable to",
+                "unresolved",
+                "cannot resolve",
+                "failed to load",
+                "failed to initialize",
+            )
+            hint_hit = any(h in text for h in failure_hints)
+            # Treat obvious error words in stderr as failure even when rc==0.
+            stderr_error_hit = False
+            if rc in (None, 0) and stderr:
+                if re.search(r"\b(error|fail|fatal|unable|cannot|unresolved)\b", stderr.lower()):
+                    stderr_error_hit = True
+            hint_hit = hint_hit or stderr_error_hit
+
+            if rc not in (None, 0) or hint_hit:
+                msg = f"Command failed (rc={rc if rc is not None else 'unknown'})"
+                remediation = None
+                if "module not found" in text or "cannot find module" in text or "failed to resolve import" in text:
+                    remediation = "Missing dependency detected; install the missing package(s) before re-running the build."
+                if remediation is None and (stderr or stdout):
+                    remediation = "Command failed; review stderr for root cause and ask LLM for remediation."
+
+                # Extract timeout_diagnosis if present (from timeout_recovery.py)
+                timeout_diagnosis = payload.get("timeout_diagnosis")
+
+                details_dict = {
+                    "tool": tool_name,
+                    "rc": rc,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "hint_detected": hint_hit,
+                    "remediation": remediation,
+                    "stderr_full": stderr,
+                    "stdout_full": stdout,
+                }
+
+                # Add timeout diagnosis to details if present
+                if timeout_diagnosis:
+                    details_dict["timeout_diagnosis"] = timeout_diagnosis
+
+                return VerificationResult(
+                    passed=False,
+                    message=msg,
+                    details=details_dict,
+                    should_replan=True,
+                )
     verification_mode = _get_verification_mode()
     test_only_change = False
     non_test_change = False
@@ -1103,7 +1188,7 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
         _ensure_test_request_for_file(context, file_path)
         return VerificationResult(
             passed=True,
-            message=f"Syntax check skipped for {file_path.name}; a project typecheck/build has been enqueued.",
+            message=f"Syntax check skipped for {file_path.name}; project-level typecheck/build task enqueued",
             details={
                 **details,
                 "syntax_skipped": True,
@@ -2431,29 +2516,9 @@ def _normalized_tokens(cmd_parts: list[str]) -> list[str]:
 
 
 def _detect_test_runner(cmd_parts: list[str], stdout: str = "", stderr: str = "") -> str:
-    combined = f"{stdout}\n{stderr}".lower()
-    if "jest" in combined:
-        return "jest"
-    if "vitest" in combined:
-        return "vitest"
-    if "pytest" in combined or "collected 0 items" in combined:
-        return "pytest"
-    if "unittest" in combined:
-        return "unittest"
-    if "phpunit" in combined:
-        return "phpunit"
-    if "rspec" in combined:
-        return "rspec"
-    if "gradle" in combined:
-        return "gradle"
-    if "maven" in combined or "surefire" in combined:
-        return "maven"
-    if "dotnet" in combined or "mstest" in combined or "xunit" in combined or "nunit" in combined:
-        return "dotnet"
-    if "dart" in combined:
-        return "dart"
-    if "flutter" in combined:
-        return "flutter"
+    # CRITICAL: Check command first, THEN output
+    # This prevents false detection when output mentions other frameworks
+    # (e.g., vitest command that outputs "consider using jest" shouldn't be detected as jest)
 
     tokens = _normalized_tokens(cmd_parts)
     if not tokens:
@@ -2512,6 +2577,32 @@ def _detect_test_runner(cmd_parts: list[str], stdout: str = "", stderr: str = ""
     if "dart" in tokens and "test" in tokens:
         return "dart"
     if "flutter" in tokens and "test" in tokens:
+        return "flutter"
+
+    # Fallback: Check output ONLY if framework not found in command
+    # This is less reliable as output may mention other frameworks in errors/warnings
+    combined = f"{stdout}\n{stderr}".lower()
+    if "vitest" in combined:
+        return "vitest"
+    if "jest" in combined:
+        return "jest"
+    if "pytest" in combined or "collected 0 items" in combined:
+        return "pytest"
+    if "unittest" in combined:
+        return "unittest"
+    if "phpunit" in combined:
+        return "phpunit"
+    if "rspec" in combined:
+        return "rspec"
+    if "gradle" in combined:
+        return "gradle"
+    if "maven" in combined or "surefire" in combined:
+        return "maven"
+    if "dotnet" in combined or "mstest" in combined or "xunit" in combined or "nunit" in combined:
+        return "dotnet"
+    if "dart" in combined:
+        return "dart"
+    if "flutter" in combined:
         return "flutter"
 
     return "unknown"
@@ -3562,6 +3653,17 @@ def _run_syntax_check(file_path: Path) -> Tuple[bool, str, bool]:
     """
     suffix = file_path.suffix.lower()
 
+    # Vue SFC: ensure it has at least a <template> or <script> block.
+    if suffix == ".vue":
+        try:
+            content = _read_file_with_fallback_encoding(file_path) or ""
+            lowered = content.lower()
+            if ("<template" not in lowered) and ("<script" not in lowered):
+                return False, "Vue SFC is missing <template> or <script> section", False
+            return True, "", False
+        except Exception as e:
+            return False, f"Vue syntax check failed: {e}", False
+
     # Python files
     if suffix == '.py':
         try:
@@ -3613,33 +3715,6 @@ def _run_syntax_check(file_path: Path) -> Tuple[bool, str, bool]:
             return False, f"TypeScript error: {result.stdout.strip()}", False
         except FileNotFoundError:
             # TypeScript not available, skip validation
-            return True, "", True
-        except Exception as e:
-            return False, f"Failed to run syntax check: {str(e)}", False
-
-    elif suffix == '.vue':
-        # Vue SFCs: try vue-tsc only if a Vue project marker exists (package.json with vue dependency)
-        pkg = _load_package_json(Path(config.ROOT) if getattr(config, "ROOT", None) else Path.cwd())
-        deps = set()
-        for field in ("dependencies", "devDependencies", "peerDependencies"):
-            values = pkg.get(field, {})
-            if isinstance(values, dict):
-                deps.update({str(k).strip().lower() for k in values.keys()})
-        is_vue_project = any(dep.startswith("vue") for dep in deps)
-        if not is_vue_project:
-            return True, "", True
-        try:
-            import subprocess
-            result = subprocess.run(
-                ['npx', '--yes', 'vue-tsc', '--noEmit', str(file_path)],
-                capture_output=True,
-                text=True,
-                timeout=15
-            )
-            if result.returncode == 0:
-                return True, "", False
-            return False, f"Vue SFC error: {result.stdout.strip() or result.stderr.strip()}", False
-        except FileNotFoundError:
             return True, "", True
         except Exception as e:
             return False, f"Failed to run syntax check: {str(e)}", False
@@ -3746,9 +3821,12 @@ def _enqueue_project_typecheck(context: RevContext, tasks: List[Task], reason: s
     if not cmd:
         return None
     # Keep the command clean; keep reason in description only.
-    desc = f"Run {cmd} for project typecheck/build to validate syntax"
+    # IMPORTANT: Avoid phrases like "for project typecheck/build" which could be parsed as a cwd path
+    desc = f"Run `{cmd}` to perform project-level typecheck and build validation"
     if reason:
-        desc += f" (reason: {reason})"
+        # Limit reason length to prevent truncation in logs
+        reason_text = reason if len(reason) <= 60 else reason[:57] + "..."
+        desc += f" ({reason_text})"
     tasks.append(
         Task(
             description=desc,
@@ -3893,7 +3971,7 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
             context.agent_requests.append({"type": "INJECT_TASKS", "details": {"tasks": tasks}})
         return VerificationResult(
             passed=True,
-            message=f"Syntax check skipped for {file_path.name}; a project typecheck/build has been enqueued.",
+            message=f"Syntax check skipped for {file_path.name}; project-level typecheck/build task enqueued",
             details={
                 "file_path": str(file_path),
                 "syntax_skipped": True,
