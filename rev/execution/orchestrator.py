@@ -184,21 +184,35 @@ def _extract_file_path_from_description(desc: str) -> Optional[str]:
 
     # Match common path patterns
     # Support most common source, config, and data extensions
-    ext = r"(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1)"
+    ext = r"(py|js|ts|json|yaml|yml|md|txt|toml|cfg|ini|c|cpp|h|hpp|rs|go|rb|php|java|cs|sql|sh|bat|ps1|vue)"
     patterns = [
         rf'`([^`]+\.{ext})`',  # backticked paths
         rf'"([^"]+\.{ext})"',  # quoted paths
         rf'\b([A-Za-z]:\\[^\s]+\.{ext})\b',  # Windows absolute
         rf'\b(/[^\s]+\.{ext})\b',  # Unix absolute
-        rf'\b([\w./\\-]+\.{ext})\b',  # relative paths
+        rf'([\w./\\-]+\.\b{ext}\b)',  # relative with separators
+        rf'([\w./\\-]+\.{ext})',  # fallback relative
     ]
 
+    matches = []
     for pattern in patterns:
-        match = re.search(pattern, desc, re.IGNORECASE)
-        if match:
-            return match.group(1)
+        for match in re.finditer(pattern, desc, re.IGNORECASE):
+            try:
+                val = match.group(1)
+            except Exception:
+                continue
+            if val:
+                matches.append(val.strip())
 
-    return None
+    if not matches:
+        return None
+
+    # Prefer matches containing a path separator; fallback to longest.
+    def score(val: str) -> tuple[int, int]:
+        has_sep = 1 if ("/" in val or "\\" in val) else 0
+        return (has_sep, len(val))
+
+    return max(matches, key=score)
 
 
 def _extract_line_range_from_description(desc: str) -> Optional[str]:
@@ -4578,12 +4592,18 @@ class Orchestrator:
                                 candidate = str(Path(candidate).relative_to(config.ROOT)).replace("\\", "/")
                             except Exception:
                                 candidate = candidate
+                        alt = (Path(config.ROOT) / candidate).resolve()
+                        if alt.exists():
+                            candidate = str(alt.relative_to(config.ROOT)).replace("\\", "/")
+                            existing_targets.append(candidate)
+                            continue
                         resolved = resolve_workspace_path(candidate).abs_path
                         if resolved.exists():
                             existing_targets.append(candidate)
                         else:
                             missing_targets.append(candidate)
-                    except Exception:
+                    except Exception as e:
+                        print(f"  [research-dedupe] Path resolution exception for '{raw}': {e}")
                         missing_targets.append(_sanitize_path_candidate(raw))
                 # Only block if ALL extracted targets are missing
                 if targets and existing_targets == [] and missing_targets:
