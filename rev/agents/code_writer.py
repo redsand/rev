@@ -137,6 +137,7 @@ def _read_file_content_for_edit(file_path: str, max_lines: int = 2000) -> str | 
     Returns the file content or None if the file cannot be read.
 
     For files over max_lines, falls back to using write_file strategy instead of replace_in_file.
+    NOTE: Empty files are considered readable; callers should treat an empty string as valid content.
     """
     def _normalize_content(content: str) -> str:
         lines = content.split('\n')
@@ -171,7 +172,7 @@ def _read_file_content_for_edit(file_path: str, max_lines: int = 2000) -> str | 
 
     try:
         content = _try_read(file_path)
-        if content:
+        if content is not None:
             return content
 
         # Fallback: resolve relative path against workspace root when workdir is scoped.
@@ -181,7 +182,7 @@ def _read_file_content_for_edit(file_path: str, max_lines: int = 2000) -> str | 
                 root_path = Path(config.ROOT)
                 alt = root_path / candidate
                 content = _try_read(str(alt))
-                if content:
+                if content is not None:
                     return content
         except Exception:
             pass
@@ -906,7 +907,7 @@ class CodeWriterAgent(BaseAgent):
 
             for file_path in target_files[:3]:  # Limit to 3 files to avoid context overflow
                 content = _read_file_content_for_edit(file_path)
-                if content:
+                if content is not None:
                     file_contents.append(f"=== ACTUAL FILE CONTENT: {file_path} ===\n{content}\n=== END OF {file_path} ===")
                     files_read_successfully.append(file_path)
                     print(f"  -> Including actual content of {file_path} for edit context")

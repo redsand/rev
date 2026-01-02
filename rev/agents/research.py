@@ -127,6 +127,22 @@ def _tool_is_available(tool_name: str, tools: list[dict]) -> bool:
             return True
     return False
 
+
+def _has_empty_path_arg(tool_name: str, arguments: dict) -> bool:
+    """
+    Detect attempts to call file-based tools with an empty/blank path.
+    This prevents tool calls like {"path": ""} that immediately fail and
+    spam the circuit breaker.
+    """
+    if not isinstance(arguments, dict):
+        return False
+
+    if tool_name in {"read_file", "read_file_lines", "get_file_info", "file_exists"}:
+        path = arguments.get("path")
+        if isinstance(path, str) and not path.strip():
+            return True
+    return False
+
 RESEARCH_SYSTEM_PROMPT = """You are a specialized Research agent. Your purpose is to investigate codebases, gather context, analyze code structures, and provide insights.
 
 You will be given a research task and context about the repository. Your goal is to gather information using available tools.
@@ -339,6 +355,20 @@ class ResearchAgent(BaseAgent):
                             )
                             if coerced:
                                 print(f"  -> ResearchAgent coerced to cheaper tool '{tool_name}' for structure listing")
+                            if _has_empty_path_arg(tool_name, arguments if isinstance(arguments, dict) else {}):
+                                error_detail = "read/list call requested with empty path; use list_dir or provide a real path."
+                                print(f"  [WARN] ResearchAgent: {error_detail}")
+                                if self.should_attempt_recovery(task, context):
+                                    self.request_replan(
+                                        context,
+                                        reason="empty_path",
+                                        detailed_reason=(
+                                            f"{error_detail}\n"
+                                            "RECOVERY: Use tree_view/list_dir to locate the path, then retry with that path."
+                                        ),
+                                    )
+                                    return self.make_recovery_request("empty_path", error_detail)
+                                return self.make_failure_signal("empty_path", error_detail)
                             print(f"  -> ResearchAgent will call tool '{tool_name}' with arguments: {arguments}")
                             raw_result = execute_tool(tool_name, arguments, agent_name="ResearchAgent")
 
@@ -374,6 +404,20 @@ class ResearchAgent(BaseAgent):
                                 print("  [WARN] ResearchAgent: using lenient tool call recovery from text output")
                         if recovered:
                             print(f"  -> Recovered tool call from text output: {recovered.name}")
+                            if _has_empty_path_arg(recovered.name, recovered.arguments if isinstance(recovered.arguments, dict) else {}):
+                                error_detail = "read/list call requested with empty path; use list_dir or provide a real path."
+                                print(f"  [WARN] ResearchAgent: {error_detail}")
+                                if self.should_attempt_recovery(task, context):
+                                    self.request_replan(
+                                        context,
+                                        reason="empty_path",
+                                        detailed_reason=(
+                                            f"{error_detail}\n"
+                                            "RECOVERY: Use tree_view/list_dir to locate the path, then retry with that path."
+                                        ),
+                                    )
+                                    return self.make_recovery_request("empty_path", error_detail)
+                                return self.make_failure_signal("empty_path", error_detail)
                             if (
                                 recovered.name == "read_file"
                                 and isinstance(recovered.arguments, dict)
@@ -407,6 +451,20 @@ class ResearchAgent(BaseAgent):
                         )
                         if retry:
                             print(f"  -> Retried tool call with JSON format: {retry.name}")
+                            if _has_empty_path_arg(retry.name, retry.arguments if isinstance(retry.arguments, dict) else {}):
+                                error_detail = "read/list call requested with empty path; use list_dir or provide a real path."
+                                print(f"  [WARN] ResearchAgent: {error_detail}")
+                                if self.should_attempt_recovery(task, context):
+                                    self.request_replan(
+                                        context,
+                                        reason="empty_path",
+                                        detailed_reason=(
+                                            f"{error_detail}\n"
+                                            "RECOVERY: Use tree_view/list_dir to locate the path, then retry with that path."
+                                        ),
+                                    )
+                                    return self.make_recovery_request("empty_path", error_detail)
+                                return self.make_failure_signal("empty_path", error_detail)
                             if (
                                 retry.name == "read_file"
                                 and isinstance(retry.arguments, dict)
