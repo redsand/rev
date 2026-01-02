@@ -1178,15 +1178,37 @@ class CodeWriterAgent(BaseAgent):
                             messages,
                             allowed_tools=recovery_allowed_tools,
                         )
-                    if recovered:
-                        tool_name = recovered.name
-                        arguments = recovered.arguments
-                        if not tool_name:
-                            return self.make_failure_signal("missing_tool", "Recovered tool call missing name")
-                        if not arguments:
-                            return self.make_failure_signal("missing_tool_args", "Recovered tool call missing arguments")
-                        if not retried:
-                            print(f"  -> Recovered tool call from text output: {tool_name}")
+                        if recovered:
+                            tool_name = recovered.name
+                            arguments = recovered.arguments
+                            if not tool_name:
+                                return self.make_failure_signal("missing_tool", "Recovered tool call missing name")
+                            if not arguments:
+                                return self.make_failure_signal("missing_tool_args", "Recovered tool call missing arguments")
+                            if not retried:
+                                print(f"  -> Recovered tool call from text output: {tool_name}")
+
+                            # For edit tasks, do NOT allow write_file to overwrite an existing file.
+                            # Force the LLM to use replace_in_file or apply_patch instead.
+                            if task.action_type.lower() == "edit" and tool_name == "write_file":
+                                target_path = arguments.get("path") or ""
+                                try:
+                                    resolved = resolve_workspace_path(target_path).abs_path
+                                    if resolved.exists():
+                                        msg = (
+                                            f"write_file is not allowed for edit tasks when the target already exists: {target_path}. "
+                                            "Use replace_in_file or apply_patch with a minimal diff."
+                                        )
+                                        if self.should_attempt_recovery(task, context):
+                                            self.request_replan(
+                                                context,
+                                                reason="write_file_not_allowed_for_edit",
+                                                detailed_reason=msg,
+                                            )
+                                            return self.make_recovery_request("write_file_not_allowed_for_edit", msg)
+                                        return self.make_failure_signal("write_file_not_allowed_for_edit", msg)
+                                except Exception:
+                                    pass
 
                         if tool_name in ["write_file", "replace_in_file", "create_directory", "move_file", "copy_file", "apply_patch"]:
                             self._display_change_preview(tool_name, arguments)

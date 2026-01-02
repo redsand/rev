@@ -766,6 +766,16 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "executor") 
     except Exception:
         pass
 
+    # Plan-only mode: do not execute tools, return a stub response
+    if getattr(config, "TOOL_EXECUTION_MODE", "normal") == "plan-only":
+        return json.dumps({
+            "skipped": True,
+            "reason": "plan-only mode (tool execution disabled)",
+            "tool": name,
+            "args": args,
+            "blocked": True,
+        })
+
     # Compatibility shim: normalize common alternate argument names that some models emit
     # (e.g. "file_path" vs the canonical "path") so tools don't KeyError.
     if isinstance(args, dict):
@@ -917,19 +927,22 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "executor") 
             perm_result = permission_mgr.check_permission(agent_name, name, args)
 
             if not perm_result.allowed:
-                error_msg = f"Permission denied: {agent_name} cannot use {name}. Reason: {perm_result.reason}"
-                permission_mgr.log_denial(agent_name, name, args, perm_result.reason)
+                if getattr(config, "TOOL_EXECUTION_MODE", "normal") == "auto-accept":
+                    logger.warning(f"[AUTO-ACCEPT] Bypassing permission denial for {name}: {perm_result.reason}")
+                else:
+                    error_msg = f"Permission denied: {agent_name} cannot use {name}. Reason: {perm_result.reason}"
+                    permission_mgr.log_denial(agent_name, name, args, perm_result.reason)
 
-                # Log the denial
-                logger.warning(f"[PERMISSION DENIED] {error_msg}")
-                get_logger().log_transaction_event("PERMISSION_DENIED", {
-                    "agent": agent_name,
-                    "tool": name,
-                    "arguments": args,
-                    "reason": perm_result.reason
-                })
+                    # Log the denial
+                    logger.warning(f"[PERMISSION DENIED] {error_msg}")
+                    get_logger().log_transaction_event("PERMISSION_DENIED", {
+                        "agent": agent_name,
+                        "tool": name,
+                        "arguments": args,
+                        "reason": perm_result.reason
+                    })
 
-                return json.dumps({"error": error_msg, "permission_denied": True})
+                    return json.dumps({"error": error_msg, "permission_denied": True})
 
             # Log successful permission check for high/critical risk tools
             if perm_result.risk_level and perm_result.risk_level.value in ["high", "critical"]:

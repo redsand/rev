@@ -1439,7 +1439,7 @@ def _sanitize_path_candidate(raw: str) -> str:
     """Extract a filesystem path token from a command-like string."""
     if not raw:
         return ""
-    text = raw.strip().strip("`\"'")
+    text = raw.strip().strip("`\"'.,;:)")
     path_pattern = r"(?:[A-Za-z]:\\[^\s\"']+|/[^\s\"']+|[\w./\\-]+\.[A-Za-z0-9]{1,6})"
     matches = re.findall(path_pattern, text)
     if not matches:
@@ -4500,7 +4500,6 @@ class Orchestrator:
                         if (
                             isinstance(prior_change, int)
                             and isinstance(last_code_change_iteration, int)
-                            and last_code_change_iteration > 0
                             and prior_change == last_code_change_iteration
                         ):
                             print(f"  [structure-read] Skipping duplicate structure listing (sig={struct_sig}, code_change_iter={last_code_change_iteration})")
@@ -4546,6 +4545,44 @@ class Orchestrator:
                         continue
                 research_seen[sig] = {"code_change_iteration": last_code_change_iteration}
                 self.context.set_agent_state("research_signature_seen", research_seen)
+
+                # If the task is targeting specific files, short-circuit when they do not exist to avoid loops.
+                targets = _extract_task_paths(next_task) or []
+                missing_targets: list[str] = []
+                existing_targets: list[str] = []
+                for raw in targets:
+                    try:
+                        resolved = resolve_workspace_path(raw).abs_path
+                        if resolved.exists():
+                            existing_targets.append(raw)
+                        else:
+                            missing_targets.append(raw)
+                    except Exception:
+                        missing_targets.append(raw)
+                # Only block if ALL extracted targets are missing
+                if targets and existing_targets == [] and missing_targets:
+                    msg = (
+                        f"Target file(s) not found: {', '.join(missing_targets)}. "
+                        "Create the file(s) or adjust the path instead of repeating reads."
+                    )
+                    print(f"  [research-dedupe] Skipping read on missing targets: {msg}")
+                    next_task.status = TaskStatus.STOPPED
+                    next_task.result = json.dumps({
+                        "skipped": True,
+                        "reason": "target_missing",
+                        "missing": missing_targets,
+                    })
+                    completed_tasks_log.append(f"[STOPPED] {next_task.description} | Reason: missing targets ({', '.join(missing_targets)})")
+                    # Request a replan to create/locate the missing files.
+                    self.context.add_agent_request(
+                        "REPLAN_REQUEST",
+                        {
+                            "agent": "Orchestrator",
+                            "reason": "missing_target_path",
+                            "detailed_reason": msg,
+                        },
+                    )
+                    continue
             else:
                 consecutive_reads = 0  # Reset on any non-research action
 

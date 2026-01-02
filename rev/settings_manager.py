@@ -240,6 +240,15 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         setter=lambda value: setattr(config, "EXECUTION_MODEL_FALLBACK", value),
         default=config.EXECUTION_MODEL_FALLBACK,
     ),
+    "tool_mode": RuntimeSetting(
+        key="tool_mode",
+        description="Tool execution mode: normal | auto-accept | plan-only",
+        section="Execution",
+        parser=_parse_non_empty_str,
+        getter=lambda: config.TOOL_EXECUTION_MODE,
+        setter=lambda value: config.set_tool_mode(value),
+        default=config.TOOL_EXECUTION_MODE,
+    ),
     "planning_model": RuntimeSetting(
         key="planning_model",
         description="Model used for planning tasks (overrides /model)",
@@ -741,13 +750,18 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
     ),
     "llm_provider": RuntimeSetting(
         key="llm_provider",
-        description="Active LLM provider (ollama, openai, anthropic, gemini)",
+        description="Active LLM provider (ollama, openai, anthropic, gemini, localai, vllm, lmstudio)",
         section="API Keys",
         parser=lambda value: _parse_choice(
-            value, choices={"ollama", "openai", "anthropic", "gemini"}
+            value, choices={"ollama", "openai", "anthropic", "gemini", "localai", "vllm", "lmstudio"}
         ),
         getter=lambda: config.LLM_PROVIDER,
-        setter=lambda value: setattr(config, "LLM_PROVIDER", value),
+        setter=lambda value: (
+            setattr(config, "LLM_PROVIDER", value),
+            setattr(config, "EXECUTION_PROVIDER", value),
+            setattr(config, "PLANNING_PROVIDER", value),
+            setattr(config, "RESEARCH_PROVIDER", value),
+        ),
         default=config.LLM_PROVIDER,
     ),
     "private_mode": RuntimeSetting(
@@ -758,6 +772,15 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         getter=lambda: config.get_private_mode(),
         setter=_set_private_mode_runtime,
         default=config.DEFAULT_PRIVATE_MODE,
+    ),
+    "mcp_enabled": RuntimeSetting(
+        key="mcp_enabled",
+        description="Enable MCP server loading and registration at startup",
+        section="MCP Servers",
+        parser=_parse_bool,
+        getter=lambda: getattr(config, "MCP_ENABLED", True),
+        setter=lambda value: setattr(config, "MCP_ENABLED", bool(value)),
+        default=getattr(config, "MCP_ENABLED", True),
     ),
     "mcp_memory_enabled": RuntimeSetting(
         key="mcp_memory_enabled",

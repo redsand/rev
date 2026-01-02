@@ -320,6 +320,8 @@ EXECUTION_PROVIDER = os.getenv("REV_EXECUTION_PROVIDER", LLM_PROVIDER)
 PLANNING_PROVIDER = os.getenv("REV_PLANNING_PROVIDER", LLM_PROVIDER)
 RESEARCH_PROVIDER = os.getenv("REV_RESEARCH_PROVIDER", LLM_PROVIDER)
 EXECUTION_MODE = os.getenv("REV_EXECUTION_MODE", "sub-agent").lower()
+# Tool execution mode: normal | auto-accept | plan-only (no tool execution)
+TOOL_EXECUTION_MODE = os.getenv("REV_TOOL_MODE", "normal").lower()
 
 def set_execution_mode(mode: str) -> bool:
     """Set the execution mode for the current session.
@@ -356,6 +358,23 @@ def get_execution_mode() -> str:
         The current execution mode ("linear" or "sub-agent")
     """
     return EXECUTION_MODE
+
+def set_tool_mode(mode: str) -> bool:
+    """Set the tool execution mode (normal | auto-accept | plan-only)."""
+    global TOOL_EXECUTION_MODE
+    mode = mode.lower().strip()
+    valid_modes = ["normal", "auto-accept", "plan-only"]
+    if mode not in valid_modes:
+        print(f"[X] Invalid tool mode: '{mode}'. Valid modes: {', '.join(valid_modes)}")
+        return False
+    TOOL_EXECUTION_MODE = mode
+    os.environ["REV_TOOL_MODE"] = mode
+    print(f"[OK] Tool mode set to: {mode}")
+    return True
+
+def get_tool_mode() -> str:
+    """Get the current tool execution mode."""
+    return TOOL_EXECUTION_MODE
 
 # OpenAI Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -491,6 +510,7 @@ PERMISSIONS_FAIL_OPEN = os.getenv("REV_PERMISSIONS_FAIL_OPEN", "false").lower() 
 # MCP (Model Context Protocol) Configuration
 # PRIVATE_MODE: When enabled, disables all public MCP servers for secure/confidential code work
 # Set REV_PRIVATE_MODE=true or use /private command to enable
+MCP_ENABLED = os.getenv("REV_MCP_ENABLED", "true").strip().lower() != "false"
 DEFAULT_PRIVATE_MODE = os.getenv("REV_PRIVATE_MODE", "false").lower() == "true"
 PRIVATE_MODE = DEFAULT_PRIVATE_MODE
 

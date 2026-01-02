@@ -393,6 +393,48 @@ def _verify_task_execution_impl(task: Task, context: RevContext) -> Verification
                 details={"tool": ev.get("tool"), "artifact_ref": ev.get("artifact_ref")},
                 should_replan=True,
             )
+
+    # For run/tool actions, ensure the last run_cmd/run_tests returned success (rc==0)
+    if action_type in {"run", "tool", "execute"}:
+        for ev in reversed(list(events)):
+            tool_name = str(ev.get("tool") or "").lower()
+            if tool_name in {"run_cmd", "run_tests"}:
+                raw = ev.get("raw_result")
+                if isinstance(raw, dict):
+                    payload = raw
+                else:
+                    try:
+                        payload = json.loads(raw or "{}")
+                    except Exception:
+                        payload = {}
+                rc = payload.get("rc")
+                stdout = payload.get("stdout") or ""
+                stderr = payload.get("stderr") or ""
+                text = f"{stdout}\n{stderr}".lower()
+                failure_hints = (
+                    "build failed",
+                    "error during build",
+                    "npm err!",
+                    "npm error",
+                    "failed with exit code",
+                    "[vite:vue]",
+                )
+                hint_hit = any(h in text for h in failure_hints)
+
+                if rc not in (None, 0) or hint_hit:
+                    return VerificationResult(
+                        passed=False,
+                        message=f"Command failed (rc={rc if rc is not None else 'unknown'})",
+                        details={
+                            "tool": tool_name,
+                            "rc": rc,
+                            "stdout": stdout,
+                            "stderr": stderr,
+                            "hint_detected": hint_hit,
+                        },
+                        should_replan=True,
+                    )
+                break
     verification_mode = _get_verification_mode()
     test_only_change = False
     non_test_change = False
@@ -3562,6 +3604,17 @@ def _run_syntax_check(file_path: Path) -> Tuple[bool, str, bool]:
     """
     suffix = file_path.suffix.lower()
 
+    # Vue SFC: ensure it has at least a <template> or <script> block.
+    if suffix == ".vue":
+        try:
+            content = _read_file_with_fallback_encoding(file_path) or ""
+            lowered = content.lower()
+            if ("<template" not in lowered) and ("<script" not in lowered):
+                return False, "Vue SFC is missing <template> or <script> section", False
+            return True, "", False
+        except Exception as e:
+            return False, f"Vue syntax check failed: {e}", False
+
     # Python files
     if suffix == '.py':
         try:
@@ -3613,33 +3666,6 @@ def _run_syntax_check(file_path: Path) -> Tuple[bool, str, bool]:
             return False, f"TypeScript error: {result.stdout.strip()}", False
         except FileNotFoundError:
             # TypeScript not available, skip validation
-            return True, "", True
-        except Exception as e:
-            return False, f"Failed to run syntax check: {str(e)}", False
-
-    elif suffix == '.vue':
-        # Vue SFCs: try vue-tsc only if a Vue project marker exists (package.json with vue dependency)
-        pkg = _load_package_json(Path(config.ROOT) if getattr(config, "ROOT", None) else Path.cwd())
-        deps = set()
-        for field in ("dependencies", "devDependencies", "peerDependencies"):
-            values = pkg.get(field, {})
-            if isinstance(values, dict):
-                deps.update({str(k).strip().lower() for k in values.keys()})
-        is_vue_project = any(dep.startswith("vue") for dep in deps)
-        if not is_vue_project:
-            return True, "", True
-        try:
-            import subprocess
-            result = subprocess.run(
-                ['npx', '--yes', 'vue-tsc', '--noEmit', str(file_path)],
-                capture_output=True,
-                text=True,
-                timeout=15
-            )
-            if result.returncode == 0:
-                return True, "", False
-            return False, f"Vue SFC error: {result.stdout.strip() or result.stderr.strip()}", False
-        except FileNotFoundError:
             return True, "", True
         except Exception as e:
             return False, f"Failed to run syntax check: {str(e)}", False

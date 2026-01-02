@@ -20,6 +20,7 @@ from .models.task import ExecutionPlan, TaskStatus
 from .tools.registry import get_available_tools
 from .debug_logger import DebugLogger
 from .execution.state_manager import StateManager
+from rev.mcp.loader import start_mcp_servers, stop_mcp_servers
 
 
 def main():
@@ -83,6 +84,11 @@ def main():
         help=f"Ollama model (default: {config.OLLAMA_MODEL})"
     )
     parser.add_argument(
+        "--llm-provider",
+        default=None,
+        help="LLM provider override (ollama, openai, anthropic, gemini, localai, vllm, lmstudio)"
+    )
+    parser.add_argument(
         "--workspace",
         default=None,
         help="Workspace root directory (sets repo root and .rev/ state location)"
@@ -92,6 +98,11 @@ def main():
         action="store_true",
         default=False,
         help="Allow tool access to absolute paths outside the workspace (must be in allowlist via /add-dir). Can also set REV_ALLOW_EXTERNAL_PATHS=true"
+    )
+    parser.add_argument(
+        "--trust-workspace",
+        action="store_true",
+        help="Skip first-run trust disclaimer for this workspace"
     )
     parser.add_argument(
         "--base-url",
@@ -169,6 +180,17 @@ def main():
         choices=["linear", "sub-agent", "inline"],
         default=None,
         help="Execution mode: 'linear' (traditional sequential), 'sub-agent' (dispatch to specialized agents). 'inline' is alias for 'linear'. Default: from REV_EXECUTION_MODE env var or 'sub-agent'"
+    )
+    parser.add_argument(
+        "--tool-mode",
+        choices=["normal", "auto-accept", "plan-only"],
+        default=None,
+        help="Tool execution mode: normal | auto-accept (bypass permission denials) | plan-only (no tool execution)"
+    )
+    parser.add_argument(
+        "--no-mcp",
+        action="store_true",
+        help="Disable MCP server startup and registration for this run"
     )
     parser.add_argument(
         "--research",
@@ -323,6 +345,7 @@ def main():
     buffered_logs: list[str] = []
     initial_command: Optional[str] = None
     clean_mode = bool(args.clean)
+    mcp_processes: list = []
 
     # Start run log only if not cleaning/clearing to avoid locking the log file being deleted.
     if not clean_mode:
@@ -359,6 +382,26 @@ def main():
     if run_log_path:
         _log(f"run_log={run_log_path}")
 
+    # First-run trust disclaimer per workspace
+    trust_marker = config.REV_DIR / "trust.ok"
+    trust_env = os.getenv("REV_TRUST_ACCEPT", "").lower() in {"1", "true", "yes", "on"}
+    if not trust_marker.exists():
+        disclaimer = (
+            "\n[TRUST NOTICE] This is the first time rev is running in this workspace.\n"
+            "rev can read/write files under the workspace root and execute shell commands.\n"
+            "Ensure you trust the contents of this project before proceeding."
+        )
+        print(disclaimer)
+        if args.trust_workspace or args.yes or trust_env:
+            try:
+                trust_marker.parent.mkdir(parents=True, exist_ok=True)
+                trust_marker.write_text("trusted", encoding="utf-8")
+                print("[OK] Workspace trusted (marker created).")
+            except Exception as e:
+                print(f"[WARN] Could not create trust marker: {e}")
+        else:
+            print("Tip: rerun with --trust-workspace or set REV_TRUST_ACCEPT=1 to skip this notice in the future.")
+
     # Enable LLM transaction logging if debug mode is requested
     if args.debug:
         config.LLM_TRANSACTION_LOG_ENABLED = True
@@ -371,10 +414,21 @@ def main():
     # Update config globals for ollama_chat function
     config.set_model(args.model)
     config.OLLAMA_BASE_URL = args.base_url
+    if args.llm_provider:
+        config.LLM_PROVIDER = args.llm_provider
+        # Ensure all phases follow the provider unless overridden by env
+        config.EXECUTION_PROVIDER = args.llm_provider
+        config.PLANNING_PROVIDER = args.llm_provider
+        config.RESEARCH_PROVIDER = args.llm_provider
 
     # Set execution mode if provided
     if args.execution_mode:
         config.set_execution_mode(args.execution_mode)
+    # Set tool mode if provided
+    if args.tool_mode:
+        config.set_tool_mode(args.tool_mode)
+    # Resolve MCP enablement (env/config plus CLI override)
+    config.MCP_ENABLED = bool(getattr(config, "MCP_ENABLED", True)) and not args.no_mcp
 
     # Determine prompt optimization settings
     # Priority: CLI flags > Environment variables > defaults
@@ -453,6 +507,31 @@ def main():
                     print(f"[WARN] Clean could not remove {entry}: {e}")
         print("Clean complete.")
         sys.exit(0)
+
+    # Initialize MCP servers (default + repo config) if enabled
+    if config.MCP_ENABLED:
+        try:
+            from rev.mcp.client import mcp_client
+
+            # Refresh registry to reflect current toggles
+            mcp_client.servers.clear()
+            mcp_client._load_default_servers()
+            mcp_processes = start_mcp_servers(config.ROOT, enable=True, register=True)
+            server_names = ", ".join(sorted(mcp_client.servers.keys())) or "none"
+            _log(f"[mcp] enabled; servers registered: {server_names}")
+            if mcp_processes:
+                _log(f"[mcp] started {len(mcp_processes)} local server process(es)")
+            try:
+                debug_logger.log("mcp", "REGISTERED", {
+                    "servers": sorted(mcp_client.servers.keys()),
+                    "process_count": len(mcp_processes),
+                })
+            except Exception:
+                pass
+        except Exception as e:
+            _log(f"[WARN] MCP initialization failed: {e}")
+    else:
+        _log("[mcp] disabled for this run")
 
     # Handle IDE server startup
     if args.ide_api:
@@ -895,6 +974,11 @@ def main():
         debug_logger.log_error("main", e, {"context": "main execution loop"})
         raise
     finally:
+        try:
+            if mcp_processes:
+                stop_mcp_servers(mcp_processes)
+        except Exception:
+            pass
         # Close the debug logger
         debug_logger.close()
 
