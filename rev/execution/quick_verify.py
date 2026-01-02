@@ -37,6 +37,16 @@ from rev.execution.verification_utils import _detect_build_command_for_root
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
+def _normalize_status(status_val) -> TaskStatus:
+    """Normalize various status representations to TaskStatus."""
+    if isinstance(status_val, TaskStatus):
+        return status_val
+    if isinstance(status_val, str):
+        try:
+            return TaskStatus(status_val.lower())
+        except Exception:
+            pass
+    return TaskStatus.PENDING
 
 
 def _strip_ansi(text: Any) -> str:
@@ -351,6 +361,7 @@ def _verify_task_execution_impl(task: Task, context: RevContext) -> Verification
     """
     Internal implementation for task verification (wrapped to catch unexpected exceptions).
     """
+    task.status = _normalize_status(getattr(task, "status", TaskStatus.PENDING))
     if task.status != TaskStatus.COMPLETED:
         return VerificationResult(
             passed=False,
@@ -394,47 +405,69 @@ def _verify_task_execution_impl(task: Task, context: RevContext) -> Verification
                 should_replan=True,
             )
 
-    # For run/tool actions, ensure the last run_cmd/run_tests returned success (rc==0)
-    if action_type in {"run", "tool", "execute"}:
-        for ev in reversed(list(events)):
-            tool_name = str(ev.get("tool") or "").lower()
-            if tool_name in {"run_cmd", "run_tests"}:
-                raw = ev.get("raw_result")
-                if isinstance(raw, dict):
-                    payload = raw
-                else:
-                    try:
-                        payload = json.loads(raw or "{}")
-                    except Exception:
-                        payload = {}
-                rc = payload.get("rc")
-                stdout = payload.get("stdout") or ""
-                stderr = payload.get("stderr") or ""
-                text = f"{stdout}\n{stderr}".lower()
-                failure_hints = (
-                    "build failed",
-                    "error during build",
-                    "npm err!",
-                    "npm error",
-                    "failed with exit code",
-                    "[vite:vue]",
-                )
-                hint_hit = any(h in text for h in failure_hints)
+    # Global guard: any run_cmd/run_tests with nonzero rc should fail verification (all action types).
+    for ev in reversed(list(events)):
+        tool_name = str(ev.get("tool") or "").lower()
+        if tool_name in {"run_cmd", "run_tests"}:
+            raw = ev.get("raw_result")
+            if isinstance(raw, dict):
+                payload = raw
+            else:
+                try:
+                    payload = json.loads(raw or "{}")
+                except Exception:
+                    payload = {}
+            rc = payload.get("rc")
+            stdout = payload.get("stdout") or ""
+            stderr = payload.get("stderr") or ""
+            text = f"{stdout}\n{stderr}".lower()
+            failure_hints = (
+                "build failed",
+                "error during build",
+                "npm err!",
+                "npm error",
+                "failed with exit code",
+                "[vite:vue]",
+                "module not found",
+                "failed to resolve import",
+                "cannot find module",
+                "resolve import",
+                "unable to",
+                "unresolved",
+                "cannot resolve",
+                "failed to load",
+                "failed to initialize",
+            )
+            hint_hit = any(h in text for h in failure_hints)
+            # Treat obvious error words in stderr as failure even when rc==0.
+            stderr_error_hit = False
+            if rc in (None, 0) and stderr:
+                if re.search(r"\b(error|fail|fatal|unable|cannot|unresolved)\b", stderr.lower()):
+                    stderr_error_hit = True
+            hint_hit = hint_hit or stderr_error_hit
 
-                if rc not in (None, 0) or hint_hit:
-                    return VerificationResult(
-                        passed=False,
-                        message=f"Command failed (rc={rc if rc is not None else 'unknown'})",
-                        details={
-                            "tool": tool_name,
-                            "rc": rc,
-                            "stdout": stdout,
-                            "stderr": stderr,
-                            "hint_detected": hint_hit,
-                        },
-                        should_replan=True,
-                    )
-                break
+            if rc not in (None, 0) or hint_hit:
+                msg = f"Command failed (rc={rc if rc is not None else 'unknown'})"
+                remediation = None
+                if "module not found" in text or "cannot find module" in text or "failed to resolve import" in text:
+                    remediation = "Missing dependency detected; install the missing package(s) before re-running the build."
+                if remediation is None and (stderr or stdout):
+                    remediation = "Command failed; review stderr for root cause and ask LLM for remediation."
+                return VerificationResult(
+                    passed=False,
+                    message=msg,
+                    details={
+                        "tool": tool_name,
+                        "rc": rc,
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "hint_detected": hint_hit,
+                        "remediation": remediation,
+                        "stderr_full": stderr,
+                        "stdout_full": stdout,
+                    },
+                    should_replan=True,
+                )
     verification_mode = _get_verification_mode()
     test_only_change = False
     non_test_change = False

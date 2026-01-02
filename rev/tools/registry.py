@@ -91,6 +91,7 @@ from rev.tools.python_ast_ops import (
 from rev.tools.cache_ops import (
     get_cache_stats, clear_caches, persist_caches
 )
+from rev.tools import web_tools
 
 
 def rag_search(query: str, k: int = 10, filters: dict = None) -> str:
@@ -194,6 +195,9 @@ _TIMEOUT_PROTECTED_TOOLS = {
     "detect_secrets",
     "check_license_compliance",
     "split_python_module_classes",
+    "web_search",
+    "fetch_url",
+    "find_files",
 }
 
 _COMMAND_TOKENS = {
@@ -488,8 +492,18 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         "git_status": lambda args: git_status(),
         "git_log": lambda args: git_log(args.get("count", 10), args.get("oneline", False)),
         "git_branch": lambda args: git_branch(args.get("action", "list"), args.get("branch_name")),
-        "run_cmd": lambda args: run_cmd(args["cmd"], args.get("timeout", 300), args.get("cwd")),
-        "run_tests": lambda args: run_tests(args.get("cmd", "pytest -q"), args.get("timeout", 600), args.get("cwd")),
+        "run_cmd": lambda args: run_cmd(
+            args["cmd"] if "cmd" in args else args.get("command"),
+            args.get("timeout", 300),
+            args.get("cwd"),
+        ) if ("cmd" in args or "command" in args) else json.dumps(
+            {"error": "missing required field: cmd", "rc": -1}
+        ),
+        "run_tests": lambda args: run_tests(
+            args.get("cmd", args.get("command", "pytest -q")),
+            args.get("timeout", 600),
+            args.get("cwd"),
+        ),
         "get_repo_context": lambda args: get_repo_context(args.get("commits", 6)),
 
         # Utility tools
@@ -499,6 +513,9 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         "run_python_diagnostic": lambda args: run_python_diagnostic(args["script"], args.get("description", "")),
         "inspect_module_hierarchy": lambda args: inspect_module_hierarchy(args["module_path"]),
         "get_system_info": lambda args: get_system_info(),
+        "web_search": lambda args: web_tools.web_search(args["query"], args.get("limit", 5)),
+        "fetch_url": lambda args: web_tools.fetch_url(args["url"], args.get("timeout", 10), args.get("max_bytes", 200000)),
+        "find_files": lambda args: web_tools.find_files(args.get("pattern", "**/*"), args.get("include_dirs", False), args.get("max_results", 200)),
 
         # SSH operations
         "ssh_connect": lambda args: ssh_connect(args["host"], args["username"], args.get("password"), args.get("key_file"), args.get("port", 22)),
@@ -1819,6 +1836,52 @@ def get_available_tools() -> list:
                         "module_path": {"type": "string", "description": "Python import path to inspect (e.g., 'lib.analysts')"}
                     },
                     "required": ["module_path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Attempt a web search. If network access is disabled, returns a structured error advising to use MCP search tools.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query"},
+                        "limit": {"type": "integer", "description": "Number of results", "default": 5}
+                    },
+                    "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "fetch_url",
+                "description": "Fetch the contents of a URL (best-effort). Returns a structured error if network access is blocked.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "URL to fetch"},
+                        "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 10},
+                        "max_bytes": {"type": "integer", "description": "Maximum bytes to read", "default": 200000}
+                    },
+                    "required": ["url"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "find_files",
+                "description": "Find files matching a glob pattern within allowed roots. Honors exclusion rules.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {"type": "string", "description": "Glob pattern", "default": "**/*"},
+                        "include_dirs": {"type": "boolean", "description": "Include directories in results", "default": False},
+                        "max_results": {"type": "integer", "description": "Maximum results to return", "default": 200}
+                    }
                 }
             }
         },

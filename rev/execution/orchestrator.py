@@ -2535,6 +2535,19 @@ def _choose_best_path_match_with_context(*, original: str, matches: List[str], d
     return ranked[0]
 
 
+def _find_path_matches(root: Path, basename: str, limit: int = 50) -> List[Path]:
+    """Find files matching a basename under a root path (case-insensitive)."""
+    matches: List[Path] = []
+    basename_lower = basename.lower()
+    for dirpath, _, filenames in os.walk(root):
+        for fn in filenames:
+            if fn.lower() == basename_lower:
+                matches.append(Path(dirpath) / fn)
+                if len(matches) >= limit:
+                    return matches
+    return matches
+
+
 def _coerce_command_intent_to_test(task: Task) -> tuple[bool, List[str]]:
     """Coerce command execution tasks (npm install, pip install, etc.) to action_type='run'.
 
@@ -4556,17 +4569,65 @@ class Orchestrator:
                 existing_targets: list[str] = []
                 for raw in targets:
                     try:
-                        resolved = resolve_workspace_path(raw).abs_path
+                        # Normalize leading slashes and workspace prefix to workspace-relative
+                        candidate = _sanitize_path_candidate(raw)
+                        if candidate.startswith("/"):
+                            candidate = candidate.lstrip("/")
+                        if candidate.lower().startswith(str(config.ROOT).replace("\\", "/").lower()):
+                            try:
+                                candidate = str(Path(candidate).relative_to(config.ROOT)).replace("\\", "/")
+                            except Exception:
+                                candidate = candidate
+                        resolved = resolve_workspace_path(candidate).abs_path
                         if resolved.exists():
-                            existing_targets.append(raw)
+                            existing_targets.append(candidate)
                         else:
-                            missing_targets.append(raw)
+                            missing_targets.append(candidate)
                     except Exception:
-                        missing_targets.append(raw)
+                        missing_targets.append(_sanitize_path_candidate(raw))
                 # Only block if ALL extracted targets are missing
                 if targets and existing_targets == [] and missing_targets:
+                    # Try to auto-correct by searching for basename matches under allowed roots
+                    alt_matches: list[str] = []
+                    for cand in missing_targets:
+                        base = Path(_sanitize_path_candidate(cand)).name
+                        if not base:
+                            continue
+                        for root in get_workspace().get_allowed_roots():
+                            hits = _find_path_matches(root, base, limit=50)
+                            alt_matches.extend([h.as_posix() for h in hits])
+                    alt_matches = sorted(set(alt_matches))
+                    replacement = _choose_best_path_match_with_context(
+                        original=missing_targets[0],
+                        matches=alt_matches,
+                        description=next_task.description or "",
+                    )
+                    if replacement:
+                        try:
+                            rep_path = Path(replacement)
+                            try:
+                                rep_rel = rep_path.relative_to(Path(config.ROOT)).as_posix()
+                            except Exception:
+                                rep_rel = rep_path.as_posix()
+                            normalized_replacement = rep_rel
+                            desc = next_task.description or ""
+                            desc = desc.replace(missing_targets[0], normalized_replacement)
+                            next_task.description = desc
+                            print(f"  [research-dedupe] Auto-corrected missing path '{missing_targets[0]}' -> '{normalized_replacement}'")
+                            # Requeue the corrected task at current position and continue
+                            self.context.plan.tasks.insert(plan_idx, next_task)
+                            continue
+                        except Exception:
+                            pass
+                    display_missing = [
+                        Path(_sanitize_path_candidate(m)).as_posix().lstrip("/")
+                        if m else ""
+                        for m in missing_targets
+                    ]
+                    display_missing = [m for m in display_missing if m]
+                    display_msg = ", ".join(display_missing) if display_missing else ", ".join(missing_targets)
                     msg = (
-                        f"Target file(s) not found: {', '.join(missing_targets)}. "
+                        f"Target file(s) not found: {display_msg}. "
                         "Create the file(s) or adjust the path instead of repeating reads."
                     )
                     print(f"  [research-dedupe] Skipping read on missing targets: {msg}")
@@ -4574,9 +4635,9 @@ class Orchestrator:
                     next_task.result = json.dumps({
                         "skipped": True,
                         "reason": "target_missing",
-                        "missing": missing_targets,
+                        "missing": display_missing or missing_targets,
                     })
-                    completed_tasks_log.append(f"[STOPPED] {next_task.description} | Reason: missing targets ({', '.join(missing_targets)})")
+                    completed_tasks_log.append(f"[STOPPED] {next_task.description} | Reason: missing targets ({display_msg})")
                     # Request a replan to create/locate the missing files.
                     self.context.add_agent_request(
                         "REPLAN_REQUEST",

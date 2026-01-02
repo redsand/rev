@@ -32,8 +32,10 @@
     "detect_secrets",
     "execute_python",
     "extract_constants",
+    "fetch_url",
     "file_exists",
     "find_dead_code",
+    "find_files",
     "find_symbol_usages",
     "generate_property_tests",
     "generate_repro_case",
@@ -92,6 +94,7 @@
     "validate_ci_config",
     "verify_migrations",
     "web_fetch",
+    "web_search",
     "write_file"
   ]
 }
