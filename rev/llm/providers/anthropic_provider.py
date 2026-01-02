@@ -52,10 +52,19 @@ class AnthropicProvider(LLMProvider):
                     tool_uses = []
                     for tc in msg.get("tool_calls", []):
                         func = tc.get("function", {})
+                        # CRITICAL FIX: Parse arguments as JSON dict, not string
+                        arguments_str = func.get("arguments", "{}")
+                        try:
+                            import json
+                            arguments_dict = json.loads(arguments_str) if isinstance(arguments_str, str) else arguments_str
+                        except (json.JSONDecodeError, TypeError):
+                            arguments_dict = {}
+
                         tool_uses.append({
                             "type": "tool_use",
+                            "id": tc.get("id", f"tool_{len(tool_uses)}"),  # Anthropic requires IDs
                             "name": func.get("name", ""),
-                            "input": func.get("arguments", ""),
+                            "input": arguments_dict,  # Must be dict, not string
                         })
                     converted.append({
                         "role": "assistant",
@@ -173,6 +182,9 @@ class AnthropicProvider(LLMProvider):
             anthropic_tools = self._convert_tools(tools)
             if anthropic_tools:
                 request_params["tools"] = anthropic_tools
+                # BEST PRACTICE: Force tool use when tools are provided
+                # This prevents the model from returning text-only responses
+                request_params["tool_choice"] = {"type": "auto"}
 
         # Log request
         debug_logger.log_llm_request(model_name, messages, tools if tools and supports_tools else None)
@@ -221,6 +233,8 @@ class AnthropicProvider(LLMProvider):
             anthropic_tools = self._convert_tools(tools)
             if anthropic_tools:
                 request_params["tools"] = anthropic_tools
+                # BEST PRACTICE: Force tool use when tools are provided
+                request_params["tool_choice"] = {"type": "auto"}
 
         debug_logger.log_llm_request(model_name, messages, tools if tools and supports_tools else None)
 

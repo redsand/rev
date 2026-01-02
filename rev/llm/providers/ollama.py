@@ -268,8 +268,9 @@ class OllamaProvider(LLMProvider):
         if "format" in kwargs and kwargs["format"] is not None:
             payload["format"] = kwargs["format"]
 
+        # CRITICAL FIX: Use standard OpenAI-compatible tools format
+        # Ollama supports tools field directly without "mode": "tools"
         if tools_provided:
-            payload["mode"] = "tools"
             payload["tools"] = tools or []
 
         # Log request
@@ -498,8 +499,9 @@ class OllamaProvider(LLMProvider):
             "options": options
         }
 
+        # CRITICAL FIX: Use standard OpenAI-compatible tools format
+        # Ollama supports tools field directly without "mode": "tools"
         if tools_provided:
-            payload["mode"] = "tools"
             payload["tools"] = tools or []
 
         debug_logger = get_logger()
@@ -624,10 +626,42 @@ class OllamaProvider(LLMProvider):
         return {"error": f"Streaming retries exhausted after {attempt} attempt(s)"}
 
     def supports_tool_calling(self, model: str) -> bool:
-        """Check if model supports tool calling."""
-        # Most Ollama models support tool calling
-        # Could be enhanced with model-specific checks
-        return True
+        """Check if model supports tool calling.
+
+        Based on Ollama documentation, models with "tools" pill support function calling.
+        Includes both local and cloud models (e.g., model-name:cloud).
+        """
+        # Strip version/tag info for matching (e.g., "model:cloud" -> "model")
+        model_lower = model.lower()
+        model_base = model_lower.split(':')[0]
+
+        # Cloud models typically support tools
+        if ':cloud' in model_lower or '-cloud' in model_lower:
+            return True
+
+        # Known tool-capable model families
+        tool_capable_prefixes = [
+            # Llama family
+            "llama3.1", "llama3.2", "llama-3.1", "llama-3.2",
+            # Mistral family
+            "mistral", "mixtral", "devstral",
+            # Qwen family
+            "qwen2.5", "qwen-2.5", "qwen3", "qwen-3",
+            # Command family
+            "command-r", "commandr",
+            # DeepSeek family
+            "deepseek", "deep-seek",
+            # GLM family
+            "glm-4", "glm4",
+            # Gemini family
+            "gemini-2", "gemini-3", "gemini2", "gemini3",
+            # Other tool-capable models
+            "granite", "phi3", "phi-3",
+            "cogito", "kimi", "nemotron",
+            "gpt-oss", "rnj"
+        ]
+
+        return any(model_base.startswith(prefix) for prefix in tool_capable_prefixes)
 
     def validate_config(self) -> bool:
         """Validate Ollama configuration."""
