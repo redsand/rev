@@ -629,20 +629,39 @@ class OllamaProvider(LLMProvider):
         """Check if model supports tool calling.
 
         Based on Ollama documentation, models with "tools" pill support function calling.
-        Common tool-capable models include: llama3.1, llama3.2, mistral, qwen2.5, etc.
+        Includes both local and cloud models (e.g., model-name:cloud).
         """
-        # Check for known tool-capable model families
+        # Strip version/tag info for matching (e.g., "model:cloud" -> "model")
         model_lower = model.lower()
+        model_base = model_lower.split(':')[0]
+
+        # Cloud models typically support tools
+        if ':cloud' in model_lower or '-cloud' in model_lower:
+            return True
+
+        # Known tool-capable model families
         tool_capable_prefixes = [
+            # Llama family
             "llama3.1", "llama3.2", "llama-3.1", "llama-3.2",
-            "mistral", "mixtral",
-            "qwen2.5", "qwen-2.5",
+            # Mistral family
+            "mistral", "mixtral", "devstral",
+            # Qwen family
+            "qwen2.5", "qwen-2.5", "qwen3", "qwen-3",
+            # Command family
             "command-r", "commandr",
-            "granite",
-            "phi3", "phi-3"
+            # DeepSeek family
+            "deepseek", "deep-seek",
+            # GLM family
+            "glm-4", "glm4",
+            # Gemini family
+            "gemini-2", "gemini-3", "gemini2", "gemini3",
+            # Other tool-capable models
+            "granite", "phi3", "phi-3",
+            "cogito", "kimi", "nemotron",
+            "gpt-oss", "rnj"
         ]
 
-        return any(model_lower.startswith(prefix) for prefix in tool_capable_prefixes)
+        return any(model_base.startswith(prefix) for prefix in tool_capable_prefixes)
 
     def validate_config(self) -> bool:
         """Validate Ollama configuration."""
