@@ -228,6 +228,16 @@ class GeminiProvider(LLMProvider):
             "max_output_tokens": int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "8192")),
         }
 
+        # BEST PRACTICE: Configure tool calling behavior
+        # For Gemini 3 models, this ensures proper function calling
+        tool_config = None
+        if tools:
+            tool_config = {
+                "function_calling_config": {
+                    "mode": "ANY"  # Force function calling when tools provided
+                }
+            }
+
         # Create model instance
         model_kwargs = {
             "model_name": model_name,
@@ -242,6 +252,9 @@ class GeminiProvider(LLMProvider):
             gemini_tools = self._convert_tools(tools)
             if gemini_tools:
                 model_kwargs["tools"] = gemini_tools
+                # Apply tool configuration to enforce function calling
+                if tool_config:
+                    model_kwargs["tool_config"] = tool_config
 
         # Log request
         debug_logger.log_llm_request(model_name, messages, tools if tools and supports_tools else None)
@@ -290,6 +303,15 @@ class GeminiProvider(LLMProvider):
             "max_output_tokens": int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "8192")),
         }
 
+        # Configure tool calling behavior for streaming
+        tool_config = None
+        if tools:
+            tool_config = {
+                "function_calling_config": {
+                    "mode": "ANY"
+                }
+            }
+
         model_kwargs = {
             "model_name": model_name,
             "generation_config": generation_config,
@@ -302,6 +324,8 @@ class GeminiProvider(LLMProvider):
             gemini_tools = self._convert_tools(tools)
             if gemini_tools:
                 model_kwargs["tools"] = gemini_tools
+                if tool_config:
+                    model_kwargs["tool_config"] = tool_config
 
         debug_logger.log_llm_request(model_name, messages, tools if tools and supports_tools else None)
 

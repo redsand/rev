@@ -252,7 +252,11 @@ class OpenAIProvider(LLMProvider):
         # Add tools if provided and supported
         if tools:
             request_params["tools"] = tools
-            request_params["tool_choice"] = "auto"
+            request_params["tool_choice"] = "required"  # BEST PRACTICE: Force tool use when provided
+            # Enable Structured Outputs for guaranteed schema compliance
+            # This ensures the model's tool calls exactly match the JSON schema
+            if supports_tools:
+                request_params["parallel_tool_calls"] = True  # Allow multiple tool calls in one response
 
         if "response_format" in kwargs and kwargs["response_format"] is not None:
             request_params["response_format"] = kwargs["response_format"]
@@ -387,7 +391,9 @@ class OpenAIProvider(LLMProvider):
 
         if tools:
             request_params["tools"] = tools
-            request_params["tool_choice"] = "auto"
+            request_params["tool_choice"] = "required"  # Force tool use when tools provided
+            if supports_tools:
+                request_params["parallel_tool_calls"] = True
 
         if "response_format" in kwargs and kwargs["response_format"] is not None:
             request_params["response_format"] = kwargs["response_format"]
@@ -421,15 +427,33 @@ class OpenAIProvider(LLMProvider):
                     if on_chunk:
                         on_chunk(delta.content)
 
-                # Handle tool calls
+                # Handle tool calls - CRITICAL FIX: Properly merge streaming deltas
+                # OpenAI streams tool calls incrementally, we need to merge them by index
                 if hasattr(delta, "tool_calls") and delta.tool_calls:
-                    for tc in delta.tool_calls:
-                        accumulated_tool_calls.append({
-                            "function": {
-                                "name": tc.function.name if hasattr(tc.function, "name") else "",
-                                "arguments": tc.function.arguments if hasattr(tc.function, "arguments") else "",
-                            }
-                        })
+                    for tc_delta in delta.tool_calls:
+                        # Get the index of this tool call
+                        tc_index = tc_delta.index if hasattr(tc_delta, "index") else len(accumulated_tool_calls)
+
+                        # Ensure we have enough slots
+                        while len(accumulated_tool_calls) <= tc_index:
+                            accumulated_tool_calls.append({
+                                "id": "",
+                                "function": {
+                                    "name": "",
+                                    "arguments": "",
+                                }
+                            })
+
+                        # Merge the delta into the accumulated tool call
+                        if hasattr(tc_delta, "id") and tc_delta.id:
+                            accumulated_tool_calls[tc_index]["id"] = tc_delta.id
+
+                        if hasattr(tc_delta, "function"):
+                            if hasattr(tc_delta.function, "name") and tc_delta.function.name:
+                                accumulated_tool_calls[tc_index]["function"]["name"] = tc_delta.function.name
+                            if hasattr(tc_delta.function, "arguments") and tc_delta.function.arguments:
+                                # Append arguments incrementally (they stream character by character)
+                                accumulated_tool_calls[tc_index]["function"]["arguments"] += tc_delta.function.arguments
 
             # Build final result
             final_message = {
@@ -496,13 +520,26 @@ class OpenAIProvider(LLMProvider):
                                 on_chunk(delta.content)
 
                         if hasattr(delta, "tool_calls") and delta.tool_calls:
-                            for tc in delta.tool_calls:
-                                accumulated_tool_calls.append({
-                                    "function": {
-                                        "name": tc.function.name if hasattr(tc.function, "name") else "",
-                                        "arguments": tc.function.arguments if hasattr(tc.function, "arguments") else "",
-                                    }
-                                })
+                            for tc_delta in delta.tool_calls:
+                                tc_index = tc_delta.index if hasattr(tc_delta, "index") else len(accumulated_tool_calls)
+
+                                while len(accumulated_tool_calls) <= tc_index:
+                                    accumulated_tool_calls.append({
+                                        "id": "",
+                                        "function": {
+                                            "name": "",
+                                            "arguments": "",
+                                        }
+                                    })
+
+                                if hasattr(tc_delta, "id") and tc_delta.id:
+                                    accumulated_tool_calls[tc_index]["id"] = tc_delta.id
+
+                                if hasattr(tc_delta, "function"):
+                                    if hasattr(tc_delta.function, "name") and tc_delta.function.name:
+                                        accumulated_tool_calls[tc_index]["function"]["name"] = tc_delta.function.name
+                                    if hasattr(tc_delta.function, "arguments") and tc_delta.function.arguments:
+                                        accumulated_tool_calls[tc_index]["function"]["arguments"] += tc_delta.function.arguments
 
                     final_message = {
                         "role": "assistant",

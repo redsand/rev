@@ -268,8 +268,9 @@ class OllamaProvider(LLMProvider):
         if "format" in kwargs and kwargs["format"] is not None:
             payload["format"] = kwargs["format"]
 
+        # CRITICAL FIX: Use standard OpenAI-compatible tools format
+        # Ollama supports tools field directly without "mode": "tools"
         if tools_provided:
-            payload["mode"] = "tools"
             payload["tools"] = tools or []
 
         # Log request
@@ -498,8 +499,9 @@ class OllamaProvider(LLMProvider):
             "options": options
         }
 
+        # CRITICAL FIX: Use standard OpenAI-compatible tools format
+        # Ollama supports tools field directly without "mode": "tools"
         if tools_provided:
-            payload["mode"] = "tools"
             payload["tools"] = tools or []
 
         debug_logger = get_logger()
@@ -624,10 +626,23 @@ class OllamaProvider(LLMProvider):
         return {"error": f"Streaming retries exhausted after {attempt} attempt(s)"}
 
     def supports_tool_calling(self, model: str) -> bool:
-        """Check if model supports tool calling."""
-        # Most Ollama models support tool calling
-        # Could be enhanced with model-specific checks
-        return True
+        """Check if model supports tool calling.
+
+        Based on Ollama documentation, models with "tools" pill support function calling.
+        Common tool-capable models include: llama3.1, llama3.2, mistral, qwen2.5, etc.
+        """
+        # Check for known tool-capable model families
+        model_lower = model.lower()
+        tool_capable_prefixes = [
+            "llama3.1", "llama3.2", "llama-3.1", "llama-3.2",
+            "mistral", "mixtral",
+            "qwen2.5", "qwen-2.5",
+            "command-r", "commandr",
+            "granite",
+            "phi3", "phi-3"
+        ]
+
+        return any(model_lower.startswith(prefix) for prefix in tool_capable_prefixes)
 
     def validate_config(self) -> bool:
         """Validate Ollama configuration."""
