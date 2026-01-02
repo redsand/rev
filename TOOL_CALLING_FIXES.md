@@ -133,25 +133,41 @@ if tools_provided:
     payload["tools"] = tools or []
     # Don't use "mode": "tools" - this causes compatibility issues
 
-# Fix 2: Proper tool support detection
+# Fix 2: Comprehensive tool support detection (including cloud models)
 def supports_tool_calling(self, model: str) -> bool:
     """Check if model supports tool calling."""
     model_lower = model.lower()
+    model_base = model_lower.split(':')[0]  # Strip tags like :cloud
+
+    # Cloud models typically support tools
+    if ':cloud' in model_lower or '-cloud' in model_lower:
+        return True
+
     tool_capable_prefixes = [
-        "llama3.1", "llama3.2",
-        "mistral", "mixtral",
-        "qwen2.5",
-        "command-r",
-        "granite",
-        "phi3"
+        # Llama, Mistral, Qwen families
+        "llama3.1", "llama3.2", "mistral", "mixtral", "devstral",
+        "qwen2.5", "qwen3", "command-r",
+        # Cloud model families
+        "deepseek", "glm-4", "gemini-2", "gemini-3",
+        "cogito", "kimi", "nemotron", "gpt-oss", "rnj",
+        # Other tool-capable models
+        "granite", "phi3"
     ]
-    return any(model_lower.startswith(prefix) for prefix in tool_capable_prefixes)
+    return any(model_base.startswith(prefix) for prefix in tool_capable_prefixes)
 ```
 
 **Key Insights**:
 - Ollama uses OpenAI-compatible API format for tools
 - Python library can auto-generate schemas from function definitions
 - Models with "tools" pill on Ollama site support function calling
+- **Cloud models** (`:cloud` suffix) automatically detected as tool-capable
+- Supports models: llama3.1/3.2, mistral, deepseek-v3.1, qwen3, gemini-3, glm-4.6/4.7, kimi-k2, etc.
+
+**Verified Cloud Models**:
+- `cogito-2.1:671b-cloud`, `deepseek-v3.1:671b-cloud`, `devstral-2:123b-cloud`
+- `gemini-3-flash-preview:cloud`, `glm-4.6:cloud`, `glm-4.7:cloud`
+- `kimi-k2-thinking:cloud`, `mistral-large-3:675b-cloud`
+- `qwen3-coder:480b-cloud`, `qwen3-next:80b-cloud`, `gpt-oss:120b-cloud`
 
 **Documentation**:
 - [Ollama Tool Support](https://ollama.com/blog/tool-support)
