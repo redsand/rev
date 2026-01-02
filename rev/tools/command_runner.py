@@ -22,6 +22,7 @@ Interrupt Design:
 """
 
 import os
+import signal
 import re
 import shlex
 import subprocess
@@ -209,6 +210,7 @@ def run_command_safe(
     cwd: Optional[Path] = None,
     capture_output: bool = True,
     check_interrupt: bool = False,
+    env: Optional[dict] = None,
 ) -> Dict[str, Any]:
     """Execute a command safely with security validation.
 
@@ -287,6 +289,10 @@ def run_command_safe(
         else:
             args[0] = resolved
 
+    env_final = os.environ.copy()
+    if env:
+        env_final.update(env)
+
     # Execute safely with shell=False
     try:
         if os.getenv("REV_DEBUG_CMD"):
@@ -301,6 +307,7 @@ def run_command_safe(
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=env_final,
         )
 
         # Support interrupt checking for long-running commands
@@ -445,6 +452,7 @@ def run_command_streamed(
     stdout_limit: int = 8000,
     stderr_limit: int = 8000,
     check_interrupt: bool = True,
+    env: Optional[dict] = None,
 ) -> Dict[str, Any]:
     """Execute a command with output streaming to prevent memory issues.
 
@@ -518,6 +526,10 @@ def run_command_streamed(
     stdout_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, encoding='utf-8', errors='replace')
     stderr_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, encoding='utf-8', errors='replace')
 
+    env_final = os.environ.copy()
+    if env:
+        env_final.update(env)
+
     try:
         proc = subprocess.Popen(
             args,
@@ -528,6 +540,7 @@ def run_command_streamed(
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=env_final,
         )
 
         # Wait for completion with interrupt support
@@ -640,3 +653,160 @@ def run_tests(cmd: str | list[str] = "pytest -q", timeout: int = 600, cwd: Optio
         check_interrupt=True,
     )
     return json.dumps(result)
+
+
+def run_command_background(
+    cmd: str | list[str],
+    *,
+    cwd: Optional[Path] = None,
+    env: Optional[dict] = None,
+) -> Dict[str, Any]:
+    """Run a command in the background with output redirected to a log file.
+
+    Returns:
+        Dict with pid, log path, and normalized command. rc is None until the process exits.
+    """
+    if cwd is None:
+        cwd = config.ROOT
+    resolved_cwd = _resolve_cwd(cwd)
+
+    # Validate command (reuse safe parser)
+    if isinstance(cmd, list):
+        if not cmd:
+            return {"blocked": True, "error": "empty command", "cmd": str(cmd), "cwd": str(resolved_cwd), "rc": -1}
+        args = [str(arg) for arg in cmd]
+        danger_tokens = {"&&", "||", "|", ">>", "<<", "`", "$("}
+        if any(tok in danger_tokens for tok in args):
+            return {
+                "blocked": True,
+                "error": "dangerous shell operators not allowed as standalone arguments",
+                "cmd": " ".join(args),
+                "cwd": str(resolved_cwd),
+                "rc": -1,
+            }
+        original_cmd_str = " ".join(cmd)
+    else:
+        is_valid, error_msg, args = _parse_and_validate(cmd)
+        if not is_valid:
+            return {
+                "blocked": True,
+                "error": error_msg,
+                "cmd": cmd,
+                "cwd": str(resolved_cwd),
+                "rc": -1,
+            }
+        original_cmd_str = cmd
+
+    args = _rewrite_windows_aliases(args)
+    args = _normalize_command_args(args, resolved_cwd)
+    normalized_cmd_str = " ".join(args)
+
+    executable = args[0]
+    resolved = _resolve_command(executable)
+    if resolved:
+        if isinstance(resolved, list):
+            args = resolved + args[1:]
+        else:
+            args[0] = resolved
+
+    env_final = os.environ.copy()
+    if env:
+        env_final.update(env)
+
+    try:
+        config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        log_path = config.LOGS_DIR / f"bg_{int(time.time())}.log"
+        log_file = open(log_path, "w", encoding="utf-8", errors="replace")
+
+        creationflags = 0
+        if os.name == "nt":
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+
+        proc = subprocess.Popen(
+            args,
+            shell=False,
+            cwd=str(resolved_cwd),
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env_final,
+            start_new_session=(os.name != "nt"),
+            creationflags=creationflags,
+        )
+
+        _record_background_process(proc.pid, log_path, normalized_cmd_str, resolved_cwd)
+
+        return {
+            "rc": None,
+            "pid": proc.pid,
+            "log": str(log_path),
+            "cmd": original_cmd_str,
+            "cmd_normalized": normalized_cmd_str,
+            "cwd": str(resolved_cwd),
+            "background": True,
+        }
+    except Exception as e:
+        return {
+            "error": f"failed to start background process: {e}",
+            "cmd": original_cmd_str,
+            "cmd_normalized": normalized_cmd_str,
+            "cwd": str(resolved_cwd),
+            "rc": -1,
+        }
+
+
+# Simple in-memory registry of background processes for this Rev session
+_BACKGROUND_PROCS: dict[int, dict] = {}
+
+
+def _record_background_process(pid: int, log_path: Path, cmd: str, cwd: Path) -> None:
+    _BACKGROUND_PROCS[pid] = {
+        "pid": pid,
+        "log": str(log_path),
+        "cmd": cmd,
+        "cwd": str(cwd),
+        "start_time": time.time(),
+    }
+
+
+def list_background_processes() -> Dict[str, Any]:
+    """Return the list of background processes started via run_command_background."""
+    # Prune entries that are no longer running
+    live: dict[int, dict] = {}
+    for pid, info in list(_BACKGROUND_PROCS.items()):
+        try:
+            os.kill(pid, 0)
+            live[pid] = info
+        except Exception:
+            # Process likely exited
+            continue
+    _BACKGROUND_PROCS.clear()
+    _BACKGROUND_PROCS.update(live)
+
+    processes = []
+    now = time.time()
+    for info in _BACKGROUND_PROCS.values():
+        age = now - info.get("start_time", now)
+        processes.append({
+            **info,
+            "age_seconds": int(age),
+            "cmd_preview": (info.get("cmd", "") or "")[:120],
+        })
+    return {"processes": processes}
+
+
+def kill_background_process(pid: int) -> Dict[str, Any]:
+    """Kill a background process if it was started by run_command_background."""
+    if pid not in _BACKGROUND_PROCS:
+        return {"error": "PID not managed by rev background runner", "rc": -1}
+    try:
+        if os.name == "nt":
+            os.kill(pid, signal.SIGTERM)
+        else:
+            os.kill(pid, signal.SIGTERM)
+        _BACKGROUND_PROCS.pop(pid, None)
+        return {"rc": 0, "killed": True, "pid": pid}
+    except Exception as e:
+        return {"rc": -1, "error": str(e), "pid": pid}

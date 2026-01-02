@@ -458,6 +458,11 @@ LLM_TRANSACTION_LOG_PATH = os.getenv(
 TDD_ENABLED = os.getenv("REV_TDD_ENABLED", "false").strip().lower() == "true"
 TDD_DEFER_TEST_EXECUTION = os.getenv("REV_TDD_DEFER_TESTS", "true").strip().lower() != "false"
 
+# Uncertainty detection - prompts user for guidance when Rev is uncertain
+UNCERTAINTY_DETECTION_ENABLED = os.getenv("REV_UNCERTAINTY_DETECTION_ENABLED", "true").strip().lower() == "true"
+UNCERTAINTY_THRESHOLD = int(os.getenv("REV_UNCERTAINTY_THRESHOLD", "5"))  # Score to trigger guidance request
+UNCERTAINTY_AUTO_SKIP_THRESHOLD = int(os.getenv("REV_UNCERTAINTY_AUTO_SKIP_THRESHOLD", "10"))  # Score to auto-skip
+
 EXCLUDE_DIRS = {
     ".git", ".hg", ".svn", ".idea", ".vscode", "__pycache__", ".pytest_cache",
     "node_modules", "dist", "build", ".next", "out", "coverage", ".cache",

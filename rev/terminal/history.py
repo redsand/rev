@@ -11,21 +11,29 @@ Provides a PromptHistory class that:
 """
 
 from collections import deque
-from typing import List, Optional
+from typing import List, Optional, Union
+from pathlib import Path
 import threading
+import os
 
 
 class PromptHistory:
     """Manages prompt history with arrow key navigation support."""
     
-    def __init__(self, max_history: int = 100):
+    def __init__(self, max_history: int = 100, history_file: Optional[Union[str, Path]] = None):
         """
         Initialize prompt history.
         
         Args:
             max_history: Maximum number of entries to keep (default: 100)
+            history_file: Optional path to persist history (empty/None disables persistence)
         """
         self.max_history = max_history
+        self.history_file: Optional[Path] = None
+        if history_file:
+            history_path = Path(str(history_file)).expanduser()
+            if str(history_path).strip():
+                self.history_file = history_path
         
         # Separate histories for commands and regular input
         self.command_history: deque = deque(maxlen=max_history)
@@ -40,6 +48,9 @@ class PromptHistory:
         
         # Thread safety
         self.lock = threading.Lock()
+
+        # Attempt to load persisted history (best-effort)
+        self._load_history()
 
     def add_command(self, command: str) -> None:
         """Add a command to command history.
@@ -61,6 +72,7 @@ class PromptHistory:
             # Reset navigation position
             self.history_position = 0
             self.current_history = None
+            self._save_history()
 
     def add_input(self, user_input: str) -> None:
         """Add regular user input to input history.
@@ -82,6 +94,7 @@ class PromptHistory:
             # Reset navigation position
             self.history_position = 0
             self.current_history = None
+            self._save_history()
 
     def start_navigation(self, is_command: bool, current_input: str = "") -> None:
         """Initialize navigation state.
@@ -94,6 +107,38 @@ class PromptHistory:
             self.current_history = self.unified_history
             self.history_position = 0
             self.current_input = current_input
+
+    def _load_history(self) -> None:
+        """Load history from disk if persistence is enabled."""
+        if not self.history_file:
+            return
+        try:
+            if self.history_file.exists():
+                lines = self.history_file.read_text(encoding="utf-8").splitlines()
+                # Keep only the most recent entries, respecting max_history
+                for line in lines[-self.max_history:]:
+                    if not line.strip():
+                        continue
+                    self.unified_history.append(line)
+                # Mirror into command/input histories for navigation parity
+                self.command_history = deque(self.unified_history, maxlen=self.max_history)
+                self.input_history = deque(self.unified_history, maxlen=self.max_history)
+        except Exception:
+            # Best-effort load; ignore errors to avoid breaking REPL startup
+            pass
+
+    def _save_history(self) -> None:
+        """Persist history to disk if enabled."""
+        if not self.history_file:
+            return
+        try:
+            self.history_file.parent.mkdir(parents=True, exist_ok=True)
+            with self.history_file.open("w", encoding="utf-8") as f:
+                for entry in list(self.unified_history)[-self.max_history:]:
+                    f.write(entry + os.linesep)
+        except Exception:
+            # Persistence is best-effort; ignore write failures
+            pass
 
     def get_previous(self) -> Optional[str]:
         """Get previous entry in history (up arrow).
@@ -138,6 +183,7 @@ class PromptHistory:
             self.history_position = 0
             self.current_history = None
             self.current_input = ""
+            self._save_history()
             self.last_entry_is_command = False
 
     def last_entry_was_command(self) -> bool:

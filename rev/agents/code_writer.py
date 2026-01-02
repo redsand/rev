@@ -372,15 +372,15 @@ CRITICAL RULES FOR IMPLEMENTATION QUALITY:
 2.  Use ONLY the tool(s) provided for this task's action_type. Other tools are NOT available:
     - For action_type="create_directory": ONLY use `create_directory`
     - For action_type="add": ONLY use `write_file`
-    - For action_type="edit": use `rewrite_python_imports` (preferred for Python import rewrites) OR `replace_in_file`
-    - For action_type="refactor": use `write_file`, `rewrite_python_imports`, or `replace_in_file` as needed
-3.  If using `replace_in_file`, follow these MANDATORY rules:
+    - For action_type="edit": use `apply_patch` (preferred for multi-line changes), `rewrite_python_imports` (Python imports), or `replace_in_file` for tiny, exact replacements
+    - For action_type="refactor": use `apply_patch`, `write_file`, `rewrite_python_imports`, or `replace_in_file` as needed
+3.  If using `replace_in_file`, follow these MANDATORY rules (use `apply_patch` instead if matching is uncertain or the change spans multiple lines):
     a) The `find` parameter MUST be an EXACT substring from the provided file content - character-for-character identical
     b) Include 2-3 surrounding lines for context to ensure the match is unique
     c) COPY the exact text from the provided file content - DO NOT type it from memory or modify spacing
     d) Preserve ALL whitespace, tabs, and indentation exactly as shown
     e) If you cannot find the exact text in the provided content, use `write_file` instead to rewrite the whole file
-    f) For small edits (1-20 lines), use replace_in_file; for large changes (>50 lines), use write_file
+    f) For small, exact edits (1-10 lines) use replace_in_file. For anything larger or if matching is uncertain, use apply_patch instead of replace_in_file.
 4.  Ensure the `replace` parameter is complete and correctly indented to match the surrounding code.
 5.  If creating a new file, ensure the COMPLETE, FULL file content is provided to the `write_file` tool - not stubs or placeholders.
 6.  Your response MUST be a single, valid JSON object representing the tool call. NEVER wrap JSON in markdown code fences (```json...```).
@@ -945,6 +945,8 @@ class CodeWriterAgent(BaseAgent):
             path.lower().endswith((".py", ".pyi")) for path in target_files_for_tools
         )
         target_exists = _targets_exist(target_files_for_tools)
+        replace_failures = int(context.agent_state.get("consecutive_replace_failures", 0) or 0)
+        force_apply_patch = bool(context.agent_state.get("force_apply_patch", False))
         # Determine which tools are appropriate for this action_type
         if task.action_type == "create_directory":
             # Directory creation tasks only get create_directory tool
@@ -955,25 +957,29 @@ class CodeWriterAgent(BaseAgent):
         elif task.action_type == "edit":
             # File modification tasks should avoid full overwrites; prefer patching tools first.
             tool_names = [
-                'replace_in_file',
                 'apply_patch',
+                'replace_in_file',
                 'write_file',
                 'copy_file',
                 'move_file',
             ]
             if include_python_tools:
                 tool_names = python_tools + tool_names
+            if force_apply_patch or replace_failures >= 1:
+                tool_names = [name for name in tool_names if name != 'replace_in_file']
         elif task.action_type == "refactor":
             # Refactoring may need to create or modify files
             tool_names = [
-                'write_file',
                 'apply_patch',
+                'write_file',
                 'replace_in_file',
                 'copy_file',
                 'move_file',
             ]
             if include_python_tools:
                 tool_names = python_tools + tool_names
+            if force_apply_patch or replace_failures >= 1:
+                tool_names = [name for name in tool_names if name != 'replace_in_file']
         elif task.action_type in {"move", "rename"}:
             # Move/rename should only use move_file to prevent accidental rewrites.
             tool_names = ['move_file']
@@ -1248,6 +1254,8 @@ class CodeWriterAgent(BaseAgent):
                                     consecutive_replace_failures = context.agent_state.get("consecutive_replace_failures", 0)
                                     consecutive_replace_failures += 1
                                     context.set_agent_state("consecutive_replace_failures", consecutive_replace_failures)
+                                    context.set_agent_state("force_apply_patch", True)
+                                    context.set_agent_state("force_apply_patch", True)
 
                                     # Escalate suggestions based on failure count
                                     if consecutive_replace_failures == 1:
@@ -1283,8 +1291,9 @@ class CodeWriterAgent(BaseAgent):
                             return self.make_failure_signal("tool_noop", noop_msg)
 
                         # Successful tool execution - reset consecutive failure counters
-                        if tool_name == "replace_in_file":
+                        if tool_name in {"replace_in_file", "apply_patch"}:
                             context.set_agent_state("consecutive_replace_failures", 0)
+                            context.set_agent_state("force_apply_patch", False)
 
                         print(f"  ✓ Successfully applied {tool_name}")
                         return build_subagent_output(
@@ -1429,22 +1438,23 @@ class CodeWriterAgent(BaseAgent):
                                     already_attempted = context.agent_state.get(recovery_key, False)
                                     if not already_attempted:
                                         context.set_agent_state(recovery_key, True)
-                                        recovered = self._retry_with_write_file(
+                                        recovered = self._retry_with_diff_or_file(
                                             messages,
                                             allowed_tools=recovery_allowed_tools,
                                         )
-                                        if recovered and recovered.name == "write_file":
+                                        if recovered and recovered.name in {"apply_patch", "write_file"}:
                                             tool_name = recovered.name
                                             arguments = recovered.arguments
                                             self._display_change_preview(tool_name, arguments)
 
                                             file_path = arguments.get("path") or arguments.get("dest") or "unknown"
-                                            content = arguments.get("content", "")
-                                            is_valid, warning_msg = self._validate_import_targets(file_path, content)
-                                            if not is_valid:
-                                                print("\n  [WARN] Import validation warning:")
-                                                print(f"  {warning_msg}")
-                                                print("  Note: This file has imports that may not exist. Proceed with caution.")
+                                            if tool_name == "write_file":
+                                                content = arguments.get("content", "")
+                                                is_valid, warning_msg = self._validate_import_targets(file_path, content)
+                                                if not is_valid:
+                                                    print("\n  [WARN] Import validation warning:")
+                                                    print(f"  {warning_msg}")
+                                                    print("  Note: This file has imports that may not exist. Proceed with caution.")
 
                                             if not self._prompt_for_approval(tool_name, file_path, context):
                                                 print("  [REJECTED] Change rejected by user")
@@ -1484,27 +1494,26 @@ class CodeWriterAgent(BaseAgent):
 
                                     # Escalate suggestions based on failure count
                                     if consecutive_replace_failures == 1:
-                                        # First failure: suggest using write_file for more reliable replacement
+                                        # First failure: suggest using apply_patch for more reliable replacement
                                         noop_msg = (
                                             f"{noop_msg}\n\n"
-                                            f"RECOVERY STEP 1 (Recommended): Switch to write_file tool instead.\n"
-                                            f"- Read the entire current file content\n"
-                                            f"- Make the necessary changes to the content\n"
-                                            f"- Use write_file to replace the entire file with the modified content\n"
-                                            f"This is MORE RELIABLE than replace_in_file for complex changes.\n\n"
+                                            f"RECOVERY STEP 1 (Recommended): Switch to apply_patch tool instead.\n"
+                                            f"- Read the current file content\n"
+                                            f"- Craft a minimal unified diff that updates only the relevant block\n"
+                                            f"- Apply via apply_patch (more reliable than replace_in_file for multi-line changes)\n\n"
                                             f"Alternative: Verify the exact 'find' text (character-for-character) from the file content provided, "
                                             f"including ALL whitespace and indentation, then retry replace_in_file."
                                         )
                                     elif consecutive_replace_failures >= 2:
-                                        # Second+ failure: strongly recommend write_file
+                                        # Second+ failure: strongly recommend apply_patch
                                         noop_msg = (
                                             f"{noop_msg}\n\n"
-                                            f"RECOVERY STEP 2 (MANDATORY): You MUST use write_file instead of replace_in_file.\n"
+                                            f"RECOVERY STEP 2 (MANDATORY): You MUST use apply_patch instead of replace_in_file.\n"
                                             f"replace_in_file has failed {consecutive_replace_failures} times. The 'find' pattern is not matching.\n"
                                             f"REQUIRED ACTION:\n"
-                                            f"1. Request read_file for the target file to get complete current content\n"
-                                            f"2. Apply your changes to that content\n"
-                                            f"3. Use write_file with the complete modified content\n"
+                                            f"1. Request read_file for the target file to get current content\n"
+                                            f"2. Craft a unified diff with precise context\n"
+                                            f"3. Apply the diff using apply_patch\n"
                                             f"DO NOT attempt replace_in_file again - it will fail."
                                         )
 
@@ -1517,8 +1526,9 @@ class CodeWriterAgent(BaseAgent):
                             return self.make_failure_signal("tool_noop", noop_msg)
 
                         # Successful tool execution - reset consecutive failure counters
-                        if tool_name == "replace_in_file":
+                        if tool_name in {"replace_in_file", "apply_patch"}:
                             context.set_agent_state("consecutive_replace_failures", 0)
+                            context.set_agent_state("force_apply_patch", False)
 
                         print(f"  Successfully applied {tool_name}")
                         return build_subagent_output(

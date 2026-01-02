@@ -21,6 +21,7 @@ from rev import config
 from rev.debug_logger import prune_old_logs
 from rev.tools.utils import quote_cmd_arg
 from rev.llm.client import ollama_chat
+from rev.tools.command_runner import run_command_safe, run_command_background, list_background_processes, kill_background_process
 
 # Backward compatibility for tests
 ROOT = config.ROOT
@@ -982,11 +983,15 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
         hint: Optional[str] = None,
         retry_plan: Optional[str] = None,
     ) -> str:
+        stdout_tail = _truncate_text(proc.stdout or "", _LLM_TIMEOUT_OUTPUT_LIMIT)
+        stderr_tail = _truncate_text(proc.stderr or "", _LLM_TIMEOUT_OUTPUT_LIMIT)
         result = {
             "success": success or already_applied,
             "rc": proc.returncode,
             "stdout": proc.stdout,
             "stderr": proc.stderr,
+            "stdout_tail": stdout_tail,
+            "stderr_tail": stderr_tail,
             "dry_run": dry_run,
             "phase": phase,
         }
@@ -1023,9 +1028,13 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
 
     try:
         strategies = [
-            ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", tfp], False),
-            ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", "--3way", tfp], True),
-            ("patch", ["patch", "--batch", "--forward", "--dry-run", "-p1", "-i", tfp], False),
+            # runner, check_args, use_three_way, apply_override
+            ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", tfp], False, None),
+            ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", "--3way", tfp], True, None),
+            ("patch", ["patch", "--batch", "--forward", "--dry-run", "-p1", "-i", tfp], False, None),
+            # More lenient patch attempts: ignore whitespace and different strip levels to salvage slightly misaligned diffs
+            ("patch", ["patch", "--batch", "--forward", "--dry-run", "--ignore-whitespace", "-p1", "-i", tfp], False, ["patch", "--batch", "--forward", "--ignore-whitespace", "-p1", "-i", tfp]),
+            ("patch", ["patch", "--batch", "--forward", "--dry-run", "--ignore-whitespace", "-p0", "-i", tfp], False, ["patch", "--batch", "--forward", "--ignore-whitespace", "-p0", "-i", tfp]),
         ]
         
         if not is_git_repo():
@@ -1035,8 +1044,9 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
         check_proc: Optional[subprocess.CompletedProcess] = None
         use_three_way = False
         apply_mode: Optional[str] = None
+        apply_override: Optional[list[str]] = None
 
-        for runner, check_args, use_three_way_flag in strategies:
+        for runner, check_args, use_three_way_flag, apply_override_args in strategies:
             check_proc = _run_shell(check_args)
 
             combined_output = (check_proc.stdout + check_proc.stderr).lower()
@@ -1046,6 +1056,7 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
             if check_proc.returncode == 0:
                 use_three_way = use_three_way_flag
                 apply_mode = runner
+                apply_override = apply_override_args
                 break
         else:
             if is_git_repo():
@@ -1083,7 +1094,10 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
             apply_args.append(tfp)
             apply_proc = _run_shell(apply_args)
         else:
-            apply_proc = _run_shell(["patch", "--batch", "--forward", "-p1", "-i", tfp])
+            if apply_override:
+                apply_proc = _run_shell(apply_override)
+            else:
+                apply_proc = _run_shell(["patch", "--batch", "--forward", "-p1", "-i", tfp])
 
         if apply_proc.returncode == 0:
             post_status = _working_tree_snapshot()
@@ -1277,7 +1291,7 @@ def git_branch(action: str = "list", branch_name: str = None) -> str:
 
 # ========== Additional Git Operations ==========
 
-def run_cmd(cmd: str | list[str], timeout: int = _DEFAULT_RUN_CMD_TIMEOUT, cwd: Optional[pathlib.Path] = None) -> str:
+def run_cmd(cmd: str | list[str], timeout: int = _DEFAULT_RUN_CMD_TIMEOUT, cwd: Optional[pathlib.Path] = None, *, background: bool = False, env: Optional[dict] = None) -> str:
     """Run a shell command safely with security validation.
 
     Security:
@@ -1327,9 +1341,12 @@ def run_cmd(cmd: str | list[str], timeout: int = _DEFAULT_RUN_CMD_TIMEOUT, cwd: 
         pass
 
     # Use safe command runner
-    from rev.tools.command_runner import run_command_safe
     if cwd is not None and not isinstance(cwd, pathlib.Path):
         cwd = pathlib.Path(cwd)
+
+    if background:
+        result = run_command_background(cmd, cwd=cwd, env=env)
+        return json.dumps(result)
 
     result = run_command_safe(
         cmd,
@@ -1337,12 +1354,44 @@ def run_cmd(cmd: str | list[str], timeout: int = _DEFAULT_RUN_CMD_TIMEOUT, cwd: 
         cwd=cwd,
         capture_output=True,
         check_interrupt=True,
+        env=env,
     )
+    # Attach tails for visibility on failures/timeouts
+    if result.get("rc", 0) != 0 or result.get("timeout") or result.get("timed_out"):
+        result["stdout_tail"] = _truncate_text(result.get("stdout", ""), _LLM_TIMEOUT_OUTPUT_LIMIT)
+        result["stderr_tail"] = _truncate_text(result.get("stderr", ""), _LLM_TIMEOUT_OUTPUT_LIMIT)
+        if result.get("timeout") or result.get("timed_out"):
+            result["error"] = result.get("error") or f"run_cmd timeout after {timeout}s"
+            result["timeout_exceeded"] = True
     result = _maybe_retry_timeout(cmd, timeout, cwd, result, is_tests=False)
     return json.dumps(result)
 
 
-def run_tests(cmd: str | list[str] = "pytest -q", timeout: int = _DEFAULT_RUN_TESTS_TIMEOUT, cwd: Optional[pathlib.Path] = None) -> str:
+def _detect_default_test_cmd(root: pathlib.Path) -> Optional[str]:
+    """Guess a sensible test command when none is provided."""
+    pkg_json = root / "package.json"
+    if pkg_json.exists():
+        try:
+            import json as _json
+            pkg = _json.loads(pkg_json.read_text(encoding="utf-8"))
+            scripts = pkg.get("scripts") or {}
+            if isinstance(scripts, dict) and "test" in scripts:
+                return "npm test"
+        except Exception:
+            pass
+
+    if (root / "pytest.ini").exists() or (root / "conftest.py").exists() or (root / "pyproject.toml").exists():
+        return "pytest -q"
+    if (root / "go.mod").exists():
+        return "go test ./..."
+    if (root / "pom.xml").exists():
+        return "mvn test"
+    if (root / "build.gradle").exists() or (root / "build.gradle.kts").exists():
+        return "./gradlew test"
+    return None
+
+
+def run_tests(cmd: Optional[str | list[str]] = None, timeout: int = _DEFAULT_RUN_TESTS_TIMEOUT, cwd: Optional[pathlib.Path] = None) -> str:
     """Run test suite safely with security validation.
 
     Security:
@@ -1357,14 +1406,63 @@ def run_tests(cmd: str | list[str] = "pytest -q", timeout: int = _DEFAULT_RUN_TE
     if cwd is not None and not isinstance(cwd, pathlib.Path):
         cwd = pathlib.Path(cwd)
 
+    resolved_cmd = cmd
+    if not resolved_cmd or (isinstance(resolved_cmd, str) and not resolved_cmd.strip()):
+        guessed = _detect_default_test_cmd(cwd or config.ROOT)
+        if guessed:
+            resolved_cmd = guessed
+        else:
+            return json.dumps({
+                "rc": -1,
+                "error": "run_tests requires a test command (e.g., 'npm test', 'pytest -q'); none provided and no default could be detected."
+            })
+
+    # Force non-interactive mode for npm test to avoid watch hangs
+    env = os.environ.copy()
+    cmd_text = resolved_cmd if isinstance(resolved_cmd, str) else " ".join(resolved_cmd)
+    lowered = cmd_text.lower()
+    if "npm test" in lowered or "npm run test" in lowered:
+        env.setdefault("CI", "1")
+        # If caller didn't specify extra args, add -- --watch=false to disable interactive watch
+        if isinstance(resolved_cmd, list) and all(arg not in {"--watch", "--watch=false", "--watchAll", "--watchAll=false"} for arg in resolved_cmd):
+            resolved_cmd = resolved_cmd + ["--", "--watch=false"]
+        elif isinstance(resolved_cmd, str) and "--watch" not in resolved_cmd:
+            resolved_cmd = f"{resolved_cmd} -- --watch=false"
+
     result = run_command_safe(
-        cmd,
+        resolved_cmd,
         timeout=timeout,
         cwd=cwd,
         capture_output=True,
         check_interrupt=True,
+        env=env,
     )
-    result = _maybe_retry_timeout(cmd, timeout, cwd, result, is_tests=True)
+
+    # Attach tails for visibility on failures/timeouts
+    if result.get("rc", 0) != 0 or result.get("timeout") or result.get("timed_out"):
+        result["stdout_tail"] = _truncate_text(result.get("stdout", ""), _LLM_TIMEOUT_OUTPUT_LIMIT)
+        result["stderr_tail"] = _truncate_text(result.get("stderr", ""), _LLM_TIMEOUT_OUTPUT_LIMIT)
+        if result.get("timeout") or result.get("timed_out"):
+            result["error"] = result.get("error") or f"run_tests timeout after {timeout}s"
+            result["timeout_exceeded"] = True
+
+    # Detect watch-mode hangs by inspecting output for common watch markers
+    watch_markers = (
+        "watch usage",
+        "press w to show more",
+        "press p to filter by a filename",
+        "watch mode",
+        "press q to quit",
+        "waiting for file changes",
+        "watching for file changes",
+    )
+    stdout_lower = (result.get("stdout") or "").lower()
+    stderr_lower = (result.get("stderr") or "").lower()
+    if any(marker in stdout_lower for marker in watch_markers) or any(marker in stderr_lower for marker in watch_markers):
+        result["rc"] = -1
+        result["error"] = "Test command appears to be running in watch/interactive mode; rerun with --watch=false or CI=1."
+
+    result = _maybe_retry_timeout(resolved_cmd, timeout, cwd, result, is_tests=True)
     return json.dumps(result)
 
 

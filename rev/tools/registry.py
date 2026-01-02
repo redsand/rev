@@ -496,6 +496,8 @@ def _build_tool_dispatch() -> Dict[str, callable]:
             args["cmd"] if "cmd" in args else args.get("command"),
             args.get("timeout", 300),
             args.get("cwd"),
+            background=args.get("background", False),
+            env=args.get("env"),
         ) if ("cmd" in args or "command" in args) else json.dumps(
             {"error": "missing required field: cmd", "rc": -1}
         ),
@@ -505,6 +507,8 @@ def _build_tool_dispatch() -> Dict[str, callable]:
             args.get("cwd"),
         ),
         "get_repo_context": lambda args: get_repo_context(args.get("commits", 6)),
+        "list_background_processes": lambda args: list_background_processes(),
+        "kill_background_process": lambda args: kill_background_process(args["pid"]),
 
         # Utility tools
         "install_package": lambda args: install_package(args["package"]),
@@ -1725,9 +1729,36 @@ def get_available_tools() -> list:
                             "description": "Command to execute"
                         },
                         "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 300},
-                        "cwd": {"type": "string", "description": "Working directory (relative to workspace)"}
+                        "cwd": {"type": "string", "description": "Working directory (relative to workspace)"},
+                        "background": {"type": "boolean", "description": "Run command in background and return immediately", "default": False},
+                        "env": {"type": "object", "description": "Optional environment variable overrides (key/value)"}
                     },
                     "required": ["cmd"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_background_processes",
+                "description": "List background processes started by rev",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "kill_background_process",
+                "description": "Kill a background process started by rev (only allowed for tracked PIDs)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pid": {"type": "integer", "description": "PID of the background process to kill"}
+                    },
+                    "required": ["pid"]
                 }
             }
         },

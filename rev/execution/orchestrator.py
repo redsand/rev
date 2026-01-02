@@ -2170,14 +2170,21 @@ def _build_diagnostic_tasks_for_failure(task: Task, verification_result: Optiona
                 action_type="edit",
             )
         )
-        build_cmd = _detect_build_command_for_root(config.ROOT or Path.cwd())
-        if build_cmd:
-            tasks.append(
-                Task(
-                    description=f"Run build to surface syntax errors and exact locations: {build_cmd}",
-                    action_type="run",
+
+        # Skip build for test-related tasks - run tests directly instead
+        is_test_task = task.action_type and task.action_type.lower() == "test"
+        is_test_file = target_path and ("/test" in target_path or "\\test" in target_path or target_path.endswith(".test.ts") or target_path.endswith(".test.js") or target_path.endswith(".spec.ts") or target_path.endswith(".spec.js") or target_path.endswith("_test.py") or target_path.endswith("test_.py"))
+
+        if not (is_test_task or is_test_file):
+            # Only run build for non-test code
+            build_cmd = _detect_build_command_for_root(config.ROOT or Path.cwd())
+            if build_cmd:
+                tasks.append(
+                    Task(
+                        description=f"Run build to surface syntax errors and exact locations: {build_cmd}",
+                        action_type="run",
+                    )
                 )
-            )
 
     if target_path:
         tasks.append(
@@ -5583,6 +5590,70 @@ class Orchestrator:
                             if failure_counts[failure_sig] > 1:
                                 print(f"  [circuit-breaker] Same error detected {failure_counts[failure_sig]}x: {error_sig}")
 
+                            # Uncertainty detection: Check if we should request user guidance
+                            if config.UNCERTAINTY_DETECTION_ENABLED and failure_counts[failure_sig] >= 2:
+                                from rev.execution.uncertainty_detector import detect_uncertainty
+                                from rev.execution.user_guidance import request_user_guidance, format_guidance_for_task
+
+                                # Collect previous error messages for better detection
+                                previous_errors = []
+                                error_history_key = f"error_history::{failure_sig}"
+                                if error_history_key in self.context.agent_state:
+                                    previous_errors = self.context.agent_state[error_history_key]
+
+                                # Store current error in history
+                                current_error = next_task.error or ""
+                                if not isinstance(previous_errors, list):
+                                    previous_errors = []
+                                previous_errors.append(current_error)
+                                self.context.set_agent_state(error_history_key, previous_errors[-5:])  # Keep last 5
+
+                                # Detect uncertainty
+                                uncertainty_score, uncertainty_signals = detect_uncertainty(
+                                    task=next_task,
+                                    retry_count=failure_counts[failure_sig],
+                                    verification_result=verification_result,
+                                    previous_errors=previous_errors
+                                )
+
+                                # Request guidance if threshold reached
+                                if uncertainty_score >= config.UNCERTAINTY_THRESHOLD:
+                                    guidance_response = request_user_guidance(
+                                        uncertainty_signals=uncertainty_signals,
+                                        task=next_task,
+                                        context={
+                                            "retry_count": failure_counts[failure_sig],
+                                            "uncertainty_score": uncertainty_score
+                                        }
+                                    )
+
+                                    if guidance_response:
+                                        if guidance_response.action == "abort":
+                                            print(f"  [{colorize('USER GUIDANCE', Colors.BRIGHT_YELLOW)}] Aborting execution")
+                                            return False
+                                        elif guidance_response.action == "skip":
+                                            print(f"  [{colorize('USER GUIDANCE', Colors.BRIGHT_YELLOW)}] Skipping task")
+                                            # Mark task as completed and continue
+                                            next_task.status = TaskStatus.COMPLETED
+                                            continue
+                                        elif guidance_response.action == "retry" and guidance_response.guidance:
+                                            # User provided guidance - inject it into task
+                                            print(f"  [{colorize('USER GUIDANCE', Colors.BRIGHT_GREEN)}] {guidance_response.guidance[:100]}")
+                                            next_task.description += format_guidance_for_task(guidance_response.guidance, next_task)
+                                            # Reset failure count to give guided approach a chance
+                                            failure_counts[failure_sig] = 0
+                                            # Add to agent requests
+                                            self.context.add_agent_request(
+                                                "USER_GUIDANCE",
+                                                {
+                                                    "agent": "User",
+                                                    "reason": "User provided guidance after uncertainty detected",
+                                                    "guidance": guidance_response.guidance
+                                                }
+                                            )
+                                            iteration -= 1  # Retry with guidance
+                                            continue
+
                             if failure_counts[failure_sig] == 2:
                                 diag_key = f"diagnostic::{failure_sig}"
                                 already_injected = self.context.agent_state.get(diag_key, False)
@@ -5660,11 +5731,54 @@ class Orchestrator:
                                     failure_sig,
                                     failure_counts[failure_sig],
                                 )
+
+                                # Last resort: Request user guidance before circuit breaker
+                                if config.UNCERTAINTY_DETECTION_ENABLED:
+                                    from rev.execution.uncertainty_detector import UncertaintySignal
+                                    from rev.execution.user_guidance import request_user_guidance, format_guidance_for_task
+
+                                    print(f"\n[{colorize('🛑 CIRCUIT BREAKER: RECOVERY LIMIT EXCEEDED', Colors.BRIGHT_RED, bold=True)}]")
+                                    print(f"{colorize(f'Made {total_recovery_attempts} recovery attempts across all errors.', Colors.BRIGHT_WHITE)}")
+                                    print(f"{colorize('This indicates a fundamental issue that cannot be auto-fixed.', Colors.BRIGHT_WHITE)}")
+
+                                    # Create a high-severity uncertainty signal for circuit breaker
+                                    circuit_breaker_signal = UncertaintySignal(
+                                        signal_type="circuit_breaker",
+                                        reason=f"Circuit breaker triggered after {total_recovery_attempts} recovery attempts",
+                                        score=10,  # Maximum score
+                                        context={"total_attempts": total_recovery_attempts, "summary": summary}
+                                    )
+
+                                    guidance_response = request_user_guidance(
+                                        uncertainty_signals=[circuit_breaker_signal],
+                                        task=next_task,
+                                        context={
+                                            "circuit_breaker": True,
+                                            "total_recovery_attempts": total_recovery_attempts
+                                        }
+                                    )
+
+                                    if guidance_response and guidance_response.action == "retry" and guidance_response.guidance:
+                                        # User provided override guidance - give it one more try
+                                        print(f"  [{colorize('USER OVERRIDE', Colors.BRIGHT_GREEN)}] {guidance_response.guidance[:100]}")
+                                        next_task.description += format_guidance_for_task(guidance_response.guidance, next_task)
+                                        # Reset counters to give user guidance a fair chance
+                                        self.context.set_agent_state("total_recovery_attempts", 0)
+                                        failure_counts[failure_sig] = 0
+                                        self.context.add_agent_request(
+                                            "USER_CIRCUIT_BREAKER_OVERRIDE",
+                                            {
+                                                "agent": "User",
+                                                "reason": "User provided override guidance at circuit breaker",
+                                                "guidance": guidance_response.guidance
+                                            }
+                                        )
+                                        iteration -= 1  # Retry with user guidance
+                                        continue
+
+                                # If no guidance or user chose to abort, trigger circuit breaker
                                 self.context.set_agent_state("no_retry", True)
                                 self.context.add_error(summary)
-                                print(f"\n[{colorize('🛑 CIRCUIT BREAKER: RECOVERY LIMIT EXCEEDED', Colors.BRIGHT_RED, bold=True)}]")
-                                print(f"{colorize(f'Made {total_recovery_attempts} recovery attempts across all errors.', Colors.BRIGHT_WHITE)}")
-                                print(f"{colorize('This indicates a fundamental issue that cannot be auto-fixed.', Colors.BRIGHT_WHITE)}")
                                 print(f"{colorize('Manual intervention required.', Colors.BRIGHT_YELLOW)}\n")
                                 print(f"{colorize(Symbols.INFO, Colors.BRIGHT_BLUE)} {summary}")
                                 return False

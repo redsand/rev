@@ -467,8 +467,8 @@ class HistoryCommand(CommandHandler):
         )
 
     def execute(self, args: List[str], session_context: Dict[str, Any]) -> str:
-        from rev.terminal.history import get_history
-
+        # Use the global history instance from input.py (handles persistence)
+        from rev.terminal.input import get_history
         history = get_history()
         output = [create_header("Command History", width=80)]
 

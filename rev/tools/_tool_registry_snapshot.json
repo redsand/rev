@@ -51,6 +51,8 @@
     "git_status",
     "inspect_module_hierarchy",
     "install_package",
+    "kill_background_process",
+    "list_background_processes",
     "list_dir",
     "mcp_add_server",
     "mcp_call_tool",
