@@ -4138,7 +4138,7 @@ class Orchestrator:
 
         # PERFORMANCE FIX 1: Track consecutive research tasks to prevent endless loops
         consecutive_reads: int = 0
-        MAX_CONSECUTIVE_READS: int = 20  # Allow max 20 consecutive READ tasks
+        MAX_CONSECUTIVE_READS: int = 40  # Allow max 40 consecutive READ/RESEARCH tasks
 
         if self.context.resume and self.context.resume_plan and self.context.plan:
             for task in self.context.plan.tasks:

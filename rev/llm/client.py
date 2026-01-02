@@ -62,8 +62,8 @@ _token_usage_tracker = _TokenUsageTracker()
 # Cache per provider+model: None (unknown), True (supported), False (unsupported)
 _THINKING_SUPPORT: Dict[str, Optional[bool]] = {}
 
-_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", flags=re.IGNORECASE | re.DOTALL)
-_ANALYSIS_BLOCK_RE = re.compile(r"<analysis>.*?</analysis>", flags=re.IGNORECASE | re.DOTALL)
+_THINK_BLOCK_RE = re.compile(r"<think>(.*?)</think>", flags=re.IGNORECASE | re.DOTALL)
+_ANALYSIS_BLOCK_RE = re.compile(r"<analysis>(.*?)</analysis>", flags=re.IGNORECASE | re.DOTALL)
 
 
 def reset_thinking_capabilities() -> None:
@@ -71,14 +71,24 @@ def reset_thinking_capabilities() -> None:
     _THINKING_SUPPORT.clear()
 
 
-def _strip_thinking_blocks(text: str) -> str:
-    """Remove provider-emitted reasoning blocks from text output."""
+def _extract_thinking(text: str) -> Tuple[str, Optional[str]]:
+    """Extract provider-emitted reasoning blocks and return (cleaned_text, thinking_raw)."""
     if not isinstance(text, str) or not text:
-        return text
-    cleaned = _THINK_BLOCK_RE.sub("", text)
-    cleaned = _ANALYSIS_BLOCK_RE.sub("", cleaned)
-    # Normalize leading whitespace after stripping.
-    return cleaned.lstrip("\n")
+        return text, None
+
+    thinking_parts: list[str] = []
+
+    def _collect(match: re.Match) -> str:
+        content = match.group(1) if match.groups() else ""
+        if content:
+            thinking_parts.append(content.strip())
+        return ""
+
+    cleaned = _THINK_BLOCK_RE.sub(_collect, text)
+    cleaned = _ANALYSIS_BLOCK_RE.sub(_collect, cleaned)
+    cleaned = cleaned.lstrip("\n")
+    thinking_raw = "\n\n".join(thinking_parts) if thinking_parts else None
+    return cleaned, thinking_raw
 
 
 def _sanitize_response_content(response: Dict[str, Any]) -> Dict[str, Any]:
@@ -94,8 +104,9 @@ def _sanitize_response_content(response: Dict[str, Any]) -> Dict[str, Any]:
     msg = dict(msg)
 
     content = msg.get("content", "")
+    thinking_raw = None
     if isinstance(content, str):
-        content = _strip_thinking_blocks(content)
+        content, thinking_raw = _extract_thinking(content)
     else:
         content = str(content) if content is not None else ""
 
@@ -112,6 +123,10 @@ def _sanitize_response_content(response: Dict[str, Any]) -> Dict[str, Any]:
             response["tool_call_recovery_errors"] = errors
 
     msg["content"] = content
+    if thinking_raw:
+        # Preserve reasoning/thought tokens for downstream visibility and next requests
+        msg["thinking"] = thinking_raw
+        response["thinking_raw"] = thinking_raw
     if tool_calls:
         msg["tool_calls"] = tool_calls
 

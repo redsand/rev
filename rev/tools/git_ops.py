@@ -26,9 +26,9 @@ from rev.tools.command_runner import run_command_safe, run_command_background, l
 # Backward compatibility for tests
 ROOT = config.ROOT
 
-_DEFAULT_RUN_CMD_TIMEOUT = 300
+_DEFAULT_RUN_CMD_TIMEOUT = 120
 _DEFAULT_RUN_TESTS_TIMEOUT = 600
-_LLM_TIMEOUT_ANALYSIS_MIN_SECONDS = 300
+_LLM_TIMEOUT_ANALYSIS_MIN_SECONDS = 120
 _LLM_TIMEOUT_ANALYSIS_MAX_SECONDS = 3600
 _LLM_TIMEOUT_OUTPUT_LIMIT = 2000
 

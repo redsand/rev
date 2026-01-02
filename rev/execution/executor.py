@@ -1141,8 +1141,15 @@ def _build_execution_system_context(sys_info: Dict[str, Any], coding_mode: bool 
     if coding_mode:
         base += CODING_EXECUTION_SUFFIX
 
-    # Apply ultrathink mode if enabled
-    if config.ULTRATHINK_MODE == "on":
+    # Apply ultrathink mode if enabled or auto for specific models
+    active_ultrathink = config.ULTRATHINK_MODE == "on"
+    if not active_ultrathink:
+        if config.ULTRATHINK_MODE != "off":
+            active_ultrathink = True
+        elif getattr(config, "EXECUTION_MODEL", "").split(":")[0] in config.ULTRATHINK_AUTO_MODELS:
+            active_ultrathink = True
+
+    if active_ultrathink:
         base = get_ultrathink_prompt(base, 'execution')
 
     return f"""System Information:
@@ -2835,8 +2842,15 @@ def fix_validation_failures(
     if coding_mode:
         system_prompt = TEST_WRITER_SYSTEM + "\n\n" + CODING_EXECUTION_SUFFIX
 
-    # Apply ultrathink mode if enabled
-    if config.ULTRATHINK_MODE == "on":
+    # Apply ultrathink mode if enabled or auto for specific models
+    active_ultrathink = config.ULTRATHINK_MODE == "on"
+    if not active_ultrathink:
+        if config.ULTRATHINK_MODE != "off":
+            active_ultrathink = True
+        elif getattr(config, "EXECUTION_MODEL", "").split(":")[0] in config.ULTRATHINK_AUTO_MODELS:
+            active_ultrathink = True
+
+    if active_ultrathink:
         system_prompt = get_ultrathink_prompt(system_prompt, 'execution')
 
     system_context = f"""System Information:

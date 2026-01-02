@@ -305,6 +305,14 @@ ULTRATHINK_MODE = os.getenv("REV_ULTRATHINK_MODE", "off").strip().lower()
 if ULTRATHINK_MODE not in {"on", "off"}:
     ULTRATHINK_MODE = "off"
 
+# Auto-enable Ultrathink for select models (e.g., GLM-4.6/4.7) unless explicitly disabled
+ULTRATHINK_AUTO_MODELS = {
+    "glm-4.7",
+    "glm-4.7:cloud",
+    "glm-4.6",
+    "glm-4.6:cloud",
+}
+
 # Maximum tokens for ultrathink mode (allows for extended reasoning)
 # Higher values enable deeper analysis but use more tokens
 ULTRATHINK_MAX_TOKENS = int(os.getenv("REV_ULTRATHINK_MAX_TOKENS", "15000"))
