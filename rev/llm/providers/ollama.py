@@ -272,6 +272,12 @@ class OllamaProvider(LLMProvider):
         # Ollama supports tools field directly without "mode": "tools"
         if tools_provided:
             payload["tools"] = tools or []
+            # CRITICAL: Force tool use when tools are provided (like OpenAI/Anthropic)
+            # This prevents models from returning text instead of calling tools
+            # Some Ollama models support "required", others use "auto"
+            # Using "auto" is safer and works across more models
+            if supports_tools and tools:
+                payload["tool_choice"] = "auto"
 
         # Log request
         debug_logger = get_logger()
@@ -362,17 +368,52 @@ class OllamaProvider(LLMProvider):
                     except json.JSONDecodeError:
                         return {"error": f"Ollama API error: {resp.status_code} {resp.reason}"}
 
-                # Try without tools if 400 with tools
+                # Try without tools or tool_choice if 400 with tools
                 if resp.status_code == 400 and tools_provided:
-                    if OLLAMA_DEBUG:
-                        print("[DEBUG] Got 400 with tools, retrying without tools...")
-                    payload_no_tools = {
-                        "model": model_name,
-                        "messages": messages,
-                        "stream": False,
-                        "options": payload.get("options", {})
-                    }
-                    resp = _make_request_interruptible(url, payload_no_tools, timeout)
+                    # First, try removing tool_choice (model might not support it)
+                    if "tool_choice" in payload:
+                        if OLLAMA_DEBUG:
+                            print("[DEBUG] Got 400 with tool_choice, retrying without tool_choice...")
+                        payload_no_choice = payload.copy()
+                        payload_no_choice.pop("tool_choice", None)
+                        try:
+                            resp = _make_request_interruptible(url, payload_no_choice, timeout)
+                            if resp.status_code == 200:
+                                # Success without tool_choice - use this payload
+                                payload = payload_no_choice
+                            else:
+                                # Still failing, try without tools entirely
+                                if OLLAMA_DEBUG:
+                                    print("[DEBUG] Still got 400, retrying without tools...")
+                                payload_no_tools = {
+                                    "model": model_name,
+                                    "messages": messages,
+                                    "stream": False,
+                                    "options": payload.get("options", {})
+                                }
+                                resp = _make_request_interruptible(url, payload_no_tools, timeout)
+                        except Exception:
+                            # Fallback to no tools
+                            if OLLAMA_DEBUG:
+                                print("[DEBUG] Exception with tool_choice removal, retrying without tools...")
+                            payload_no_tools = {
+                                "model": model_name,
+                                "messages": messages,
+                                "stream": False,
+                                "options": payload.get("options", {})
+                            }
+                            resp = _make_request_interruptible(url, payload_no_tools, timeout)
+                    else:
+                        # No tool_choice, try without tools
+                        if OLLAMA_DEBUG:
+                            print("[DEBUG] Got 400 with tools, retrying without tools...")
+                        payload_no_tools = {
+                            "model": model_name,
+                            "messages": messages,
+                            "stream": False,
+                            "options": payload.get("options", {})
+                        }
+                        resp = _make_request_interruptible(url, payload_no_tools, timeout)
 
                 resp.raise_for_status()
                 response = resp.json()
@@ -503,6 +544,9 @@ class OllamaProvider(LLMProvider):
         # Ollama supports tools field directly without "mode": "tools"
         if tools_provided:
             payload["tools"] = tools or []
+            # Force tool use when tools are provided
+            if supports_tools and tools:
+                payload["tool_choice"] = "auto"
 
         debug_logger = get_logger()
         debug_logger.log_llm_request(model_name, messages, tools if tools_provided else None)
@@ -519,13 +563,26 @@ class OllamaProvider(LLMProvider):
                 response = requests.post(url, json=payload, timeout=timeout, stream=True)
 
                 if response.status_code == 400 and tools_provided:
-                    payload_no_tools = {
-                        "model": model_name,
-                        "messages": messages,
-                        "stream": True,
-                        "options": payload.get("options", {})
-                    }
-                    response = requests.post(url, json=payload_no_tools, timeout=timeout, stream=True)
+                    # Try removing tool_choice first, then tools
+                    if "tool_choice" in payload:
+                        payload_no_choice = payload.copy()
+                        payload_no_choice.pop("tool_choice", None)
+                        try:
+                            response = requests.post(url, json=payload_no_choice, timeout=timeout, stream=True)
+                            if response.status_code == 200:
+                                payload = payload_no_choice
+                        except Exception:
+                            pass
+
+                    # If still failing, try without tools
+                    if response.status_code == 400:
+                        payload_no_tools = {
+                            "model": model_name,
+                            "messages": messages,
+                            "stream": True,
+                            "options": payload.get("options", {})
+                        }
+                        response = requests.post(url, json=payload_no_tools, timeout=timeout, stream=True)
 
                 response.raise_for_status()
 

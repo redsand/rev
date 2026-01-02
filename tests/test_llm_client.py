@@ -134,7 +134,8 @@ def test_returns_error_after_exhausting_retries(mock_sleep, monkeypatch):
 
 
 @patch("rev.llm.client.requests.post")
-def test_sends_tools_mode_even_with_empty_tools(mock_post):
+def test_sends_tools_in_standard_format(mock_post):
+    """Test that tools are sent in OpenAI-compatible format (not 'mode: tools')."""
     messages = [{"role": "user", "content": "test"}]
     mock_post.return_value = _make_response(
         200,
@@ -151,7 +152,8 @@ def test_sends_tools_mode_even_with_empty_tools(mock_post):
     assert mock_post.call_count == 1
 
     payload = mock_post.call_args.kwargs["json"]
-    assert payload["mode"] == "tools"
+    # CRITICAL: Should use standard OpenAI format, not "mode": "tools"
+    assert "mode" not in payload, "Should not use non-standard 'mode' parameter"
     assert payload["tools"] == []
 
 

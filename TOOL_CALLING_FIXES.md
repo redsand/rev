@@ -133,7 +133,13 @@ if tools_provided:
     payload["tools"] = tools or []
     # Don't use "mode": "tools" - this causes compatibility issues
 
-# Fix 2: Comprehensive tool support detection (including cloud models)
+# Fix 2: CRITICAL - Force tool use with tool_choice parameter
+if tools_provided:
+    payload["tools"] = tools or []
+    if supports_tools and tools:
+        payload["tool_choice"] = "auto"  # Prevents models from returning text!
+
+# Fix 3: Comprehensive tool support detection (including cloud models)
 def supports_tool_calling(self, model: str) -> bool:
     """Check if model supports tool calling."""
     model_lower = model.lower()
