@@ -1178,7 +1178,7 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
         _ensure_test_request_for_file(context, file_path)
         return VerificationResult(
             passed=True,
-            message=f"Syntax check skipped for {file_path.name}; a project typecheck/build has been enqueued.",
+            message=f"Syntax check skipped for {file_path.name}; project-level typecheck/build task enqueued",
             details={
                 **details,
                 "syntax_skipped": True,
@@ -3805,9 +3805,12 @@ def _enqueue_project_typecheck(context: RevContext, tasks: List[Task], reason: s
     if not cmd:
         return None
     # Keep the command clean; keep reason in description only.
-    desc = f"Run {cmd} for project typecheck/build to validate syntax"
+    # IMPORTANT: Avoid phrases like "for project typecheck/build" which could be parsed as a cwd path
+    desc = f"Run `{cmd}` to perform project-level typecheck and build validation"
     if reason:
-        desc += f" (reason: {reason})"
+        # Limit reason length to prevent truncation in logs
+        reason_text = reason if len(reason) <= 60 else reason[:57] + "..."
+        desc += f" ({reason_text})"
     tasks.append(
         Task(
             description=desc,
@@ -3952,7 +3955,7 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
             context.agent_requests.append({"type": "INJECT_TASKS", "details": {"tasks": tasks}})
         return VerificationResult(
             passed=True,
-            message=f"Syntax check skipped for {file_path.name}; a project typecheck/build has been enqueued.",
+            message=f"Syntax check skipped for {file_path.name}; project-level typecheck/build task enqueued",
             details={
                 "file_path": str(file_path),
                 "syntax_skipped": True,

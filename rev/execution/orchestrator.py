@@ -5772,17 +5772,69 @@ class Orchestrator:
                 # Summarize the result of the last tool event
                 event = next_task.tool_events[-1]
                 tool_output = event.get('raw_result')
+                tool_name = event.get('tool', '')
+
                 if isinstance(tool_output, str):
                     summary = tool_output.strip()
+
+                    # Smart truncation: parse command results to prioritize error information
+                    if tool_name in ('run_cmd', 'run_tests', 'run_property_tests'):
+                        try:
+                            result_data = json.loads(summary)
+                            if isinstance(result_data, dict):
+                                rc = result_data.get('rc', 0)
+                                stderr = result_data.get('stderr', '').strip()
+                                stdout = result_data.get('stdout', '').strip()
+
+                                # For failed commands, prioritize stderr (contains error messages)
+                                if rc != 0 and stderr:
+                                    # Extract the most relevant error portion
+                                    # Keep up to 2000 chars of stderr for build/test errors
+                                    if len(stderr) > 2000:
+                                        # Try to find error markers and keep content around them
+                                        error_markers = ['error:', 'Error:', 'ERROR:', 'failed', 'Failed', 'FAILED']
+                                        best_section = stderr[-2000:]  # Default to end
+
+                                        for marker in error_markers:
+                                            idx = stderr.rfind(marker)
+                                            if idx > 0:
+                                                # Get context around the error
+                                                start = max(0, idx - 500)
+                                                end = min(len(stderr), idx + 1500)
+                                                best_section = stderr[start:end]
+                                                if start > 0:
+                                                    best_section = '...' + best_section
+                                                if end < len(stderr):
+                                                    best_section = best_section + '...'
+                                                break
+
+                                        summary = json.dumps({
+                                            'rc': rc,
+                                            'stderr': best_section,
+                                            'stdout': stdout[:500] if stdout else ''
+                                        })
+                                    # else: keep full result if under 2000 chars
+                                elif rc == 0:
+                                    # Success - brief summary is fine
+                                    summary = json.dumps({
+                                        'rc': 0,
+                                        'stdout': stdout[:800] if len(stdout) > 800 else stdout
+                                    })
+                        except (json.JSONDecodeError, ValueError):
+                            # Not JSON or invalid - treat as plain string
+                            pass
+
                     # If the error is already in the summary, don't repeat it
                     if error_detail and error_detail in summary:
                         output_detail = summary
                         error_detail = ""
                     else:
                         output_detail = summary
-                    
-                    if len(output_detail) > 300:
-                        output_detail = output_detail[:300] + '...'
+
+                    # Generous limits: 2500 chars for command output, 800 for other tools
+                    limit = 2500 if tool_name in ('run_cmd', 'run_tests', 'run_property_tests') else 800
+                    if len(output_detail) > limit:
+                        output_detail = output_detail[:limit] + '...'
 
             if error_detail:
                 log_entry += f" | Reason: {error_detail}"

@@ -21,6 +21,25 @@ from rev.execution.ultrathink_prompts import ULTRATHINK_CODE_WRITER_PROMPT
 from rev.tools.workspace_resolver import resolve_workspace_path
 
 
+def _looks_like_code_reference(text: str) -> bool:
+    """Check if text looks like a code reference (e.g., api.method.name) rather than a file path.
+
+    Returns True if the text has multiple dots but no path separators.
+    """
+    if not text:
+        return False
+
+    # Count dots
+    dot_count = text.count('.')
+
+    # Has path separators?
+    has_path_sep = ('/' in text or '\\' in text)
+
+    # If there are 2+ dots and no path separators, it's likely a code reference
+    # Examples: api.interceptors.request.use, express.json.stringify
+    return dot_count >= 2 and not has_path_sep
+
+
 def _extract_target_files_from_description(description: str) -> list[str]:
     """Extract file paths mentioned in a task description.
 
@@ -35,15 +54,25 @@ def _extract_target_files_from_description(description: str) -> list[str]:
     paths = []
 
     # Match backticked paths like `src/module/file.ext` (any extension)
+    # But exclude code references like `api.interceptors.request.use`
     backtick_pattern = r'`([^`]+\.\w+)`'
     for match in re.finditer(backtick_pattern, description, re.IGNORECASE):
-        paths.append(match.group(1))
+        candidate = match.group(1)
+        # Filter out code references: if there are multiple dots but no path separators,
+        # it's likely a code reference (e.g., api.method.name) not a file path
+        if _looks_like_code_reference(candidate):
+            continue
+        paths.append(candidate)
 
     # Match quoted paths like "src/module/file.ext" (any extension)
     quote_pattern = r'"([^"]+\.\w+)"'
     for match in re.finditer(quote_pattern, description, re.IGNORECASE):
-        if match.group(1) not in paths:
-            paths.append(match.group(1))
+        candidate = match.group(1)
+        if candidate in paths:
+            continue
+        if _looks_like_code_reference(candidate):
+            continue
+        paths.append(candidate)
 
     # Match bare paths like src/module/file.ext or backend/prisma/schema.prisma
     # Pattern: word chars, slashes, dots, hyphens + dot + extension
@@ -62,6 +91,9 @@ def _extract_target_files_from_description(description: str) -> list[str]:
     for match in re.finditer(bare_pattern, description, re.IGNORECASE):
         candidate = match.group(1)
         if candidate in paths or candidate.startswith('.'):
+            continue
+        # Skip code references (multiple dots, no path separators)
+        if _looks_like_code_reference(candidate):
             continue
         end_idx = match.end()
         if end_idx < len(description) and description[end_idx] == "(":
