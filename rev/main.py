@@ -528,6 +528,15 @@ def main():
                 })
             except Exception:
                 pass
+
+            # Log tool availability (static + MCP)
+            try:
+                from rev.tools.registry import get_tool_stats
+                stats = get_tool_stats()
+                _log(f"[tools] total available: {stats.get('total_tools', 'n/a')}")
+                debug_logger.log("tools", "STATS", stats)
+            except Exception as e:  # pragma: no cover - logging only
+                _log(f"[WARN] Unable to compute tool stats: {e}")
         except Exception as e:
             _log(f"[WARN] MCP initialization failed: {e}")
     else:
@@ -631,8 +640,11 @@ def main():
 
 
     _log(f"rev - CI/CD Agent")
-    _log(f"Model: {config.OLLAMA_MODEL}")
-    _log(f"Ollama: {config.OLLAMA_BASE_URL}")
+    active_model = config.EXECUTION_MODEL or config.OLLAMA_MODEL
+    _log(f"Provider: {config.LLM_PROVIDER}")
+    _log(f"Model: {active_model}")
+    if (config.LLM_PROVIDER or "").lower() == "ollama":
+        _log(f"Ollama: {config.OLLAMA_BASE_URL}")
     _log(f"Repository: {config.ROOT}")
     if args.parallel > 1:
         _log(f"Parallel execution: {args.parallel} concurrent tasks")

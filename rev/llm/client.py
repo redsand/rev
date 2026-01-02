@@ -17,6 +17,7 @@ from rev import config
 from rev.cache import LLMResponseCache, get_llm_cache
 from rev.debug_logger import get_logger
 from rev.llm.provider_factory import get_provider, get_provider_for_model
+from rev.llm.tool_call_parser import parse_tool_calls_from_text
 
 
 # Debug mode - set to True to see API requests/responses
@@ -81,15 +82,40 @@ def _strip_thinking_blocks(text: str) -> str:
 
 
 def _sanitize_response_content(response: Dict[str, Any]) -> Dict[str, Any]:
-    """Strip any chain-of-thought-like blocks from assistant content."""
+    """Strip chain-of-thought blocks and recover tool calls from assistant text when absent."""
     if not isinstance(response, dict):
         return response
+
     msg = response.get("message")
-    if isinstance(msg, dict) and isinstance(msg.get("content"), str):
-        msg = dict(msg)
-        msg["content"] = _strip_thinking_blocks(msg.get("content", ""))
-        response = dict(response)
-        response["message"] = msg
+    if not isinstance(msg, dict):
+        return response
+
+    response = dict(response)
+    msg = dict(msg)
+
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        content = _strip_thinking_blocks(content)
+    else:
+        content = str(content) if content is not None else ""
+
+    tool_calls = msg.get("tool_calls") or []
+
+    # Attempt to recover tool calls from text when native tool_calls are missing.
+    if content and not tool_calls:
+        recovered, cleaned, errors = parse_tool_calls_from_text(content)
+        if recovered:
+            tool_calls = recovered
+            content = cleaned
+            response["tool_call_recovered"] = True
+        if errors:
+            response["tool_call_recovery_errors"] = errors
+
+    msg["content"] = content
+    if tool_calls:
+        msg["tool_calls"] = tool_calls
+
+    response["message"] = msg
     return response
 
 
@@ -99,8 +125,8 @@ def _thinking_cache_key(provider: Any, model: str) -> str:
 
 
 def _provider_can_try_thinking(provider: Any) -> bool:
-    # Only OpenAI-compatible backends are expected to accept a "thinking" parameter today.
-    return getattr(provider, "name", "") == "openai"
+    # Avoid "thinking" for OpenAI until explicitly supported; it causes param errors on most models.
+    return False
 
 
 def _is_thinking_param_error(response: Dict[str, Any]) -> bool:
@@ -551,12 +577,18 @@ def ollama_chat(
     Returns:
         Dict with 'message' and 'usage' keys, or 'error' key if failed
     """
-    model_name = model or config.OLLAMA_MODEL
+    # Prefer explicit model, then execution model, then legacy OLLAMA_MODEL
+    model_name = model or getattr(config, "EXECUTION_MODEL", None) or config.OLLAMA_MODEL
     supports_tools = config.DEFAULT_SUPPORTS_TOOLS if supports_tools is None else supports_tools
+    if tools:
+        supports_tools = True
+    # Always attempt tool-calling when tools are supplied, even if the model is uncertain.
+    if tools:
+        supports_tools = True
 
     # Get cache for checking/storing responses
     llm_cache = get_llm_cache() or LLMResponseCache()
-    tools_provided = tools is not None and supports_tools
+    tools_provided = tools is not None
 
     debug_logger = get_logger()
     try:
@@ -564,12 +596,19 @@ def ollama_chat(
             "llm_provider": config.LLM_PROVIDER,
             "supports_tools": supports_tools,
             "tools_provided": bool(tools),
+            "tools_count": len(tools) if tools else 0,
         })
     except Exception:
         pass
     if getattr(config, "LLM_TRANSACTION_LOG_ENABLED", False):
         try:
-            debug_logger.log_llm_transcript(model=model_name, messages=messages, response={"pending": True}, tools=tools)
+            debug_logger.log_llm_transcript(
+                model=model_name,
+                messages=messages,
+                response={"pending": True},
+                tools=tools,
+                extra={"supports_tools": supports_tools, "tools_count": len(tools) if tools else 0},
+            )
         except Exception:
             pass
 
@@ -584,16 +623,9 @@ def ollama_chat(
 
     # Get the appropriate provider for the model
     try:
-        # If the primary provider is ollama, we route everything to it to avoid
-        # warnings about missing API keys for auto-detected cloud models.
-        # If it's a known cloud provider (configured via keys or env), we allow auto-detection
-        # to proceed unless it detects ollama (the fallback).
-        override_provider = None
-        if config.LLM_PROVIDER == "ollama":
-            override_provider = "ollama"
-        elif config.LLM_PROVIDER not in {"gemini", "openai", "anthropic"}:
-            override_provider = config.LLM_PROVIDER
-
+        # Force provider if user selected one; this prevents auto-detection from
+        # falling back to Ollama when model names are ambiguous (e.g., o4-mini).
+        override_provider = config.LLM_PROVIDER or None
         provider = get_provider_for_model(model_name, override_provider=override_provider)
         # DEBUG: Log provider selection
         if OLLAMA_DEBUG:

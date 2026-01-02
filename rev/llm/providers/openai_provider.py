@@ -46,7 +46,11 @@ class OpenAIProvider(LLMProvider):
         message = str(error).lower()
         if "temperature" not in message:
             return False
-        return "unsupported parameter" in message or "not supported" in message
+        return (
+            "unsupported parameter" in message
+            or "not supported" in message
+            or "unsupported value" in message
+        )
 
     @staticmethod
     def _get_value(obj: Any, key: str, default: Any = None) -> Any:
@@ -170,12 +174,12 @@ class OpenAIProvider(LLMProvider):
         request_params: Dict[str, Any] = {
             "model": model_name,
             "input": messages,
-            "temperature": float(os.getenv("OPENAI_TEMPERATURE", "0.1")),
+            "temperature": float(os.getenv("OPENAI_TEMPERATURE", str(config.OPENAI_TEMPERATURE))),
         }
         if model_name in self._no_temperature_models:
             request_params.pop("temperature", None)
 
-        if tools and supports_tools:
+        if tools:
             request_params["tools"] = self._normalize_tools_for_responses(tools)
             request_params["tool_choice"] = "auto"
 
@@ -220,7 +224,7 @@ class OpenAIProvider(LLMProvider):
         debug_logger = get_logger()
 
         # Default to GPT-4
-        model_name = model or os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview")
+        model_name = model or os.getenv("OPENAI_MODEL", "gpt-5.2-mini")
         if model_name in self._responses_only_models:
             try:
                 result = self._chat_with_responses(client, messages, tools, model_name, supports_tools, **kwargs)
@@ -234,7 +238,8 @@ class OpenAIProvider(LLMProvider):
         request_params = {
             "model": model_name,
             "messages": messages,
-            "temperature": float(os.getenv("OPENAI_TEMPERATURE", "0.1")),
+            # Respect runtime setting; fallback to env if provided, else config default
+            "temperature": float(os.getenv("OPENAI_TEMPERATURE", str(getattr(config, "OPENAI_TEMPERATURE", 1.0)))),
         }
         if model_name in self._no_temperature_models:
             request_params.pop("temperature", None)
@@ -245,7 +250,7 @@ class OpenAIProvider(LLMProvider):
             request_params["thinking"] = kwargs["thinking"]
 
         # Add tools if provided and supported
-        if tools and supports_tools:
+        if tools:
             request_params["tools"] = tools
             request_params["tool_choice"] = "auto"
 
@@ -356,7 +361,7 @@ class OpenAIProvider(LLMProvider):
         client = self._get_client()
         debug_logger = get_logger()
 
-        model_name = model or os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview")
+        model_name = model or os.getenv("OPENAI_MODEL", "gpt-5.2-mini")
         if model_name in self._responses_only_models:
             try:
                 result = self._chat_with_responses(client, messages, tools, model_name, supports_tools, **kwargs)
@@ -371,7 +376,7 @@ class OpenAIProvider(LLMProvider):
         request_params = {
             "model": model_name,
             "messages": messages,
-            "temperature": float(os.getenv("OPENAI_TEMPERATURE", "0.1")),
+            "temperature": float(os.getenv("OPENAI_TEMPERATURE", str(getattr(config, "OPENAI_TEMPERATURE", 1.0)))),
             "stream": True,
         }
         if model_name in self._no_temperature_models:
@@ -380,7 +385,7 @@ class OpenAIProvider(LLMProvider):
         if "thinking" in kwargs and kwargs["thinking"] is not None:
             request_params["thinking"] = kwargs["thinking"]
 
-        if tools and supports_tools:
+        if tools:
             request_params["tools"] = tools
             request_params["tool_choice"] = "auto"
 
@@ -527,9 +532,10 @@ class OpenAIProvider(LLMProvider):
 
     def supports_tool_calling(self, model: str) -> bool:
         """Check if model supports tool calling."""
-        # Most GPT-4 and GPT-3.5-turbo models support tool calling
-        tool_capable_models = ["gpt-4", "gpt-3.5-turbo"]
-        return any(model.startswith(prefix) for prefix in tool_capable_models)
+        # OpenAI tool-capable families: GPT-x, O-family (o1/o3/o4), and 5.x mini/preview
+        model_lower = model.lower()
+        prefixes = ("gpt-", "o1", "o3", "o4", "o-", "gpt-5", "gpt5")
+        return model_lower.startswith(prefixes)
 
     def validate_config(self) -> bool:
         """Validate OpenAI configuration."""

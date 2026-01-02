@@ -326,9 +326,15 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
         description="LLM temperature (0.0-2.0; lower = more deterministic)",
         section="LLM Generation",
         parser=_parse_temperature,
-        getter=lambda: config.OLLAMA_TEMPERATURE,
-        setter=lambda value: setattr(config, "OLLAMA_TEMPERATURE", value),
-        default=0.1,
+        getter=lambda: config.TEMPERATURE,
+        setter=lambda value: (
+            setattr(config, "TEMPERATURE", value),
+            setattr(config, "OLLAMA_TEMPERATURE", value),
+            setattr(config, "OPENAI_TEMPERATURE", value),
+            setattr(config, "ANTHROPIC_TEMPERATURE", value),
+            setattr(config, "GEMINI_TEMPERATURE", value),
+        ),
+        default=1.0,
     ),
     "num_ctx": RuntimeSetting(
         key="num_ctx",
@@ -756,12 +762,7 @@ RUNTIME_SETTINGS: Dict[str, RuntimeSetting] = {
             value, choices={"ollama", "openai", "anthropic", "gemini", "localai", "vllm", "lmstudio"}
         ),
         getter=lambda: config.LLM_PROVIDER,
-        setter=lambda value: (
-            setattr(config, "LLM_PROVIDER", value),
-            setattr(config, "EXECUTION_PROVIDER", value),
-            setattr(config, "PLANNING_PROVIDER", value),
-            setattr(config, "RESEARCH_PROVIDER", value),
-        ),
+        setter=lambda value: config.set_llm_provider(value),
         default=config.LLM_PROVIDER,
     ),
     "private_mode": RuntimeSetting(
@@ -983,6 +984,10 @@ def apply_saved_settings(session_context: Optional[Dict[str, Any]] = None) -> Op
 
     if settings.get("runtime_settings"):
         apply_runtime_settings(settings.get("runtime_settings", {}))
+
+    # Keep phase providers aligned with llm_provider unless explicitly overridden later
+    if config.LLM_PROVIDER:
+        config.set_llm_provider(config.LLM_PROVIDER)
 
     # Reload MCP servers if private mode changed
     if config.get_private_mode() != private_mode_before:

@@ -210,7 +210,7 @@ def _get_primary_provider_and_model():
         provider_models = {
             "gemini": os.getenv("GEMINI_MODEL", "gemini-3-flash-preview"),
             "anthropic": os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"),
-            "openai": os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview"),
+            "openai": os.getenv("OPENAI_MODEL", "gpt-5.2-mini"),
             "ollama": DEFAULT_OLLAMA_MODEL,
         }
         return explicit_provider, provider_models.get(explicit_provider, DEFAULT_OLLAMA_MODEL)
@@ -228,7 +228,7 @@ def _get_primary_provider_and_model():
     # Check OpenAI credentials
     openai_key = os.getenv("OPENAI_API_KEY", "").strip()
     if openai_key:
-        return "openai", os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview")
+        return "openai", os.getenv("OPENAI_MODEL", "gpt-5.2-mini")
 
     # Default to Ollama
     return "ollama", DEFAULT_OLLAMA_MODEL
@@ -245,6 +245,7 @@ if os.getenv("OLLAMA_DEBUG"):
 OLLAMA_BASE_URL = DEFAULT_OLLAMA_BASE_URL
 OLLAMA_MODEL = DEFAULT_OLLAMA_MODEL
 EXECUTION_MODEL = os.getenv("REV_EXECUTION_MODEL", _DEFAULT_MODEL)
+# Auto-switch target if repeated tool-call failures occur (env override supported)
 EXECUTION_MODEL_FALLBACK = os.getenv("REV_EXECUTION_MODEL_FALLBACK", "").strip()
 PLANNING_MODEL = os.getenv("REV_PLANNING_MODEL", _DEFAULT_MODEL)
 REVIEW_MODEL = os.getenv("REV_REVIEW_MODEL", _DEFAULT_MODEL)
@@ -267,9 +268,12 @@ TEST_EXECUTOR_COMMAND_CORRECTION_ENABLED = os.getenv("REV_TEST_EXECUTOR_COMMAND_
 EXPLICIT_YES = os.getenv("REV_EXPLICIT_YES", "false").lower() == "true"
 
 # LLM Generation Parameters (for improved tool calling with local models)
-# Lower temperature improves consistency and accuracy for tool calling
-# Recommended: 0.1 for tool calling, 0.7 for creative tasks
-OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.1"))
+# Default to 1.0 for broad model compatibility; set lower (e.g., 0.1-0.3) if your
+# provider/model prefers cooler temperatures for tool-calling reliability.
+# The global TEMPERATURE is the source of truth; provider-specific temperatures
+# inherit from it unless explicitly overridden by env vars.
+TEMPERATURE = float(os.getenv("REV_TEMPERATURE", os.getenv("OPENAI_TEMPERATURE", "1.0")))
+OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", str(TEMPERATURE)))
 
 # Context window size (num_ctx) - recommended 8K-16K for tool calling
 # Higher values allow for more context but use more memory
@@ -378,19 +382,19 @@ def get_tool_mode() -> str:
 
 # OpenAI Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview")
-OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.1"))
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.2-mini")
+OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", str(TEMPERATURE)))
 
 # Anthropic (Claude) Configuration
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
-ANTHROPIC_TEMPERATURE = float(os.getenv("ANTHROPIC_TEMPERATURE", "0.1"))
+ANTHROPIC_TEMPERATURE = float(os.getenv("ANTHROPIC_TEMPERATURE", str(TEMPERATURE)))
 ANTHROPIC_MAX_TOKENS = int(os.getenv("ANTHROPIC_MAX_TOKENS", "8192"))
 
 # Google Gemini Configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
-GEMINI_TEMPERATURE = float(os.getenv("GEMINI_TEMPERATURE", "0.1"))
+GEMINI_TEMPERATURE = float(os.getenv("GEMINI_TEMPERATURE", str(TEMPERATURE)))
 GEMINI_TOP_P = float(os.getenv("GEMINI_TOP_P", "0.9"))
 GEMINI_TOP_K = int(os.getenv("GEMINI_TOP_K", "40"))
 GEMINI_MAX_OUTPUT_TOKENS = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "8192"))
@@ -652,6 +656,22 @@ def set_model(model_name: str) -> None:
     EXECUTION_MODEL = model_name
     PLANNING_MODEL = model_name
     RESEARCH_MODEL = model_name
+
+
+def set_llm_provider(provider: str) -> None:
+    """
+    Update the active LLM provider for all phases (execution, planning, research).
+
+    This keeps all phases aligned with the selected provider unless explicitly
+    overridden by env vars/CLI for a specific phase.
+    """
+    global LLM_PROVIDER, EXECUTION_PROVIDER, PLANNING_PROVIDER, RESEARCH_PROVIDER
+    provider = (provider or "").strip().lower()
+    if provider:
+        LLM_PROVIDER = provider
+        EXECUTION_PROVIDER = provider
+        PLANNING_PROVIDER = provider
+        RESEARCH_PROVIDER = provider
 
 
 def get_system_info_cached() -> Dict[str, Any]:

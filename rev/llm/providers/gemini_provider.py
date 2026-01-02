@@ -222,7 +222,7 @@ class GeminiProvider(LLMProvider):
 
         # Build generation config
         generation_config = {
-            "temperature": float(os.getenv("GEMINI_TEMPERATURE", "0.1")),
+            "temperature": float(os.getenv("GEMINI_TEMPERATURE", str(config.GEMINI_TEMPERATURE))),
             "top_p": float(os.getenv("GEMINI_TOP_P", "0.9")),
             "top_k": int(os.getenv("GEMINI_TOP_K", "40")),
             "max_output_tokens": int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "8192")),
@@ -238,7 +238,7 @@ class GeminiProvider(LLMProvider):
             model_kwargs["system_instruction"] = system_instruction
 
         # Add tools if provided and supported
-        if tools and supports_tools:
+        if tools:
             gemini_tools = self._convert_tools(tools)
             if gemini_tools:
                 model_kwargs["tools"] = gemini_tools
@@ -284,7 +284,7 @@ class GeminiProvider(LLMProvider):
         system_instruction, converted_messages = self._convert_messages(messages)
 
         generation_config = {
-            "temperature": float(os.getenv("GEMINI_TEMPERATURE", "0.1")),
+            "temperature": float(os.getenv("GEMINI_TEMPERATURE", str(config.GEMINI_TEMPERATURE))),
             "top_p": float(os.getenv("GEMINI_TOP_P", "0.9")),
             "top_k": int(os.getenv("GEMINI_TOP_K", "40")),
             "max_output_tokens": int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "8192")),
@@ -298,7 +298,7 @@ class GeminiProvider(LLMProvider):
         if system_instruction:
             model_kwargs["system_instruction"] = system_instruction
 
-        if tools and supports_tools:
+        if tools:
             gemini_tools = self._convert_tools(tools)
             if gemini_tools:
                 model_kwargs["tools"] = gemini_tools

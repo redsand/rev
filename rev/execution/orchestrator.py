@@ -4497,10 +4497,14 @@ class Orchestrator:
                     prior = structure_seen.get(struct_sig)
                     if isinstance(prior, dict):
                         prior_change = prior.get("code_change_iteration", -1)
+                        # Only block duplicates once a code change iteration has been recorded.
+                        # Allow redundant listings during initial planning/resume (code_change_iteration = -1)
+                        # so the agent can recover missing paths.
                         if (
                             isinstance(prior_change, int)
                             and isinstance(last_code_change_iteration, int)
                             and prior_change == last_code_change_iteration
+                            and last_code_change_iteration >= 0
                         ):
                             print(f"  [structure-read] Skipping duplicate structure listing (sig={struct_sig}, code_change_iter={last_code_change_iteration})")
                             next_task.status = TaskStatus.STOPPED

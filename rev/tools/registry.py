@@ -2524,3 +2524,20 @@ def get_available_tools() -> list:
 
     _enforce_registry_guard(tools)
     return tools
+
+
+def get_tool_stats() -> Dict[str, Any]:
+    """Return simple tool stats for logging/telemetry."""
+    tools = get_available_tools()
+    stats: Dict[str, Any] = {
+        "total_tools": len(tools),
+    }
+    # Include MCP server visibility if available (best-effort)
+    try:  # pragma: no cover - runtime environment may not have MCP
+        from rev.mcp.client import mcp_client  # type: ignore
+
+        stats["mcp_server_count"] = len(getattr(mcp_client, "servers", {}))
+    except Exception:
+        stats["mcp_server_count"] = None
+
+    return stats
