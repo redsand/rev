@@ -86,7 +86,8 @@ def _extract_thinking(text: str) -> Tuple[str, Optional[str]]:
 
     cleaned = _THINK_BLOCK_RE.sub(_collect, text)
     cleaned = _ANALYSIS_BLOCK_RE.sub(_collect, cleaned)
-    cleaned = cleaned.lstrip("\n")
+    # Strip stray standalone <think> or </think> tags that were emitted without a full block
+    cleaned = re.sub(r"</?think>", "", cleaned, flags=re.IGNORECASE).lstrip("\n")
     thinking_raw = "\n\n".join(thinking_parts) if thinking_parts else None
     return cleaned, thinking_raw
 
@@ -570,6 +571,7 @@ def ollama_chat(
     tools: List[Dict] = None,
     model: Optional[str] = None,
     supports_tools: Optional[bool] = None,
+    tool_choice: Optional[str] = None,
     **kwargs
 ) -> Dict[str, Any]:
     """Send chat request to LLM using the appropriate provider.
@@ -595,11 +597,21 @@ def ollama_chat(
     # Prefer explicit model, then execution model, then legacy OLLAMA_MODEL
     model_name = model or getattr(config, "EXECUTION_MODEL", None) or config.OLLAMA_MODEL
     supports_tools = config.DEFAULT_SUPPORTS_TOOLS if supports_tools is None else supports_tools
-    if tools:
-        supports_tools = True
     # Always attempt tool-calling when tools are supplied, even if the model is uncertain.
     if tools:
         supports_tools = True
+    # Safety net: if model supports tools but caller passed none/empty, populate with full registry.
+    if supports_tools and not tools:
+        try:
+            from rev.tools.registry import get_available_tools  # local import to avoid circular dependency
+            tools = get_available_tools()
+            supports_tools = True
+        except Exception:
+            tools = tools or []
+
+    # Allow callers to explicitly control tool_choice (e.g., force "required" for write tasks)
+    if tool_choice:
+        kwargs["tool_choice"] = tool_choice
 
     # Get cache for checking/storing responses
     llm_cache = get_llm_cache() or LLMResponseCache()
@@ -612,17 +624,24 @@ def ollama_chat(
             "supports_tools": supports_tools,
             "tools_provided": bool(tools),
             "tools_count": len(tools) if tools else 0,
+            "tools_names": [t.get("function", {}).get("name") for t in (tools or []) if isinstance(t, dict)],
         })
     except Exception:
         pass
     if getattr(config, "LLM_TRANSACTION_LOG_ENABLED", False):
         try:
+            tool_names = [t.get("function", {}).get("name") for t in (tools or []) if isinstance(t, dict)]
             debug_logger.log_llm_transcript(
                 model=model_name,
                 messages=messages,
                 response={"pending": True},
                 tools=tools,
-                extra={"supports_tools": supports_tools, "tools_count": len(tools) if tools else 0},
+                extra={
+                    "supports_tools": supports_tools,
+                    "tools_count": len(tools) if tools else 0,
+                    "tools_provided": bool(tools),
+                    "tools_names": tool_names,
+                },
             )
         except Exception:
             pass

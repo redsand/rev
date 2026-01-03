@@ -3873,7 +3873,9 @@ class Orchestrator:
             "- If the goal has been achieved, respond with only: GOAL_ACHIEVED"
         )
 
-        response_data = ollama_chat([{"role": "user", "content": prompt}])
+        # CRITICAL: Planner expects text response, NOT tool calls
+        # Explicitly disable tools to prevent Gemini from trying to call functions
+        response_data = ollama_chat([{"role": "user", "content": prompt}], tools=None, supports_tools=False)
 
         if "error" in response_data or not response_data.get("message"):
             raise RuntimeError(f"Planner LLM error: {response_data.get('error') if isinstance(response_data, dict) else 'unknown'}")

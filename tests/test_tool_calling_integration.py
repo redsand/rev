@@ -254,6 +254,34 @@ class TestOpenAIToolCalling:
         assert call_kwargs["tool_choice"] == "required"
         assert call_kwargs.get("parallel_tool_calls") is True
 
+    @patch.object(OpenAIProvider, "_get_client")
+    def test_gpt4o_uses_required_tool_choice(self, mock_get_client):
+        """gpt-4o should be invoked with tool_choice='required' and parallel_tool_calls=True."""
+        provider = OpenAIProvider(api_key="test-key")
+
+        mock_client = Mock()
+        mock_chat = Mock()
+        mock_completions = Mock()
+        mock_chat.completions = mock_completions
+        mock_client.chat = mock_chat
+        mock_get_client.return_value = mock_client
+
+        mock_response = Mock()
+        mock_message = Mock(content="", tool_calls=[])
+        mock_response.choices = [Mock(message=mock_message)]
+        mock_response.usage = Mock(prompt_tokens=1, completion_tokens=1, total_tokens=2)
+        mock_completions.create.return_value = mock_response
+
+        messages = [{"role": "user", "content": "test"}]
+        tools = [{"type": "function", "function": {"name": "test", "description": "Test", "parameters": {}}}]
+
+        provider.chat(messages, tools=tools, supports_tools=True, model="gpt-4o")
+
+        call_kwargs = mock_completions.create.call_args.kwargs
+        assert call_kwargs["model"] == "gpt-4o"
+        assert call_kwargs["tool_choice"] == "required"
+        assert call_kwargs.get("parallel_tool_calls") is True
+
 
 # ============================================================================
 # GEMINI PROVIDER TESTS
@@ -291,25 +319,45 @@ class TestGeminiToolCalling:
         assert "tool_config" in call_kwargs
         assert call_kwargs["tool_config"]["function_calling_config"]["mode"] == "ANY"
 
-    def test_removes_unsupported_schema_fields(self):
-        """Gemini rejects 'default', 'oneOf', 'anyOf', 'allOf' in schemas."""
+    def test_sanitizes_schema_and_drops_invalid_required(self):
+        """Gemini should strip unsupported fields and invalid required entries (including array item required)."""
         provider = GeminiProvider(api_key="test-key", silent=True)
 
-        schema_with_unsupported = {
+        schema_with_issues = {
             "type": "object",
             "properties": {
                 "name": {"type": "string", "default": "test"},
-                "value": {"oneOf": [{"type": "string"}, {"type": "number"}]}
+                "value": {"oneOf": [{"type": "string"}, {"type": "number"}]},
+                "add": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"foo": {"type": "string"}},
+                        # Invalid: required references property that doesn't exist, and is inside items
+                        "required": ["foo", "bar"],
+                    },
+                    "required": ["foo"],  # Invalid: required on array schema
+                },
             },
-            "anyOf": [{"required": ["name"]}, {"required": ["value"]}]
+            "anyOf": [{"required": ["name"]}, {"required": ["value"]}],
+            "required": ["name", "missing_prop"],
         }
 
-        cleaned = provider._remove_default_fields(schema_with_unsupported)
+        cleaned = provider._sanitize_schema(schema_with_issues)
 
-        # Verify unsupported fields are removed
-        assert "default" not in cleaned.get("properties", {}).get("name", {})
-        assert "oneOf" not in cleaned.get("properties", {}).get("value", {})
+        # Unsupported keywords removed
+        assert "default" not in cleaned["properties"]["name"]
+        assert "oneOf" not in cleaned["properties"]["value"]
         assert "anyOf" not in cleaned
+
+        # Top-level required keeps only existing props
+        assert cleaned.get("required") == ["name"]
+
+        add_schema = cleaned["properties"]["add"]
+        # Array-level required removed
+        assert "required" not in add_schema
+        # items.required filtered to only existing properties (no missing 'bar')
+        assert add_schema.get("items", {}).get("required") == ["foo"]
 
 
 # ============================================================================

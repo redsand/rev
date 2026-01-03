@@ -264,6 +264,19 @@ class ResearchAgent(BaseAgent):
         )
         available_tools = selected_tools
 
+        # Safety net: ensure the LLM always receives tools (avoid empty list -> tools_provided:false).
+        if not available_tools:
+            fallback = [
+                tool for tool in all_tools
+                if tool.get("function", {}).get("name") in research_tool_names
+            ]
+            if fallback:
+                print(f"  [WARN] Context builder returned no tools; falling back to ALL research tools ({len(fallback)})")
+                available_tools = fallback
+            else:
+                print("  [WARN] Context builder returned no tools and no research candidates matched; using full tool registry as last resort")
+                available_tools = all_tools
+
         if _is_structure_inventory_task(task.description):
             tool_name, arguments, coerced = _coerce_structure_tool(
                 task.description,

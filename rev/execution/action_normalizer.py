@@ -28,6 +28,7 @@ _EXACT_ALIASES: dict[str, str] = {
     "inspect": "read",
     "view": "read",
     "explain": "read",
+    "list": "read",
     # file operation aliases
     "rename_file": "rename",
     "move_file": "move",
