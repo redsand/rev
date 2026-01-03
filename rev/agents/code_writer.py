@@ -994,9 +994,25 @@ class CodeWriterAgent(BaseAgent):
             context,
             tool_universe=all_tools,
             candidate_tool_names=tool_names,
-            max_tools=min(7, len(tool_names) if tool_names else 7),
+            # Allow the full candidate set (no 7-tool cap); keeps all action-type-appropriate tools available
+            max_tools=len(tool_names) if tool_names else len(all_tools),
         )
         available_tools = selected_tools
+
+        # Absolute safety net: ensure the LLM always receives tools.
+        # The context builder can return an empty list when the query doesn't overlap
+        # with tool descriptions (common for "add" tasks like prisma/schema.prisma).
+        if not available_tools:
+            fallback = [
+                tool for tool in all_tools
+                if tool.get("function", {}).get("name") in (tool_names or [])
+            ]
+            if fallback:
+                print(f"  [WARN] Context builder returned no tools; falling back to ALL candidates: {[t.get('function', {}).get('name') for t in fallback]}")
+                available_tools = fallback
+            else:
+                print("  [WARN] Context builder returned no tools and no candidates matched; using full tool registry as last resort")
+                available_tools = all_tools
 
         # Build enhanced user message with extraction guidance
         task_guidance = f"Task (action_type: {task.action_type}): {task.description}"

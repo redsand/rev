@@ -1542,31 +1542,20 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                 iter_warned = True
             """
 
-            call_tools = tools if tools_enabled and model_supports_tools else None
+            # Final safety net: always send a non-empty tool list when the model supports tools.
+            effective_tools = tools or get_available_tools()
+            call_tools = effective_tools if model_supports_tools else None
+            tools_enabled = bool(call_tools)
             llm_messages = _prepare_llm_messages(messages, exec_context, session_tracker)
             response = ollama_chat(llm_messages, tools=call_tools, model=model_name, supports_tools=model_supports_tools)
 
             if "error" in response:
                 error_msg = response['error']
                 print(f"  ✗ Error: {error_msg}")
-
-                # If we keep getting errors, try without tools
-                if "400" in error_msg:
-                    tools_enabled = False
-                    if messages and messages[0].get("role") == "system" and "Tool calling is disabled" not in messages[0].get("content", ""):
-                        messages[0]["content"] = messages[0]["content"] + "\n\nTool calling is disabled; provide explicit file edits & patches."
-                    messages.append({
-                        "role": "user",
-                        "content": "Tool calling is disabled due to previous errors. Provide explicit file edits and unified diffs."
-                    })
-                    print("  → Disabling tools for this task and retrying without tool support...")
-                    response = ollama_chat(llm_messages, tools=None, model=model_name, supports_tools=False)
-
-                if "error" in response:
-                    plan.mark_failed(error_msg)
-                    if state_manager:
-                        state_manager.on_task_failed(current_task)
-                    break
+                plan.mark_failed(error_msg)
+                if state_manager:
+                    state_manager.on_task_failed(current_task)
+                break
 
             if "usage" in response:
                 usage = response.get("usage", {}) or {}
@@ -1959,20 +1948,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                     no_tool_call_streak = 0
                     continue
 
-                if no_tool_call_streak >= 2 and tools_enabled and (current_task.action_type or "").lower() in {"add", "edit", "refactor", "fix"}:
-                    tools_enabled = False
-                    if messages and messages[0].get("role") == "system" and "Tool calling is disabled" not in messages[0].get("content", ""):
-                        messages[0]["content"] = messages[0]["content"] + "\n\nTool calling is disabled; output unified diffs or full file content."
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            "Tool calling is disabled for this task. "
-                            "Provide a unified diff (diff --git or ---/+++ with @@ hunks) "
-                            "or full file contents for new files. Do not include analysis."
-                        ),
-                    })
-                    no_tool_call_streak = 0
-                    continue
+                # Keep tools enabled even after tool-less replies; do not disable tool calling.
 
                 # If model keeps responding without tools or completion, inject guidance instead of failing
                 if no_tool_call_streak >= 3:
@@ -2186,31 +2162,21 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                     budget_warned = True
         """
 
-        call_tools = tools if tools_enabled and model_supports_tools else None
+        # Final safety net: always send a non-empty tool list when the model supports tools.
+        effective_tools = tools or get_available_tools()
+        call_tools = effective_tools if model_supports_tools else None
+        tools_enabled = bool(call_tools)
         llm_messages = _prepare_llm_messages(messages, exec_context)
         response = ollama_chat(llm_messages, tools=call_tools, model=model_name, supports_tools=model_supports_tools)
 
         if "error" in response:
             error_msg = response['error']
             print(f"  ✗ Error: {error_msg}")
-
-            if "400" in error_msg:
-                tools_enabled = False
-                if messages and messages[0].get("role") == "system" and "Tool calling is disabled" not in messages[0].get("content", ""):
-                    messages[0]["content"] = messages[0]["content"] + "\n\nTool calling is disabled; provide explicit file edits & patches."
-                messages.append({
-                    "role": "user",
-                    "content": "Tool calling is disabled due to previous errors. Provide explicit file edits and unified diffs."
-                })
-                print(f"  → Retrying without tool support...")
-                response = ollama_chat(llm_messages, tools=None, model=model_name, supports_tools=False)
-
-            if "error" in response:
-                plan.mark_task_failed(task, error_msg)
-                if state_manager:
-                    state_manager.on_task_failed(task)
-                _log_usage(False)
-                return False
+            plan.mark_task_failed(task, error_msg)
+            if state_manager:
+                state_manager.on_task_failed(task)
+            _log_usage(False)
+            return False
 
         if "usage" in response:
             usage = response.get("usage", {}) or {}
@@ -2486,20 +2452,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                 no_tool_call_streak = 0
                 continue
 
-            if no_tool_call_streak >= 2 and tools_enabled and (task.action_type or "").lower() in {"add", "edit", "refactor", "fix"}:
-                tools_enabled = False
-                if messages and messages[0].get("role") == "system" and "Tool calling is disabled" not in messages[0].get("content", ""):
-                    messages[0]["content"] = messages[0]["content"] + "\n\nTool calling is disabled; output unified diffs or full file content."
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "Tool calling is disabled for this task. "
-                        "Provide a unified diff (diff --git or ---/+++ with @@ hunks) "
-                        "or full file contents for new files. Do not include analysis."
-                    ),
-                })
-                no_tool_call_streak = 0
-                continue
+            # Keep tools enabled even after tool-less replies; do not disable tool calling.
 
             # If model keeps responding without tools or completion, inject guidance instead of failing
             if no_tool_call_streak >= 3:
@@ -3177,7 +3130,10 @@ Action type: {current_task.action_type}
                     if message_queue.has_pending():
                         print("\n  📥 [Message pending - will process after response]", end='', flush=True)
 
-                call_tools = tools if tools_enabled and model_supports_tools else None
+                # Final safety net: always send a non-empty tool list when the model supports tools.
+                effective_tools = tools or get_available_tools()
+                call_tools = effective_tools if model_supports_tools else None
+                tools_enabled = bool(call_tools)
                 llm_messages = _prepare_llm_messages(messages, exec_context, session_tracker)
 
                 try:
@@ -3205,12 +3161,6 @@ Action type: {current_task.action_type}
 
                 if "error" in response:
                     print(f"  ✗ Error: {response['error']}")
-                    if "400" in str(response['error']):
-                        tools_enabled = False
-                        messages.append({
-                            "role": "user",
-                            "content": "Tool calling disabled. Provide explicit file edits."
-                        })
                     continue
 
                 msg = response.get("message", {})

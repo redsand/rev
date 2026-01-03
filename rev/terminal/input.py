@@ -85,6 +85,22 @@ def _handle_tab_completion(prompt: str, buffer: List[str], cursor_pos: int) -> i
     if not suggestions:
         return cursor_pos
 
+    # If only one suggestion, autocomplete inline (bash-style)
+    if len(suggestions) == 1:
+        completion = suggestions[0]
+        # Remove the already-typed prefix after the slash
+        # Example: "/set llm_" with suggestion "llm_provider"
+        prefix = buffer_prefix[1:]
+        completion_tail = completion[len(prefix):]
+        # Insert completion tail at cursor
+        for ch in completion_tail:
+            buffer.insert(cursor_pos, ch)
+            cursor_pos += 1
+        # Redraw prompt with completed text
+        print("\r" + " " * (len(prompt) + len(''.join(buffer))), end="\r")
+        print(prompt + ''.join(buffer), end="", flush=True)
+        return cursor_pos
+
     sys.stdout.write("\n" + "  ".join(suggestions) + "\n")
     _render_prompt(prompt, buffer, cursor_pos)
     return cursor_pos
