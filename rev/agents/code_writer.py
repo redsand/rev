@@ -998,19 +998,27 @@ class CodeWriterAgent(BaseAgent):
             max_tools=len(tool_names) if tool_names else len(all_tools),
         )
         available_tools = selected_tools
+        allowed_tool_names = set(tool_names or [])
+        if allowed_tool_names:
+            available_tools = [
+                tool for tool in available_tools
+                if tool.get("function", {}).get("name") in allowed_tool_names
+            ]
 
         # Absolute safety net: ensure the LLM always receives tools.
         # The context builder can return an empty list when the query doesn't overlap
         # with tool descriptions (common for "add" tasks like prisma/schema.prisma).
         if not available_tools:
-            fallback = [
-                tool for tool in all_tools
-                if tool.get("function", {}).get("name") in (tool_names or [])
-            ]
-            if fallback:
-                print(f"  [WARN] Context builder returned no tools; falling back to ALL candidates: {[t.get('function', {}).get('name') for t in fallback]}")
-                available_tools = fallback
-            else:
+            fallback_candidates = set(tool_names or [])
+            if fallback_candidates:
+                fallback = [
+                    tool for tool in all_tools
+                    if tool.get("function", {}).get("name") in fallback_candidates
+                ]
+                if fallback:
+                    print(f"  [WARN] Context builder returned no tools; falling back to ALL candidates: {[t.get('function', {}).get('name') for t in fallback]}")
+                    available_tools = fallback
+            if not available_tools:
                 print("  [WARN] Context builder returned no tools and no candidates matched; using full tool registry as last resort")
                 available_tools = all_tools
 
@@ -1172,8 +1180,11 @@ class CodeWriterAgent(BaseAgent):
             {"role": "user", "content": f"{task_guidance}\n\nSelected Context:\n{rendered_context}{file_content_section}"}
         ]
 
+        # Force tool calls for write tasks so the model cannot respond with plain text.
+        tool_choice_mode = "required"
+
         try:
-            response = ollama_chat(messages, tools=available_tools)
+            response = ollama_chat(messages, tools=available_tools, tool_choice=tool_choice_mode)
             error_type = None
             error_detail = None
 
@@ -1215,19 +1226,95 @@ class CodeWriterAgent(BaseAgent):
                     if not error_type:
                         print(f"  -> CodeWriterAgent will call tool '{tool_name}'")
 
-                        # Display change preview for file modifying operations
-                        if tool_name in ["write_file", "replace_in_file", "create_directory", "move_file", "copy_file", "apply_patch"]:
-                            self._display_change_preview(tool_name, arguments)
+            # Recovery: if we got text instead of a structured tool call, try to recover from the text content.
+            if error_type in {"text_instead_of_tool_call", "missing_tool_calls", "empty_tool_calls"}:
+                recovered = recover_tool_call_from_text(
+                    response.get("message", {}).get("content", ""),
+                    allowed_tools=recovery_allowed_tools,
+                )
+                if not recovered:
+                    recovered = recover_tool_call_from_text_lenient(
+                        response.get("message", {}).get("content", ""),
+                        allowed_tools=recovery_allowed_tools,
+                    )
+                    if recovered:
+                        print("  [WARN] CodeWriterAgent: using lenient tool call recovery from text output")
+                if recovered:
+                    tool_name = recovered.name
+                    arguments = recovered.arguments if isinstance(recovered.arguments, dict) else {}
+                    print(f"  -> Recovered tool call from text output: {tool_name}")
+                    error_type = None
 
-                            # Validate import targets before proceeding
-                            file_path = arguments.get("path") or arguments.get("dest") or "unknown"
-                            if tool_name == "write_file":
-                                content = arguments.get("content", "")
-                                is_valid, warning_msg = self._validate_import_targets(file_path, content)
-                                if not is_valid:
-                                    print(f"\n  [WARN]  Import validation warning:")
-                                    print(f"  {warning_msg}")
-                                    print(f"  Note: This file has imports that may not exist. Proceed with caution.")
+            # If we have a tool call (either structured or recovered), execute it.
+            if not error_type and tool_name:
+                # Display change preview for file modifying operations
+                if tool_name in ["write_file", "replace_in_file", "create_directory", "move_file", "copy_file", "apply_patch"]:
+                    self._display_change_preview(tool_name, arguments)
+
+                    # Validate import targets before proceeding
+                    file_path = arguments.get("path") or arguments.get("dest") or "unknown"
+                    if tool_name == "write_file":
+                        content = arguments.get("content", "")
+                        is_valid, warning_msg = self._validate_import_targets(file_path, content)
+                        if not is_valid:
+                            print(f"\n  [WARN]  Import validation warning:")
+                            print(f"  {warning_msg}")
+                            print(f"  Note: This file has imports that may not exist. Proceed with caution.")
+
+                    # Ask for user approval
+                    if not self._prompt_for_approval(tool_name, file_path, context):
+                        print(f"  \u2717 Change rejected by user")
+                        return "[USER_REJECTED] Change was not approved by user"
+
+                # Execute the tool
+                ok_args, arg_msg = self._validate_tool_args(tool_name, arguments)
+                if not ok_args:
+                    print(f"  \u2717 Invalid tool args: {arg_msg}")
+                    if self._should_retry_invalid_tool_args(context, tool_name):
+                        self.request_replan(
+                            context,
+                            reason="Missing required tool arguments",
+                            detailed_reason=self._invalid_args_guidance(tool_name, arg_msg),
+                        )
+                        return self.make_recovery_request("invalid_tool_args", arg_msg)
+                    return self.make_failure_signal("invalid_tool_args", arg_msg)
+
+                print(f"  \u23f3 Applying {tool_name} to {arguments.get('path', 'file')}...")
+                raw_result = execute_tool(tool_name, arguments, agent_name="code_writer")
+
+            # Recovery: if we got text instead of a structured tool call, try to recover from the text content.
+            if error_type in {"text_instead_of_tool_call", "missing_tool_calls", "empty_tool_calls"}:
+                recovered = recover_tool_call_from_text(
+                    response.get("message", {}).get("content", ""),
+                    allowed_tools=recovery_allowed_tools,
+                )
+                if not recovered:
+                    recovered = recover_tool_call_from_text_lenient(
+                        response.get("message", {}).get("content", ""),
+                        allowed_tools=recovery_allowed_tools,
+                    )
+                    if recovered:
+                        print("  [WARN] CodeWriterAgent: using lenient tool call recovery from text output")
+                if recovered:
+                    tool_name = recovered.name
+                    arguments = recovered.arguments if isinstance(recovered.arguments, dict) else {}
+                    print(f"  -> Recovered tool call from text output: {tool_name}")
+                    error_type = None
+
+                # Display change preview for file modifying operations
+                if tool_name in ["write_file", "replace_in_file", "create_directory", "move_file", "copy_file", "apply_patch"]:
+                    self._display_change_preview(tool_name, arguments)
+
+                    # Validate import targets before proceeding
+                    file_path = arguments.get("path") or arguments.get("dest") or "unknown"
+                    if tool_name == "write_file":
+                        content = arguments.get("content", "")
+                        is_valid, warning_msg = self._validate_import_targets(file_path, content)
+                        if not is_valid:
+                            print(f"\n  [WARN]  Import validation warning:")
+                            print(f"  {warning_msg}")
+                            print(f"  Note: This file has imports that may not exist. Proceed with caution.")
+                            print(f"  Note: This file has imports that may not exist. Proceed with caution.")
 
                             # Ask for user approval
                             if not self._prompt_for_approval(tool_name, file_path, context):

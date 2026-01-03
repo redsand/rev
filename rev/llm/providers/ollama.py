@@ -257,6 +257,7 @@ class OllamaProvider(LLMProvider):
             "top_p": kwargs.get("top_p", config.OLLAMA_TOP_P),
             "top_k": kwargs.get("top_k", config.OLLAMA_TOP_K),
         }
+        explicit_tool_choice = kwargs.pop("tool_choice", None)
 
         payload = {
             "model": model_name,
@@ -275,9 +276,9 @@ class OllamaProvider(LLMProvider):
             # CRITICAL: Force tool use when tools are provided (like OpenAI/Anthropic)
             # This prevents models from returning text instead of calling tools
             # Some Ollama models support "required", others use "auto"
-            # Using "auto" is safer and works across more models
+            # Using "auto" is safer and works across more models, but allow explicit override.
             if supports_tools and tools:
-                payload["tool_choice"] = "auto"
+                payload["tool_choice"] = explicit_tool_choice or "auto"
 
         # Log request
         debug_logger = get_logger()
@@ -368,43 +369,43 @@ class OllamaProvider(LLMProvider):
                     except json.JSONDecodeError:
                         return {"error": f"Ollama API error: {resp.status_code} {resp.reason}"}
 
-                # Try without tools or tool_choice if 400 with tools
+                # Try safer fallbacks if the model rejects tool_choice/tool payloads
                 if resp.status_code == 400 and tools_provided:
-                    # First, try removing tool_choice (model might not support it)
-                    if "tool_choice" in payload:
+                    # 1) If explicit tool_choice was set, downshift to auto (keep tools)
+                    if explicit_tool_choice and payload.get("tool_choice"):
+                        payload_auto = payload.copy()
+                        payload_auto["tool_choice"] = "auto"
+                        try:
+                            resp_auto = _make_request_interruptible(url, payload_auto, timeout)
+                            if OLLAMA_DEBUG:
+                                print("[DEBUG] Got 400 with explicit tool_choice, retrying with tool_choice=auto...")
+                                print(f"[DEBUG] Response status: {resp_auto.status_code}")
+                            if resp_auto.status_code < 400:
+                                resp = resp_auto
+                                payload = payload_auto
+                        except Exception as exc:
+                            if OLLAMA_DEBUG:
+                                print(f"[DEBUG] Exception with tool_choice=auto fallback: {exc}")
+
+                    # 2) Remove tool_choice entirely (keep tools)
+                    if resp.status_code == 400 and "tool_choice" in payload:
                         if OLLAMA_DEBUG:
                             print("[DEBUG] Got 400 with tool_choice, retrying without tool_choice...")
                         payload_no_choice = payload.copy()
                         payload_no_choice.pop("tool_choice", None)
                         try:
-                            resp = _make_request_interruptible(url, payload_no_choice, timeout)
-                            if resp.status_code == 200:
-                                # Success without tool_choice - use this payload
+                            resp_no_choice = _make_request_interruptible(url, payload_no_choice, timeout)
+                            if resp_no_choice.status_code < 400:
+                                resp = resp_no_choice
                                 payload = payload_no_choice
                             else:
-                                # Still failing, try without tools entirely
-                                if OLLAMA_DEBUG:
-                                    print("[DEBUG] Still got 400, retrying without tools...")
-                                payload_no_tools = {
-                                    "model": model_name,
-                                    "messages": messages,
-                                    "stream": False,
-                                    "options": payload.get("options", {})
-                                }
-                                resp = _make_request_interruptible(url, payload_no_tools, timeout)
-                        except Exception:
-                            # Fallback to no tools
+                                resp = resp_no_choice
+                        except Exception as exc:
                             if OLLAMA_DEBUG:
-                                print("[DEBUG] Exception with tool_choice removal, retrying without tools...")
-                            payload_no_tools = {
-                                "model": model_name,
-                                "messages": messages,
-                                "stream": False,
-                                "options": payload.get("options", {})
-                            }
-                            resp = _make_request_interruptible(url, payload_no_tools, timeout)
-                    else:
-                        # No tool_choice, try without tools
+                                print(f"[DEBUG] Exception with tool_choice removal: {exc}")
+
+                    # 3) Last resort: drop tools entirely
+                    if resp.status_code == 400:
                         if OLLAMA_DEBUG:
                             print("[DEBUG] Got 400 with tools, retrying without tools...")
                         payload_no_tools = {
@@ -413,7 +414,17 @@ class OllamaProvider(LLMProvider):
                             "stream": False,
                             "options": payload.get("options", {})
                         }
-                        resp = _make_request_interruptible(url, payload_no_tools, timeout)
+                        try:
+                            resp_no_tools = _make_request_interruptible(url, payload_no_tools, timeout)
+                            if resp_no_tools.status_code < 400:
+                                resp = resp_no_tools
+                                payload = payload_no_tools
+                                tools_provided = False
+                            else:
+                                resp = resp_no_tools
+                        except Exception as exc:
+                            if OLLAMA_DEBUG:
+                                print(f"[DEBUG] Exception with no-tools fallback: {exc}")
 
                 resp.raise_for_status()
                 response = resp.json()

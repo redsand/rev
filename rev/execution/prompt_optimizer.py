@@ -160,7 +160,10 @@ def _build_structure_guard(user_request: str) -> str:
     snapshot = _format_workspace_snapshot()
     if snapshot:
         guard_lines.insert(1, snapshot)
-    request_paths = re.findall(r"(?:\\./|\\.\\./|[A-Za-z]:\\\\|/)[^\\s,;]+", user_request or "")
+    request_paths = re.findall(
+        r"(?:\\./|\\.\\./|[A-Za-z]:\\\\|/)(?:[\\w.\\-]+[/\\\\])+[\\w.\\-]+(?:\\.[\\w.\\-]+)?",
+        user_request or "",
+    )
     if request_paths:
         guard_lines.insert(1, f"User-mentioned paths: {', '.join(request_paths[:6])}")
     return "\n".join(guard_lines)

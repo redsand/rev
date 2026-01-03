@@ -88,15 +88,12 @@ def _handle_tab_completion(prompt: str, buffer: List[str], cursor_pos: int) -> i
     # If only one suggestion, autocomplete inline (bash-style)
     if len(suggestions) == 1:
         completion = suggestions[0]
-        # Remove the already-typed prefix after the slash
-        # Example: "/set llm_" with suggestion "llm_provider"
-        prefix = buffer_prefix[1:]
-        completion_tail = completion[len(prefix):]
-        # Insert completion tail at cursor
+        # Autocomplete only the current token (after the last space), not the entire buffer.
+        token_prefix = buffer_prefix.split()[-1] if buffer_prefix.split() else ""
+        completion_tail = completion[len(token_prefix):]
         for ch in completion_tail:
             buffer.insert(cursor_pos, ch)
             cursor_pos += 1
-        # Redraw prompt with completed text
         print("\r" + " " * (len(prompt) + len(''.join(buffer))), end="\r")
         print(prompt + ''.join(buffer), end="", flush=True)
         return cursor_pos

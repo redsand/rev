@@ -21,7 +21,7 @@ from typing import Dict, Any, List, Optional, Tuple
 
 from rev.models.task import ExecutionPlan, Task, TaskStatus
 from rev.execution.state_manager import StateManager
-from rev.tools.registry import execute_tool
+from rev.tools.registry import execute_tool, get_available_tools
 from rev.llm.client import ollama_chat
 from rev.execution.ultrathink_prompts import get_ultrathink_prompt
 from rev.config import (

@@ -110,25 +110,66 @@ class GeminiProvider(LLMProvider):
 
         return system_instruction.strip(), converted
 
-    def _remove_default_fields(self, schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Recursively remove schema keywords Gemini rejects (default/oneOf/anyOf/allOf)."""
+    def _sanitize_schema(self, schema: Dict[str, Any], is_property_value: bool = False) -> Dict[str, Any]:
+        """Recursively remove/clean keywords Gemini rejects (default/oneOf/etc) and invalid required entries.
+
+        Args:
+            schema: Schema dict to sanitize
+            is_property_value: True if this schema is a value inside a "properties" dict
+        """
         if not isinstance(schema, dict):
             return schema
 
         result = {}
+        # Get properties at THIS level for validating required fields
+        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+
         for key, value in schema.items():
-            # Skip unsupported keywords
-            if key in {"default", "oneOf", "anyOf", "allOf"}:
+            # Handle "properties" dict - recursively sanitize each property's schema
+            # Mark nested schemas as property values so we preserve their structure
+            if key == "properties":
+                if isinstance(value, dict):
+                    result[key] = {
+                        prop_name: self._sanitize_schema(prop_value, is_property_value=True) if isinstance(prop_value, dict) else prop_value
+                        for prop_name, prop_value in value.items()
+                        # Preserve ALL property names, including "default", "add", etc.
+                    }
+                else:
+                    result[key] = value
                 continue
-            elif isinstance(value, dict):
-                result[key] = self._remove_default_fields(value)
+
+            # Remove unsupported schema keywords
+            if key in {"oneOf", "anyOf", "allOf"}:
+                continue
+
+            # Remove "default" keyword ONLY when it's used as a schema attribute (default value)
+            # Keep "default" when it's a property name inside "properties" dict
+            if key == "default":
+                # Skip default values (schema keyword), but this was already handled if inside properties
+                continue
+
+            if key == "required":
+                # Only validate required fields against properties at THIS level
+                if not isinstance(value, list):
+                    continue
+
+                # Only include required fields that actually exist in properties
+                filtered = [item for item in value if isinstance(item, str) and item in properties]
+                if filtered:
+                    result[key] = filtered
+                continue
+
+            # Recursively sanitize nested dicts
+            if isinstance(value, dict):
+                result[key] = self._sanitize_schema(value, is_property_value=False)
             elif isinstance(value, list):
                 result[key] = [
-                    self._remove_default_fields(item) if isinstance(item, dict) else item
+                    self._sanitize_schema(item, is_property_value=False) if isinstance(item, dict) else item
                     for item in value
                 ]
             else:
                 result[key] = value
+
         return result
 
     def _convert_tools(self, tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
@@ -141,11 +182,14 @@ class GeminiProvider(LLMProvider):
             return []
 
         function_declarations = []
+
         for tool in tools:
             if tool.get("type") == "function":
                 func = tool.get("function", {})
-                # Remove 'default' fields from parameters as Gemini doesn't support them
-                parameters = self._remove_default_fields(func.get("parameters", {}))
+
+                # Remove unsupported keywords and invalid required entries
+                parameters = self._sanitize_schema(func.get("parameters", {}))
+
                 function_declarations.append({
                     "name": func.get("name", ""),
                     "description": func.get("description", ""),
