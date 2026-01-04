@@ -928,6 +928,29 @@ class CodeWriterAgent(BaseAgent):
         """
         print(f"CodeWriterAgent executing task: {task.description}")
 
+        # CRITICAL GUARD: Enforce research before add/edit operations
+        # ADD/EDIT actions should NEVER happen without prior research (list_dir, tree_view, read_file)
+        # to understand the current state of the repository
+        if task.action_type in ("add", "edit"):
+            # Check if any research has been done in recent task history
+            recent_tasks = context.agent_state.get("recent_tasks") or []
+            research_keywords = ["list_dir", "tree_view", "read", "search", "listing", "found"]
+            has_research = any(
+                any(kw in str(prev_task).lower() for kw in research_keywords)
+                for prev_task in recent_tasks[-10:]  # Check last 10 tasks
+            )
+
+            if not has_research:
+                print(f"  [RESEARCH_GUARD] WARNING: {task.action_type.upper()} action without prior research!")
+                print(f"  [RESEARCH_GUARD] Forcing research step before proceeding...")
+                # Return a signal to the orchestrator to do research first
+                return self.make_recovery_request(
+                    "missing_research",
+                    f"{task.action_type.upper()} task requires research first. "
+                    f"Must list directory structure or read existing files before adding/editing. "
+                    f"Suggestion: Start with list_dir or tree_view to understand current repository state."
+                )
+
         # Track recovery attempts
         recovery_attempts = self.increment_recovery_attempts(task, context)
 
@@ -952,8 +975,12 @@ class CodeWriterAgent(BaseAgent):
             # Directory creation tasks only get create_directory tool
             tool_names = ['create_directory']
         elif task.action_type == "add":
-            # File creation tasks only get write_file tool
-            tool_names = ['write_file']
+            # File creation tasks get write_file PLUS edit tools
+            # Rationale: ADD might discover the file exists and need to edit instead
+            # This prevents the "file exists, use edit instead" failure loop
+            tool_names = ['write_file', 'apply_patch', 'replace_in_file']
+            if include_python_tools:
+                tool_names = python_tools + tool_names
         elif task.action_type == "edit":
             # File modification tasks should avoid full overwrites; prefer patching tools first.
             tool_names = [
@@ -1230,6 +1257,8 @@ class CodeWriterAgent(BaseAgent):
 
             error_type = None
             error_detail = None
+            tool_name = None  # Initialize to avoid UnboundLocalError
+            arguments = None
 
             # Debug: Print what we got back
             if not response:
