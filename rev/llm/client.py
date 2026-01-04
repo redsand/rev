@@ -622,7 +622,7 @@ def ollama_chat(
 
     # DIAGNOSTIC LOGGING
     tools_count_after = len(tools) if tools else 0
-    if tools_count_after == 0:
+    if tools_count_after == 0 and (supports_tools or tools_count_before > 0):
         print(f"  [LLM_CLIENT] WARNING: Calling LLM with 0 tools! supports_tools_before={supports_tools_before}, supports_tools_after={supports_tools}, tools_count_before={tools_count_before}, tools_count_after={tools_count_after}")
     elif tools_count_before != tools_count_after:
         print(f"  [LLM_CLIENT] Tools auto-populated: {tools_count_before} -> {tools_count_after}")

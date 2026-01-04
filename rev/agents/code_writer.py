@@ -943,12 +943,35 @@ class CodeWriterAgent(BaseAgent):
             if not has_research:
                 print(f"  [RESEARCH_GUARD] WARNING: {task.action_type.upper()} action without prior research!")
                 print(f"  [RESEARCH_GUARD] Forcing research step before proceeding...")
-                # Return a signal to the orchestrator to do research first
-                return self.make_recovery_request(
-                    "missing_research",
-                    f"{task.action_type.upper()} task requires research first. "
-                    f"Must list directory structure or read existing files before adding/editing. "
-                    f"Suggestion: Start with list_dir or tree_view to understand current repository state."
+                signature = f"missing_research::{task.action_type}::{(task.description or '').strip().lower()}"
+                should_inject = not bool(context.get_agent_state(signature, False))
+                if should_inject:
+                    context.set_agent_state(signature, True)
+                    target_files = _extract_target_files_from_description(task.description or "")
+                    target_hint = ""
+                    if target_files:
+                        target_hint = f" Confirm whether these targets exist: {', '.join(target_files[:3])}."
+                    research_desc = (
+                        "Inspect repository structure with tree_view (max depth 2) or list_dir to "
+                        "locate target files for the pending write task."
+                        f"{target_hint}"
+                    )
+                    context.add_agent_request(
+                        "INJECT_TASKS",
+                        {
+                            "tasks": [
+                                Task(description=research_desc, action_type="read"),
+                            ]
+                        },
+                    )
+                return json.dumps(
+                    {
+                        "skipped": True,
+                        "reason": "missing_research",
+                        "action": task.action_type,
+                        "description": task.description,
+                        "injected": should_inject,
+                    }
                 )
 
         # Track recovery attempts

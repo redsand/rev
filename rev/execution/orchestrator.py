@@ -2411,6 +2411,22 @@ def _append_task_tool_event(task: Task, result_payload: Any) -> None:
     )
 
 
+def _is_missing_research_result(result_payload: Any) -> bool:
+    if not result_payload:
+        return False
+    if isinstance(result_payload, str):
+        if result_payload.startswith("[RESEARCH_INJECTED]"):
+            return True
+        try:
+            parsed = json.loads(result_payload)
+        except Exception:
+            return False
+        result_payload = parsed
+    if isinstance(result_payload, dict):
+        return bool(result_payload.get("skipped")) and result_payload.get("reason") == "missing_research"
+    return False
+
+
 def _did_run_real_tests(task: Task, verification_result: Optional["VerificationResult"]) -> bool:
     """Heuristic: did this test task actually run tests (not installs/lint)?"""
     try:
@@ -2463,6 +2479,16 @@ def _enforce_action_tool_constraints(task: Task) -> tuple[bool, Optional[str]]:
         return False, "Write action completed without write tool execution"
 
     return True, None
+
+
+def _has_recent_research_evidence(completed_tasks: List[Task], max_check: int = 5) -> bool:
+    if not completed_tasks:
+        return False
+    read_actions = {"read", "analyze", "research", "investigate", "review"}
+    for task in reversed(completed_tasks[-max_check:]):
+        if (task.action_type or "").lower() in read_actions and getattr(task, "tool_events", None):
+            return True
+    return False
 
 
 def _should_coerce_read_only(action_type: Optional[str]) -> bool:
@@ -4449,6 +4475,25 @@ class Orchestrator:
                     self.context.set_agent_state("transformation_count", transformation_count + 1)
                     print(f"  [transformation-tracking] Count: {transformation_count + 1}/3")
 
+                next_action_normalized = (next_task.action_type or "").strip().lower()
+                if next_action_normalized in {"add", "edit"} and not _has_recent_research_evidence(completed_tasks):
+                    guard_sig = f"missing_research_guard::{next_action_normalized}::{(next_task.description or '').strip().lower()}"
+                    last_injected = self.context.agent_state.get(guard_sig)
+                    if last_injected != iteration:
+                        self.context.set_agent_state(guard_sig, iteration)
+                        targets = _extract_task_paths(next_task)
+                        target_hint = ""
+                        if targets:
+                            target_hint = f" Confirm whether these targets exist: {', '.join(targets[:3])}."
+                        research_desc = (
+                            "Inspect repository structure with tree_view (max depth 2) or list_dir to locate "
+                            "target files for the pending write task."
+                            f"{target_hint}"
+                        )
+                        pending_injected_tasks.insert(0, next_task)
+                        next_task = Task(description=research_desc, action_type="read")
+                        print(f"  [research-guard] Injecting research before {next_action_normalized} task.")
+
                 next_task.task_id = iteration
                 try:
                     from rev.execution.planner import apply_validation_steps_to_task
@@ -6210,6 +6255,12 @@ class Orchestrator:
                         context=context,
                         task_id=task.task_id,
                     )
+
+            if _is_missing_research_result(result):
+                task.result = result
+                task.status = TaskStatus.STOPPED
+                task.error = "missing research; injected research task"
+                return False
 
             task.result = result
             try:
