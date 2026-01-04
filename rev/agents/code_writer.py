@@ -989,6 +989,11 @@ class CodeWriterAgent(BaseAgent):
 
         available_tools = [tool for tool in all_tools if tool['function']['name'] in tool_names]
         recovery_allowed_tools = list(tool_names) if tool_names else [t["function"]["name"] for t in available_tools]
+
+        # DIAGNOSTIC LOGGING: Track tool provisioning
+        print(f"  [TOOL_PROVISION] action_type={task.action_type}, tool_names={tool_names}")
+        print(f"  [TOOL_PROVISION] Initial available_tools count: {len(available_tools)}, names: {[t['function']['name'] for t in available_tools]}")
+
         rendered_context, selected_tools, _bundle = build_context_and_tools(
             task,
             context,
@@ -997,30 +1002,52 @@ class CodeWriterAgent(BaseAgent):
             # Allow the full candidate set (no 7-tool cap); keeps all action-type-appropriate tools available
             max_tools=len(tool_names) if tool_names else len(all_tools),
         )
-        available_tools = selected_tools
-        allowed_tool_names = set(tool_names or [])
-        if allowed_tool_names:
-            available_tools = [
-                tool for tool in available_tools
-                if tool.get("function", {}).get("name") in allowed_tool_names
-            ]
+
+        # DIAGNOSTIC LOGGING: Track what context builder returned
+        print(f"  [TOOL_PROVISION] Context builder returned {len(selected_tools)} tools: {[t.get('function', {}).get('name') for t in selected_tools]}")
+
+        # CRITICAL FIX: Never replace available_tools with an empty list!
+        # The context builder can return empty results if keyword matching fails,
+        # but we already have a perfectly good tool list from all_tools filtered by tool_names.
+        # Only use selected_tools if it's non-empty; otherwise keep our initial available_tools.
+        if selected_tools:
+            available_tools = selected_tools
+            allowed_tool_names = set(tool_names or [])
+            if allowed_tool_names:
+                before_filter = len(available_tools)
+                available_tools = [
+                    tool for tool in available_tools
+                    if tool.get("function", {}).get("name") in allowed_tool_names
+                ]
+                # DIAGNOSTIC LOGGING: Track filtering
+                print(f"  [TOOL_PROVISION] After filtering to allowed names: {before_filter} -> {len(available_tools)}")
+        else:
+            # Context builder returned empty - keep our initial available_tools
+            print(f"  [TOOL_PROVISION] Context builder returned empty! Keeping initial available_tools: {len(available_tools)} tools")
 
         # Absolute safety net: ensure the LLM always receives tools.
         # The context builder can return an empty list when the query doesn't overlap
         # with tool descriptions (common for "add" tasks like prisma/schema.prisma).
         if not available_tools:
+            print(f"  [TOOL_PROVISION] CRITICAL: No tools after filtering! Activating safety net...")
             fallback_candidates = set(tool_names or [])
             if fallback_candidates:
+                print(f"  [TOOL_PROVISION] Fallback candidates: {fallback_candidates}")
                 fallback = [
                     tool for tool in all_tools
                     if tool.get("function", {}).get("name") in fallback_candidates
                 ]
                 if fallback:
-                    print(f"  [WARN] Context builder returned no tools; falling back to ALL candidates: {[t.get('function', {}).get('name') for t in fallback]}")
+                    print(f"  [TOOL_PROVISION] Safety net activated: falling back to ALL candidates: {[t.get('function', {}).get('name') for t in fallback]}")
                     available_tools = fallback
+                else:
+                    print(f"  [TOOL_PROVISION] ERROR: Fallback candidates not found in tool universe!")
             if not available_tools:
-                print("  [WARN] Context builder returned no tools and no candidates matched; using full tool registry as last resort")
+                print(f"  [TOOL_PROVISION] LAST RESORT: Using full tool registry ({len(all_tools)} tools)")
                 available_tools = all_tools
+
+        # FINAL DIAGNOSTIC: What we're actually sending to the LLM
+        print(f"  [TOOL_PROVISION] FINAL: Sending {len(available_tools)} tools to LLM: {[t.get('function', {}).get('name') for t in available_tools]}")
 
         # Build enhanced user message with extraction guidance
         task_guidance = f"Task (action_type: {task.action_type}): {task.description}"
@@ -1184,7 +1211,23 @@ class CodeWriterAgent(BaseAgent):
         tool_choice_mode = "required"
 
         try:
-            response = ollama_chat(messages, tools=available_tools, tool_choice=tool_choice_mode)
+            # DIAGNOSTIC LOGGING: Final check before LLM call
+            print(f"  [TOOL_PROVISION] Calling ollama_chat with {len(available_tools)} tools, tool_choice={tool_choice_mode}")
+
+            # CRITICAL FIX: Explicitly pass supports_tools=True when we have tools
+            # This prevents the LLM from being called with tools but supports_tools=False
+            response = ollama_chat(
+                messages,
+                tools=available_tools,
+                supports_tools=True if available_tools else None,
+                tool_choice=tool_choice_mode
+            )
+
+            # DIAGNOSTIC LOGGING: Check response
+            print(f"  [TOOL_PROVISION] LLM response keys: {list(response.keys()) if response else 'None'}")
+            if response and 'message' in response:
+                print(f"  [TOOL_PROVISION] Message keys: {list(response['message'].keys())}")
+
             error_type = None
             error_detail = None
 
