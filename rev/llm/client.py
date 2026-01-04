@@ -597,9 +597,20 @@ def ollama_chat(
     # Prefer explicit model, then execution model, then legacy OLLAMA_MODEL
     model_name = model or getattr(config, "EXECUTION_MODEL", None) or config.OLLAMA_MODEL
     supports_tools = config.DEFAULT_SUPPORTS_TOOLS if supports_tools is None else supports_tools
+
+    # DIAGNOSTIC LOGGING
+    tools_count_before = len(tools) if tools else 0
+    supports_tools_before = supports_tools
+
     # Always attempt tool-calling when tools are supplied, even if the model is uncertain.
     if tools:
         supports_tools = True
+
+    # CRITICAL FIX: Treat empty list same as None - both mean "no tools provided"
+    # This ensures the safety net activates for empty lists too
+    if tools is not None and len(tools) == 0:
+        tools = None
+
     # Safety net: if model supports tools but caller passed none/empty, populate with full registry.
     if supports_tools and not tools:
         try:
@@ -608,6 +619,13 @@ def ollama_chat(
             supports_tools = True
         except Exception:
             tools = tools or []
+
+    # DIAGNOSTIC LOGGING
+    tools_count_after = len(tools) if tools else 0
+    if tools_count_after == 0:
+        print(f"  [LLM_CLIENT] WARNING: Calling LLM with 0 tools! supports_tools_before={supports_tools_before}, supports_tools_after={supports_tools}, tools_count_before={tools_count_before}, tools_count_after={tools_count_after}")
+    elif tools_count_before != tools_count_after:
+        print(f"  [LLM_CLIENT] Tools auto-populated: {tools_count_before} -> {tools_count_after}")
 
     # Allow callers to explicitly control tool_choice (e.g., force "required" for write tasks)
     if tool_choice:

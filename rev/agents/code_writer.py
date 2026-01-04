@@ -928,6 +928,29 @@ class CodeWriterAgent(BaseAgent):
         """
         print(f"CodeWriterAgent executing task: {task.description}")
 
+        # CRITICAL GUARD: Enforce research before add/edit operations
+        # ADD/EDIT actions should NEVER happen without prior research (list_dir, tree_view, read_file)
+        # to understand the current state of the repository
+        if task.action_type in ("add", "edit"):
+            # Check if any research has been done in recent task history
+            recent_tasks = context.agent_state.get("recent_tasks") or []
+            research_keywords = ["list_dir", "tree_view", "read", "search", "listing", "found"]
+            has_research = any(
+                any(kw in str(prev_task).lower() for kw in research_keywords)
+                for prev_task in recent_tasks[-10:]  # Check last 10 tasks
+            )
+
+            if not has_research:
+                print(f"  [RESEARCH_GUARD] WARNING: {task.action_type.upper()} action without prior research!")
+                print(f"  [RESEARCH_GUARD] Forcing research step before proceeding...")
+                # Return a signal to the orchestrator to do research first
+                return self.make_recovery_request(
+                    "missing_research",
+                    f"{task.action_type.upper()} task requires research first. "
+                    f"Must list directory structure or read existing files before adding/editing. "
+                    f"Suggestion: Start with list_dir or tree_view to understand current repository state."
+                )
+
         # Track recovery attempts
         recovery_attempts = self.increment_recovery_attempts(task, context)
 
@@ -952,8 +975,12 @@ class CodeWriterAgent(BaseAgent):
             # Directory creation tasks only get create_directory tool
             tool_names = ['create_directory']
         elif task.action_type == "add":
-            # File creation tasks only get write_file tool
-            tool_names = ['write_file']
+            # File creation tasks get write_file PLUS edit tools
+            # Rationale: ADD might discover the file exists and need to edit instead
+            # This prevents the "file exists, use edit instead" failure loop
+            tool_names = ['write_file', 'apply_patch', 'replace_in_file']
+            if include_python_tools:
+                tool_names = python_tools + tool_names
         elif task.action_type == "edit":
             # File modification tasks should avoid full overwrites; prefer patching tools first.
             tool_names = [
@@ -989,6 +1016,11 @@ class CodeWriterAgent(BaseAgent):
 
         available_tools = [tool for tool in all_tools if tool['function']['name'] in tool_names]
         recovery_allowed_tools = list(tool_names) if tool_names else [t["function"]["name"] for t in available_tools]
+
+        # DIAGNOSTIC LOGGING: Track tool provisioning
+        print(f"  [TOOL_PROVISION] action_type={task.action_type}, tool_names={tool_names}")
+        print(f"  [TOOL_PROVISION] Initial available_tools count: {len(available_tools)}, names: {[t['function']['name'] for t in available_tools]}")
+
         rendered_context, selected_tools, _bundle = build_context_and_tools(
             task,
             context,
@@ -997,30 +1029,52 @@ class CodeWriterAgent(BaseAgent):
             # Allow the full candidate set (no 7-tool cap); keeps all action-type-appropriate tools available
             max_tools=len(tool_names) if tool_names else len(all_tools),
         )
-        available_tools = selected_tools
-        allowed_tool_names = set(tool_names or [])
-        if allowed_tool_names:
-            available_tools = [
-                tool for tool in available_tools
-                if tool.get("function", {}).get("name") in allowed_tool_names
-            ]
+
+        # DIAGNOSTIC LOGGING: Track what context builder returned
+        print(f"  [TOOL_PROVISION] Context builder returned {len(selected_tools)} tools: {[t.get('function', {}).get('name') for t in selected_tools]}")
+
+        # CRITICAL FIX: Never replace available_tools with an empty list!
+        # The context builder can return empty results if keyword matching fails,
+        # but we already have a perfectly good tool list from all_tools filtered by tool_names.
+        # Only use selected_tools if it's non-empty; otherwise keep our initial available_tools.
+        if selected_tools:
+            available_tools = selected_tools
+            allowed_tool_names = set(tool_names or [])
+            if allowed_tool_names:
+                before_filter = len(available_tools)
+                available_tools = [
+                    tool for tool in available_tools
+                    if tool.get("function", {}).get("name") in allowed_tool_names
+                ]
+                # DIAGNOSTIC LOGGING: Track filtering
+                print(f"  [TOOL_PROVISION] After filtering to allowed names: {before_filter} -> {len(available_tools)}")
+        else:
+            # Context builder returned empty - keep our initial available_tools
+            print(f"  [TOOL_PROVISION] Context builder returned empty! Keeping initial available_tools: {len(available_tools)} tools")
 
         # Absolute safety net: ensure the LLM always receives tools.
         # The context builder can return an empty list when the query doesn't overlap
         # with tool descriptions (common for "add" tasks like prisma/schema.prisma).
         if not available_tools:
+            print(f"  [TOOL_PROVISION] CRITICAL: No tools after filtering! Activating safety net...")
             fallback_candidates = set(tool_names or [])
             if fallback_candidates:
+                print(f"  [TOOL_PROVISION] Fallback candidates: {fallback_candidates}")
                 fallback = [
                     tool for tool in all_tools
                     if tool.get("function", {}).get("name") in fallback_candidates
                 ]
                 if fallback:
-                    print(f"  [WARN] Context builder returned no tools; falling back to ALL candidates: {[t.get('function', {}).get('name') for t in fallback]}")
+                    print(f"  [TOOL_PROVISION] Safety net activated: falling back to ALL candidates: {[t.get('function', {}).get('name') for t in fallback]}")
                     available_tools = fallback
+                else:
+                    print(f"  [TOOL_PROVISION] ERROR: Fallback candidates not found in tool universe!")
             if not available_tools:
-                print("  [WARN] Context builder returned no tools and no candidates matched; using full tool registry as last resort")
+                print(f"  [TOOL_PROVISION] LAST RESORT: Using full tool registry ({len(all_tools)} tools)")
                 available_tools = all_tools
+
+        # FINAL DIAGNOSTIC: What we're actually sending to the LLM
+        print(f"  [TOOL_PROVISION] FINAL: Sending {len(available_tools)} tools to LLM: {[t.get('function', {}).get('name') for t in available_tools]}")
 
         # Build enhanced user message with extraction guidance
         task_guidance = f"Task (action_type: {task.action_type}): {task.description}"
@@ -1184,9 +1238,27 @@ class CodeWriterAgent(BaseAgent):
         tool_choice_mode = "required"
 
         try:
-            response = ollama_chat(messages, tools=available_tools, tool_choice=tool_choice_mode)
+            # DIAGNOSTIC LOGGING: Final check before LLM call
+            print(f"  [TOOL_PROVISION] Calling ollama_chat with {len(available_tools)} tools, tool_choice={tool_choice_mode}")
+
+            # CRITICAL FIX: Explicitly pass supports_tools=True when we have tools
+            # This prevents the LLM from being called with tools but supports_tools=False
+            response = ollama_chat(
+                messages,
+                tools=available_tools,
+                supports_tools=True if available_tools else None,
+                tool_choice=tool_choice_mode
+            )
+
+            # DIAGNOSTIC LOGGING: Check response
+            print(f"  [TOOL_PROVISION] LLM response keys: {list(response.keys()) if response else 'None'}")
+            if response and 'message' in response:
+                print(f"  [TOOL_PROVISION] Message keys: {list(response['message'].keys())}")
+
             error_type = None
             error_detail = None
+            tool_name = None  # Initialize to avoid UnboundLocalError
+            arguments = None
 
             # Debug: Print what we got back
             if not response:

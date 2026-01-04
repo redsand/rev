@@ -292,6 +292,7 @@ class GeminiProvider(LLMProvider):
             model_kwargs["system_instruction"] = system_instruction
 
         # Add tools if provided and supported
+        gemini_tools = None
         if tools:
             gemini_tools = self._convert_tools(tools)
             if gemini_tools:
@@ -299,6 +300,11 @@ class GeminiProvider(LLMProvider):
                 # Apply tool configuration to enforce function calling
                 if tool_config:
                     model_kwargs["tool_config"] = tool_config
+                # DIAGNOSTIC: Log tool provisioning
+                print(f"  [GEMINI] Converted {len(tools)} OpenAI tools to {len(gemini_tools[0].get('function_declarations', []))} Gemini function declarations")
+                print(f"  [GEMINI] Tool config: {tool_config}")
+            else:
+                print(f"  [GEMINI] WARNING: Tool conversion returned empty! Original tools count: {len(tools)}")
 
         # Log request
         debug_logger.log_llm_request(model_name, messages, tools if tools and supports_tools else None)
@@ -306,8 +312,30 @@ class GeminiProvider(LLMProvider):
         try:
             model = genai.GenerativeModel(**model_kwargs)
 
+            # DIAGNOSTIC: Log model configuration
+            print(f"  [GEMINI] Model: {model_name}")
+            print(f"  [GEMINI] Has tools: {bool(gemini_tools)}")
+            print(f"  [GEMINI] Has system_instruction: {bool(system_instruction)}")
+
             # Generate response
             response = model.generate_content(converted_messages)
+
+            # DIAGNOSTIC: Log raw response structure
+            if hasattr(response, 'candidates'):
+                print(f"  [GEMINI] Response has {len(response.candidates)} candidate(s)")
+                if response.candidates:
+                    candidate = response.candidates[0]
+                    if hasattr(candidate, 'content'):
+                        content = candidate.content
+                        if hasattr(content, 'parts'):
+                            print(f"  [GEMINI] First candidate has {len(content.parts)} part(s)")
+                            for i, part in enumerate(content.parts):
+                                if hasattr(part, 'function_call'):
+                                    print(f"  [GEMINI] Part {i}: function_call - {part.function_call.name}")
+                                elif hasattr(part, 'text'):
+                                    print(f"  [GEMINI] Part {i}: text - {part.text[:100]}...")
+                    if hasattr(candidate, 'finish_reason'):
+                        print(f"  [GEMINI] Finish reason: {candidate.finish_reason}")
 
             result = self._convert_response(
                 response.candidates[0].content if response.candidates else response,

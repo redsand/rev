@@ -171,24 +171,32 @@ def build_context_and_tools(
     rendered = builder.render(bundle)
     selected_tool_schemas = [t.schema for t in bundle.selected_tool_schemas]
 
+    # DIAGNOSTIC LOGGING
+    print(f"  [CONTEXT_PROVIDER] Retrieved {len(selected_tool_schemas)} tools from retrieval: {[t.get('function', {}).get('name') for t in selected_tool_schemas]}")
+    print(f"  [CONTEXT_PROVIDER] Candidate tool names: {candidate_tool_names}")
+
     # CRITICAL FIX: Always filter to only allowed candidate tools
     # The retrieval system may return tools not in candidate_tool_names based on semantic similarity
     # We must enforce the constraint regardless of what retrieval returns
     # This prevents wrong tools from being available (e.g., read_file for ADD tasks that should only have write_file)
     if candidate_tool_names:
         allowed = set(candidate_tool_names)
+        before_count = len(selected_tool_schemas)
         selected_tool_schemas = [
             t for t in selected_tool_schemas
             if t.get("function", {}).get("name") in allowed
         ]
+        print(f"  [CONTEXT_PROVIDER] After filtering to candidates: {before_count} -> {len(selected_tool_schemas)}")
 
     # If filtering removed all tools, fall back to explicit candidate list
     if not selected_tool_schemas and candidate_tool_names:
+        print(f"  [CONTEXT_PROVIDER] Filtering removed all tools! Activating fallback to tool_universe")
         allowed = set(candidate_tool_names)
         selected_tool_schemas = [
             t for t in tool_universe
             if t.get("function", {}).get("name") in allowed
         ][:max_tools]
+        print(f"  [CONTEXT_PROVIDER] Fallback populated {len(selected_tool_schemas)} tools: {[t.get('function', {}).get('name') for t in selected_tool_schemas]}")
 
     if force_tool_names:
         forced = [name for name in force_tool_names if isinstance(name, str) and name.strip()]

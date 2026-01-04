@@ -1,22 +1,24 @@
 # rev — Production-Grade Agentic Development System
 
-A **robust, pattern-based autonomous development system** powered by [Ollama](https://ollama.ai) for local LLM inference. Rev uses **specialized sub-agents** for different task types, ensuring high-quality code generation, testing, and validation.
+A **robust, pattern-based autonomous development system** powered by **7 LLM providers** including Ollama, OpenAI, Anthropic, Gemini, LocalAI, vLLM, and LMStudio. Rev uses **specialized sub-agents** for different task types, ensuring high-quality code generation, testing, and validation.
 
 ## 🌟 What Makes Rev Different
 
 Rev isn't just another AI coding assistant — it's a **complete agentic development system** with specialized agents for different tasks:
 
-- **🧪 Test-Driven Development (TDD) Core** — Tests are written BEFORE implementation code; follows Red-Green-Refactor cycle for all features
 - **🤖 Specialized Sub-Agent Architecture** — Dedicated agents for code writing, refactoring, testing, debugging, documentation, research, and analysis
 - **✅ Workflow Verification Loop** — Plan → Execute → **Verify** → Report → Re-plan (ensures tasks actually complete)
+- **🧠 Uncertainty Detection** — Detects when uncertain and requests user guidance instead of retrying blindly
 - **💬 Interactive REPL Mode** — Session-persistent development with real-time guidance and context retention across multiple prompts
 - **🖥️ Universal IDE Integration** — Native support for VSCode, Visual Studio, Vim, Emacs, and all LSP-compatible editors
+- **🌐 7 LLM Provider Support** — Ollama (local), OpenAI (GPT-4), Anthropic (Claude), Google Gemini, LocalAI, vLLM, and LMStudio (OpenAI-compatible)
 - **🔍 RAG (Retrieval-Augmented Generation)** — Semantic code search using TF-IDF + hybrid symbolic search for intelligent context gathering
 - **🛡️ ContextGuard/ClarityEngine** — Validates context sufficiency before planning, preventing "hallucinations" from insufficient context
 - **🧠 21 Agentic Design Patterns** — Built on proven research patterns (Goal Setting, Routing, RAG, Recovery, Resource Budgets, etc.)
 - **📊 Resource-Aware** — Tracks steps, tokens, and time budgets to prevent runaway execution
 - **🎯 Goal-Oriented** — Derives measurable goals from requests and validates they're met
 - **🛡️ Production-Ready** — Multi-layer validation, security scanning, auto-recovery, and rollback planning
+- **🧪 Optional TDD Mode** — Test-Driven Development workflow (tests before implementation)
 
 ## Critical Features for Production Development
 
@@ -46,6 +48,45 @@ rev --repl
 > Now extract the JWT logic to a separate service
 > Add unit tests for the service
 > /status  # See what was done
+```
+
+### 🧠 Uncertainty Detection (NEW!)
+**Detects when Rev is uncertain and requests user guidance** instead of retrying blindly:
+
+```bash
+# When uncertain, Rev will ask:
+🤔 Rev is uncertain and needs guidance:
+• Task failed 3 times with identical error: ModuleNotFoundError: No module named 'pytest'
+• No progress - same error on every attempt
+
+Task: run tests for auth module
+Attempts: 3
+
+[Options]
+  [1] Provide specific guidance (describe what to do)
+  [2] Skip this task and continue
+  [3] Retry with current approach
+  [4] Abort execution
+
+Choice [1-4]:
+```
+
+**Why Uncertainty Detection is Critical:**
+- **No Blind Retries** — Asks for help after 2+ failures with same error
+- **Circuit Breaker Override** — Last chance before aborting (10 recovery attempts)
+- **User Control** — Choose to provide guidance, skip, retry, or abort
+- **Faster Resolution** — Get correct information instead of wasting time
+
+**Configure:**
+```bash
+# Enable/disable (default: enabled)
+export REV_UNCERTAINTY_DETECTION_ENABLED=true
+
+# Set threshold for triggering guidance (default: 5)
+export REV_UNCERTAINTY_THRESHOLD=5
+
+# Auto-skip threshold (default: 10)
+export REV_UNCERTAINTY_AUTO_SKIP_THRESHOLD=10
 ```
 
 ### 🔍 RAG (Retrieval-Augmented Generation)
@@ -87,59 +128,25 @@ rev "Implement authentication system"
 - **Gap Detection** — Identifies missing information before wasting tokens
 - **Hallucination Prevention** — Won't generate fake code for "missing" patterns
 
-### 🧪 Test-Driven Development (TDD) Core
-**REV follows TDD as a fundamental practice** for all development work:
-
-```bash
-# REV automatically enforces TDD workflow:
-rev "Add user authentication feature"
-
-# Internally:
-# 1. PLAN: Review existing tests → Write new tests → Implement feature → Run tests
-# 2. RED: Creates failing tests that specify desired behavior
-# 3. GREEN: Implements minimal code to make tests pass
-# 4. REFACTOR: Improves code while keeping tests green
-```
-
-**Why TDD is Core to REV:**
-- **Tests First** — All plans ensure test tasks come BEFORE implementation tasks
-- **Red-Green-Refactor** — Follows the proven TDD cycle for every feature
-- **Bug Reproduction** — Bug fixes start with a test that reproduces the issue
-- **Verified Quality** — Code is only accepted when tests pass
-- **Living Documentation** — Tests serve as executable specifications
-
-**TDD in Planning:**
-```
-# BAD (without TDD):
-Task 1: Implement authentication
-Task 2: Add tests
-
-# GOOD (with TDD):
-Task 1: Review existing test patterns
-Task 2: Write test for authentication in tests/test_auth.py
-Task 3: Run test to verify it fails (RED)
-Task 4: Implement authentication to make test pass (GREEN)
-Task 5: Run test to verify it passes
-Task 6: Refactor if needed while keeping tests green
-```
-
 ---
 
 ## Key Features
 
-### Sub-Agent Architecture (NEW - Now Default!)
-- **🔧 CodeWriterAgent** — Specialized for file creation and modification
+### Specialized Sub-Agent Architecture
+- **🔧 CodeWriterAgent** — Specialized for file creation and modification (add, edit, delete, move)
 - **♻️ RefactoringAgent** — Handles code extraction and reorganization with verification
-- **🧪 TestExecutorAgent** — Runs tests and validates correctness
+- **🧪 TestExecutorAgent** — Runs tests, executes commands, and validates correctness
 - **🐛 DebuggingAgent** — Analyzes and fixes code issues
 - **📚 DocumentationAgent** — Creates and updates documentation
 - **🔍 ResearchAgent** — Explores codebase before planning
 - **📊 AnalysisAgent** — Provides code analysis and insights
+- **🛠️ ToolCreationAgent** — Creates specialized tools for unique workflows
+- **⚙️ ToolExecutorAgent** — Executes specialized tools
 
 Each agent is optimized for its specific task type, resulting in **higher quality outputs** and **3x faster execution**.
 
 ### Workflow Verification Loop
-New in v2.1: **Proper verification workflow** that ensures tasks actually complete:
+**Proper verification workflow** that ensures tasks actually complete:
 ```
 Plan → Execute → VERIFY ✓ → Report → Re-plan if needed
 ```
@@ -150,7 +157,7 @@ Plan → Execute → VERIFY ✓ → Report → Re-plan if needed
 - Real-time feedback on task completion status
 
 ### Core Capabilities
-- **🤖 7-Agent System** — Planning, Research, Execution, Code Writing, Refactoring, Testing, Analysis
+- **🤖 9-Agent System** — Planning, Research, Execution, Code Writing, Refactoring, Testing, Analysis, Tool Creation, Tool Execution
 - **🎭 Orchestrator Mode** — Meta-agent coordinates all agents with resource tracking
 - **🔍 Research Agent** — Pre-planning codebase exploration (symbolic + semantic search)
 - **📚 Learning Agent** — Project memory that learns from past executions
@@ -164,12 +171,13 @@ Plan → Execute → VERIFY ✓ → Report → Re-plan if needed
 - **🚀 Parallel Execution** — Run 2+ tasks concurrently for 2-4x faster completion
 - **🧪 Automatic Testing** — Runs tests after each change to validate correctness
 - **🔧 Full Code Operations** — Review, edit, add, delete, rename files
-- **🏠 Local LLM** — Uses Ollama (no API keys, fully private)
+- **🏠 Local LLM Support** — Ollama, LocalAI, vLLM, LMStudio (no API keys, fully private)
+- **☁️ Cloud LLM Support** — OpenAI (GPT-4), Anthropic (Claude), Google Gemini
 - **🎯 Advanced Planning** — Dependency analysis, impact assessment, risk evaluation
 
 ## Architecture
 
-**Multi-Agent Sub-Agent Orchestration System (v2.1)**
+**Multi-Agent Sub-Agent Orchestration System**
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -189,7 +197,8 @@ Plan → Execute → VERIFY ✓ → Report → Re-plan if needed
 └─────────┘  └─────────┘  │(CODE, TEST,  │
                            │ REFACTOR,    │
                            │ DOCUMENTATION,
-                           │ DEBUGGING)   │
+                           │ DEBUGGING,   │
+                           │ TOOLS)       │
                            └──────┬───────┘
                                   │
                   ┌───────────────┼───────────────┐
@@ -206,15 +215,15 @@ Plan → Execute → VERIFY ✓ → Report → Re-plan if needed
                   │    ▼                      ▼   │
                   │  ┌──────────┐      ┌──────────┐
                   │  │Debugging │      │Documentation
-                  │  │Agent     │      │Agent
-                  │  │(DEBUG)   │      │(DOCS)
+                  │  │Agent     │      │Agent     │
+                  │  │(DEBUG)   │      │(DOCS)    │
                   │  └──────────┘      └──────────┘
                   │                      │
                   └──────────┬───────────┘
                              │
                              ▼
                     ┌──────────────────┐
-                    │VERIFY EXECUTION  │ ← NEW!
+                    │VERIFY EXECUTION  │
                     │(quick_verify)    │
                     └────────┬─────────┘
                              │
@@ -237,52 +246,16 @@ The orchestrator intelligently routes tasks to the right agent:
 |-----------|-------|--------------|
 | `add`, `create`, `write` | CodeWriterAgent | Create new files, write code |
 | `edit`, `modify` | CodeWriterAgent | Edit existing files, modify code |
+| `delete`, `move` | CodeWriterAgent | Remove or relocate files |
 | `refactor`, `extract` | RefactoringAgent | Extract classes, reorganize code with **verification** |
-| `test`, `validate` | TestExecutorAgent | Run tests, validate correctness |
+| `test`, `validate`, `run` | TestExecutorAgent | Run tests, execute commands, validate correctness |
 | `debug`, `fix` | DebuggingAgent | Analyze errors, suggest fixes |
 | `document`, `docs` | DocumentationAgent | Create/update documentation |
-| `research`, `analyze` | ResearchAgent | Explore codebase, analyze patterns |
+| `research`, `analyze`, `read` | ResearchAgent | Explore codebase, analyze patterns |
+| `create_tool` | ToolCreationAgent | Create specialized tools |
+| `execute_tool`, `tool` | ToolExecutorAgent | Execute custom tools |
 
 Each agent is optimized for its specific task type with custom prompts and tool access.
-
-## Execution Modes
-
-Rev supports two execution modes:
-
-- **🤖 Sub-Agent Mode (NOW DEFAULT!)** — Specialized agents handle specific task types for **higher quality** and **faster execution**
-- **📋 Linear Mode (Testing)** — Single generic agent for testing/comparison
-
-### Quick Start
-
-```bash
-# Use Sub-Agent Mode (DEFAULT for all new usage)
-rev "Extract BreakoutAnalyst class to lib/analysts/"
-
-# Explicitly enable Sub-Agent Mode
-export REV_EXECUTION_MODE=sub-agent
-rev "Your task"
-
-# Use Linear Mode for testing (not recommended for production)
-export REV_EXECUTION_MODE=linear
-rev "Your task"
-```
-
-### Performance Comparison
-
-| Feature | Sub-Agent (DEFAULT) | Linear (Testing) |
-|---------|-----------|---------|
-| Code extraction | ✅ Real implementations (95%) | ⚠️ May generate stubs (65%) |
-| Performance | ✅ 3x faster with specialization | ⚠️ Sequential only |
-| Quality | ✅ Task-specialized validation | ⚠️ Generic validation |
-| Task verification | ✅ Built-in verification | ⚠️ No verification |
-| Tests passing | ✅ 26/26 tests | ✅ Basic tests |
-
-**Why Sub-Agent Mode is Default:**
-1. **Specialized agents** produce higher-quality code
-2. **3x faster** execution through task optimization
-3. **Verification loop** ensures tasks actually complete
-4. **No silent failures** — broken extractions are detected
-5. **Better resource usage** — agents optimized for their task type
 
 ---
 
@@ -291,19 +264,22 @@ rev "Your task"
 ### Quick Install (Recommended)
 
 ```bash
-# Install via pip (coming soon to PyPI)
+# Install via pip
 pip install rev-agentic
 
 # Or install from source
-git clone https://github.com/redsand/rev
+git clone https://github.com/yourusername/rev
 cd rev
 pip install -e .
 ```
 
 **Includes:** All IDE integration features (LSP server, HTTP API, VSCode/Visual Studio extensions)
 
-### 1. Install Ollama
+### 1. Choose Your LLM Provider
 
+Rev supports multiple LLM providers:
+
+#### Option A: Local LLM (Ollama) - Private & Free
 ```bash
 # macOS
 brew install ollama
@@ -312,21 +288,44 @@ brew install ollama
 curl -fsSL https://ollama.ai/install.sh | sh
 
 # Windows - Download from https://ollama.ai
-```
 
-### 2. Pull a Code Model
-
-**⚠️ Important:** rev requires a model with **function/tool calling support** for full functionality.
-
-**Recommended models with tool support:**
-```bash
-# Best for code tasks
+# Pull a code model
 ollama pull qwen3-coder:480b-cloud  # Recommended
 ollama pull llama3.1:70b            # Excellent alternative
 ollama pull mistral-nemo:latest     # Fast with tools
 ```
 
-### 3. Install Dependencies
+#### Option B: Cloud LLMs - Powerful & Convenient
+```bash
+# OpenAI (GPT-4)
+export OPENAI_API_KEY="your-key-here"
+pip install rev-agentic[openai]
+
+# Anthropic (Claude)
+export ANTHROPIC_API_KEY="your-key-here"
+pip install rev-agentic[anthropic]
+
+# Google Gemini
+export GEMINI_API_KEY="your-key-here"
+pip install rev-agentic[gemini]
+```
+
+#### Option C: OpenAI-Compatible Backends - Local & Flexible
+```bash
+# LocalAI (OpenAI-compatible local server)
+export LOCALAI_BASE_URL="http://localhost:8080/v1"
+export REV_LLM_PROVIDER=localai
+
+# vLLM (High-performance inference server)
+export VLLM_BASE_URL="http://localhost:8000/v1"
+export REV_LLM_PROVIDER=vllm
+
+# LMStudio (Local LLM development environment)
+export LMSTUDIO_BASE_URL="http://localhost:1234/v1"
+export REV_LLM_PROVIDER=lmstudio
+```
+
+### 2. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
@@ -408,6 +407,30 @@ rev "Generate API documentation from code comments"
 
 The orchestrator automatically routes to the appropriate agent!
 
+### LLM Provider Selection
+
+```bash
+# Use specific provider
+rev "your task" --llm-provider gemini
+rev "your task" --llm-provider openai --model gpt-4
+rev "your task" --llm-provider anthropic --model claude-3-5-sonnet-20241022
+
+# Auto-detection from model name
+rev "your task" --model gpt-4           # Uses OpenAI
+rev "your task" --model claude-3-opus   # Uses Anthropic
+rev "your task" --model gemini-pro      # Uses Gemini
+
+# OpenAI-compatible backends
+rev "your task" --llm-provider localai
+rev "your task" --llm-provider vllm
+rev "your task" --llm-provider lmstudio
+
+# Set default provider
+export REV_LLM_PROVIDER=gemini
+export REV_EXECUTION_MODEL=gemini-2.0-flash-exp
+rev "your task"
+```
+
 ## 🖥️ IDE Integration
 
 Rev provides comprehensive IDE integration for VSCode, Visual Studio, and all LSP-compatible editors (Vim, Emacs, Sublime Text, JetBrains IDEs).
@@ -432,7 +455,7 @@ rev --ide-lsp
 - **Code Refactoring** - Improve code quality and maintainability
 - **Debugging** - Fix bugs and errors with AI assistance
 - **Documentation** - Add comprehensive documentation
-- **Model Selection** - Choose from Ollama, GPT-4, Claude, etc.
+- **Model Selection** - Choose from Ollama, GPT-4, Claude, Gemini
 - **Custom Tasks** - Execute any Rev task from your IDE
 
 ### VSCode Extension
@@ -495,17 +518,47 @@ rev --ide-api --ide-api-port 9000  # Custom port
 ### Environment Variables
 
 ```bash
-# Execution mode (now sub-agent by default)
-export REV_EXECUTION_MODE=sub-agent     # DEFAULT
-export REV_EXECUTION_MODE=linear        # Testing only
+# LLM Provider Selection
+export REV_LLM_PROVIDER=ollama        # ollama, openai, anthropic, gemini, localai, vllm, lmstudio
+export REV_EXECUTION_MODEL=gemini-3-flash-preview:cloud
 
-# Ollama configuration
+# Provider-Specific Configuration
+## Ollama (local)
 export OLLAMA_BASE_URL="http://localhost:11434"
 export OLLAMA_MODEL="qwen3-coder:480b-cloud"
+
+## OpenAI
+export OPENAI_API_KEY="your-key"
+export OPENAI_MODEL="gpt-4"
+
+## Anthropic
+export ANTHROPIC_API_KEY="your-key"
+export ANTHROPIC_MODEL="claude-3-5-sonnet-20241022"
+
+## Gemini
+export GEMINI_API_KEY="your-key"
+export GEMINI_MODEL="gemini-2.0-flash-exp"
+
+## OpenAI-Compatible Backends (LocalAI, vLLM, LMStudio)
+export LOCALAI_BASE_URL="http://localhost:8080/v1"
+export VLLM_BASE_URL="http://localhost:8000/v1"
+export LMSTUDIO_BASE_URL="http://localhost:1234/v1"
+# These reuse OpenAIProvider with custom base URLs
 
 # LLM Generation Parameters
 export OLLAMA_TEMPERATURE=0.1           # Lower = more accurate
 export OLLAMA_NUM_CTX=16384             # Context window
+
+# Feature Toggles
+export REV_UNCERTAINTY_DETECTION_ENABLED=true   # Uncertainty detection (default: true)
+export REV_UNCERTAINTY_THRESHOLD=5              # Score to trigger guidance
+export REV_CONTEXT_GUARD=true                   # Context validation (default: true)
+export REV_TDD_ENABLED=false                    # Test-driven development
+
+# Resource Budgets
+export REV_MAX_STEPS=500                # Maximum execution steps
+export REV_MAX_TOKENS=1000000           # Token budget
+export REV_MAX_SECONDS=3600             # Wallclock timeout (60 min)
 ```
 
 ### Command-Line Options
@@ -515,9 +568,9 @@ rev [OPTIONS] "task description"
 
 Core Options:
   --repl                       Interactive REPL mode
-  --model MODEL                Ollama model to use
+  --model MODEL                LLM model to use
+  --llm-provider PROVIDER      LLM provider (ollama, openai, anthropic, gemini, localai, vllm, lmstudio)
   --base-url URL               Ollama API URL
-  --execution-mode MODE        sub-agent (default) or linear
 
 IDE Integration:
   --ide-api                    Start IDE API server
@@ -526,13 +579,22 @@ IDE Integration:
   --ide-lsp-port PORT          LSP server port (default: 2087)
   --ide-lsp-stdio              Use stdio for LSP
 
+Advanced:
+  --research                   Enable research agent (default: enabled)
+  --research-depth DEPTH       Research depth (shallow/medium/deep)
+  --review-strictness LEVEL    Review level (lenient/moderate/strict)
+  --parallel -j N              Parallel execution (N workers)
+  --tui                        Curses-based TUI mode
+  --debug                      Enable debug logging
+
 Other:
+  -y, --yes                    Auto-approve changes
   -h, --help                   Show all options
 ```
 
 ## Troubleshooting
 
-### "Connection refused"
+### "Connection refused" (Ollama)
 
 Ensure Ollama is running:
 
@@ -540,12 +602,48 @@ Ensure Ollama is running:
 ollama serve
 ```
 
-### "Model not found"
+### "Model not found" (Ollama)
 
 Pull the model first:
 
 ```bash
 ollama pull qwen3-coder:480b-cloud
+```
+
+### "Authentication error" (Cloud providers)
+
+Verify your API keys:
+
+```bash
+# OpenAI
+echo $OPENAI_API_KEY
+
+# Anthropic
+echo $ANTHROPIC_API_KEY
+
+# Gemini
+echo $GEMINI_API_KEY
+
+# Save keys permanently
+rev save-api-key openai YOUR_KEY
+rev save-api-key anthropic YOUR_KEY
+rev save-api-key gemini YOUR_KEY
+```
+
+### "Connection refused" (OpenAI-Compatible Backends)
+
+For LocalAI, vLLM, or LMStudio, ensure the server is running and the base URL is correct:
+
+```bash
+# Verify server is running
+curl http://localhost:8080/v1/models  # LocalAI
+curl http://localhost:8000/v1/models  # vLLM
+curl http://localhost:1234/v1/models  # LMStudio
+
+# Set correct base URL
+export LOCALAI_BASE_URL="http://localhost:8080/v1"
+export VLLM_BASE_URL="http://localhost:8000/v1"
+export LMSTUDIO_BASE_URL="http://localhost:1234/v1"
 ```
 
 ### Verification Failure
@@ -559,13 +657,26 @@ If you see messages like:
 
 This is **expected behavior!** The verification system detected that a task didn't complete properly and is re-planning. Let it retry — it will often succeed on the second attempt with a different approach.
 
+### Uncertainty Guidance
+
+When Rev asks for guidance:
+
+```
+🤔 Rev is uncertain and needs guidance:
+• Task failed 3 times with identical error
+```
+
+**This is working correctly!** Rev detected repeated failures and is asking for help instead of wasting time. Provide specific guidance to resolve the issue quickly.
+
 ## Testing & Coverage
 
 **Test Coverage: 80%+** - Production Ready ✅
 
-- **136 tests passing** (100% pass rate)
-- **20 new verification tests** ensuring workflow quality
+- **136+ tests passing** (100% pass rate)
 - **Cross-platform tested** (Windows, Linux, macOS)
+- **Provider-specific tests** for Gemini, OpenAI, Anthropic
+- **Uncertainty detection tests** (11 test cases)
+- **Schema sanitization tests** (7 test cases)
 
 ### Running Tests
 
@@ -573,8 +684,10 @@ This is **expected behavior!** The verification system detected that a task didn
 # Run all tests
 python -m pytest tests -v
 
-# Run verification tests
-python -m pytest tests/test_quick_verify.py tests/test_refactoring_extraction_workflow.py -v
+# Run specific test suites
+python -m pytest tests/test_uncertainty_detection.py -v
+python -m pytest tests/test_gemini_schema_sanitization.py -v
+python -m pytest tests/test_quick_verify.py -v
 
 # Run with coverage
 python -m pytest tests --cov=rev --cov-report=term-missing
@@ -588,11 +701,15 @@ python -m pytest tests --cov=rev --cov-report=term-missing
 4. **Review Changes** — Use `git diff` before committing
 5. **Iterative Development** — Use REPL for interactive work
 6. **Trust Verification** — Let the system verify and retry
+7. **Provide Guidance When Asked** — Answer uncertainty prompts to save time
+8. **Choose the Right Provider** — Ollama for privacy, cloud providers for power
 
 ## Key Documents
 
 - **[docs/IDE_INTEGRATION.md](docs/IDE_INTEGRATION.md)** — IDE integration guide (VSCode, Visual Studio, Vim, Emacs, etc.)
 - **[docs/WORKFLOW_VERIFICATION_FIX.md](docs/WORKFLOW_VERIFICATION_FIX.md)** — Verification loop implementation
+- **[docs/UNCERTAINTY_DETECTION_IMPLEMENTATION.md](docs/UNCERTAINTY_DETECTION_IMPLEMENTATION.md)** — Uncertainty detection system
+- **[docs/GEMINI_COMPLETE_FIX.md](docs/GEMINI_COMPLETE_FIX.md)** — Gemini integration fixes
 - **[docs/README.md](docs/README.md)** — Complete feature documentation
 - **[docs/IMPLEMENTATION_SUMMARY.md](docs/IMPLEMENTATION_SUMMARY.md)** — Agentic patterns reference
 
@@ -632,6 +749,17 @@ User Request → Router → Specialized Agent → Optimized Tool Calls → Verif
 - Automatic re-planning with different approach
 - Transparent reporting of what actually happened
 
+### Multi-Provider Support (7 Providers)
+
+**Flexibility:**
+- **Local** (Ollama, LocalAI, vLLM, LMStudio) - No API costs, fully private, works offline
+- **Cloud** (OpenAI GPT-4, Anthropic Claude, Google Gemini) - Most powerful models, best results
+
+**Per-Phase Configuration:**
+- Different providers for planning vs execution
+- Mix and match for cost/quality optimization
+- Fallback support for reliability
+
 ## File Structure
 
 ```
@@ -639,20 +767,36 @@ User Request → Router → Specialized Agent → Optimized Tool Calls → Verif
 ├── README.md                  # Main documentation (you are here)
 ├── docs/
 │   ├── IDE_INTEGRATION.md     # IDE integration guide
-│   ├── WORKFLOW_VERIFICATION_FIX.md    # Verification implementation
-│   ├── IMPLEMENTATION_SUMMARY.md       # Agentic patterns reference
-│   ├── ARCHITECTURE.md                 # System architecture
-│   └── ... (40+ documentation files)
+│   ├── UNCERTAINTY_DETECTION_IMPLEMENTATION.md  # Uncertainty system
+│   ├── GEMINI_COMPLETE_FIX.md                  # Gemini integration
+│   ├── WORKFLOW_VERIFICATION_FIX.md            # Verification implementation
+│   ├── IMPLEMENTATION_SUMMARY.md               # Agentic patterns reference
+│   ├── ARCHITECTURE.md                         # System architecture
+│   └── ... (50+ documentation files)
 ├── rev/                       # Main package (CLI entry: `rev`)
 │   ├── execution/
 │   │   ├── orchestrator.py    # Sub-agent coordinator (with verification)
 │   │   ├── quick_verify.py    # Task verification module
+│   │   ├── uncertainty_detector.py  # Uncertainty detection
+│   │   ├── user_guidance.py   # User guidance dialog
 │   │   └── ...
 │   ├── agents/
 │   │   ├── code_writer.py     # CodeWriterAgent
 │   │   ├── refactoring.py     # RefactoringAgent
 │   │   ├── test_executor.py   # TestExecutorAgent
+│   │   ├── debugging.py       # DebuggingAgent
+│   │   ├── documentation.py   # DocumentationAgent
+│   │   ├── research.py        # ResearchAgent
+│   │   ├── analysis.py        # AnalysisAgent
 │   │   └── ...
+│   ├── llm/
+│   │   ├── providers/
+│   │   │   ├── ollama.py      # Ollama provider
+│   │   │   ├── openai_provider.py   # OpenAI/GPT-4
+│   │   │   ├── anthropic_provider.py  # Anthropic/Claude
+│   │   │   ├── gemini_provider.py     # Google Gemini
+│   │   │   └── base.py        # Provider interface
+│   │   └── provider_factory.py  # Provider selection
 │   ├── ide/                   # IDE integration
 │   │   ├── lsp_server.py      # LSP server
 │   │   ├── api_server.py      # HTTP/WebSocket API
@@ -662,6 +806,8 @@ User Request → Router → Specialized Agent → Optimized Tool Calls → Verif
 │   ├── vscode/                # VSCode extension
 │   └── visual-studio/         # Visual Studio extension
 ├── tests/
+│   ├── test_uncertainty_detection.py  # Uncertainty tests
+│   ├── test_gemini_schema_sanitization.py  # Gemini schema tests
 │   ├── test_ide_integration.py  # IDE integration tests
 │   └── ... (comprehensive test suite)
 └── requirements.txt           # Project dependencies
