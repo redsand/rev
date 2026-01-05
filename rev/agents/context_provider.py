@@ -13,6 +13,7 @@ from rev.core.context import RevContext
 from rev.models.task import Task
 from rev.retrieval.context_builder import ContextBuilder, ContextBundle
 from rev import config
+from rev.run_log import write_run_log_line
 
 
 _BUILDER: ContextBuilder | None = None
@@ -172,8 +173,8 @@ def build_context_and_tools(
     selected_tool_schemas = [t.schema for t in bundle.selected_tool_schemas]
 
     # DIAGNOSTIC LOGGING
-    print(f"  [CONTEXT_PROVIDER] Retrieved {len(selected_tool_schemas)} tools from retrieval: {[t.get('function', {}).get('name') for t in selected_tool_schemas]}")
-    print(f"  [CONTEXT_PROVIDER] Candidate tool names: {candidate_tool_names}")
+    write_run_log_line(f"  [CONTEXT_PROVIDER] Retrieved {len(selected_tool_schemas)} tools from retrieval: {[t.get('function', {}).get('name') for t in selected_tool_schemas]}")
+    write_run_log_line(f"  [CONTEXT_PROVIDER] Candidate tool names: {candidate_tool_names}")
 
     # CRITICAL FIX: Always filter to only allowed candidate tools
     # The retrieval system may return tools not in candidate_tool_names based on semantic similarity
@@ -186,17 +187,17 @@ def build_context_and_tools(
             t for t in selected_tool_schemas
             if t.get("function", {}).get("name") in allowed
         ]
-        print(f"  [CONTEXT_PROVIDER] After filtering to candidates: {before_count} -> {len(selected_tool_schemas)}")
+        write_run_log_line(f"  [CONTEXT_PROVIDER] After filtering to candidates: {before_count} -> {len(selected_tool_schemas)}")
 
     # If filtering removed all tools, fall back to explicit candidate list
     if not selected_tool_schemas and candidate_tool_names:
-        print(f"  [CONTEXT_PROVIDER] Filtering removed all tools! Activating fallback to tool_universe")
+        write_run_log_line(f"  [CONTEXT_PROVIDER] Filtering removed all tools! Activating fallback to tool_universe")
         allowed = set(candidate_tool_names)
         selected_tool_schemas = [
             t for t in tool_universe
             if t.get("function", {}).get("name") in allowed
         ][:max_tools]
-        print(f"  [CONTEXT_PROVIDER] Fallback populated {len(selected_tool_schemas)} tools: {[t.get('function', {}).get('name') for t in selected_tool_schemas]}")
+        write_run_log_line(f"  [CONTEXT_PROVIDER] Fallback populated {len(selected_tool_schemas)} tools: {[t.get('function', {}).get('name') for t in selected_tool_schemas]}")
 
     if force_tool_names:
         forced = [name for name in force_tool_names if isinstance(name, str) and name.strip()]

@@ -78,6 +78,42 @@ def _extract_patch_from_text(text: str) -> Optional[str]:
     return None
 
 
+def _looks_like_code_reference(text: str) -> bool:
+    """Check if text looks like a code reference rather than a file path."""
+    if not text:
+        return False
+
+    # Has path separators? Likely a real file path
+    if '/' in text or '\\' in text:
+        return False
+
+    # Count dots
+    dot_count = text.count('.')
+
+    # 2+ dots without path separators = definitely code reference
+    if dot_count >= 2:
+        return True
+
+    # For single-dot patterns, check common patterns
+    if dot_count == 1:
+        parts = text.split('.')
+        if len(parts) == 2:
+            name, extension = parts
+            common_vars = {
+                'app', 'obj', 'this', 'self', 'req', 'res', 'ctx', 'config',
+                'server', 'client', 'router', 'express', 'console', 'process',
+                'module', 'api', 'db', 'prisma', 'auth', 'user'
+            }
+            common_methods = {
+                'listen', 'get', 'post', 'put', 'delete', 'use', 'send', 'status',
+                'json', 'log', 'error', 'warn', 'info', 'debug', 'find', 'save',
+                'create', 'update', 'remove', 'connect', 'disconnect'
+            }
+            if name.lower() in common_vars or extension.lower() in common_methods:
+                return True
+    return False
+
+
 def _extract_file_from_text(text: str) -> Optional[Tuple[str, str]]:
     if not text:
         return None
@@ -93,18 +129,27 @@ def _extract_file_from_text(text: str) -> Optional[Tuple[str, str]]:
 
     first_line = lines[0].strip()
     path = None
+
+    def _clean_path_token(token: str) -> str:
+        cleaned = token.strip().strip("\"'`")
+        if cleaned.endswith(":"):
+            cleaned = cleaned[:-1].strip()
+        return cleaned
+
     if any(first_line.lower().startswith(marker) for marker in ("path:", "file:", "filepath:")):
-        path = first_line.split(":", 1)[1].strip()
-        body = "\n".join(lines[1:])
-    elif (
-        "." in first_line
-        and " " not in first_line
-        and first_line.lower().endswith((".py", ".js", ".ts", ".md", ".json", ".yaml", ".yml", ".txt"))
-    ):
-        path = first_line
-        body = "\n".join(lines[1:])
+        path = _clean_path_token(first_line.split(":", 1)[1])
     else:
+        # detect the first file-like token anywhere on the line
+        path_match = re.search(r"[\w./\\-]+\.\w+", first_line)
+        if path_match:
+            candidate = _clean_path_token(path_match.group(0))
+            if not _looks_like_code_reference(candidate):
+                path = candidate
+
+    if not path:
         return None
+
+    body = "\n".join(lines[1:])
 
     body = body.rstrip("\n")
     if not path or not body:
