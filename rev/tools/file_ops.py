@@ -553,8 +553,52 @@ def append_to_file(path: str, content: str) -> str:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
 
+def _fuzzy_match(find: str, content: str) -> Optional[Tuple[int, int, str]]:
+    """
+    Find a fuzzy match for the 'find' string within 'content'.
+    Returns (start_index, end_index, actual_match_text) or None.
+    """
+    import difflib
+
+    # 1. Try normalizing whitespace (collapse all consecutive whitespace to a single space)
+    def normalize(text: str) -> str:
+        return " ".join(text.split())
+
+    norm_find = normalize(find)
+    if not norm_find:
+        return None
+
+    # Check for exact normalized match first (very fast)
+    # We need to find where this occurs in the original content to get indices
+    # This is a bit tricky, so we use a more robust line-based approach
+    
+    find_lines = find.splitlines()
+    content_lines = content.splitlines(keepends=True)
+    
+    if not find_lines or not content_lines:
+        return None
+
+    # Use SequenceMatcher to find the best matching block of lines
+    matcher = difflib.SequenceMatcher(None, [normalize(l) for l in find_lines], [normalize(l) for l in content_lines])
+    best_match = matcher.find_longest_match(0, len(find_lines), 0, len(content_lines))
+    
+    # We only consider it a match if it covers a significant portion of the 'find' string
+    if best_match.size >= len(find_lines) * 0.8:
+        # Reconstruct the original indices
+        start_line = best_match.b
+        end_line = best_match.b + best_match.size
+        
+        # Calculate character indices
+        start_char = sum(len(l) for l in content_lines[:start_line])
+        end_char = sum(len(l) for l in content_lines[:end_line])
+        
+        actual_match = "".join(content_lines[start_line:end_line])
+        return start_char, end_char, actual_match
+        
+    return None
+
 def replace_in_file(path: str, find: str, replace: str, regex: bool = False) -> str:
-    """Find and replace within a file."""
+    """Find and replace within a file with fuzzy fallback."""
     try:
         # Validate find parameter
         if not find:
@@ -563,25 +607,43 @@ def replace_in_file(path: str, find: str, replace: str, regex: bool = False) -> 
         p = _safe_path(path)
         if not p.exists():
             return json.dumps({"error": f"Not found: {path}"})
-        content = p.read_text(encoding="utf-8", errors="ignore")
+        
+        # Read with BOM handling if possible
+        try:
+            content = p.read_text(encoding="utf-8-sig") # Handles BOM automatically
+        except Exception:
+            content = p.read_text(encoding="utf-8", errors="ignore")
 
-        # Determine match count up front (used for no-op detection and error messages).
+        # 1. Try Exact/Regex Match
         if regex:
             match_count = len(re.findall(find, content))
+            if match_count > 0:
+                new_content = re.sub(find, replace, content)
+            else:
+                new_content = content
         else:
             match_count = content.count(find)
+            if match_count > 0:
+                new_content = content.replace(find, replace)
+            else:
+                new_content = content
+
+        # 2. Fuzzy Fallback (only for non-regex exact matches that failed)
+        is_fuzzy = False
+        if match_count == 0 and not regex:
+            fuzzy = _fuzzy_match(find, content)
+            if fuzzy:
+                start, end, actual_match = fuzzy
+                new_content = content[:start] + replace + content[end:]
+                match_count = 1
+                is_fuzzy = True
 
         if match_count == 0:
             return json.dumps(
                 {"replaced": 0, "file": _rel_to_root(p), "path_abs": str(p), "path_rel": _rel_to_root_posix(p)}
             )
 
-        if regex:
-            new_content = re.sub(find, replace, content)
-        else:
-            new_content = content.replace(find, replace)
-
-        if content == new_content:
+        if content == new_content and match_count > 0 and not is_fuzzy:
             return json.dumps(
                 {
                     "replaced": 0,
