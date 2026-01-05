@@ -511,7 +511,7 @@ def handle_insufficient_context(
 
     if interactive:
         print("\n" + "=" * 70)
-        print("⚠️  CONTEXT GAPS DETECTED - Interactive Clarification")
+        print("  CONTEXT GAPS DETECTED - Interactive Clarification")
         print("=" * 70)
 
         # Display gaps
@@ -524,7 +524,7 @@ def handle_insufficient_context(
         if sufficiency.hallucination_risks:
             print("\nHallucination Risks:")
             for risk in sufficiency.hallucination_risks[:3]:
-                print(f"  ⚠️  {risk}")
+                print(f"    {risk}")
 
         # Ask for clarification or skip
         print("\nOptions:")

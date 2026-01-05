@@ -7,6 +7,7 @@ class BaseAgent(ABC):
     """Abstract base class for all sub-agents with built-in recovery mechanisms."""
 
     # All agents should limit recovery attempts to prevent infinite loops
+    # This can be overridden by specific agents.
     MAX_RECOVERY_ATTEMPTS = 2
 
     @abstractmethod

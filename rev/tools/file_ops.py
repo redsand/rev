@@ -388,7 +388,7 @@ def write_file(path: str, content: str) -> str:
             if check_result.get('warnings'):
                 # Log warnings (visible to user/LLM)
                 for warning in check_result['warnings']:
-                    print(f"  ⚠️  {warning}")
+                    print(f"    {warning}")
 
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")

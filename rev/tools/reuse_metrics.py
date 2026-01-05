@@ -126,7 +126,7 @@ class ReuseMetricsTracker:
                 f.write(json.dumps(self.current_session.to_dict()) + '\n')
         except Exception as e:
             # Don't fail if metrics can't be saved
-            print(f"  ⚠️  Failed to save reuse metrics: {e}")
+            print(f"    Failed to save reuse metrics: {e}")
 
     def get_summary(self, last_n: int = 10) -> Dict[str, Any]:
         """Get summary of recent reuse metrics.
@@ -188,7 +188,7 @@ class ReuseMetricsTracker:
         print("=" * 60)
 
         if "error" in summary:
-            print(f"  ⚠️  {summary['error']}")
+            print(f"    {summary['error']}")
             return
 
         print(f"  📊 {summary['message']}")
@@ -198,7 +198,7 @@ class ReuseMetricsTracker:
         print(f"  🎯 Average reuse ratio: {summary['average_reuse_ratio']:.1%}")
 
         if summary.get('total_similarity_warnings', 0) > 0:
-            print(f"  ⚠️  Similarity warnings: {summary['total_similarity_warnings']}")
+            print(f"    Similarity warnings: {summary['total_similarity_warnings']}")
             print(f"     (Files created despite similar files existing)")
 
         print("=" * 60)

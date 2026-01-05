@@ -975,7 +975,7 @@ def _display_validation_report(report: ValidationReport):
 
     status_emoji = {
         ValidationStatus.PASSED: "✅",
-        ValidationStatus.PASSED_WITH_WARNINGS: "⚠️",
+        ValidationStatus.PASSED_WITH_WARNINGS: "",
         ValidationStatus.FAILED: "❌",
         ValidationStatus.SKIPPED: "⏭️"
     }
@@ -996,7 +996,7 @@ def _display_validation_report(report: ValidationReport):
     print(f"\n{overall_emoji} Overall: {report.summary}")
 
     if report.rollback_recommended:
-        print("\n⚠️  ROLLBACK RECOMMENDED: Validation failed, consider reverting changes")
+        print("\n  ROLLBACK RECOMMENDED: Validation failed, consider reverting changes")
 
     if report.auto_fixed:
         print(f"\n🔧 Auto-fixed: {', '.join(report.auto_fixed)}")
@@ -1064,7 +1064,7 @@ def format_validation_feedback_for_llm(report: ValidationReport, user_request: s
 
     # Warning checks (informational)
     if warning_checks:
-        feedback_parts.append("⚠️  WARNINGS:")
+        feedback_parts.append("  WARNINGS:")
         for result in warning_checks:
             feedback_parts.append(f"  - {result.name}: {result.message}")
         feedback_parts.append("")

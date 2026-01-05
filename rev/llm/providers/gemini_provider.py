@@ -35,7 +35,7 @@ class GeminiProvider(LLMProvider):
         else:
             logger.log("llm", "GEMINI_API_KEY_MISSING", {}, "ERROR")
             if not silent:
-                print("⚠️  WARNING: No Gemini API key found!")
+                print("  WARNING: No Gemini API key found!")
                 print("   Set GEMINI_API_KEY environment variable or use 'rev save-api-key gemini YOUR_KEY'")
 
         self._genai = None
@@ -87,23 +87,54 @@ class GeminiProvider(LLMProvider):
                 # Gemini uses system_instruction parameter
                 system_instruction += content + "\n"
             elif role == "assistant":
-                converted.append({
-                    "role": "model",  # Gemini uses "model" instead of "assistant"
-                    "parts": [{"text": content}],
-                })
+                parts = []
+                if content:
+                    parts.append({"text": content})
+                
+                # IMPORTANT: Include tool calls in history so Gemini can match responses
+                tool_calls = msg.get("tool_calls", [])
+                if tool_calls:
+                    for tc in tool_calls:
+                        func = tc.get("function", {})
+                        args_raw = func.get("arguments", "{}")
+                        try:
+                            args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
+                        except Exception:
+                            args = {}
+                            
+                        parts.append({
+                            "function_call": {
+                                "name": func.get("name", ""),
+                                "args": args,
+                            }
+                        })
+                
+                if parts:
+                    converted.append({
+                        "role": "model",
+                        "parts": parts,
+                    })
             elif role == "user":
                 converted.append({
                     "role": "user",
                     "parts": [{"text": content}],
                 })
             elif role == "tool":
-                # Gemini tool results
+                # Gemini tool results: use 'user' role for function_response parts
+                try:
+                    # Gemini expects an object for the response body
+                    resp_obj = json.loads(content) if isinstance(content, str) else content
+                    if not isinstance(resp_obj, dict):
+                        resp_obj = {"result": content}
+                except Exception:
+                    resp_obj = {"result": content}
+
                 converted.append({
-                    "role": "function",
+                    "role": "user",
                     "parts": [{
                         "function_response": {
                             "name": msg.get("name", ""),
-                            "response": {"result": content},
+                            "response": resp_obj,
                         }
                     }],
                 })
@@ -141,10 +172,13 @@ class GeminiProvider(LLMProvider):
             # Improve oneOf/anyOf/allOf handling: use the first valid option instead of stripping
             if key in {"oneOf", "anyOf", "allOf"}:
                 if isinstance(value, list) and value:
-                    # Merge the first sub-schema into the current one
+                    # Sanitize the first sub-schema
                     first_schema = self._sanitize_schema(value[0], is_property_value=is_property_value)
                     if isinstance(first_schema, dict):
-                        result.update(first_schema)
+                        # Merge properties from the first schema into our result
+                        for sub_key, sub_val in first_schema.items():
+                            if sub_key not in result:
+                                result[sub_key] = sub_val
                 continue
 
             # Remove "default" keyword ONLY when it's used as a schema attribute (default value)
@@ -176,6 +210,16 @@ class GeminiProvider(LLMProvider):
                 result[key] = value
 
         return result
+
+    def _get_safety_settings(self):
+        """Get safety settings that minimize blocking for code generation."""
+        import google.generativeai as genai
+        return {
+            genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
+            genai.types.HarmCategory.HARM_CATEGORY_HATE_SPEECH: genai.types.HarmBlockThreshold.BLOCK_NONE,
+            genai.types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: genai.types.HarmBlockThreshold.BLOCK_NONE,
+            genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
+        }
 
     def _convert_tools(self, tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
         """Convert OpenAI-style tool definitions to Gemini format.
@@ -289,6 +333,7 @@ class GeminiProvider(LLMProvider):
         model_kwargs = {
             "model_name": model_name,
             "generation_config": generation_config,
+            "safety_settings": self._get_safety_settings(),
         }
 
         if system_instruction:
@@ -401,6 +446,7 @@ class GeminiProvider(LLMProvider):
         model_kwargs = {
             "model_name": model_name,
             "generation_config": generation_config,
+            "safety_settings": self._get_safety_settings(),
         }
 
         if system_instruction:

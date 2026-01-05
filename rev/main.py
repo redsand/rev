@@ -979,7 +979,7 @@ def main():
             if current_manager is not None:
                 current_manager.on_interrupt()
         except Exception as exc:  # pragma: no cover – ensure interrupt handling never fails
-            print(f"⚠️  Warning: could not save checkpoint on interrupt ({exc})")
+            print(f"  Warning: could not save checkpoint on interrupt ({exc})")
         print("\n\nAborted by user")
         sys.exit(1)
     except Exception as e:

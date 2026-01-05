@@ -345,7 +345,8 @@ def recover_tool_call_from_text_lenient(
         path = _extract_json_string_value(content, "path")
         content_value = _extract_json_string_value(content, "content")
         if path and content_value is not None:
-            return RecoveredToolCall(name=tool_name, arguments={"path": path, "content": content_value})
+            if not _looks_like_code_reference(path):
+                return RecoveredToolCall(name=tool_name, arguments={"path": path, "content": content_value})
         return None
 
     if tool_lower == "replace_in_file":
@@ -353,20 +354,23 @@ def recover_tool_call_from_text_lenient(
         find_value = _extract_json_string_value(content, "find") or _extract_json_string_value(content, "old_string")
         replace_value = _extract_json_string_value(content, "replace") or _extract_json_string_value(content, "new_string")
         if path and find_value is not None and replace_value is not None:
-            return RecoveredToolCall(name=tool_name, arguments={"path": path, "find": find_value, "replace": replace_value})
+            if not _looks_like_code_reference(path):
+                return RecoveredToolCall(name=tool_name, arguments={"path": path, "find": find_value, "replace": replace_value})
         return None
 
     if tool_lower in {"move_file", "copy_file"}:
         src = _extract_json_string_value(content, "src") or _extract_json_string_value(content, "source")
         dest = _extract_json_string_value(content, "dest") or _extract_json_string_value(content, "path")
         if src and dest:
-            return RecoveredToolCall(name=tool_name, arguments={"src": src, "dest": dest})
+            if not _looks_like_code_reference(src) and not _looks_like_code_reference(dest):
+                return RecoveredToolCall(name=tool_name, arguments={"src": src, "dest": dest})
         return None
 
     if tool_lower in {"delete_file", "read_file", "get_file_info", "file_exists"}:
         path = _extract_json_string_value(content, "path")
         if path:
-            return RecoveredToolCall(name=tool_name, arguments={"path": path})
+            if not _looks_like_code_reference(path):
+                return RecoveredToolCall(name=tool_name, arguments={"path": path})
         return None
 
     return None
