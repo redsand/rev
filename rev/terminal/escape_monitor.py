@@ -79,7 +79,7 @@ class EscapeKeyMonitor:
                         # Check if it's ESC key (ASCII 27)
                         if char == '\x1b':
                             set_escape_interrupt(True)
-                            print("\n⚠️  ESC detected - interrupting execution...")
+                            print("\n  ESC detected - interrupting execution...")
 
                 except (ImportError, OSError):
                     # select not available (Windows) or stdin not available

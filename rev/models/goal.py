@@ -149,7 +149,7 @@ class Goal:
         status_emoji = {
             GoalStatus.ACHIEVED: "✅",
             GoalStatus.FAILED: "❌",
-            GoalStatus.PARTIALLY_ACHIEVED: "⚠️",
+            GoalStatus.PARTIALLY_ACHIEVED: "",
             GoalStatus.IN_PROGRESS: "🔄",
             GoalStatus.PENDING: "⏳"
         }.get(self.status, "❓")

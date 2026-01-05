@@ -285,7 +285,7 @@ Format your response as JSON:
                     pass
 
     except Exception as e:
-        print(f"  ⚠️ Error getting recommendations: {e}")
+        print(f"   Error getting recommendations: {e}")
 
     return None
 
@@ -312,7 +312,7 @@ def prompt_optimization_dialog(
     recommendations = get_prompt_recommendations(user_request)
 
     if not recommendations:
-        print("  ⚠️ Could not generate recommendations. Using original request.\n")
+        print("   Could not generate recommendations. Using original request.\n")
         return user_request, False
 
     # Display analysis
@@ -326,7 +326,7 @@ def prompt_optimization_dialog(
     print(f"   Clarity Score: {clarity_score}/10")
 
     if issues:
-        print(f"\n   ⚠️  Potential Issues:")
+        print(f"\n     Potential Issues:")
         for issue in issues:
             print(f"      - {issue}")
 

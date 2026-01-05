@@ -702,7 +702,7 @@ def _prepare_llm_messages(
     if exec_context:
         recent_actions = exec_context.get_recent_actions_summary()
         if recent_actions:
-            context_blocks.append(f"⚠️ {recent_actions} - DO NOT repeat these actions.")
+            context_blocks.append(f" {recent_actions} - DO NOT repeat these actions.")
 
     if context_blocks:
         prepared.append({"role": "user", "content": "\n\n".join(context_blocks)})
@@ -1098,19 +1098,19 @@ def _build_task_constraints(task: Task) -> str:
 
     # Action-type specific constraints
     if action_type == "review":
-        constraints.append("⚠️ REVIEW TASK: You may ONLY read files and search code. Do NOT write, edit, or modify any files.")
+        constraints.append(" REVIEW TASK: You may ONLY read files and search code. Do NOT write, edit, or modify any files.")
         constraints.append("Expected output: A brief summary (3-5 sentences) of what you found.")
     elif action_type == "add":
-        constraints.append("⚠️ ADD TASK: You MUST create or add new code. Use write_file or apply_patch.")
+        constraints.append(" ADD TASK: You MUST create or add new code. Use write_file or apply_patch.")
         constraints.append("Focus ONLY on adding the specific feature mentioned in the task description.")
     elif action_type == "edit":
-        constraints.append("⚠️ EDIT TASK: You MUST modify existing code. Use apply_patch or write_file.")
+        constraints.append(" EDIT TASK: You MUST modify existing code. Use apply_patch or write_file.")
         constraints.append("Edit ONLY the specific files/sections mentioned in the task description.")
     elif action_type == "test":
-        constraints.append("⚠️ TEST TASK: You MUST run tests. Use run_tests or run_cmd.")
+        constraints.append(" TEST TASK: You MUST run tests. Use run_tests or run_cmd.")
         constraints.append("Expected output: Test results showing pass/fail status.")
     elif action_type == "doc":
-        constraints.append("⚠️ DOC TASK: You MUST update documentation files only.")
+        constraints.append(" DOC TASK: You MUST update documentation files only.")
         constraints.append("Focus ONLY on documentation changes mentioned in the task description.")
 
     # General constraints for all tasks
@@ -1325,7 +1325,7 @@ def execution_mode(
     # Scary operations will still prompt individually
     if not auto_approve:
         print("\nThis will execute all tasks with full autonomy.")
-        print("⚠️  Note: Destructive operations will still require confirmation.")
+        print("  Note: Destructive operations will still require confirmation.")
         response = input("Start execution? [y/N]: ").strip().lower()
         if response not in ["y", "yes"]:
             print("Execution cancelled.")
@@ -1403,7 +1403,7 @@ def execution_mode(
     while not plan.is_complete() and iteration < max_iterations:
         # Check for escape key interrupt
         if get_escape_interrupt():
-            print("\n⚠️  Execution interrupted by ESC key")
+            print("\n  Execution interrupted by ESC key")
             set_escape_interrupt(False)
 
             # Mark current task as stopped
@@ -1431,7 +1431,7 @@ def execution_mode(
         if budget:
             budget.update_time()
             if budget.is_exceeded():
-                print(f"⚠️ Resource budget exceeded before starting task loop: {budget.get_usage_summary()} (continuing)")
+                print(f" Resource budget exceeded before starting task loop: {budget.get_usage_summary()} (continuing)")
                 budget_warned = True
 
         print(f"\n[Task {plan.current_index + 1}/{len(plan.tasks)}] {current_task.description}")
@@ -1504,7 +1504,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
         while task_iterations < max_task_iterations and not task_complete:
             # Check for escape key interrupt during task execution
             if get_escape_interrupt():
-                print("\n⚠️  Task execution interrupted by ESC key")
+                print("\n  Task execution interrupted by ESC key")
                 set_escape_interrupt(False)
 
                 # Mark current task as stopped
@@ -1538,7 +1538,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
             """
             task_iterations += 1
             if task_iterations >= warn_task_iterations and not iter_warned:
-                print(f"⚠️ Task {plan.current_index + 1} nearing iteration limit ({task_iterations}/{max_task_iterations})")
+                print(f" Task {plan.current_index + 1} nearing iteration limit ({task_iterations}/{max_task_iterations})")
                 iter_warned = True
             """
 
@@ -1564,7 +1564,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                     budget.update_tokens(usage.get("total", 0) or 0)
                     budget.update_time()
                     if budget.is_exceeded() and not budget_warned:
-                        print(f"  ⚠️ Resource budget exceeded during execution: {budget.get_usage_summary()} (continuing)")
+                        print(f"   Resource budget exceeded during execution: {budget.get_usage_summary()} (continuing)")
                         budget_warned = True
 
             msg = response.get("message", {})
@@ -1573,7 +1573,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
 
             # Allow ESC to interrupt after LLM response but before any tool execution
             if get_escape_interrupt():
-                print("\n⚠️  Task execution interrupted by ESC key")
+                print("\n  Task execution interrupted by ESC key")
                 set_escape_interrupt(False)
                 plan.mark_task_stopped(current_task)
                 if state_manager:
@@ -1590,7 +1590,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                 for tool_call in tool_calls:
                     # Check for escape key interrupt before each tool execution
                     if get_escape_interrupt():
-                        print("\n⚠️  Tool execution interrupted by ESC key")
+                        print("\n  Tool execution interrupted by ESC key")
                         set_escape_interrupt(False)
 
                         # Mark current task as stopped
@@ -1622,7 +1622,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                     """
                     # Check for back-to-back duplicate tool call (exact same args)
                     if exec_context.is_duplicate_call(tool_name, tool_args):
-                        print(f"  ⚠️ Skipping duplicate {tool_name} call (same args back-to-back)")
+                        print(f"   Skipping duplicate {tool_name} call (same args back-to-back)")
                         messages.append({
                             "role": "tool",
                             "name": tool_name,
@@ -1634,7 +1634,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                     # Check for loop pattern (same tool called repeatedly)
                     loop_warning = exec_context.detect_loop_pattern()
                     if loop_warning:
-                        print(f"  ⚠️ {loop_warning}")
+                        print(f"   {loop_warning}")
                         messages.append({
                             "role": "user",
                             "content": f"WARNING: {loop_warning}. Stop exploring and make a concrete edit using write_file or apply_patch NOW."
@@ -1670,7 +1670,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                     if current_task.action_type in {"add", "edit"} and exec_context.is_exploration_heavy(threshold=5):
                         warning_count = exec_context.increment_force_edit_warning(current_task.action_type)
                         if warning_count == 1:
-                            print(f"  ⚠️ Exploration budget exhausted - forcing edit mode (warning 1/2)")
+                            print(f"   Exploration budget exhausted - forcing edit mode (warning 1/2)")
                             messages.append({
                                 "role": "user",
                                 "content": f"You have done extensive exploration without making any edits. STOP searching/reading and create the code change NOW using write_file or apply_patch. The task is: '{current_task.description}'. Create the best-effort implementation immediately."
@@ -1690,7 +1690,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
 
                     # Final escape check immediately before executing the tool
                     if get_escape_interrupt():
-                        print("\n⚠️  Tool execution interrupted by ESC key")
+                        print("\n  Tool execution interrupted by ESC key")
                         set_escape_interrupt(False)
                         plan.mark_task_stopped(current_task)
                         if state_manager:
@@ -1709,7 +1709,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
                         if over_budget_hits[tool_name] == 1:
                             limit = tool_limits.get(tool_name)
                             used = tool_usage.get(tool_name, 0)
-                            print(f"  ⚠️ {tool_name} budget reached for this task ({used}/{limit}); please continue without additional {tool_name} calls.")
+                            print(f"   {tool_name} budget reached for this task ({used}/{limit}); please continue without additional {tool_name} calls.")
                         messages.append({
                             "role": "tool",
                             "name": tool_name,
@@ -1952,7 +1952,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
 
                 # If model keeps responding without tools or completion, inject guidance instead of failing
                 if no_tool_call_streak >= 3:
-                    print(f"  ⚠️ Model still not calling tools; injecting reminder and continuing.")
+                    print(f"   Model still not calling tools; injecting reminder and continuing.")
                     reminder = (
                         "You must call the available tools (read_file, search_code, write_file, "
                         "apply_patch, run_cmd, run_tests) to inspect and modify the code. "
@@ -1966,7 +1966,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
 
         if not task_complete and task_iterations >= max_task_iterations:
             error_msg = "Exceeded iteration limit"
-            print(f"  ⚠️ Task exceeded iteration limit ({task_iterations}/{max_task_iterations}) (marking stopped)")
+            print(f"   Task exceeded iteration limit ({task_iterations}/{max_task_iterations}) (marking stopped)")
             plan.mark_task_stopped(current_task)
             current_task.error = error_msg
             if state_manager:
@@ -2040,7 +2040,7 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
         metrics_path = session_tracker.emit_metrics()
         print(f"📈 Metrics emitted to: {metrics_path}")
     except Exception as e:
-        print(f"\n⚠️  Failed to save session data: {e}")
+        print(f"\n  Failed to save session data: {e}")
 
     return all(t.status == TaskStatus.COMPLETED for t in plan.tasks)
 
@@ -2140,7 +2140,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
     while task_iterations < max_task_iterations and not task_complete:
         # Allow ESC to interrupt concurrent task execution immediately
         if get_escape_interrupt():
-            print("\n⚠️  Task execution interrupted by ESC key")
+            print("\n  Task execution interrupted by ESC key")
             set_escape_interrupt(False)
             plan.mark_task_stopped(task)
             if state_manager:
@@ -2151,14 +2151,14 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
         """
         task_iterations += 1
         if task_iterations >= warn_task_iterations and not iter_warned:
-            print(f"⚠️ Task {task.task_id + 1} nearing iteration limit ({task_iterations}/{max_task_iterations})")
+            print(f" Task {task.task_id + 1} nearing iteration limit ({task_iterations}/{max_task_iterations})")
             iter_warned = True
 
         if budget:
             budget.update_time()
             if budget.is_exceeded():
                 if not budget_warned:
-                    print(f"⚠️ Resource budget exceeded for task {task.task_id + 1}: {budget.get_usage_summary()} (continuing)")
+                    print(f" Resource budget exceeded for task {task.task_id + 1}: {budget.get_usage_summary()} (continuing)")
                     budget_warned = True
         """
 
@@ -2185,7 +2185,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                 budget.update_tokens(usage.get("total", 0) or 0)
                 budget.update_time()
                 if budget.is_exceeded() and not budget_warned:
-                    print(f"⚠️ Resource budget exceeded during execution for task {task.task_id + 1}: {budget.get_usage_summary()} (continuing)")
+                    print(f" Resource budget exceeded during execution for task {task.task_id + 1}: {budget.get_usage_summary()} (continuing)")
                     budget_warned = True
 
         msg = response.get("message", {})
@@ -2211,7 +2211,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                 """
                 # Check for back-to-back duplicate tool call (exact same args)
                 if exec_context.is_duplicate_call(tool_name, tool_args):
-                    print(f"  ⚠️ Skipping duplicate {tool_name} call (same args back-to-back)")
+                    print(f"   Skipping duplicate {tool_name} call (same args back-to-back)")
                     messages.append({
                         "role": "tool",
                         "name": tool_name,
@@ -2223,7 +2223,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                 # Check for loop pattern (same tool called repeatedly)
                 loop_warning = exec_context.detect_loop_pattern()
                 if loop_warning:
-                    print(f"  ⚠️ {loop_warning}")
+                    print(f"   {loop_warning}")
                     messages.append({
                         "role": "user",
                         "content": f"WARNING: {loop_warning}. Stop exploring and make a concrete edit using write_file or apply_patch NOW."
@@ -2259,7 +2259,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                 if task.action_type in {"add", "edit"} and exec_context.is_exploration_heavy(threshold=5):
                     warning_count = exec_context.increment_force_edit_warning(task.action_type)
                     if warning_count == 1:
-                        print(f"  ⚠️ Exploration budget exhausted - forcing edit mode (warning 1/2)")
+                        print(f"   Exploration budget exhausted - forcing edit mode (warning 1/2)")
                         messages.append({
                             "role": "user",
                             "content": f"You have done extensive exploration without making any edits. STOP searching/reading and create the code change NOW using write_file or apply_patch. The task is: '{task.description}'. Create the best-effort implementation immediately."
@@ -2289,7 +2289,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
                     if over_budget_hits[tool_name] == 1:
                         limit = tool_limits.get(tool_name)
                         used = tool_usage.get(tool_name, 0)
-                        print(f"  ⚠️ {tool_name} budget reached for this task ({used}/{limit}); please continue without additional {tool_name} calls.")
+                        print(f"   {tool_name} budget reached for this task ({used}/{limit}); please continue without additional {tool_name} calls.")
                     messages.append({
                         "role": "tool",
                         "name": tool_name,
@@ -2456,7 +2456,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
 
             # If model keeps responding without tools or completion, inject guidance instead of failing
             if no_tool_call_streak >= 3:
-                print(f"  ⚠️ Model still not calling tools; injecting reminder and continuing.")
+                print(f"   Model still not calling tools; injecting reminder and continuing.")
                 reminder = (
                     "You must call the available tools (read_file, search_code, write_file, "
                     "apply_patch, run_cmd, run_tests) to inspect and modify the code. "
@@ -2469,7 +2469,7 @@ Execute this task completely. When done, respond with TASK_COMPLETE."""
             no_tool_call_streak = 0
 
     if not task_complete:
-        print(f"  ⚠️ Task exceeded iteration limit ({task_iterations}/{max_task_iterations}) (marking stopped)")
+        print(f"   Task exceeded iteration limit ({task_iterations}/{max_task_iterations}) (marking stopped)")
         plan.mark_task_stopped(task)
         task.error = "Exceeded iteration limit"
         if state_manager:
@@ -2643,7 +2643,7 @@ def concurrent_execution_mode(
                 # No tasks completed in this interval, just continue the loop
                 pass
             except Exception as e:
-                print(f"⚠️ Error in coordination loop: {e}")
+                print(f" Error in coordination loop: {e}")
             
             # Small delay to prevent tight loop
             time.sleep(0.1)
@@ -2908,7 +2908,7 @@ Please analyze these validation failures and fix them. Complete each fix and rep
             print(f"  → LLM response: {content[:200]}")
 
     if iteration >= max_fix_attempts:
-        print(f"  ⚠️  Reached maximum fix attempts ({max_fix_attempts})")
+        print(f"    Reached maximum fix attempts ({max_fix_attempts})")
         return False
 
     return fixes_complete
@@ -3046,7 +3046,7 @@ def streaming_execution_mode(
         while not plan.is_complete() and iteration < max_iterations:
             # Check for escape/interrupt
             if get_escape_interrupt() or streaming_manager.is_interrupted():
-                print("\n⚠️  Execution interrupted")
+                print("\n  Execution interrupted")
                 set_escape_interrupt(False)
                 current_task = plan.get_current_task()
                 if current_task:
@@ -3091,7 +3091,7 @@ Action type: {current_task.action_type}
             while task_iterations < max_task_iterations and not task_complete:
                 # Check for interrupt
                 if get_escape_interrupt() or streaming_manager.is_interrupted():
-                    print("\n⚠️  Task interrupted")
+                    print("\n  Task interrupted")
                     plan.mark_task_stopped(current_task)
                     task_complete = True
                     break
@@ -3147,7 +3147,7 @@ Action type: {current_task.action_type}
                         check_user_messages=check_messages,
                     )
                 except KeyboardInterrupt:
-                    print("\n⚠️  Request cancelled")
+                    print("\n  Request cancelled")
                     plan.mark_task_stopped(current_task)
                     task_complete = True
                     break
@@ -3189,7 +3189,7 @@ Action type: {current_task.action_type}
                         """
                         # Check for back-to-back duplicate
                         if exec_context.is_duplicate_call(tool_name, tool_args):
-                            print(f"  ⚠️ Skipping duplicate {tool_name} call (same args back-to-back)")
+                            print(f"   Skipping duplicate {tool_name} call (same args back-to-back)")
                             messages.append({
                                 "role": "tool",
                                 "name": tool_name,
@@ -3284,7 +3284,7 @@ Action type: {current_task.action_type}
                     break
 
             if not task_complete and task_iterations >= max_task_iterations:
-                print(f"\n  ⚠️ Task exceeded iteration limit")
+                print(f"\n   Task exceeded iteration limit")
                 plan.mark_task_stopped(current_task)
 
             # Trim message history

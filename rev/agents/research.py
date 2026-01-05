@@ -145,7 +145,7 @@ def _has_empty_path_arg(tool_name: str, arguments: dict) -> bool:
 
 RESEARCH_SYSTEM_PROMPT = """You are a specialized Research agent. Your sole purpose is to gather information about a codebase by calling read-only tools.
 
-âš ï¸ CRITICAL WARNING - TOOL EXECUTION IS MANDATORY âš ï¸
+CRITICAL WARNING - TOOL EXECUTION IS MANDATORY
 YOU MUST CALL A TOOL. DO NOT RETURN EXPLANATORY TEXT. DO NOT DESCRIBE WHAT YOU WOULD DO.
 IF YOU RETURN TEXT INSTEAD OF A TOOL CALL, THE TASK WILL FAIL PERMANENTLY.
 

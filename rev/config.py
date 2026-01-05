@@ -25,7 +25,7 @@ def load_repo_config(root: pathlib.Path) -> None:
                 print(f"[OK] Loaded repo config from {yaml_config}")
                 return
         except (ImportError, Exception) as e:
-            print(f"⚠️  Warning: Failed to load {yaml_config}: {e}")
+            print(f"  Warning: Failed to load {yaml_config}: {e}")
             
     # Try rev.toml (TOML)
     toml_config = root / "rev.toml"
@@ -43,7 +43,7 @@ def load_repo_config(root: pathlib.Path) -> None:
             print(f"[OK] Loaded repo config from {toml_config}")
             return
         except (ImportError, Exception) as e:
-            print(f"⚠️  Warning: Failed to load {toml_config}: {e}")
+            print(f"  Warning: Failed to load {toml_config}: {e}")
 
 
 # Check for optional dependencies

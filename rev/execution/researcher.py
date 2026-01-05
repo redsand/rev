@@ -42,12 +42,12 @@ def get_rag_retriever(budget=None, repo_stats: Optional[Dict[str, Any]] = None):
             if not retriever.index_built:
                 file_count = (repo_stats or {}).get("file_count", 0)
                 if file_count and file_count > 1500:
-                    print("  ⚠️  Skipping RAG index (repo too large for lightweight index)")
+                    print("    Skipping RAG index (repo too large for lightweight index)")
                     return None
                 if budget:
                     remaining = budget.get_remaining()
                     if remaining.get("tokens", 100) < 10 or remaining.get("time", 100) < 10:
-                        print("  ⚠️  Skipping RAG index due to tight budget")
+                        print("    Skipping RAG index due to tight budget")
                         return None
 
                 print("  → Building or loading RAG index (cached)...")
@@ -65,18 +65,18 @@ def get_rag_retriever(budget=None, repo_stats: Optional[Dict[str, Any]] = None):
                     build_thread.join(timeout=600)
 
                     if build_thread.is_alive():
-                        print(f"  ⚠️  RAG index building timed out after 600s - skipping RAG search")
+                        print(f"    RAG index building timed out after 600s - skipping RAG search")
                         return None
 
                     stats = retriever.get_index_stats()
                     print(f"    Indexed {stats.get('total_chunks', 0)} code chunks")
                 except Exception as e:
-                    print(f"  ⚠️  RAG index building failed: {e}")
+                    print(f"    RAG index building failed: {e}")
                     return None
 
             _RAG_RETRIEVER = retriever
         except Exception as e:
-            print(f"  ⚠️  RAG initialization failed: {e}")
+            print(f"    RAG initialization failed: {e}")
             return None
 
     return _RAG_RETRIEVER
@@ -379,7 +379,7 @@ def _format_external_findings(scan_results: List[Dict[str, Any]]) -> str:
             continue
 
         if result.get("error"):
-            parts.append(f"   ⚠️  Error: {result['error']}")
+            parts.append(f"     Error: {result['error']}")
             continue
 
         file_count = len(result.get("files", []))
@@ -460,7 +460,7 @@ def _rag_search(query: str, k: int = 10, budget=None, repo_stats: Optional[Dict[
         return {"files": files, "chunks": chunk_info}
 
     except Exception as e:
-        print(f"  ⚠️  RAG search failed: {e}")
+        print(f"    RAG search failed: {e}")
         return {"files": [], "chunks": []}
 
 
@@ -599,7 +599,7 @@ def research_codebase(
                 findings.dependencies = result.get("dependencies", [])
                 findings.potential_conflicts = result.get("conflicts", [])
         except Exception as e:
-            print(f"  ⚠️  {task_name} research failed: {e}")
+            print(f"    {task_name} research failed: {e}")
 
     # Use LLM to synthesize findings and suggest approach
     if not quick_mode:
@@ -888,7 +888,7 @@ def _display_research_findings(findings: ResearchFindings):
     print(f"\n📊 Estimated Complexity: {findings.estimated_complexity.upper()}")
 
     if findings.warnings:
-        print(f"\n⚠️  Warnings:")
+        print(f"\n  Warnings:")
         for warning in findings.warnings:
             print(f"   - {warning}")
 

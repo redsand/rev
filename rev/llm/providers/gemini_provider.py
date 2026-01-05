@@ -35,7 +35,7 @@ class GeminiProvider(LLMProvider):
         else:
             logger.log("llm", "GEMINI_API_KEY_MISSING", {}, "ERROR")
             if not silent:
-                print("⚠️  WARNING: No Gemini API key found!")
+                print("  WARNING: No Gemini API key found!")
                 print("   Set GEMINI_API_KEY environment variable or use 'rev save-api-key gemini YOUR_KEY'")
 
         self._genai = None

@@ -440,7 +440,7 @@ def review_execution_plan(
     print("→ Checking for vague placeholder tasks...")
     vague_tasks = _detect_vague_tasks_in_plan(plan)
     if vague_tasks:
-        print(f"  ⚠️  Found {len(vague_tasks)} task(s) with vague placeholders:")
+        print(f"    Found {len(vague_tasks)} task(s) with vague placeholders:")
         for vt in vague_tasks:
             print(f"     Task #{vt['task_id'] + 1}: {vt['reason']}")
             review.issues.append({
@@ -470,7 +470,7 @@ def review_execution_plan(
     print("→ Checking requirements coverage...")
     uncovered_requirements = _check_requirements_coverage(plan, user_request)
     if uncovered_requirements:
-        print(f"  ⚠️  Found {len(uncovered_requirements)} uncovered requirement(s):")
+        print(f"    Found {len(uncovered_requirements)} uncovered requirement(s):")
         for ureq in uncovered_requirements:
             print(f"     - {ureq}")
             review.missing_tasks.append(ureq)
@@ -527,14 +527,14 @@ Provide a thorough review."""
         response = ollama_chat(messages, tools=tools, model=config.REVIEW_MODEL) or {}
 
         if not isinstance(response, dict):
-            print("⚠️  Review agent returned no response; approving with suggestions by default")
+            print("  Review agent returned no response; approving with suggestions by default")
             review.decision = ReviewDecision.APPROVED_WITH_SUGGESTIONS
             review.suggestions.append("Review agent unavailable - plan approved by default")
             review.confidence_score = 0.7
             return review
 
         if "error" in response:
-            print(f"⚠️  Review agent error: {response['error']}")
+            print(f"  Review agent error: {response['error']}")
             # Default to approved with warning
             review.decision = ReviewDecision.APPROVED_WITH_SUGGESTIONS
             review.suggestions.append("Review agent unavailable - plan approved by default")
@@ -597,14 +597,14 @@ Provide a thorough review."""
 
         except Exception as e:
             parse_attempt += 1
-            print(f"⚠️  Error parsing review: {e}")
+            print(f"  Error parsing review: {e}")
             print("??  Review request prompt:")
             print(plan_prompt)
             print("??  Raw review response content:")
             print(content)
             if parse_attempt > max_parse_retries:
                 if _apply_freeform_review(review, content):
-                    print("⚠️  Falling back to freeform review parsing.")
+                    print("  Falling back to freeform review parsing.")
                     break
                 review.decision = ReviewDecision.APPROVED_WITH_SUGGESTIONS
                 review.suggestions.append("Could not parse review - approved by default")
@@ -622,7 +622,7 @@ Provide a thorough review."""
 
             messages.append({"role": "assistant", "content": str(content)})
             messages.append({"role": "user", "content": retry_instruction})
-            print("⚠️  Retrying review agent once due to parse failure with strict JSON reminder...")
+            print("  Retrying review agent once due to parse failure with strict JSON reminder...")
             continue
 
     # Display review
@@ -844,7 +844,7 @@ def _display_plan_review(review: PlanReview, plan: ExecutionPlan):
     decision_emoji = {
         ReviewDecision.APPROVED: "✅",
         ReviewDecision.APPROVED_WITH_SUGGESTIONS: "✅",
-        ReviewDecision.REQUIRES_CHANGES: "⚠️",
+        ReviewDecision.REQUIRES_CHANGES: "",
         ReviewDecision.REJECTED: "❌"
     }
     emoji = decision_emoji.get(review.decision, "❓")
@@ -916,7 +916,7 @@ def display_action_review(review: ActionReview, action_description: str):
     if not review.approved:
         print(f"\n❌ Action blocked: {action_description}")
     elif review.concerns or review.security_warnings:
-        print(f"\n⚠️  Action approved with concerns: {action_description}")
+        print(f"\n  Action approved with concerns: {action_description}")
 
     if review.security_warnings:
         print("🔒 Security Warnings:")
@@ -924,7 +924,7 @@ def display_action_review(review: ActionReview, action_description: str):
             print(f"  - {warning}")
 
     if review.concerns:
-        print("⚠️  Concerns:")
+        print("  Concerns:")
         for concern in review.concerns:
             print(f"  - {concern}")
 
@@ -974,7 +974,7 @@ def format_review_feedback_for_llm(review: ActionReview, action_description: str
             feedback_parts.append(f"  - {warning}")
 
     if review.concerns:
-        feedback_parts.append("\n⚠️  CONCERNS:")
+        feedback_parts.append("\n  CONCERNS:")
         for concern in review.concerns:
             feedback_parts.append(f"  - {concern}")
 

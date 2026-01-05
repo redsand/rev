@@ -1277,7 +1277,7 @@ def _create_generic_repair_task(
         else:
             # Different error - progress was made
             description += (
-                f"\n**⚠️ ATTEMPT {attempt_number} - Partial Progress:**\n"
+                f"\n** ATTEMPT {attempt_number} - Partial Progress:**\n"
                 "The error changed from the previous attempt, which means you made some progress!\n"
                 "However, there's still an issue to fix.\n"
                 "- Review what was tried before (see tool call history above)\n"
@@ -1291,7 +1291,7 @@ def _create_generic_repair_task(
     elif attempt_number > 1:
         # No context available, use basic message
         description += (
-            f"\n**⚠️ ATTEMPT {attempt_number}:**\n"
+            f"\n** ATTEMPT {attempt_number}:**\n"
             "Previous repair attempt(s) did not fully resolve the issue.\n"
             "- Review what was tried before (see tool call history above)\n"
             "- Try a different approach or look deeper\n"
@@ -3233,7 +3233,7 @@ class Orchestrator:
         desc = task.description.lower()
         file_path = _extract_file_path_from_description(task.description)
         
-        print(f"  ⚠️  Redundant action detected ({count}x): {action_sig}")
+        print(f"    Redundant action detected ({count}x): {action_sig}")
         
         if task.action_type in {"read", "analyze"} and file_path:
             # If reading the same file, try searching for usages instead
@@ -3621,7 +3621,7 @@ class Orchestrator:
                 try:
                     self.context.state_manager.on_interrupt(token_usage=get_token_usage())
                 except Exception as exc:
-                    print(f"⚠️  Warning: could not save checkpoint on interrupt ({exc})")
+                    print(f"  Warning: could not save checkpoint on interrupt ({exc})")
             raise
         except Exception as e:
             failure_phase = self.context.current_phase or AgentPhase.FAILED
@@ -4131,7 +4131,7 @@ class Orchestrator:
                         if completed_tasks_log:
                             self.context.work_history = completed_tasks_log
                     except Exception as e:
-                        print(f"  ⚠️  Failed to load checkpoint: {e}")
+                        print(f"    Failed to load checkpoint: {e}")
                         self.context.plan = ExecutionPlan(tasks=[])
                 else:
                     self.context.plan = ExecutionPlan(tasks=[])
@@ -4218,7 +4218,7 @@ class Orchestrator:
             if self.context.resource_budget.is_exceeded() and not budget_warning_shown:
                 exceeded = self.context.resource_budget.get_exceeded_resources()
                 exceeded_str = ", ".join(exceeded)
-                print(f"\n⚠️ Resource budget exceeded at step {iteration}: {exceeded_str}")
+                print(f"\n Resource budget exceeded at step {iteration}: {exceeded_str}")
                 print(f"   Usage: {self.context.resource_budget.get_usage_summary()}")
                 print(f"   To increase limits, set environment variables:")
                 print(f"   - REV_MAX_STEPS (current: {self.context.resource_budget.max_steps})")
@@ -4338,7 +4338,7 @@ class Orchestrator:
                     if file_read_counts:
                         work_summary += "\n📄 Files Already Inspected (DO NOT re-read these files unless absolutely necessary):\n"
                         for filename, count in sorted(file_read_counts.items(), key=lambda x: (-x[1], x[0])):
-                            marker = "⚠️ STOP READING" if count >= 2 else "✓"
+                            marker = " STOP READING" if count >= 2 else "✓"
                             work_summary += f"  {marker} {filename}: read {count}x"
                             if count >= 2:
                                 work_summary += " - MUST use [EDIT] or [CREATE] now, NOT another [READ]"
@@ -4386,7 +4386,7 @@ class Orchestrator:
                 if action_counts:
                     for sig, count in action_counts.items():
                         if count >= 2:
-                            failure_notes.append(f"⚠️ REPETITION: Action '[{sig}]' proposed {count}x. It is not progressing. DO NOT REPEAT. Try a different tool or inspect code again.")
+                            failure_notes.append(f" REPETITION: Action '[{sig}]' proposed {count}x. It is not progressing. DO NOT REPEAT. Try a different tool or inspect code again.")
 
                 failure_notes_str = "\n".join(failure_notes)
                 path_hints = _generate_path_hints(completed_tasks_log)
@@ -4400,7 +4400,7 @@ class Orchestrator:
                         reason = details.get("reason", "unknown")
                         detailed = details.get("detailed_reason", "")
                         agent = details.get("agent", "Agent")
-                        note = f"⚠️ {agent} REQUEST: {reason}"
+                        note = f" {agent} REQUEST: {reason}"
                         if detailed:
                             note += f"\n  Instruction: {detailed}"
                         notes.append(note)
@@ -4458,7 +4458,7 @@ class Orchestrator:
                     # This is a redundant action - need to transform it
                     if transformation_count >= 3:
                         # Too many transformations - trigger circuit breaker instead
-                        print(f"\n  ⚠️  Transformation limit reached ({transformation_count}x) - triggering circuit breaker")
+                        print(f"\n    Transformation limit reached ({transformation_count}x) - triggering circuit breaker")
                         self.context.set_agent_state("no_retry", True)
                         self.context.add_error(f"Circuit breaker: too many action transformations ({transformation_count}x)")
                         print("\n[🛑 CIRCUIT BREAKER: TRANSFORMATION LOOP DETECTED]")
@@ -6408,7 +6408,7 @@ class Orchestrator:
                     tool_failure_count = context.agent_state.get("tool_execution_failure_count", 0)
                     context.set_agent_state("tool_execution_failure_count", tool_failure_count + 1)
 
-                    print(f"\n  ⚠️  {colorize('LLM FAILED TO EXECUTE TOOLS', Colors.BRIGHT_YELLOW)} (failure #{tool_failure_count + 1})")
+                    print(f"\n    {colorize('LLM FAILED TO EXECUTE TOOLS', Colors.BRIGHT_YELLOW)} (failure #{tool_failure_count + 1})")
                     print(f"  {colorize('The LLM returned text instead of calling tools', Colors.BRIGHT_BLACK)}")
 
                     # Circuit breaker: Too many tool execution failures
@@ -6448,7 +6448,7 @@ class Orchestrator:
                         return False
 
                     if tool_failure_count >= 2:
-                        print(f"  {colorize('⚠️  Multiple tool execution failures detected', Colors.BRIGHT_RED)}")
+                        print(f"  {colorize('  Multiple tool execution failures detected', Colors.BRIGHT_RED)}")
                         print(f"  {colorize('Recommendation: Try a different model with better tool-calling support', Colors.BRIGHT_YELLOW)}")
                         print(f"  {colorize('Current model may not properly support function calling', Colors.BRIGHT_BLACK)}\n")
 

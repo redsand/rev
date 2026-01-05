@@ -104,7 +104,7 @@ class UserMessageQueue:
             if self._pending_message is not None:
                 # Replace existing message
                 self._total_replaced += 1
-                print(f"\n  ⚠️ [Previous message replaced]")
+                print(f"\n   [Previous message replaced]")
 
             self._pending_message = message
             self._total_submitted += 1

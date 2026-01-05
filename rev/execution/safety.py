@@ -178,7 +178,7 @@ def prompt_scary_operation(operation: str, reason: str, auto_approve: bool = Fal
         return _PROMPT_DECISIONS[key]
 
     print(f"\n{'='*60}")
-    print(f"⚠️  POTENTIALLY DESTRUCTIVE OPERATION DETECTED")
+    print(f"  POTENTIALLY DESTRUCTIVE OPERATION DETECTED")
     print(f"{'='*60}")
     operation_display = operation if "\n" not in operation else f"\n{operation}"
     print(f"Operation: {operation_display}")

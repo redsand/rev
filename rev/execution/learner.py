@@ -493,7 +493,7 @@ def display_learning_suggestions(suggestions: Dict[str, Any], user_request: str)
 
     if suggestions["warnings"]:
         has_content = True
-        print("\n⚠️  Warnings from past experience:")
+        print("\n  Warnings from past experience:")
         for warning in suggestions["warnings"]:
             print(f"   - {warning}")
 

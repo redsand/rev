@@ -574,7 +574,7 @@ class ExecutionPlan:
             rollback_steps.append("Or apply inverse patch")
 
         elif task.action_type == "delete":
-            rollback_steps.append("⚠️  CRITICAL: Deleted files cannot be recovered without backup")
+            rollback_steps.append("  CRITICAL: Deleted files cannot be recovered without backup")
             rollback_steps.append("Restore from git history: git checkout HEAD~1 -- <files>")
             rollback_steps.append("Or restore from backup if available")
 

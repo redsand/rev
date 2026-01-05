@@ -108,7 +108,7 @@ class StateManager:
                     "error": str(e),
                     "reason": reason
                 }, "ERROR")
-                print(f"⚠️  Warning: Failed to save checkpoint: {e}")
+                print(f"  Warning: Failed to save checkpoint: {e}")
                 return None
 
     def _get_resume_info(self) -> Dict[str, Any]:
@@ -198,7 +198,7 @@ class StateManager:
         if checkpoint_path:
 
             print("\n" + "=" * 60)
-            print("⚠️  EXECUTION INTERRUPTED")
+            print("  EXECUTION INTERRUPTED")
             print("=" * 60)
             print(f"\n✓ State saved to: {checkpoint_path}")
             print("\nTo load this session and continue manually:")

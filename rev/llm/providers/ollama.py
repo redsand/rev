@@ -216,7 +216,7 @@ class OllamaProvider(LLMProvider):
 
         if was_truncated:
             print(
-                f"⚠️  Context trimmed from ~{original_tokens:,} to ~{trimmed_tokens:,} tokens "
+                f"  Context trimmed from ~{original_tokens:,} to ~{trimmed_tokens:,} tokens "
                 f"(limit {config.MAX_LLM_TOKENS_PER_RUN:,})."
             )
 
@@ -516,7 +516,7 @@ class OllamaProvider(LLMProvider):
 
         if was_truncated:
             print(
-                f"⚠️  Context trimmed from ~{original_tokens:,} to ~{trimmed_tokens:,} tokens "
+                f"  Context trimmed from ~{original_tokens:,} to ~{trimmed_tokens:,} tokens "
                 f"(limit {config.MAX_LLM_TOKENS_PER_RUN:,})."
             )
 

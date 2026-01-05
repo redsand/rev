@@ -1155,7 +1155,7 @@ Provide detailed subtasks."""}
 
             # If force_breakdown is True but we got too few subtasks, try harder
             if force_breakdown and len(subtasks) <= 2:
-                print(f"  ⚠️  Breakdown returned only {len(subtasks)} subtasks, retrying with stronger prompt...")
+                print(f"    Breakdown returned only {len(subtasks)} subtasks, retrying with stronger prompt...")
                 retry_messages = [
                     {"role": "system", "content": BREAKDOWN_SYSTEM},
                     {"role": "user", "content": f"""The previous breakdown was insufficient. Break down this task into MORE specific subtasks:
@@ -1441,7 +1441,7 @@ def _enhance_repo_context(context_json: str) -> str:
             if line.strip():
                 enhanced.append(f"  {line}")
         enhanced.append("```")
-        enhanced.append("⚠️ WARNING: Files shown above already exist and may be modified!")
+        enhanced.append(" WARNING: Files shown above already exist and may be modified!")
         enhanced.append("")
     else:
         enhanced.append("📋 GIT STATUS: No modified or untracked files (clean working directory)")
@@ -1525,7 +1525,7 @@ def _enhance_repo_context(context_json: str) -> str:
 
     # Error handling
     if "error" in context:
-        enhanced.append(f"⚠️ Context Error: {context['error']}")
+        enhanced.append(f" Context Error: {context['error']}")
         if "note" in context:
             enhanced.append(f"   Note: {context['note']}")
         enhanced.append("")
@@ -1687,7 +1687,7 @@ CURRENT WORKSPACE STATE:
 {context_enhanced}
 {workspace_note}
 
-⚠️ CRITICAL: You MUST examine the workspace state above before planning any actions.
+ CRITICAL: You MUST examine the workspace state above before planning any actions.
 - DO NOT create directories or files that already exist
 - DO NOT assume an empty workspace - check what's already there
 - If files are modified, consider reviewing them first
@@ -1768,7 +1768,7 @@ Generate a comprehensive execution plan as a JSON array NOW with AT LEAST 2 task
             break
         except Exception as e:
             parse_attempt += 1
-            print(f"⚠️  Error parsing plan on attempt {parse_attempt}: {e}")
+            print(f"  Error parsing plan on attempt {parse_attempt}: {e}")
             
             if parse_attempt > max_parse_retries:
                 print("❌ Maximum parsing retries exceeded. Aborting.")
@@ -1803,7 +1803,7 @@ Generate a comprehensive execution plan as a JSON array NOW with AT LEAST 2 task
             )
 
             if is_single_broad_plan:
-                print("  ⚠️  Detected overly broad plan with 1-2 tasks - forcing breakdown...")
+                print("    Detected overly broad plan with 1-2 tasks - forcing breakdown...")
 
             for task_data in tasks_data:
                 complexity = task_data.get("complexity", "low")
@@ -1864,10 +1864,10 @@ Generate a comprehensive execution plan as a JSON array NOW with AT LEAST 2 task
             description = task_data.get("description", "")
             if _has_vague_placeholder(description):
                 vague_task_count += 1
-                print(f"  ⚠️  Vague task detected: '{description[:60]}...'")
+                print(f"    Vague task detected: '{description[:60]}...'")
 
         if vague_task_count > 0:
-            print(f"  ⚠️  {vague_task_count} task(s) contain vague placeholders - adding discovery task")
+            print(f"    {vague_task_count} task(s) contain vague placeholders - adding discovery task")
             # Prepend a discovery task if we have vague tasks
             discovery_task = {
                 "description": f"Scan and identify specific classes/functions to implement for: {user_request[:100]}",
@@ -1906,7 +1906,7 @@ Generate a comprehensive execution plan as a JSON array NOW with AT LEAST 2 task
                     missing_requirements.append(req)
 
             if missing_requirements:
-                print(f"  ⚠️  {len(missing_requirements)} requirement(s) may not be covered in plan:")
+                print(f"    {len(missing_requirements)} requirement(s) may not be covered in plan:")
                 for missing in missing_requirements:
                     print(f"     - {missing}")
                     # Add a task for the missing requirement
@@ -1934,7 +1934,7 @@ Generate a comprehensive execution plan as a JSON array NOW with AT LEAST 2 task
 
     # CRITICAL VALIDATION: Ensure we have at least 2 tasks
     if len(plan.tasks) == 1:
-        print("  ⚠️  Plan contains only 1 task - forcing split into review + implementation")
+        print("    Plan contains only 1 task - forcing split into review + implementation")
         single_task = plan.tasks[0]
         plan.tasks = []
 
@@ -2046,7 +2046,7 @@ Generate a comprehensive execution plan as a JSON array NOW with AT LEAST 2 task
                 print(f"   Depends on: {', '.join(dep_desc)}")
 
             if task.breaking_change:
-                print("   ⚠️  Warning: Potentially breaking change")
+                print("     Warning: Potentially breaking change")
 
     print("=" * 60)
 
@@ -2261,7 +2261,7 @@ CRITICAL: Check if \"REMAINING TASKS\" section above is empty:
 TASK:
 Based on the current progress and remaining tasks, what is the SINGLE NEXT ACTION we should take?
 
-⚠️  STRICT RULES (DO NOT VIOLATE):
+  STRICT RULES (DO NOT VIOLATE):
 1. ONLY ONE action - no lists, no multiple options
 2. ONLY declare "GOAL_ACHIEVED" if:
    - ALL remaining tasks above are COMPLETE (empty list)
@@ -2314,7 +2314,7 @@ NOW RESPOND WITH ONLY THE JSON OBJECT."""
     response = ollama_chat(messages, model=model_name) or {}
 
     if "error" in response:
-        print(f"⚠️  Error determining next action: {response['error']}")
+        print(f"  Error determining next action: {response['error']}")
         # Return a review task as fallback
         return Task(description="Review current progress and files", action_type="review")
 
@@ -2334,7 +2334,7 @@ NOW RESPOND WITH ONLY THE JSON OBJECT."""
 
         # Validate action_type and convert if needed
         if action_type not in VALID_ACTION_TYPES:
-            print(f"⚠️  Invalid action type '{action_type}' suggested by LLM")
+            print(f"  Invalid action type '{action_type}' suggested by LLM")
             print(f"   Converting to 'add' (valid action type)")
             # Map common invalid types to valid ones
             if any(x in action_type for x in ["create", "mkdir", "directory"]):
@@ -2357,7 +2357,7 @@ NOW RESPOND WITH ONLY THE JSON OBJECT."""
         return task
 
     except Exception as e:
-        print(f"⚠️  Error parsing next action response: {e}")
+        print(f"  Error parsing next action response: {e}")
         print(f"  Response: {content[:100]}...")
         # Return a review task as fallback
         return Task(description="Review current progress and determine next steps", action_type="review")
