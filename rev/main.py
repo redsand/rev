@@ -89,6 +89,36 @@ def main():
         help="LLM provider override (ollama, openai, anthropic, gemini, localai, vllm, lmstudio)"
     )
     parser.add_argument(
+        "--soc",
+        action="store_true",
+        help="Run in SOC mode using the Hawk SOC agent."
+    )
+    parser.add_argument(
+        "--soc-config",
+        default=None,
+        help="SOC agent config path override."
+    )
+    parser.add_argument(
+        "--soc-log",
+        default=None,
+        help="SOC agent log file path override."
+    )
+    parser.add_argument(
+        "--soc-case-id",
+        default=None,
+        help="Process a single case ID in SOC mode."
+    )
+    parser.add_argument(
+        "--soc-ci",
+        action="store_true",
+        help="Monitor the case queue in SOC mode (CI loop)."
+    )
+    parser.add_argument(
+        "--soc-debug",
+        action="store_true",
+        help="Enable debug logging for SOC mode."
+    )
+    parser.add_argument(
         "--workspace",
         default=None,
         help="Workspace root directory (sets repo root and .rev/ state location)"
@@ -346,6 +376,22 @@ def main():
     initial_command: Optional[str] = None
     clean_mode = bool(args.clean)
     mcp_processes: list = []
+
+    if args.soc:
+        from types import SimpleNamespace
+        from rev.soc.agent import run_soc_agent, default_config_path
+
+        soc_options = SimpleNamespace(
+            config=args.soc_config or default_config_path(),
+            log=args.soc_log,
+            id=args.soc_case_id,
+            debug=args.soc_debug,
+            ci=args.soc_ci,
+            llm_provider=args.llm_provider,
+            model=args.model,
+        )
+        run_soc_agent(soc_options)
+        return
 
     # Start run log only if not cleaning/clearing to avoid locking the log file being deleted.
     if not clean_mode:
