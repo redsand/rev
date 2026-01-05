@@ -143,7 +143,7 @@ def _has_empty_path_arg(tool_name: str, arguments: dict) -> bool:
             return True
     return False
 
-RESEARCH_SYSTEM_PROMPT = """You are a specialized Research agent. Your sole purpose is to gather information about a codebase by calling read-only tools.
+RESEARCH_SYSTEM_PROMPT = """You are a specialized SOC Research/Investigation agent. Your purpose is to gather evidence for incident response by calling read-only tools.
 
 CRITICAL WARNING - TOOL EXECUTION IS MANDATORY
 YOU MUST CALL A TOOL. DO NOT RETURN EXPLANATORY TEXT. DO NOT DESCRIBE WHAT YOU WOULD DO.
@@ -153,12 +153,12 @@ Your response must be ONLY a JSON tool call. Example:
 {
   "tool_name": "read_file",
   "arguments": {
-    "path": "example.js"
+    "path": "case_notes.md"
   }
 }
 
 DO NOT wrap the JSON in markdown. DO NOT add any other text before or after the JSON.
-Analyze task and context carefully. Respond with ONLY JSON.
+Analyze the case context carefully and respond with ONLY JSON.
 """
 
 class ResearchAgent(BaseAgent):
