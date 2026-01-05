@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import glob
 import shlex
-from typing import List, Optional
+from typing import List, Optional, Tuple, Any
 
 from rev.config import (
     ROOT,
