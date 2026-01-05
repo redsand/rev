@@ -220,7 +220,20 @@ class OllamaProvider(LLMProvider):
                 f"(limit {config.MAX_LLM_TOKENS_PER_RUN:,})."
             )
 
-        messages = trimmed_messages
+        # CRITICAL FIX: Clean messages before sending to API
+        # Strip internal metadata like 'thinking' that shouldn't be part of the history sent to the LLM
+        messages = []
+        for m in trimmed_messages:
+            clean_m = {
+                "role": m.get("role"),
+                "content": _stringify_content(m.get("content", ""))
+            }
+            if "tool_calls" in m:
+                clean_m["tool_calls"] = m["tool_calls"]
+            if "tool_call_id" in m:
+                clean_m["tool_call_id"] = m["tool_call_id"]
+            messages.append(clean_m)
+
         messages, _appended_continue = _ensure_last_user_or_tool(messages)
 
         model_name = model or config.OLLAMA_MODEL
@@ -520,7 +533,20 @@ class OllamaProvider(LLMProvider):
                 f"(limit {config.MAX_LLM_TOKENS_PER_RUN:,})."
             )
 
-        messages = trimmed_messages
+        # CRITICAL FIX: Clean messages before sending to API
+        # Strip internal metadata like 'thinking' that shouldn't be part of the history sent to the LLM
+        messages = []
+        for m in trimmed_messages:
+            clean_m = {
+                "role": m.get("role"),
+                "content": _stringify_content(m.get("content", ""))
+            }
+            if "tool_calls" in m:
+                clean_m["tool_calls"] = m["tool_calls"]
+            if "tool_call_id" in m:
+                clean_m["tool_call_id"] = m["tool_call_id"]
+            messages.append(clean_m)
+
         messages, _appended_continue = _ensure_last_user_or_tool(messages)
 
         model_name = model or config.OLLAMA_MODEL

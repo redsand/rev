@@ -1156,12 +1156,18 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
             ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", "--ignore-whitespace", tfp], False, None),
             ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", "--ignore-whitespace", "-p0", tfp], False, ["git", "apply", "--inaccurate-eof", "--whitespace=nowarn", "--ignore-whitespace", "-p0", tfp]),
             ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", "--ignore-whitespace", "--3way", tfp], True, None),
-            ("patch", ["patch", "--batch", "--forward", "--dry-run", "-p1", "-i", tfp], False, None),
-            # More lenient patch attempts: ignore whitespace and different strip levels to salvage slightly misaligned diffs
-            ("patch", ["patch", "--batch", "--forward", "--dry-run", "--ignore-whitespace", "-p1", "-i", tfp], False, ["patch", "--batch", "--forward", "--ignore-whitespace", "-p1", "-i", tfp]),
-            ("patch", ["patch", "--batch", "--forward", "--dry-run", "--ignore-whitespace", "-p0", "-i", tfp], False, ["patch", "--batch", "--forward", "--ignore-whitespace", "-p0", "-i", tfp]),
-            ("python", [], False, None), # Internal Python fallback
         ]
+        
+        # Only offer system 'patch' on non-Windows platforms or if specifically forced
+        if os.name != "nt":
+            strategies.extend([
+                ("patch", ["patch", "--batch", "--forward", "--dry-run", "-p1", "-i", tfp], False, None),
+                ("patch", ["patch", "--batch", "--forward", "--dry-run", "--ignore-whitespace", "-p1", "-i", tfp], False, ["patch", "--batch", "--forward", "--ignore-whitespace", "-p1", "-i", tfp]),
+                ("patch", ["patch", "--batch", "--forward", "--dry-run", "--ignore-whitespace", "-p0", "-i", tfp], False, ["patch", "--batch", "--forward", "--ignore-whitespace", "-p0", "-i", tfp]),
+            ])
+            
+        # Always include the internal Python fallback as the final strategy
+        strategies.append(("python", [], False, None))
         
         if not is_git_repo():
             # Skip git strategies if not a repo to avoid 'fatal: not a git repository'
