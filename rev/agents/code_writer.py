@@ -422,6 +422,7 @@ class CodeWriterAgent(BaseAgent):
     A sub-agent that specializes in writing and editing code.
     Implements intelligent error recovery with retry limits and user approval for changes.
     """
+    MAX_RECOVERY_ATTEMPTS = 3
 
     # ANSI color codes for diff display (matching linear mode)
     _COLOR_RED = "\033[31m"      # Deletions
@@ -968,16 +969,20 @@ class CodeWriterAgent(BaseAgent):
             # For EDIT, we prefer patching tools.
             tool_names = ['apply_patch', 'replace_in_file', 'copy_file', 'move_file']
             
-            # Only allow write_file for EDIT if the file DOES NOT exist or is empty
-            # (Basically treating it like an ADD if it's new)
-            try:
-                target_paths = _extract_target_files_from_description(task.description)
-                if target_paths:
-                    resolved = resolve_workspace_path(target_paths[0]).abs_path
-                    if not resolved.exists() or resolved.stat().st_size == 0:
-                        tool_names.append('write_file')
-            except:
-                pass
+            # RECOVERY ESCALATION: If we are on attempt 3+, allow write_file as a last resort.
+            if recovery_attempts >= 2:
+                tool_names.append('write_file')
+                print(f"  [RECOVERY] Enabling write_file fallback for EDIT (attempt {recovery_attempts + 1})")
+            else:
+                # Only allow write_file for EDIT if the file DOES NOT exist or is empty
+                try:
+                    target_paths = _extract_target_files_from_description(task.description)
+                    if target_paths:
+                        resolved = resolve_workspace_path(target_paths[0]).abs_path
+                        if not resolved.exists() or resolved.stat().st_size == 0:
+                            tool_names.append('write_file')
+                except:
+                    pass
         elif task.action_type in {"move", "rename"}:
             tool_names = ['move_file']
         else:
@@ -1001,6 +1006,9 @@ class CodeWriterAgent(BaseAgent):
         # Task guidance
         task_guidance = f"Task (action_type: {task.action_type}): {task.description}"
         
+        if recovery_attempts >= 2 and task.action_type == "edit":
+            task_guidance += "\n\nRECOVERY FALLBACK: Previous patching attempts failed. I have enabled `write_file` for you. You MUST provide the COMPLETE, FULL content of the file with your changes. Do NOT use partial content or placeholders."
+
         # Mandatory file reading for edits
         file_content_section = ""
         if task.action_type in ("edit", "refactor") and not _task_is_command_only(task.description or ""):
