@@ -1029,8 +1029,8 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
     try:
         strategies = [
             # runner, check_args, use_three_way, apply_override
-            ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", tfp], False, None),
-            ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", "--3way", tfp], True, None),
+            ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", "--ignore-whitespace", tfp], False, None),
+            ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", "--ignore-whitespace", "--3way", tfp], True, None),
             ("patch", ["patch", "--batch", "--forward", "--dry-run", "-p1", "-i", tfp], False, None),
             # More lenient patch attempts: ignore whitespace and different strip levels to salvage slightly misaligned diffs
             ("patch", ["patch", "--batch", "--forward", "--dry-run", "--ignore-whitespace", "-p1", "-i", tfp], False, ["patch", "--batch", "--forward", "--ignore-whitespace", "-p1", "-i", tfp]),
@@ -1088,7 +1088,7 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
             return _result(check_proc, success=True, phase="check")
 
         if apply_mode == "git":
-            apply_args = ["git", "apply", "--inaccurate-eof", "--whitespace=nowarn"]
+            apply_args = ["git", "apply", "--inaccurate-eof", "--whitespace=nowarn", "--ignore-whitespace"]
             if use_three_way:
                 apply_args.append("--3way")
             apply_args.append(tfp)

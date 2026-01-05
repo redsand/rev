@@ -370,6 +370,7 @@ TOOL SELECTION RULES:
 - Provide a standard unified diff (---/+++/@@).
 - Ensure context lines match the provided file content EXACTLY.
 - Keep patches minimal to avoid truncation.
+- For large files, break your changes into MULTIPLE smaller hunks or multiple `apply_patch` calls.
 
 `replace_in_file` RULES:
 - The `find` string must be an EXACT, character-for-character match (including whitespace).
