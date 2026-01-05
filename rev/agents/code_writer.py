@@ -356,23 +356,26 @@ def _task_is_command_only(description: str) -> bool:
         )
     )
 
-CODE_WRITER_SYSTEM_PROMPT = """You are a specialized Code Writer agent. Your sole purpose is to execute a single coding task by calling the ONLY available tool for this specific task.
+CODE_WRITER_SYSTEM_PROMPT = """You are a specialized Code Writer agent. Your sole purpose is to execute a single coding task by calling the ONLY available tool.
 
-âš ï¸ CRITICAL WARNING - TOOL EXECUTION IS MANDATORY âš ï¸
-YOU MUST CALL A TOOL. DO NOT RETURN EXPLANATORY TEXT. DO NOT DESCRIBE WHAT YOU WOULD DO.
-IF YOU RETURN TEXT INSTEAD OF A TOOL CALL, THE TASK WILL FAIL PERMANENTLY.
+âš ï¸ CRITICAL: TOOL EXECUTION IS MANDATORY âš ï¸
+You MUST call a tool. Do NOT return text or explanations. 
 
-Your response must be ONLY a JSON tool call. Example:
-{
-  "tool_name": "write_file",
-  "arguments": {
-    "path": "example.js",
-    "content": "console.log('hello');"
-  }
-}
+TOOL SELECTION RULES:
+1.  For EDITING existing files: You MUST use `apply_patch` or `replace_in_file`. 
+2.  Do NOT use `write_file` to overwrite existing files; it will be rejected. 
+3.  Use `apply_patch` for any multi-line change. Use `replace_in_file` ONLY for small, exact string swaps.
 
-DO NOT wrap the JSON in markdown. DO NOT add any other text before or after the JSON.
-Analyze task and context carefully. Respond with ONLY JSON.
+`apply_patch` RULES:
+- Provide a standard unified diff (---/+++/@@).
+- Ensure context lines match the provided file content EXACTLY.
+- Keep patches minimal to avoid truncation.
+
+`replace_in_file` RULES:
+- The `find` string must be an EXACT, character-for-character match (including whitespace).
+- Include 2-3 lines of context in `find` to ensure uniqueness.
+
+Your response must be ONLY a JSON tool call. No markdown fences.
 """
 
 def _is_path_valid_for_task(path_str: str, task: Task) -> Tuple[bool, str]:
@@ -955,16 +958,31 @@ class CodeWriterAgent(BaseAgent):
 
         # Determine appropriate tools
         all_tools = get_available_tools()
-        tool_names = ['write_file', 'apply_patch', 'replace_in_file', 'create_directory', 'copy_file', 'move_file']
         
         if task.action_type == "create_directory":
             tool_names = ['create_directory']
         elif task.action_type == "add":
+            # ADD gets write_file plus patching tools (in case file exists)
             tool_names = ['write_file', 'apply_patch', 'replace_in_file']
         elif task.action_type == "edit":
-            tool_names = ['apply_patch', 'replace_in_file', 'write_file', 'copy_file', 'move_file']
+            # For EDIT, we prefer patching tools.
+            tool_names = ['apply_patch', 'replace_in_file', 'copy_file', 'move_file']
+            
+            # Only allow write_file for EDIT if the file DOES NOT exist or is empty
+            # (Basically treating it like an ADD if it's new)
+            try:
+                target_paths = _extract_target_files_from_description(task.description)
+                if target_paths:
+                    resolved = resolve_workspace_path(target_paths[0]).abs_path
+                    if not resolved.exists() or resolved.stat().st_size == 0:
+                        tool_names.append('write_file')
+            except:
+                pass
         elif task.action_type in {"move", "rename"}:
             tool_names = ['move_file']
+        else:
+            # General fallback
+            tool_names = ['write_file', 'apply_patch', 'replace_in_file', 'create_directory', 'copy_file', 'move_file']
 
         available_tools = [tool for tool in all_tools if tool['function']['name'] in tool_names]
         recovery_allowed_tools = tool_names

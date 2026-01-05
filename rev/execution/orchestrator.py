@@ -6082,8 +6082,18 @@ class Orchestrator:
                 display_entry = display_entry.replace("[COMPLETED]", colorize("OK", Colors.BRIGHT_GREEN, bold=True), 1)
             elif display_entry.startswith("[FAILED]"):
                 display_entry = display_entry.replace("[FAILED]", colorize("ERR", Colors.BRIGHT_RED, bold=True), 1)
+            elif display_entry.startswith("[IN_PROGRESS]"):
+                display_entry = display_entry.replace("[IN_PROGRESS]", colorize("IN PROGRESS", Colors.BRIGHT_YELLOW, bold=True), 1)
 
-            print(f"  {'✓' if next_task.status == TaskStatus.COMPLETED else '✗'} {display_entry}")
+            # Determine status symbol
+            if next_task.status == TaskStatus.COMPLETED:
+                status_symbol = "✓"
+            elif next_task.status == TaskStatus.IN_PROGRESS:
+                status_symbol = colorize(Symbols.ELLIPSIS, Colors.BRIGHT_YELLOW)
+            else:
+                status_symbol = "✗"
+
+            print(f"  {status_symbol} {display_entry}")
 
             # Check for replan requests from agents
             if self.context and self.context.agent_requests:
