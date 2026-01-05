@@ -1,8 +1,13 @@
 from typing import Dict, Type, List
 from rev.agents.base import BaseAgent
-from rev.agents.analysis import AnalysisAgent
+from rev.agents.code_writer import CodeWriterAgent
+from rev.agents.test_executor import TestExecutorAgent
+from rev.agents.refactoring import RefactoringAgent
+from rev.agents.debugging import DebuggingAgent
 from rev.agents.documentation import DocumentationAgent
 from rev.agents.research import ResearchAgent
+from rev.agents.analysis import AnalysisAgent
+from rev.agents.tool_creation import ToolCreationAgent
 from rev.agents.tool_executor import ToolExecutorAgent
 
 class AgentRegistry:
@@ -32,20 +37,39 @@ class AgentRegistry:
         """Get a list of all registered action types."""
         return list(cls._agents.keys())
 
-# Register SOC-focused agents
-# Research/investigation
-AgentRegistry.register_agent("research", ResearchAgent)
-AgentRegistry.register_agent("investigate", ResearchAgent)
-AgentRegistry.register_agent("triage", AnalysisAgent)
-AgentRegistry.register_agent("analyze", AnalysisAgent)
+# Register default agents
+# Code modification agents
+AgentRegistry.register_agent("add", CodeWriterAgent)
+AgentRegistry.register_agent("edit", CodeWriterAgent)
+AgentRegistry.register_agent("create_directory", CodeWriterAgent)  # File/directory creation
+AgentRegistry.register_agent("delete", CodeWriterAgent)  # File deletion
+AgentRegistry.register_agent("move", CodeWriterAgent)  # File move/rename
+AgentRegistry.register_agent("rename", CodeWriterAgent)  # File rename (alias for move)
+AgentRegistry.register_agent("refactor", RefactoringAgent)
+AgentRegistry.register_agent("refracto", RefactoringAgent)
+AgentRegistry.register_agent("refacto", RefactoringAgent)
+AgentRegistry.register_agent("refctor", RefactoringAgent)
+AgentRegistry.register_agent("general", RefactoringAgent)
 
-# Documentation and reporting
+# Testing and debugging agents
+AgentRegistry.register_agent("test", TestExecutorAgent)
+AgentRegistry.register_agent("run", TestExecutorAgent)  # Command execution
+AgentRegistry.register_agent("execute", TestExecutorAgent)  # Command execution (alias)
+AgentRegistry.register_agent("debug", DebuggingAgent)
+AgentRegistry.register_agent("fix", DebuggingAgent)
+
+# Documentation agents
 AgentRegistry.register_agent("document", DocumentationAgent)
 AgentRegistry.register_agent("docs", DocumentationAgent)
-AgentRegistry.register_agent("report", DocumentationAgent)
 
-# Escalation and containment actions
-AgentRegistry.register_agent("escalate", ToolExecutorAgent)
-AgentRegistry.register_agent("contain", ToolExecutorAgent)
-AgentRegistry.register_agent("mitigate", ToolExecutorAgent)
+# Research and analysis agents
+AgentRegistry.register_agent("research", ResearchAgent)
+AgentRegistry.register_agent("investigate", ResearchAgent)
+AgentRegistry.register_agent("analyze", AnalysisAgent)
+AgentRegistry.register_agent("review", AnalysisAgent)
+AgentRegistry.register_agent("read", ResearchAgent)
+AgentRegistry.register_agent("set_workdir", ResearchAgent)
+
+# Advanced agents
+AgentRegistry.register_agent("create_tool", ToolCreationAgent)
 AgentRegistry.register_agent("tool", ToolExecutorAgent)
