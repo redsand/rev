@@ -6269,10 +6269,33 @@ class Orchestrator:
                 return False
 
             task.result = result
+
+            # Check for special agent signals BEFORE enforcing constraints
+            if isinstance(result, str) and (result.startswith("[RECOVERY_REQUESTED]") or result.startswith("[FINAL_FAILURE]") or result.startswith("[USER_REJECTED]")):
+                if result.startswith("[RECOVERY_REQUESTED]"):
+                    retry_reason = result[len("[RECOVERY_REQUESTED]"):].strip()
+                    if retry_reason:
+                        print(f"  [retry_reason] {retry_reason}")
+                        history = context.work_history if isinstance(context.work_history, list) else []
+                        history.append(f"[RETRY] {task.description} | Reason: {retry_reason}")
+                        context.work_history = history
+                        context.set_agent_state("last_retry_reason", retry_reason)
+                    task.status = TaskStatus.FAILED
+                    task.error = result[len("[RECOVERY_REQUESTED]"):]
+                elif result.startswith("[FINAL_FAILURE]"):
+                    task.status = TaskStatus.FAILED
+                    task.error = result[len("[FINAL_FAILURE]"):]
+                    context.add_error(f"Task {task.task_id}: {task.error}")
+                else:
+                    task.status = TaskStatus.STOPPED
+                    task.error = result[len("[USER_REJECTED]"):]
+                return False
+
             try:
                 _append_task_tool_event(task, result)
             except Exception:
                 pass
+            
             ok, constraint_error = _enforce_action_tool_constraints(task)
             if not ok:
                 if (task.action_type or "").lower() == "test":
@@ -6435,27 +6458,10 @@ class Orchestrator:
                         return False
             except Exception:
                 pass
-            if isinstance(result, str) and (result.startswith("[RECOVERY_REQUESTED]") or result.startswith("[FINAL_FAILURE]") or result.startswith("[USER_REJECTED]")):
-                if result.startswith("[RECOVERY_REQUESTED]"):
-                    retry_reason = result[len("[RECOVERY_REQUESTED]"):].strip()
-                    if retry_reason:
-                        print(f"  [retry_reason] {retry_reason}")
-                        history = context.work_history if isinstance(context.work_history, list) else []
-                        history.append(f"[RETRY] {task.description} | Reason: {retry_reason}")
-                        context.work_history = history
-                        context.set_agent_state("last_retry_reason", retry_reason)
-                    task.status = TaskStatus.FAILED
-                    task.error = result[len("[RECOVERY_REQUESTED]"):]
-                elif result.startswith("[FINAL_FAILURE]"):
-                    task.status = TaskStatus.FAILED
-                    task.error = result[len("[FINAL_FAILURE]"):]
-                    context.add_error(f"Task {task.task_id}: {task.error}")
-                else:
-                    task.status = TaskStatus.STOPPED
-                    task.error = result[len("[USER_REJECTED]"):]
-                return False
-            else:
-                # Harden TEST actions: they must execute a real test command.
+            
+            # Special signal handler was moved up.
+            
+            # Harden TEST actions: they must execute a real test command.
                 action_type = (task.action_type or "").lower()
                 if action_type == "test" and not _did_run_real_tests(task, verification_result):
                     signature = getattr(task, "_normalized_signature", None) or _normalize_test_task_signature(task)

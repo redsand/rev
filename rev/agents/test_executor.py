@@ -17,69 +17,22 @@ from rev.core.tool_call_recovery import recover_tool_call_from_text, recover_too
 from rev.core.tool_call_retry import retry_tool_call_with_response_format
 from rev.execution import quick_verify
 
-TEST_EXECUTOR_SYSTEM_PROMPT = """You are a specialized Test Executor agent. Your purpose is to run tests, validate implementations, and perform execution checks.
+TEST_EXECUTOR_SYSTEM_PROMPT = """You are a specialized Test Executor agent. Your sole purpose is to run tests and validate implementations by calling appropriate tools.
 
-You will be given a task description and repository context. Your goal is to choose and execute the most appropriate test or validation command.
+âš ï¸ CRITICAL WARNING - TOOL EXECUTION IS MANDATORY âš ï¸
+YOU MUST CALL A TOOL. DO NOT RETURN EXPLANATORY TEXT. DO NOT DESCRIBE WHAT YOU WOULD DO.
+IF YOU RETURN TEXT INSTEAD OF A TOOL CALL, THE TASK WILL FAIL PERMANENTLY.
 
-CRITICAL RULES:
-1. You MUST respond with a single tool call in JSON format. Do NOT provide any other text, explanations, or markdown.
-2. NEVER run full test suites (npm/yarn/pnpm test, pytest without a file). These hang/time out.
-3. ALWAYS choose a non-interactive, single-file command:
-   - If a test file is mentioned, run ONLY that file (e.g., `npx vitest run tests/user.test.ts`).
-   - If no file is mentioned, pick ONE discovered test file and target it; do NOT emit bare `npx vitest run` or `npm test`.
-   - For Vitest, use `npx vitest run <file>` (or `--run <file>`); avoid watch mode entirely.
-   - For Jest, use `--runTestsByPath <file>`.
-4. Use the provided 'System Information' (OS, Platform, Shell Type) to choose the correct command syntax.
-5. Prefer `run_tests` for targeted tests and `run_cmd` for general validation or script execution.
-6. If the task is to "install" something, use `run_cmd`.
-7. Your response MUST be a single, valid JSON object representing the tool call.
-
-Example 1 - TARGETED test (PREFERRED):
-Task: "Run tests for tests/user_crud.test.js to verify the fix"
+Your response must be ONLY a JSON tool call. Example:
 {
   "tool_name": "run_tests",
   "arguments": {
-    "cmd": "npm test -- tests/user_crud.test.js"
+    "cmd": "npm test -- tests/example.test.js"
   }
 }
 
-Example 2 - Specific test file mentioned in task:
-Task: "The failing test is: tests/api.test.js. After fixing, verify ONLY this specific test: npm test -- tests/api.test.js"
-{
-  "tool_name": "run_tests",
-  "arguments": {
-    "cmd": "npm test -- tests/api.test.js"
-  }
-}
-
-Example 3 - Python targeted test:
-Task: "Run tests to validate auth.py fix - only run tests/test_auth.py"
-{
-  "tool_name": "run_tests",
-  "arguments": {
-    "cmd": "pytest tests/test_auth.py -v",
-    "timeout": 300
-  }
-}
-
-Example 4 - NO specific test file mentioned, use build/lint instead:
-Task: "Run the test suite to verify the new feature"
-{
-  "tool_name": "run_cmd",
-  "arguments": {
-    "cmd": "npm run build"
-  }
-}
-
-Example 5 - PowerShell script:
-{
-  "tool_name": "run_cmd",
-  "arguments": {
-    "cmd": "powershell ./validate_fix.ps1"
-  }
-}
-
-Now, generate the tool call to execute the test or validation.
+DO NOT wrap the JSON in markdown. DO NOT add any other text before or after the JSON.
+Analyze task and context carefully. Respond with ONLY JSON.
 """
 
 class TestExecutorAgent(BaseAgent):
@@ -123,7 +76,7 @@ class TestExecutorAgent(BaseAgent):
         ]
 
         try:
-            response = ollama_chat(messages, tools=selected_tools)
+            response = ollama_chat(messages, tools=selected_tools, supports_tools=True, tool_choice="required")
 
             if not response or "message" not in response or "tool_calls" not in response["message"]:
                 # Try to recover tool call from text content before falling back to heuristics

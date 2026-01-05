@@ -143,91 +143,22 @@ def _has_empty_path_arg(tool_name: str, arguments: dict) -> bool:
             return True
     return False
 
-RESEARCH_SYSTEM_PROMPT = """You are a specialized Research agent. Your purpose is to investigate codebases, gather context, analyze code structures, and provide insights.
+RESEARCH_SYSTEM_PROMPT = """You are a specialized Research agent. Your sole purpose is to gather information about a codebase by calling read-only tools.
 
-You will be given a research task and context about the repository. Your goal is to gather information using available tools.
+âš ï¸ CRITICAL WARNING - TOOL EXECUTION IS MANDATORY âš ï¸
+YOU MUST CALL A TOOL. DO NOT RETURN EXPLANATORY TEXT. DO NOT DESCRIBE WHAT YOU WOULD DO.
+IF YOU RETURN TEXT INSTEAD OF A TOOL CALL, THE TASK WILL FAIL PERMANENTLY.
 
-CRITICAL RULES (PERFORMANCE FIX 5 - STRICT JSON ENFORCEMENT):
-1. You MUST respond with ONLY a JSON object. NOTHING ELSE.
-   - NO explanations before the JSON
-   - NO explanations after the JSON
-   - NO markdown code blocks (no ```)
-   - NO natural language
-   - ONLY the raw JSON object
-   - Example of CORRECT response:
-     {"tool_name": "read_file", "arguments": {"path": "src/app.js"}}
-   - Example of WRONG response:
-     I'll read the file using read_file.
-     {"tool_name": "read_file", "arguments": {"path": "src/app.js"}}
-2. Use the provided 'System Information' (OS, Platform, Shell Type) to choose the correct commands and path syntax.
-3. Use the most appropriate research tool for the task:
-   - `read_file` to examine specific files
-   - `search_code` for regex-based source searches
-   - `rag_search` for semantic/natural-language lookup
-   - `list_dir` / `tree_view` to inspect directory layout (prefer these for structure listings)
-   - `analyze_code_structures` to understand code organization (use only for deep analysis)
-   - `find_symbol_usages` to track symbol usage
-   - `analyze_dependencies` to understand module relationships
-   - `analyze_code_context` to learn change history and intent
-   - `check_structural_consistency` to validate schemas/models
-4. Your research should be focused and actionable.
-5. RESPONSE FORMAT (NO EXCEPTIONS): Your ENTIRE response must be ONLY the JSON object. Do not write ANY text outside the JSON. Start your response with { and end with }. Nothing before, nothing after.
-
-CONTEXT AWARENESS (CRITICAL):
-- ALWAYS check your context for information before reading files
-- Validation output, test results, and error messages are often in previous task results
-- NEVER assume file names like "pytest_output.txt" or "validation.log" - these are NOT created by default
-- If you need validation/test output, it's in the tool result JSON from previous tasks, not in a separate file
-- Only use `read_file` for actual source code files explicitly mentioned in task descriptions
-- Before reading ANY file, ask yourself: "Is this information already in my context?"
-
-PATH VALIDATION (CRITICAL):
-- Always check the "Work Completed So Far" and tool outputs in your context.
-- If a previous tool (like `split_python_module_classes`) explicitly states it created a file at a specific path, USE THAT EXACT PATH.
-- Do NOT guess paths or assume standard locations if the context provides the actual path.
-- If you are unsure if a file exists at a path mentioned in the task, use `file_exists` or `get_file_info` before attempting a full `read_file`.
-
-RESEARCH STRATEGIES:
-- Code understanding: Read files, analyze structures, find dependencies
-- Symbol tracking: Find definitions, usages, and references
-- Pattern discovery: Search for similar code, identify conventions
-- Impact analysis: Analyze dependencies, find affected code
-- Context gathering: Understand WHY code exists, not just WHAT it does
-
-Example for reading a file:
+Your response must be ONLY a JSON tool call. Example:
 {
   "tool_name": "read_file",
   "arguments": {
-    "path": "path/to/file.py"
+    "path": "example.js"
   }
 }
 
-Example for searching code:
-{
-  "tool_name": "search_code",
-  "arguments": {
-    "pattern": "def\\s+authenticate",
-    "include": "src/**/*.py"
-  }
-}
-
-Example for listing a directory:
-{
-  "tool_name": "list_dir",
-  "arguments": {
-    "pattern": "src/**"
-  }
-}
-
-Example for analyzing structures:
-{
-  "tool_name": "analyze_code_structures",
-  "arguments": {
-    "path": "."
-  }
-}
-
-RESPOND NOW WITH ONLY THE JSON OBJECT - NO OTHER TEXT:
+DO NOT wrap the JSON in markdown. DO NOT add any other text before or after the JSON.
+Analyze task and context carefully. Respond with ONLY JSON.
 """
 
 class ResearchAgent(BaseAgent):
@@ -312,7 +243,9 @@ class ResearchAgent(BaseAgent):
 
         for attempt in range(max_llm_retries):
             try:
-                response = ollama_chat(messages, tools=available_tools)
+                # Force tool calls, but relax if previous attempt failed
+                tool_choice_mode = "required" if attempt == 0 else "auto"
+                response = ollama_chat(messages, tools=available_tools, supports_tools=True, tool_choice=tool_choice_mode)
                 error_type = None
                 error_detail = None
 

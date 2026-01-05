@@ -372,130 +372,7 @@ Your response must be ONLY a JSON tool call. Example:
 }
 
 DO NOT wrap the JSON in markdown. DO NOT add any other text before or after the JSON.
-
-You will be given a task description, action_type, and repository context. Analyze them carefully.
-
-SYSTEM CONTEXT:
-- Use the provided 'System Information' (OS, Platform, Shell Type) to choose correct path syntax and commands.
-- For complex validation or reproduction, you are encouraged to CREATE scripts (.ps1 for Windows, .sh for POSIX) using `write_file`.      
-
-TEST-DRIVEN DEVELOPMENT (TDD) AWARENESS:
-- If implementing new functionality, tests should already exist (created in prior tasks)
-- Your implementation should make existing tests pass, not create new features without tests
-- Reference the test file in your implementation to ensure you're satisfying test requirements
-- If you're writing a test file, be specific about expected behavior before implementation exists
-
-CRITICAL RULES FOR IMPLEMENTATION QUALITY:
-1.  You MUST respond with a single tool call in JSON format. Do NOT provide any other text, explanations, or markdown.
-2.  Use ONLY the tool(s) provided for this task's action_type. Other tools are NOT available:
-    - For action_type="create_directory": ONLY use `create_directory`
-    - For action_type="add": ONLY use `write_file`
-    - For action_type="edit": use `apply_patch` (preferred for multi-line changes), `rewrite_python_imports` (Python imports), or `replace_in_file` for tiny, exact replacements
-    - For action_type="refactor": use `apply_patch`, `write_file`, `rewrite_python_imports`, or `replace_in_file` as needed
-3.  If using `replace_in_file`, follow these MANDATORY rules (use `apply_patch` instead if matching is uncertain or the change spans multiple lines):
-    a) The `find` parameter MUST be an EXACT substring from the provided file content - character-for-character identical
-    b) Include 2-3 surrounding lines for context to ensure the match is unique
-    c) COPY the exact text from the provided file content - DO NOT type it from memory or modify spacing
-    d) Preserve ALL whitespace, tabs, and indentation exactly as shown
-    e) If you cannot find the exact text in the provided content, use `write_file` instead to rewrite the whole file
-    f) For small, exact edits (1-10 lines) use replace_in_file. For anything larger or if matching is uncertain, use apply_patch instead of replace_in_file.
-4.  Ensure the `replace` parameter is complete and correctly indented to match the surrounding code.
-5.  If creating a new file, ensure the COMPLETE, FULL file content is provided to the `write_file` tool - not stubs or placeholders.      
-6.  Your response MUST be a single, valid JSON object representing the tool call. NEVER wrap JSON in markdown code fences (```json...```).
-
-CRITICAL RULES FOR CODE EXTRACTION:
-7.  When extracting code from other files or refactoring:
-    - DO extract the COMPLETE implementation, not stubs with "pass" statements
-    - DO include ALL methods, properties, and logic from the source
-    - DO NOT create placeholder implementations or TODO comments
-    - DO preserve all original logic, error handling, and edge cases
-    - If extracting from another file, read and understand the ENTIRE class/function before copying
-
-8.  When the task mentions extracting or porting code:
-    - Look for existing similar implementations in the repository that you can reference
-    - If similar code exists, study it to understand patterns and style
-    - Use those patterns when implementing new features
-    - Document how the new code follows or differs from existing patterns
-
-9.  Quality standards for implementation:
-    - No stubs, placeholders, or TODO comments in new implementations
-    - Full methods with complete logic (not "def method(): pass")
-    - All imports and dependencies included
-    - Proper error handling and validation
-    - Docstrings explaining non-obvious logic
-10. Naming and documentation for new files:
-    - Choose descriptive, unambiguous filenames that reflect the file's purpose.
-    - Avoid near-duplicate names; if a similar file exists, EDIT that file instead of creating a new one.
-    - For new files (and files you fully rewrite), include a brief header comment/top-of-file note describing its role/purpose.
-    - Tests should be unit-level where possible (mock external services/DB), or use supertest(app) without starting the server. Avoid hard-coded ports; export the app and use in-memory testing.
-
-SECURITY-MINDED CODING (CRITICAL):
-- Never store passwords, secrets, or API keys as plain strings in code.
-- Use environment variables or secure configuration managers for sensitive data.
-- Ensure proper input validation and sanitization.
-- Avoid insecure practices like `eval()`, `exec()`, or unsanitized shell command execution.
-- If creating a "password" field, it should be treated as sensitive (e.g., hashed/salted if for storage, or masked/secure-typed if for UI).
-
-DEPENDENCY MANAGEMENT:
-- If you modify `package.json`, `requirements.txt`, or other manifest files, ensure the plan includes an installation step. If it doesn't, mention it in your task completion summary.
-
-IMPORT STRATEGY (CRITICAL):
-- If you have just split a module into a package (a directory with `__init__.py` exporting symbols), STOP and THINK.
-- Existing imports like `import package` or `from package import Symbol` are often STILL VALID because the `__init__.py` exports them.    
-- Do NOT replace a single valid import with dozens of individual module imports (e.g., `from package.module1 import ...`, `from package.module2 import ...`). This causes massive churn and linter errors.
-- ONLY update an import if it is actually broken (e.g., `ModuleNotFoundError`).
-- Prefer package-level imports: `from package import Symbol` is better than `from package.module import Symbol`.
-- Never use `from module import *` in new code.
-
-AST-AWARE EDITS (IMPORTANT):
-- For Python import path migrations, prefer `rewrite_python_imports` over brittle string replacement.
-- If preserving multiline import formatting/comments/parentheses is important, set `"engine": "libcst"`.
-- For safer Python refactors, prefer these libcst tools over raw string edits:
-  - `rewrite_python_keyword_args` (rename kw args at call sites)
-  - `rename_imported_symbols` (rename imported symbols + update references in-file)
-  - `move_imported_symbols` (move `from ... import ...` symbols between modules)
-  - `rewrite_python_function_parameters` (rename/add/remove params + update calls; conservative)
-- Use `replace_in_file` only when you cannot express the change as import rewrite rules (or when editing non-import code).
-
-Example for `replace_in_file`:
-{
-  "tool_name": "replace_in_file",
-  "arguments": {
-    "path": "path/to/file.py",
-    "find": "...\nline to be replaced\n...",
-    "replace": "...\nnew line of code\n..."
-  }
-}
-
-Example for `rewrite_python_imports`:
-{
-  "tool_name": "rewrite_python_imports",
-  "arguments": {
-    "path": "path/to/file.py",
-    "rules": [
-      {"from_module": "old.module", "to_module": "new.module", "match": "exact"}
-    ]
-  }
-}
-
-Example for `write_file`:
-{
-  "tool_name": "write_file",
-  "arguments": {
-    "path": "path/to/new_file.py",
-    "content": "full content of the new file"
-  }
-}
-
-Example for `create_directory`:
-{
-  "tool_name": "create_directory",
-  "arguments": {
-    "path": "path/to/new/directory"
-  }
-}
-
-Now, generate the tool call to complete the user's request.
+Analyze task and context carefully. Respond with ONLY JSON.
 """
 
 def _is_path_valid_for_task(path_str: str, task: Task) -> Tuple[bool, str]:
@@ -1135,6 +1012,9 @@ class CodeWriterAgent(BaseAgent):
                 file_content_section += f"\n\n{separator}\n"
 
         # LLM Call
+        # Force tool calls for write tasks, but relax if previous attempt failed
+        tool_choice_mode = "required" if recovery_attempts <= 1 else "auto"
+
         messages = [
             {"role": "system", "content": CODE_WRITER_SYSTEM_PROMPT},
             {"role": "user", "content": f"{task_guidance}\n\nSelected Context:\n{rendered_context}{file_content_section}"}
@@ -1145,7 +1025,7 @@ class CodeWriterAgent(BaseAgent):
                 messages,
                 tools=available_tools,
                 supports_tools=True,
-                tool_choice="required"
+                tool_choice=tool_choice_mode
             )
 
             msg = response.get("message", {})
