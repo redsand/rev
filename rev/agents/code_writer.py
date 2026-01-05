@@ -917,43 +917,6 @@ class CodeWriterAgent(BaseAgent):
         """
         print(f"CodeWriterAgent executing task: {task.description}")
 
-        # CRITICAL GUARD: Enforce research before add/edit operations
-        if task.action_type in ("add", "edit"):
-            recent_tasks = context.agent_state.get("recent_tasks") or []
-            research_keywords = ["list_dir", "tree_view", "read", "search", "listing", "found"]
-            has_research = any(
-                any(kw in str(prev_task).lower() for kw in research_keywords)
-                for prev_task in recent_tasks[-10:]
-            )
-
-            if not has_research:
-                print(f"  [RESEARCH_GUARD] WARNING: {task.action_type.upper()} action without prior research!")
-                print(f"  [RESEARCH_GUARD] Forcing research step before proceeding...")
-                signature = f"missing_research::{task.action_type}::{(task.description or '').strip().lower()}"
-                should_inject = not bool(context.get_agent_state(signature, False))
-                if should_inject:
-                    context.set_agent_state(signature, True)
-                    target_files = _extract_target_files_from_description(task.description or "")
-                    target_hint = ""
-                    if target_files:
-                        target_hint = f" Confirm whether these targets exist: {', '.join(target_files[:3])}."
-                    research_desc = (
-                        "Inspect repository structure with tree_view (max depth 2) or list_dir to "
-                        "locate target files for the pending write task."
-                        f"{target_hint}"
-                    )
-                    context.add_agent_request(
-                        "INJECT_TASKS",
-                        {"tasks": [Task(description=research_desc, action_type="read")]},
-                    )
-                return json.dumps({
-                    "skipped": True,
-                    "reason": "missing_research",
-                    "action": task.action_type,
-                    "description": task.description,
-                    "injected": should_inject,
-                })
-
         # Track recovery attempts
         recovery_attempts = self.increment_recovery_attempts(task, context)
 

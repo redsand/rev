@@ -2486,8 +2486,13 @@ def _has_recent_research_evidence(completed_tasks: List[Task], max_check: int = 
         return False
     read_actions = {"read", "analyze", "research", "investigate", "review"}
     for task in reversed(completed_tasks[-max_check:]):
-        if (task.action_type or "").lower() in read_actions and getattr(task, "tool_events", None):
-            return True
+        # Successful research tasks count as evidence
+        if (task.action_type or "").lower() in read_actions:
+            if task.status == TaskStatus.COMPLETED:
+                return True
+            # Legacy/fallback: check for tool events if status is not COMPLETED
+            if getattr(task, "tool_events", None):
+                return True
     return False
 
 
