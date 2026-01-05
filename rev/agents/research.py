@@ -1,5 +1,5 @@
 import json
-from typing import Any, Optional
+from typing import Any, Optional, Dict, List
 from rev.agents.base import BaseAgent
 from rev.models.task import Task
 from rev.tools.registry import execute_tool, get_available_tools
@@ -391,6 +391,10 @@ class ResearchAgent(BaseAgent):
                                 raw_result = json.dumps(outputs)
                             else:
                                 raw_result = execute_tool(recovered.name, recovered.arguments, agent_name="ResearchAgent")
+                            
+                            # Record evidence for research guard
+                            self._record_tool_event(task, context, recovered.name, recovered.arguments, raw_result)
+                            
                             snippet = _extract_snippet(recovered.name, recovered.arguments, raw_result)
                             context.add_insight("research_agent", f"task_{task.task_id}_result", {
                                 "tool": recovered.name,
@@ -445,6 +449,10 @@ class ResearchAgent(BaseAgent):
                                 raw_result = json.dumps(outputs)
                             else:
                                 raw_result = execute_tool(retry.name, retry.arguments, agent_name="ResearchAgent")
+                            
+                            # Record evidence for research guard
+                            self._record_tool_event(task, context, retry.name, retry.arguments, raw_result)
+                            
                             snippet = _extract_snippet(retry.name, retry.arguments, raw_result)
                             context.add_insight("research_agent", f"task_{task.task_id}_result", {
                                 "tool": retry.name,
@@ -497,3 +505,45 @@ class ResearchAgent(BaseAgent):
                 return self.make_failure_signal(last_error_type, last_error_detail)
         
         return self.make_failure_signal("unknown", "Loop exhausted without specific error")
+
+    def _record_tool_event(
+        self,
+        task: Task,
+        context: RevContext,
+        tool_name: str,
+        tool_args: Dict[str, Any],
+        raw_result: str,
+    ) -> None:
+        """Record a tool event for research tracking."""
+        if not tool_name or not isinstance(tool_name, str):
+            return
+        if not hasattr(task, "tool_events") or task.tool_events is None:
+            task.tool_events = []
+
+        safe_args: Dict[str, Any] = tool_args if isinstance(tool_args, dict) else {"args": tool_args}
+
+        try:
+            payload = json.loads(
+                build_subagent_output(
+                    agent_name="ResearchAgent",
+                    tool_name=tool_name,
+                    tool_args=safe_args,
+                    tool_output=raw_result,
+                    context=context,
+                    task_id=task.task_id,
+                )
+            )
+            # Add to task history
+            task.tool_events.append({
+                "tool": tool_name,
+                "args": safe_args,
+                "timestamp": context.get_timestamp() if hasattr(context, "get_timestamp") else None,
+                "output": payload
+            })
+        except Exception:
+            # Fallback if parsing fails
+            task.tool_events.append({
+                "tool": tool_name,
+                "args": safe_args,
+                "raw_result": raw_result[:500]
+            })
