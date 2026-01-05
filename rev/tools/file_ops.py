@@ -359,7 +359,8 @@ def read_file(path: str) -> str:
             return cached_content
 
     try:
-        txt = p.read_text(encoding="utf-8", errors="ignore")
+        # Use utf-8-sig to automatically handle and strip BOM if present
+        txt = p.read_text(encoding="utf-8-sig", errors="ignore")
         if len(txt) > READ_RETURN_LIMIT:
             txt = txt[:READ_RETURN_LIMIT] + "\n...[truncated]..."
 

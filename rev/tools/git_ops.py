@@ -58,18 +58,31 @@ def _run_shell(cmd: str | list[str], timeout: int = 300) -> subprocess.Completed
         # Return a CompletedProcess object for compatibility
         if result.get("blocked"):
             # Command was blocked for security reasons
+            error_msg = result.get('error', 'security violation')
             return subprocess.CompletedProcess(
                 args=str(cmd),
                 returncode=-1,
                 stdout="",
-                stderr=f"BLOCKED: {result.get('error', 'security violation')}"
+                stderr=f"BLOCKED: {error_msg}"
             )
+
+        rc = result.get("rc")
+        if rc is None:
+            rc = -1
+            
+        stdout = result.get("stdout", "")
+        stderr = result.get("stderr", "")
+        
+        # If we have an internal error message but no stderr, surface it
+        internal_error = result.get("error")
+        if internal_error and not stderr:
+            stderr = f"INTERNAL ERROR: {internal_error}"
 
         return subprocess.CompletedProcess(
             args=str(cmd),
-            returncode=result.get("rc", -1),
-            stdout=result.get("stdout", ""),
-            stderr=result.get("stderr", "")
+            returncode=rc,
+            stdout=stdout,
+            stderr=stderr
         )
     except OSError as exc:
         # On Windows low-memory/paging-file failures (e.g., WinError 1455), return a CompletedProcess-like
@@ -1030,6 +1043,7 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
         strategies = [
             # runner, check_args, use_three_way, apply_override
             ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", "--ignore-whitespace", tfp], False, None),
+            ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", "--ignore-whitespace", "-p0", tfp], False, ["git", "apply", "--inaccurate-eof", "--whitespace=nowarn", "--ignore-whitespace", "-p0", tfp]),
             ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", "--ignore-whitespace", "--3way", tfp], True, None),
             ("patch", ["patch", "--batch", "--forward", "--dry-run", "-p1", "-i", tfp], False, None),
             # More lenient patch attempts: ignore whitespace and different strip levels to salvage slightly misaligned diffs
@@ -1045,6 +1059,8 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
         use_three_way = False
         apply_mode: Optional[str] = None
         apply_override: Optional[list[str]] = None
+        
+        errors = []
 
         for runner, check_args, use_three_way_flag, apply_override_args in strategies:
             check_proc = _run_shell(check_args)
@@ -1058,23 +1074,28 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
                 apply_mode = runner
                 apply_override = apply_override_args
                 break
+            else:
+                if "command not found" in check_proc.stderr.lower() or "not recognized" in check_proc.stderr.lower():
+                    # Don't clutter with "command not found" if we have other strategies
+                    continue
+                errors.append(f"{runner}: {check_proc.stderr.strip()}")
         else:
             if is_git_repo():
                 reverse_proc = _run_shell(["git", "apply", "--check", "--reverse", "--inaccurate-eof", tfp])
                 reverse_output = (reverse_proc.stdout + reverse_proc.stderr).lower()
                 if reverse_proc.returncode == 0 or "reversed" in reverse_output:
                     return _result(reverse_proc, success=True, already_applied=True, phase="check")
-            else:
-                # If not a git repo, we don't have a check_proc yet if we only had one strategy and it failed?
-                # Actually, if is_git_repo is False, strategies list has only "patch".
-                # If patch strategy failed, we are here.
-                # check_proc would be the patch command's process.
-                pass
 
             if _allow_chunking and not dry_run and len(chunked_parts) > 1:
                 chunk_result = _apply_patch_in_chunks(chunked_parts, dry_run=dry_run)
                 if chunk_result:
                     return chunk_result
+
+            # If we reached here, all strategies failed.
+            # Use the first git error as the primary one, as it's usually most relevant.
+            primary_error = errors[0] if errors else "All patch strategies failed"
+            if check_proc and check_proc.returncode == -1 and "INTERNAL ERROR" in check_proc.stderr:
+                primary_error = check_proc.stderr
 
             return _result(
                 check_proc,
