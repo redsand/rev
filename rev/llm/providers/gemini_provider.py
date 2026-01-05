@@ -138,8 +138,13 @@ class GeminiProvider(LLMProvider):
                     result[key] = value
                 continue
 
-            # Remove unsupported schema keywords
+            # Improve oneOf/anyOf/allOf handling: use the first valid option instead of stripping
             if key in {"oneOf", "anyOf", "allOf"}:
+                if isinstance(value, list) and value:
+                    # Merge the first sub-schema into the current one
+                    first_schema = self._sanitize_schema(value[0], is_property_value=is_property_value)
+                    if isinstance(first_schema, dict):
+                        result.update(first_schema)
                 continue
 
             # Remove "default" keyword ONLY when it's used as a schema attribute (default value)
@@ -210,40 +215,33 @@ class GeminiProvider(LLMProvider):
         # response.text might exist but be empty when there are function calls
         if hasattr(response, "parts"):
             for part in response.parts:
-                if hasattr(part, "text"):
-                    content += part.text
-                elif hasattr(part, "function_call"):
+                if hasattr(part, "function_call") and part.function_call and getattr(part.function_call, "name", None):
                     # Handle function call
                     fc = part.function_call
                     tool_calls.append({
                         "function": {
                             "name": fc.name,
-                            "arguments": json.dumps(dict(fc.args)),
+                            "arguments": json.dumps(dict(fc.args or {})),
                         }
                     })
-        elif hasattr(response, "text"):
-            # Fallback to text attribute if no parts
+                else:
+                    text = getattr(part, "text", None)
+                    if text:
+                        content += text
+        elif hasattr(response, "text") and response.text:
             content = response.text
 
-        result_message = {
-            "role": "assistant",
-            "content": content,
-        }
-
-        if tool_calls:
-            result_message["tool_calls"] = tool_calls
-
-        # Extract usage information
-        usage = {"prompt": 0, "completion": 0, "total": 0}
-        if usage_metadata:
-            usage["prompt"] = getattr(usage_metadata, "prompt_token_count", 0)
-            usage["completion"] = getattr(usage_metadata, "candidates_token_count", 0)
-            usage["total"] = getattr(usage_metadata, "total_token_count", 0)
-
         return {
-            "message": result_message,
-            "done": True,
-            "usage": usage,
+            "message": {
+                "role": "assistant",
+                "content": content,
+                "tool_calls": tool_calls if tool_calls else None,
+            },
+            "usage": {
+                "prompt": getattr(usage_metadata, "prompt_token_count", 0) if usage_metadata else 0,
+                "completion": getattr(usage_metadata, "candidates_token_count", 0) if usage_metadata else 0,
+                "total": getattr(usage_metadata, "total_token_count", 0) if usage_metadata else 0,
+            }
         }
 
     def chat(
@@ -252,19 +250,17 @@ class GeminiProvider(LLMProvider):
         tools: Optional[List[Dict[str, Any]]] = None,
         model: Optional[str] = None,
         supports_tools: bool = True,
+        tool_choice: Optional[str] = None,
         **kwargs
     ) -> Dict[str, Any]:
         """Send chat request to Gemini."""
         genai = self._get_client()
         debug_logger = get_logger()
 
-        # Default to Gemini 2.0 Flash
-        model_name = model or os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
+        model_name = model or os.getenv("GEMINI_MODEL", config.GEMINI_MODEL)
 
-        # Convert messages to Gemini format
         system_instruction, converted_messages = self._convert_messages(messages)
 
-        # Build generation config
         generation_config = {
             "temperature": float(os.getenv("GEMINI_TEMPERATURE", str(config.GEMINI_TEMPERATURE))),
             "top_p": float(os.getenv("GEMINI_TOP_P", "0.9")),
@@ -272,15 +268,22 @@ class GeminiProvider(LLMProvider):
             "max_output_tokens": int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "8192")),
         }
 
-        # BEST PRACTICE: Configure tool calling behavior
-        # For Gemini 3 models, this ensures proper function calling
+        # Configure tool calling behavior for non-streaming
         tool_config = None
-        if tools:
+        # Respect tool_choice: "none" means no tools, "required" means any tool, function name means that tool
+        effective_tools = tools if tool_choice != "none" else None
+        
+        if effective_tools:
+            mode = "ANY" if tool_choice == "required" or tool_choice == "any" else "AUTO"
             tool_config = {
                 "function_calling_config": {
-                    "mode": "ANY"  # Force function calling when tools provided
+                    "mode": mode
                 }
             }
+            if tool_choice and tool_choice not in ("auto", "none", "required", "any"):
+                # Force a specific function call
+                tool_config["function_calling_config"]["allowed_function_names"] = [tool_choice]
+                tool_config["function_calling_config"]["mode"] = "ANY"
 
         # Create model instance
         model_kwargs = {
@@ -293,18 +296,18 @@ class GeminiProvider(LLMProvider):
 
         # Add tools if provided and supported
         gemini_tools = None
-        if tools:
-            gemini_tools = self._convert_tools(tools)
+        if effective_tools:
+            gemini_tools = self._convert_tools(effective_tools)
             if gemini_tools:
                 model_kwargs["tools"] = gemini_tools
                 # Apply tool configuration to enforce function calling
                 if tool_config:
                     model_kwargs["tool_config"] = tool_config
                 # DIAGNOSTIC: Log tool provisioning
-                print(f"  [GEMINI] Converted {len(tools)} OpenAI tools to {len(gemini_tools[0].get('function_declarations', []))} Gemini function declarations")
-                print(f"  [GEMINI] Tool config: {tool_config}")
+                # print(f"  [GEMINI] Converted {len(effective_tools)} OpenAI tools to {len(gemini_tools[0].get('function_declarations', []))} Gemini function declarations")
+                # print(f"  [GEMINI] Tool config: {tool_config}")
             else:
-                print(f"  [GEMINI] WARNING: Tool conversion returned empty! Original tools count: {len(tools)}")
+                print(f"  [GEMINI] WARNING: Tool conversion returned empty! Original tools count: {len(effective_tools)}")
 
         # Log request
         debug_logger.log_llm_request(model_name, messages, tools if tools and supports_tools else None)
@@ -313,29 +316,32 @@ class GeminiProvider(LLMProvider):
             model = genai.GenerativeModel(**model_kwargs)
 
             # DIAGNOSTIC: Log model configuration
-            print(f"  [GEMINI] Model: {model_name}")
-            print(f"  [GEMINI] Has tools: {bool(gemini_tools)}")
-            print(f"  [GEMINI] Has system_instruction: {bool(system_instruction)}")
+            # print(f"  [GEMINI] Model: {model_name}")
+            # print(f"  [GEMINI] Has tools: {bool(gemini_tools)}")
+            # print(f"  [GEMINI] Has system_instruction: {bool(system_instruction)}")
 
             # Generate response
             response = model.generate_content(converted_messages)
 
             # DIAGNOSTIC: Log raw response structure
             if hasattr(response, 'candidates'):
-                print(f"  [GEMINI] Response has {len(response.candidates)} candidate(s)")
+                # print(f"  [GEMINI] Response has {len(response.candidates)} candidate(s)")
                 if response.candidates:
                     candidate = response.candidates[0]
                     if hasattr(candidate, 'content'):
                         content = candidate.content
                         if hasattr(content, 'parts'):
-                            print(f"  [GEMINI] First candidate has {len(content.parts)} part(s)")
+                            # print(f"  [GEMINI] First candidate has {len(content.parts)} part(s)")
                             for i, part in enumerate(content.parts):
                                 if hasattr(part, 'function_call'):
-                                    print(f"  [GEMINI] Part {i}: function_call - {part.function_call.name}")
+                                    # print(f"  [GEMINI] Part {i}: function_call - {part.function_call.name}")
+                                    pass
                                 elif hasattr(part, 'text'):
-                                    print(f"  [GEMINI] Part {i}: text - {part.text[:100]}...")
+                                    # print(f"  [GEMINI] Part {i}: text - {part.text[:100]}...")
+                                    pass
                     if hasattr(candidate, 'finish_reason'):
-                        print(f"  [GEMINI] Finish reason: {candidate.finish_reason}")
+                        # print(f"  [GEMINI] Finish reason: {candidate.finish_reason}")
+                        pass
 
             result = self._convert_response(
                 response.candidates[0].content if response.candidates else response,
@@ -358,6 +364,7 @@ class GeminiProvider(LLMProvider):
         on_chunk: Optional[Callable[[str], None]] = None,
         check_interrupt: Optional[Callable[[], bool]] = None,
         check_user_messages: Optional[Callable[[], bool]] = None,
+        tool_choice: Optional[str] = None,
         **kwargs
     ) -> Dict[str, Any]:
         """Stream chat responses from Gemini."""
@@ -377,12 +384,19 @@ class GeminiProvider(LLMProvider):
 
         # Configure tool calling behavior for streaming
         tool_config = None
-        if tools:
+        effective_tools = tools if tool_choice != "none" else None
+
+        if effective_tools:
+            mode = "ANY" if tool_choice == "required" or tool_choice == "any" else "AUTO"
             tool_config = {
                 "function_calling_config": {
-                    "mode": "ANY"
+                    "mode": mode
                 }
             }
+            if tool_choice and tool_choice not in ("auto", "none", "required", "any"):
+                # Force a specific function call
+                tool_config["function_calling_config"]["allowed_function_names"] = [tool_choice]
+                tool_config["function_calling_config"]["mode"] = "ANY"
 
         model_kwargs = {
             "model_name": model_name,
@@ -392,14 +406,14 @@ class GeminiProvider(LLMProvider):
         if system_instruction:
             model_kwargs["system_instruction"] = system_instruction
 
-        if tools:
-            gemini_tools = self._convert_tools(tools)
+        if effective_tools:
+            gemini_tools = self._convert_tools(effective_tools)
             if gemini_tools:
                 model_kwargs["tools"] = gemini_tools
                 if tool_config:
                     model_kwargs["tool_config"] = tool_config
 
-        debug_logger.log_llm_request(model_name, messages, tools if tools and supports_tools else None)
+        debug_logger.log_llm_request(model_name, messages, effective_tools if effective_tools and supports_tools else None)
 
         try:
             model = genai.GenerativeModel(**model_kwargs)
@@ -424,18 +438,20 @@ class GeminiProvider(LLMProvider):
                 # Extract text from chunk - check parts first for function calls
                 if hasattr(chunk, "parts"):
                     for part in chunk.parts:
-                        if hasattr(part, "text"):
-                            accumulated_content += part.text
-                            if on_chunk:
-                                on_chunk(part.text)
-                        elif hasattr(part, "function_call"):
+                        if hasattr(part, "function_call") and part.function_call and getattr(part.function_call, "name", None):
                             fc = part.function_call
                             accumulated_tool_calls.append({
                                 "function": {
                                     "name": fc.name,
-                                    "arguments": json.dumps(dict(fc.args)),
+                                    "arguments": json.dumps(dict(fc.args or {})),
                                 }
                             })
+                        else:
+                            text = getattr(part, "text", None)
+                            if text:
+                                accumulated_content += text
+                                if on_chunk:
+                                    on_chunk(text)
                 elif hasattr(chunk, "text"):
                     text = chunk.text
                     accumulated_content += text

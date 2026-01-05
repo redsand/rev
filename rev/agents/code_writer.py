@@ -6,7 +6,7 @@ from rev.llm.client import ollama_chat
 from rev.core.context import RevContext
 from rev.execution.safety import is_scary_operation, prompt_scary_operation
 from difflib import unified_diff
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Sequence
 import re
 from pathlib import Path
 
@@ -17,6 +17,7 @@ from rev.agents.subagent_io import build_subagent_output
 from rev.tools.registry import execute_tool as execute_registry_tool
 from rev.tools import file_ops
 from rev import config
+from rev.run_log import write_run_log_line
 from rev.execution.ultrathink_prompts import ULTRATHINK_CODE_WRITER_PROMPT
 from rev.tools.workspace_resolver import resolve_workspace_path
 
@@ -229,6 +230,23 @@ def _targets_exist(paths: list[str]) -> bool:
     return False
 
 
+def _merge_tool_schemas(primary: Sequence[Dict[str, Any]], fallback: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Merge tool schema lists, preserving order and de-duplicating by tool name."""
+    merged: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for tool in list(primary) + list(fallback):
+        if not isinstance(tool, dict):
+            continue
+        name = tool.get("function", {}).get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        merged.append(tool)
+    return merged
+
+
 def _detect_path_conflict(path_str: str) -> Optional[str]:
     """
     Detect common path conflicts such as creating both <name>.ts and <name>/index.ts.
@@ -333,14 +351,14 @@ def _task_is_command_only(description: str) -> bool:
         re.search(
             r"\b(run_cmd|run_terminal_command|run_tests|execute command|install|npm install|npm ci|yarn install|"
             r"pnpm install|pip install|pipenv install|poetry install|pipx install|conda install|bundle install|composer install|"
-            r"apt-get|apt install|brew install|choco install|winget install|yum install|dnf install|apk add|pacman -S|zypper install)\b",
+            r"apt-get|apt install|brew install|choco install|winget install|yum install|dnf install|apk add|pacman -S|zypper install)\b", 
             desc,
         )
     )
 
 CODE_WRITER_SYSTEM_PROMPT = """You are a specialized Code Writer agent. Your sole purpose is to execute a single coding task by calling the ONLY available tool for this specific task.
 
-⚠️ CRITICAL WARNING - TOOL EXECUTION IS MANDATORY ⚠️
+âš ï¸ CRITICAL WARNING - TOOL EXECUTION IS MANDATORY âš ï¸
 YOU MUST CALL A TOOL. DO NOT RETURN EXPLANATORY TEXT. DO NOT DESCRIBE WHAT YOU WOULD DO.
 IF YOU RETURN TEXT INSTEAD OF A TOOL CALL, THE TASK WILL FAIL PERMANENTLY.
 
@@ -359,7 +377,7 @@ You will be given a task description, action_type, and repository context. Analy
 
 SYSTEM CONTEXT:
 - Use the provided 'System Information' (OS, Platform, Shell Type) to choose correct path syntax and commands.
-- For complex validation or reproduction, you are encouraged to CREATE scripts (.ps1 for Windows, .sh for POSIX) using `write_file`.
+- For complex validation or reproduction, you are encouraged to CREATE scripts (.ps1 for Windows, .sh for POSIX) using `write_file`.      
 
 TEST-DRIVEN DEVELOPMENT (TDD) AWARENESS:
 - If implementing new functionality, tests should already exist (created in prior tasks)
@@ -382,7 +400,7 @@ CRITICAL RULES FOR IMPLEMENTATION QUALITY:
     e) If you cannot find the exact text in the provided content, use `write_file` instead to rewrite the whole file
     f) For small, exact edits (1-10 lines) use replace_in_file. For anything larger or if matching is uncertain, use apply_patch instead of replace_in_file.
 4.  Ensure the `replace` parameter is complete and correctly indented to match the surrounding code.
-5.  If creating a new file, ensure the COMPLETE, FULL file content is provided to the `write_file` tool - not stubs or placeholders.
+5.  If creating a new file, ensure the COMPLETE, FULL file content is provided to the `write_file` tool - not stubs or placeholders.      
 6.  Your response MUST be a single, valid JSON object representing the tool call. NEVER wrap JSON in markdown code fences (```json...```).
 
 CRITICAL RULES FOR CODE EXTRACTION:
@@ -394,7 +412,7 @@ CRITICAL RULES FOR CODE EXTRACTION:
     - If extracting from another file, read and understand the ENTIRE class/function before copying
 
 8.  When the task mentions extracting or porting code:
-    - Look for existing implementations in the repository that you can reference
+    - Look for existing similar implementations in the repository that you can reference
     - If similar code exists, study it to understand patterns and style
     - Use those patterns when implementing new features
     - Document how the new code follows or differs from existing patterns
@@ -423,7 +441,7 @@ DEPENDENCY MANAGEMENT:
 
 IMPORT STRATEGY (CRITICAL):
 - If you have just split a module into a package (a directory with `__init__.py` exporting symbols), STOP and THINK.
-- Existing imports like `import package` or `from package import Symbol` are often STILL VALID because the `__init__.py` exports them.
+- Existing imports like `import package` or `from package import Symbol` are often STILL VALID because the `__init__.py` exports them.    
 - Do NOT replace a single valid import with dozens of individual module imports (e.g., `from package.module1 import ...`, `from package.module2 import ...`). This causes massive churn and linter errors.
 - ONLY update an import if it is actually broken (e.g., `ModuleNotFoundError`).
 - Prefer package-level imports: `from package import Symbol` is better than `from package.module import Symbol`.
@@ -479,6 +497,45 @@ Example for `create_directory`:
 
 Now, generate the tool call to complete the user's request.
 """
+
+def _is_path_valid_for_task(path_str: str, task: Task) -> Tuple[bool, str]:
+    """Check if the provided path is reasonable for the given task."""
+    if not path_str or path_str == "unknown":
+        return True, ""
+
+    # 1. Use the core code reference check
+    from rev.core.tool_call_recovery import _looks_like_code_reference
+    if _looks_like_code_reference(path_str):
+        return False, f"Path '{path_str}' looks like a code reference, not a file path."
+
+    # 2. Check if the path is mentioned in the task description
+    desc = (task.description or "").lower()
+    path_lower = path_str.lower().replace('\\', '/')
+    filename = Path(path_str).name.lower()
+    
+    # Extract mentioned files from description
+    mentioned = [p.lower().replace('\\', '/') for p in _extract_target_files_from_description(task.description)]
+    
+    if path_lower in mentioned or filename in [Path(p).name for p in mentioned]:
+        return True, ""
+
+    # 3. If not mentioned, check if it already exists
+    try:
+        resolved = resolve_workspace_path(path_str).abs_path
+        if resolved.exists():
+            return True, ""
+    except:
+        pass
+
+    # 4. Special cases: some tasks create new files without explicit paths in description
+    # but they usually follow a pattern. If it's a completely new path not in desc, be suspicious.
+    if task.action_type == "add" and any(token in desc for token in ("create", "add", "new", "file")):
+        # allow creation if it's in a reasonable directory
+        if any(path_str.startswith(d) for d in ("src/", "tests/", "prisma/", "public/")):
+            return True, ""
+
+    return False, f"Path '{path_str}' is not mentioned in the task and does not exist. It may be a hallucination."
+
 
 class CodeWriterAgent(BaseAgent):
     """
@@ -596,6 +653,57 @@ class CodeWriterAgent(BaseAgent):
 
         return False, ""
 
+    def _record_tool_event(
+        self,
+        task: Task,
+        context: RevContext,
+        tool_name: str,
+        tool_args: Dict[str, Any],
+        raw_result: str,
+    ) -> None:
+        """Record a tool event even when the overall task fails or requests recovery."""
+        if not tool_name or not isinstance(tool_name, str):
+            return
+        if not hasattr(task, "tool_events") or task.tool_events is None:
+            task.tool_events = []
+
+        safe_args: Dict[str, Any] = tool_args if isinstance(tool_args, dict) else {"args": tool_args}
+
+        try:
+            payload = json.loads(
+                build_subagent_output(
+                    agent_name="CodeWriterAgent",
+                    tool_name=tool_name,
+                    tool_args=safe_args,
+                    tool_output=raw_result,
+                    context=context,
+                    task_id=task.task_id,
+                )
+            )
+            evidence = payload.get("evidence") if isinstance(payload, dict) else None
+            artifact_ref = None
+            summary = None
+            if isinstance(evidence, list) and evidence and isinstance(evidence[0], dict):
+                artifact_ref = evidence[0].get("artifact_ref")
+                summary = evidence[0].get("summary")
+            task.tool_events.append(
+                {
+                    "tool": tool_name,
+                    "args": safe_args,
+                    "raw_result": raw_result,
+                    "artifact_ref": artifact_ref,
+                    "summary": summary,
+                }
+            )
+        except Exception:
+            task.tool_events.append(
+                {
+                    "tool": tool_name,
+                    "args": safe_args,
+                    "raw_result": raw_result,
+                }
+            )
+
     def _validate_tool_args(self, tool_name: str, arguments: dict) -> Tuple[bool, str]:
         """Validate minimum required tool args to avoid tool-layer KeyErrors."""
         tool = (tool_name or "").lower()
@@ -622,7 +730,7 @@ class CodeWriterAgent(BaseAgent):
                 return False, (
                     "replace_in_file missing required key: replace. "
                     "RECOVERY: You MUST include the 'replace' parameter even if deleting content. "
-                    'To delete text, use: {"path": "...", "find": "...", "replace": ""}. '
+                    'To delete text, use: {"path": "...", "find": "...", "replace": ""}. ' 
                     "Empty string is allowed for deletions."
                 )
         elif tool == "rewrite_python_imports":
@@ -690,7 +798,7 @@ class CodeWriterAgent(BaseAgent):
     def _retry_with_diff_or_file(
         self,
         messages: List[Dict[str, str]],
-        *,
+        *, 
         allowed_tools: List[str],
     ) -> Optional[RecoveredToolCall]:
         """Fallback retry asking for unified diff or full file content."""
@@ -712,7 +820,7 @@ class CodeWriterAgent(BaseAgent):
     def _retry_with_write_file(
         self,
         messages: List[Dict[str, str]],
-        *,
+        *, 
         allowed_tools: List[str],
     ) -> Optional[RecoveredToolCall]:
         """Fallback retry forcing full file content output."""
@@ -738,7 +846,7 @@ class CodeWriterAgent(BaseAgent):
         self,
         messages: List[Dict[str, str]],
         raw_content: str,
-        *,
+        *, 
         allowed_tools: List[str],
         tools: List[Dict[str, Any]],
     ) -> Optional[RecoveredToolCall]:
@@ -929,15 +1037,12 @@ class CodeWriterAgent(BaseAgent):
         print(f"CodeWriterAgent executing task: {task.description}")
 
         # CRITICAL GUARD: Enforce research before add/edit operations
-        # ADD/EDIT actions should NEVER happen without prior research (list_dir, tree_view, read_file)
-        # to understand the current state of the repository
         if task.action_type in ("add", "edit"):
-            # Check if any research has been done in recent task history
             recent_tasks = context.agent_state.get("recent_tasks") or []
             research_keywords = ["list_dir", "tree_view", "read", "search", "listing", "found"]
             has_research = any(
                 any(kw in str(prev_task).lower() for kw in research_keywords)
-                for prev_task in recent_tasks[-10:]  # Check last 10 tasks
+                for prev_task in recent_tasks[-10:]
             )
 
             if not has_research:
@@ -958,816 +1063,214 @@ class CodeWriterAgent(BaseAgent):
                     )
                     context.add_agent_request(
                         "INJECT_TASKS",
-                        {
-                            "tasks": [
-                                Task(description=research_desc, action_type="read"),
-                            ]
-                        },
+                        {"tasks": [Task(description=research_desc, action_type="read")]},
                     )
-                return json.dumps(
-                    {
-                        "skipped": True,
-                        "reason": "missing_research",
-                        "action": task.action_type,
-                        "description": task.description,
-                        "injected": should_inject,
-                    }
-                )
+                return json.dumps({
+                    "skipped": True,
+                    "reason": "missing_research",
+                    "action": task.action_type,
+                    "description": task.description,
+                    "injected": should_inject,
+                })
 
         # Track recovery attempts
         recovery_attempts = self.increment_recovery_attempts(task, context)
 
-        # Constrain available tools based on task action_type
+        # Determine appropriate tools
         all_tools = get_available_tools()
-        python_tools = [
-            'rewrite_python_imports',
-            'rewrite_python_keyword_args',
-            'rename_imported_symbols',
-            'move_imported_symbols',
-            'rewrite_python_function_parameters',
-        ]
-        target_files_for_tools = _extract_target_files_from_description(task.description)
-        include_python_tools = any(
-            path.lower().endswith((".py", ".pyi")) for path in target_files_for_tools
-        )
-        target_exists = _targets_exist(target_files_for_tools)
-        replace_failures = int(context.agent_state.get("consecutive_replace_failures", 0) or 0)
-        force_apply_patch = bool(context.agent_state.get("force_apply_patch", False))
-        # Determine which tools are appropriate for this action_type
+        tool_names = ['write_file', 'apply_patch', 'replace_in_file', 'create_directory', 'copy_file', 'move_file']
+        
         if task.action_type == "create_directory":
-            # Directory creation tasks only get create_directory tool
             tool_names = ['create_directory']
         elif task.action_type == "add":
-            # File creation tasks get write_file PLUS edit tools
-            # Rationale: ADD might discover the file exists and need to edit instead
-            # This prevents the "file exists, use edit instead" failure loop
             tool_names = ['write_file', 'apply_patch', 'replace_in_file']
-            if include_python_tools:
-                tool_names = python_tools + tool_names
         elif task.action_type == "edit":
-            # File modification tasks should avoid full overwrites; prefer patching tools first.
-            tool_names = [
-                'apply_patch',
-                'replace_in_file',
-                'write_file',
-                'copy_file',
-                'move_file',
-            ]
-            if include_python_tools:
-                tool_names = python_tools + tool_names
-            if force_apply_patch or replace_failures >= 1:
-                tool_names = [name for name in tool_names if name != 'replace_in_file']
-        elif task.action_type == "refactor":
-            # Refactoring may need to create or modify files
-            tool_names = [
-                'apply_patch',
-                'write_file',
-                'replace_in_file',
-                'copy_file',
-                'move_file',
-            ]
-            if include_python_tools:
-                tool_names = python_tools + tool_names
-            if force_apply_patch or replace_failures >= 1:
-                tool_names = [name for name in tool_names if name != 'replace_in_file']
+            tool_names = ['apply_patch', 'replace_in_file', 'write_file', 'copy_file', 'move_file']
         elif task.action_type in {"move", "rename"}:
-            # Move/rename should only use move_file to prevent accidental rewrites.
             tool_names = ['move_file']
-        else:
-            # Unknown action types get all tools (fallback)
-            tool_names = ['write_file', 'replace_in_file', 'create_directory', 'copy_file', 'move_file']
 
         available_tools = [tool for tool in all_tools if tool['function']['name'] in tool_names]
-        recovery_allowed_tools = list(tool_names) if tool_names else [t["function"]["name"] for t in available_tools]
+        recovery_allowed_tools = tool_names
 
-        # DIAGNOSTIC LOGGING: Track tool provisioning
-        print(f"  [TOOL_PROVISION] action_type={task.action_type}, tool_names={tool_names}")
-        print(f"  [TOOL_PROVISION] Initial available_tools count: {len(available_tools)}, names: {[t['function']['name'] for t in available_tools]}")
-
+        # Build context and tools
         rendered_context, selected_tools, _bundle = build_context_and_tools(
             task,
             context,
             tool_universe=all_tools,
             candidate_tool_names=tool_names,
-            # Allow the full candidate set (no 7-tool cap); keeps all action-type-appropriate tools available
-            max_tools=len(tool_names) if tool_names else len(all_tools),
+            max_tools=len(tool_names),
         )
-
-        # DIAGNOSTIC LOGGING: Track what context builder returned
-        print(f"  [TOOL_PROVISION] Context builder returned {len(selected_tools)} tools: {[t.get('function', {}).get('name') for t in selected_tools]}")
-
-        # CRITICAL FIX: Never replace available_tools with an empty list!
-        # The context builder can return empty results if keyword matching fails,
-        # but we already have a perfectly good tool list from all_tools filtered by tool_names.
-        # Only use selected_tools if it's non-empty; otherwise keep our initial available_tools.
         if selected_tools:
-            available_tools = selected_tools
-            allowed_tool_names = set(tool_names or [])
-            if allowed_tool_names:
-                before_filter = len(available_tools)
-                available_tools = [
-                    tool for tool in available_tools
-                    if tool.get("function", {}).get("name") in allowed_tool_names
-                ]
-                # DIAGNOSTIC LOGGING: Track filtering
-                print(f"  [TOOL_PROVISION] After filtering to allowed names: {before_filter} -> {len(available_tools)}")
-        else:
-            # Context builder returned empty - keep our initial available_tools
-            print(f"  [TOOL_PROVISION] Context builder returned empty! Keeping initial available_tools: {len(available_tools)} tools")
+            available_tools = _merge_tool_schemas(selected_tools, available_tools)
 
-        # Absolute safety net: ensure the LLM always receives tools.
-        # The context builder can return an empty list when the query doesn't overlap
-        # with tool descriptions (common for "add" tasks like prisma/schema.prisma).
-        if not available_tools:
-            print(f"  [TOOL_PROVISION] CRITICAL: No tools after filtering! Activating safety net...")
-            fallback_candidates = set(tool_names or [])
-            if fallback_candidates:
-                print(f"  [TOOL_PROVISION] Fallback candidates: {fallback_candidates}")
-                fallback = [
-                    tool for tool in all_tools
-                    if tool.get("function", {}).get("name") in fallback_candidates
-                ]
-                if fallback:
-                    print(f"  [TOOL_PROVISION] Safety net activated: falling back to ALL candidates: {[t.get('function', {}).get('name') for t in fallback]}")
-                    available_tools = fallback
-                else:
-                    print(f"  [TOOL_PROVISION] ERROR: Fallback candidates not found in tool universe!")
-            if not available_tools:
-                print(f"  [TOOL_PROVISION] LAST RESORT: Using full tool registry ({len(all_tools)} tools)")
-                available_tools = all_tools
-
-        # FINAL DIAGNOSTIC: What we're actually sending to the LLM
-        print(f"  [TOOL_PROVISION] FINAL: Sending {len(available_tools)} tools to LLM: {[t.get('function', {}).get('name') for t in available_tools]}")
-
-        # Build enhanced user message with extraction guidance
+        # Task guidance
         task_guidance = f"Task (action_type: {task.action_type}): {task.description}"
-
-        # Add extraction guidance based on task type
-        if any(word in task.description.lower() for word in ["extract", "port", "move", "refactor", "create"]):
-            task_guidance += """\n\nEXTRACTION GUIDANCE:
-- Look for existing similar implementations in the codebase to understand patterns
-- Extract COMPLETE implementations, not stubs or placeholders
-- Include ALL methods, properties, and business logic from the source
-- Preserve error handling and edge cases
-- Do NOT use "pass" statements or TODO comments in new code
-- Document any assumptions or changes from original implementation"""
-
-        # PRIORITY 1 FIX: Mandatory file reading for edit/refactor tasks
-        # For edit/refactor tasks, read target files and include their content
-        # This ensures the LLM has the exact file content for replace_in_file
+        
+        # Mandatory file reading for edits
         file_content_section = ""
         if task.action_type in ("edit", "refactor") and not _task_is_command_only(task.description or ""):
             target_files = _extract_target_files_from_description(task.description)
-
-            # MANDATORY: EDIT tasks must identify target files
             if not target_files:
-                error_msg = (
-                    f"EDIT task must specify target file path in description. "
-                    f"Task: '{task.description[:100]}...' does not mention any file to edit. "
-                    f"Include file path like 'edit app.js' or 'update package.json'."
-                )
+                error_msg = "EDIT task must specify target file path in description."
                 print(f"  [ERROR] {error_msg}")
-                if self.should_attempt_recovery(task, context):
-                    self.request_replan(
-                        context,
-                        reason="EDIT task missing target file specification",
-                        detailed_reason=(
-                            f"{error_msg}\n\n"
-                            "RECOVERY: Ensure the task description explicitly mentions the file path to edit. "
-                            "Examples: 'edit src/app.js to add routes', 'update package.json to add lint script'. "
-                            "If creating a new file, use action_type='add' instead of 'edit'."
-                        )
-                    )
-                    return self.make_recovery_request("missing_target_file", error_msg)
                 return self.make_failure_signal("missing_target_file", error_msg)
 
-            # MANDATORY: Read target files (don't proceed without content)
             file_contents = []
             files_read_successfully = []
-            files_failed_to_read = []
-
-            for file_path in target_files[:3]:  # Limit to 3 files to avoid context overflow
+            for file_path in target_files[:3]:
                 content = _read_file_content_for_edit(file_path)
                 if content is not None:
                     file_contents.append(f"=== ACTUAL FILE CONTENT: {file_path} ===\n{content}\n=== END OF {file_path} ===")
                     files_read_successfully.append(file_path)
-                    print(f"  -> Including actual content of {file_path} for edit context")
-                else:
-                    files_failed_to_read.append(file_path)
-                    print(f"  [WARN] Cannot read target file: {file_path}")
-
-            # Fail fast if no files could be read successfully
+            
             if not files_read_successfully and target_files:
-                primary_file = target_files[0]
-                # Collect quick existence/size hints for better guidance
-                attempt_notes = []
-                empty_detected = False
-                for raw_path in target_files[:3]:
-                    try:
-                        resolved = resolve_workspace_path(raw_path).abs_path
-                        if resolved.exists():
-                            if resolved.is_file():
-                                size = resolved.stat().st_size
-                                attempt_notes.append(f"{raw_path} (exists, size={size} bytes)")
-                                if size == 0:
-                                    empty_detected = True
-                            else:
-                                attempt_notes.append(f"{raw_path} (exists, but is a directory)")
-                        else:
-                            attempt_notes.append(f"{raw_path} (not found)")
-                    except Exception:
-                        attempt_notes.append(f"{raw_path} (path resolution failed)")
-                attempt_hint = "; ".join(attempt_notes)
-                error_msg = (
-                    f"Cannot read target file '{primary_file}' for EDIT task. "
-                    f"File may not exist or is unreadable. Attempts: {attempt_hint}"
-                )
+                error_msg = f"Cannot read target file '{target_files[0]}' for EDIT task."
                 print(f"  [ERROR] {error_msg}")
-                if empty_detected:
-                    print("  [INFO] Detected empty target file; consider using write_file to supply full content.")
-                if self.should_attempt_recovery(task, context):
-                    self.request_replan(
-                        context,
-                        reason="Target file not found for EDIT",
-                        detailed_reason=(
-                            f"{error_msg}\n\n"
-                            f"RECOVERY: If '{primary_file}' does not exist yet, use action_type='add' to create it. "
-                            f"If the file exists but has a different path, verify the correct path using 'read_file' or 'list_dir'. "
-                            f"If the file exists but is empty, switch to write_file with the full desired content. "
-                            f"Do NOT proceed with EDIT action on non-existent files."
-                        )
-                    )
-                    return self.make_recovery_request("file_not_found", error_msg)
                 return self.make_failure_signal("file_not_found", error_msg)
 
-            # Warn if some files couldn't be read
-            if files_failed_to_read:
-                print(f"  [WARN] Could not read {len(files_failed_to_read)} file(s): {', '.join(files_failed_to_read)}")
-                print(f"  [WARN] Proceeding with {len(files_read_successfully)} successfully read file(s)")
-
-            # Include file content in prompt
             if file_contents:
                 separator = "=" * 70
-                file_content_section = f"\n\n{separator}\n"
-                file_content_section += "ACTUAL FILE CONTENT TO EDIT (USE THIS AS SOURCE FOR 'find' PARAMETER)\n"
-                file_content_section += f"{separator}\n\n"
+                file_content_section = f"\n\n{separator}\nACTUAL FILE CONTENT TO EDIT\n{separator}\n\n"
                 file_content_section += "\n\n".join(file_contents)
                 file_content_section += f"\n\n{separator}\n"
-                file_content_section += (
-                    "CRITICAL INSTRUCTIONS FOR replace_in_file:\n"
-                    "1. The 'find' parameter MUST be copied CHARACTER-FOR-CHARACTER from the content above\n"
-                    "2. Include 2-3 lines of context BEFORE and AFTER the line you want to change\n"
-                    "3. DO NOT modify spacing, tabs, or line endings when copying the 'find' text\n"
-                    "4. DO NOT type from memory - COPY the exact text you see above\n"
-                    "5. If the text you need to edit is NOT visible above, use write_file instead\n"
-                    "6. Verify your 'find' text appears EXACTLY in the file content above before submitting\n"
-                    f"{separator}\n"
-                )
 
-        # For action_type="add": prevent duplicates by checking similar existing files.
-        if task.action_type == "add":
-            target_files = target_files_for_tools or _extract_target_files_from_description(task.description)
-            if not target_files:
-                return self.make_failure_signal("missing_target", "No target file specified for add/create task")
-            # If any target already exists, fail fast.
-            if _targets_exist(target_files):
-                return self.make_failure_signal("target_exists", "Target file already exists; use edit instead")
-            similar_hits = []
-            for target in target_files:
-                try:
-                    check = file_ops._check_for_similar_files(target)  # type: ignore
-                    if check.get("similar_files"):
-                        similar_hits.extend(check["similar_files"])
-                except Exception:
-                    continue
-            if similar_hits:
-                return self.make_recovery_request(
-                    "similar_file_exists",
-                    f"Similar files exist for target(s): {', '.join(similar_hits[:3])}. Edit an existing file instead of creating a duplicate."
-                )
-
-        # Select system prompt based on ultrathink mode
-        system_prompt = CODE_WRITER_SYSTEM_PROMPT
-        if config.ULTRATHINK_MODE == "on":
-            system_prompt = ULTRATHINK_CODE_WRITER_PROMPT
-            print("  🧠 ULTRATHINK MODE ENABLED - Using enhanced reasoning prompt")
-
+        # LLM Call
         messages = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": CODE_WRITER_SYSTEM_PROMPT},
             {"role": "user", "content": f"{task_guidance}\n\nSelected Context:\n{rendered_context}{file_content_section}"}
         ]
 
-        # Force tool calls for write tasks so the model cannot respond with plain text.
-        tool_choice_mode = "required"
-
         try:
-            # DIAGNOSTIC LOGGING: Final check before LLM call
-            print(f"  [TOOL_PROVISION] Calling ollama_chat with {len(available_tools)} tools, tool_choice={tool_choice_mode}")
-
-            # CRITICAL FIX: Explicitly pass supports_tools=True when we have tools
-            # This prevents the LLM from being called with tools but supports_tools=False
             response = ollama_chat(
                 messages,
                 tools=available_tools,
-                supports_tools=True if available_tools else None,
-                tool_choice=tool_choice_mode
+                supports_tools=True,
+                tool_choice="required"
             )
 
-            # DIAGNOSTIC LOGGING: Check response
-            print(f"  [TOOL_PROVISION] LLM response keys: {list(response.keys()) if response else 'None'}")
-            if response and 'message' in response:
-                print(f"  [TOOL_PROVISION] Message keys: {list(response['message'].keys())}")
+            msg = response.get("message", {})
+            tool_calls = msg.get("tool_calls", [])
+            raw_content = msg.get("content", "")
 
-            error_type = None
-            error_detail = None
-            tool_name = None  # Initialize to avoid UnboundLocalError
-            arguments = None
+            tool_name, arguments, error_type, error_detail = None, None, None, None
 
-            # Debug: Print what we got back
-            if not response:
-                error_type = "empty_response"
-                error_detail = "LLM returned None/empty response"
-            elif "message" not in response:
-                error_type = "missing_message_key"
-                error_detail = f"Response missing 'message' key: {list(response.keys())}"
-            elif "tool_calls" not in response["message"]:
-                # Check if there's regular content instead
-                if "content" in response["message"]:
-                    error_type = "text_instead_of_tool_call"
-                    error_detail = f"LLM returned text instead of tool call: {response['message']['content'][:200]}"
+            # 1. Parse structured tool calls
+            if tool_calls:
+                tool_call = tool_calls[0]
+                tool_name = tool_call.get('function', {}).get('name')
+                arguments_str = tool_call.get('function', {}).get('arguments')
+                if isinstance(arguments_str, dict):
+                    arguments = arguments_str
                 else:
-                    error_type = "missing_tool_calls"
-                    error_detail = f"Response missing 'tool_calls': {list(response['message'].keys())}"
-            else:
-                tool_calls = response["message"]["tool_calls"]
-                if not tool_calls:
-                    error_type = "empty_tool_calls"
-                    error_detail = "tool_calls array is empty"
-                else:
-                    # Success - process tool call
-                    tool_call = tool_calls[0]
-                    tool_name = tool_call['function']['name']
-                    arguments_str = tool_call['function']['arguments']
+                    try:
+                        arguments = json.loads(arguments_str)
+                    except:
+                        error_type = "invalid_json"
+                        error_detail = "Invalid JSON in arguments"
 
-                    if isinstance(arguments_str, dict):
-                        arguments = arguments_str
-                    else:
-                        try:
-                            arguments = json.loads(arguments_str)
-                        except json.JSONDecodeError:
-                            error_type = "invalid_json"
-                            error_detail = f"Invalid JSON in tool arguments: {arguments_str[:200]}"
-
-                    if not error_type:
-                        print(f"  -> CodeWriterAgent will call tool '{tool_name}'")
-
-            # Recovery: if we got text instead of a structured tool call, try to recover from the text content.
-            if error_type in {"text_instead_of_tool_call", "missing_tool_calls", "empty_tool_calls"}:
-                recovered = recover_tool_call_from_text(
-                    response.get("message", {}).get("content", ""),
-                    allowed_tools=recovery_allowed_tools,
-                )
+            # 2. Recovery from text
+            if not tool_name or error_type:
+                recovered = recover_tool_call_from_text(raw_content, allowed_tools=recovery_allowed_tools)
                 if not recovered:
-                    recovered = recover_tool_call_from_text_lenient(
-                        response.get("message", {}).get("content", ""),
-                        allowed_tools=recovery_allowed_tools,
-                    )
-                    if recovered:
-                        print("  [WARN] CodeWriterAgent: using lenient tool call recovery from text output")
+                    recovered = recover_tool_call_from_text_lenient(raw_content, allowed_tools=recovery_allowed_tools)
                 if recovered:
-                    tool_name = recovered.name
-                    arguments = recovered.arguments if isinstance(recovered.arguments, dict) else {}
+                    tool_name, arguments, error_type = recovered.name, recovered.arguments, None
                     print(f"  -> Recovered tool call from text output: {tool_name}")
-                    error_type = None
 
-            # If we have a tool call (either structured or recovered), execute it.
-            if not error_type and tool_name:
-                # Display change preview for file modifying operations
-                if tool_name in ["write_file", "replace_in_file", "create_directory", "move_file", "copy_file", "apply_patch"]:
+            # 3. Fallback retries
+            if not tool_name and not error_type:
+                recovered = self._retry_with_tool_call_repair(messages, raw_content, allowed_tools=recovery_allowed_tools, tools=available_tools)
+                if not recovered:
+                    recovered = self._retry_with_diff_or_file(messages, allowed_tools=recovery_allowed_tools)
+                if recovered:
+                    tool_name, arguments = recovered.name, recovered.arguments
+                    print(f"  -> Recovered tool call via fallback retry: {tool_name}")
+                else:
+                    error_type, error_detail = "no_tool_call", "LLM failed to call a tool"
+
+            # 4. Validation and Execution
+            if tool_name and not error_type:
+                # FOR EDIT TASKS: Enforce no overwrite via write_file
+                if task.action_type.lower() == "edit" and tool_name == "write_file":
+                    target_path = arguments.get("path") or ""
+                    try:
+                        resolved = resolve_workspace_path(target_path).abs_path
+                        if resolved.exists():
+                            msg = f"write_file not allowed for edit tasks on existing file: {target_path}"
+                            if self.should_attempt_recovery(task, context):
+                                self.request_replan(context, reason="write_file_not_allowed_for_edit", detailed_reason=msg)
+                                return self.make_recovery_request("write_file_not_allowed_for_edit", msg)
+                            return self.make_failure_signal("write_file_not_allowed_for_edit", msg)
+                    except: pass
+
+                if tool_name in tool_names:
                     self._display_change_preview(tool_name, arguments)
-
-                    # Validate import targets before proceeding
                     file_path = arguments.get("path") or arguments.get("dest") or "unknown"
-                    if tool_name == "write_file":
-                        content = arguments.get("content", "")
-                        is_valid, warning_msg = self._validate_import_targets(file_path, content)
-                        if not is_valid:
-                            print(f"\n  [WARN]  Import validation warning:")
-                            print(f"  {warning_msg}")
-                            print(f"  Note: This file has imports that may not exist. Proceed with caution.")
+                    
+                    # VALIDATE PATH
+                    is_valid_path, path_error = _is_path_valid_for_task(file_path, task)
+                    if not is_valid_path:
+                        print(f"  ✗ Invalid path: {path_error}")
+                        if self.should_attempt_recovery(task, context):
+                            self.request_replan(context, reason="invalid_path", detailed_reason=path_error)
+                            return self.make_recovery_request("invalid_path", path_error)
+                        return self.make_failure_signal("invalid_path", path_error)
 
-                    # Ask for user approval
+                    conflict = _detect_path_conflict(file_path)
+                    if conflict: print(f"  [WARN] {conflict}")
+
                     if not self._prompt_for_approval(tool_name, file_path, context):
-                        print(f"  \u2717 Change rejected by user")
+                        print(f"  ✗ Change rejected by user")
                         return "[USER_REJECTED] Change was not approved by user"
 
-                # Execute the tool
                 ok_args, arg_msg = self._validate_tool_args(tool_name, arguments)
                 if not ok_args:
-                    print(f"  \u2717 Invalid tool args: {arg_msg}")
-                    if self._should_retry_invalid_tool_args(context, tool_name):
-                        self.request_replan(
-                            context,
-                            reason="Missing required tool arguments",
-                            detailed_reason=self._invalid_args_guidance(tool_name, arg_msg),
-                        )
-                        return self.make_recovery_request("invalid_tool_args", arg_msg)
+                    print(f"  ✗ Invalid tool args: {arg_msg}")
                     return self.make_failure_signal("invalid_tool_args", arg_msg)
 
-                print(f"  \u23f3 Applying {tool_name} to {arguments.get('path', 'file')}...")
+                print(f"  ⏳ Applying {tool_name} to {arguments.get('path', 'file')}...")
                 raw_result = execute_tool(tool_name, arguments, agent_name="code_writer")
 
-            # Recovery: if we got text instead of a structured tool call, try to recover from the text content.
-            if error_type in {"text_instead_of_tool_call", "missing_tool_calls", "empty_tool_calls"}:
-                recovered = recover_tool_call_from_text(
-                    response.get("message", {}).get("content", ""),
-                    allowed_tools=recovery_allowed_tools,
+                has_err, tool_err = self._tool_result_has_error(raw_result)
+                if has_err:
+                    self._record_tool_event(task, context, tool_name, arguments, raw_result)
+                    print(f"  ✗ Tool error: {tool_err}")
+                    if self.should_attempt_recovery(task, context):
+                        # Enhanced guidance for apply_patch failure
+                        if tool_name == "apply_patch":
+                            tool_err += "\n\nRECOVERY: Patch failed. Try using replace_in_file for smaller changes or write_file to rewrite the entire file."
+                        self.request_replan(context, reason="tool_error", detailed_reason=tool_err)
+                        return self.make_recovery_request("tool_error", tool_err)
+                    return self.make_failure_signal("tool_error", tool_err)
+
+                is_noop, noop_msg = self._tool_result_is_noop(tool_name, raw_result)
+                if is_noop:
+                    self._record_tool_event(task, context, tool_name, arguments, raw_result)
+                    print(f"  ? Tool no-op: {noop_msg}")
+                    return self.make_failure_signal("tool_noop", noop_msg)
+
+                self._record_tool_event(task, context, tool_name, arguments, raw_result)
+                print(f"  ✓ Successfully applied {tool_name}")
+                return build_subagent_output(
+                    agent_name="CodeWriterAgent",
+                    tool_name=tool_name,
+                    tool_args=arguments,
+                    tool_output=raw_result,
+                    context=context,
+                    task_id=task.task_id,
                 )
-                if not recovered:
-                    recovered = recover_tool_call_from_text_lenient(
-                        response.get("message", {}).get("content", ""),
-                        allowed_tools=recovery_allowed_tools,
-                    )
-                    if recovered:
-                        print("  [WARN] CodeWriterAgent: using lenient tool call recovery from text output")
-                if recovered:
-                    tool_name = recovered.name
-                    arguments = recovered.arguments if isinstance(recovered.arguments, dict) else {}
-                    print(f"  -> Recovered tool call from text output: {tool_name}")
-                    error_type = None
 
-                # Display change preview for file modifying operations
-                if tool_name in ["write_file", "replace_in_file", "create_directory", "move_file", "copy_file", "apply_patch"]:
-                    self._display_change_preview(tool_name, arguments)
-
-                    # Validate import targets before proceeding
-                    file_path = arguments.get("path") or arguments.get("dest") or "unknown"
-                    if tool_name == "write_file":
-                        content = arguments.get("content", "")
-                        is_valid, warning_msg = self._validate_import_targets(file_path, content)
-                        if not is_valid:
-                            print(f"\n  [WARN]  Import validation warning:")
-                            print(f"  {warning_msg}")
-                            print(f"  Note: This file has imports that may not exist. Proceed with caution.")
-                            print(f"  Note: This file has imports that may not exist. Proceed with caution.")
-
-                            # Ask for user approval
-                            if not self._prompt_for_approval(tool_name, file_path, context):
-                                print(f"  ✗ Change rejected by user")
-                                return "[USER_REJECTED] Change was not approved by user"
-
-                        # Execute the tool
-                        ok_args, arg_msg = self._validate_tool_args(tool_name, arguments)
-                        if not ok_args:
-                            print(f"  ✗ Invalid tool args: {arg_msg}")
-                            if self._should_retry_invalid_tool_args(context, tool_name):
-                                self.request_replan(
-                                    context,
-                                    reason="Missing required tool arguments",
-                                    detailed_reason=self._invalid_args_guidance(tool_name, arg_msg),
-                                )
-                                return self.make_recovery_request("invalid_tool_args", arg_msg)
-                            return self.make_failure_signal("invalid_tool_args", arg_msg)
-
-                        print(f"  ⏳ Applying {tool_name} to {arguments.get('path', 'file')}...")
-                        raw_result = execute_tool(tool_name, arguments, agent_name="code_writer")
-                        has_error, error_msg = self._tool_result_has_error(raw_result)
-                        if has_error:
-                            print(f"  ✗ Tool reported error: {error_msg}")
-                            if self.should_attempt_recovery(task, context):
-                                self.request_replan(
-                                    context,
-                                    reason="Tool execution failed",
-                                    detailed_reason=f"{tool_name} returned error: {error_msg}",
-                                )
-                                return self.make_recovery_request("tool_error", error_msg)
-                            return self.make_failure_signal("tool_error", error_msg)
-
-                        is_noop, noop_msg = self._tool_result_is_noop(tool_name, raw_result)
-                        if is_noop:
-                            print(f"  ? Tool made no changes: {noop_msg}")
-                            if self.should_attempt_recovery(task, context):
-                                if tool_name == "replace_in_file":
-                                    # Track consecutive replace_in_file failures to escalate recovery suggestions
-                                    consecutive_replace_failures = context.agent_state.get("consecutive_replace_failures", 0)
-                                    consecutive_replace_failures += 1
-                                    context.set_agent_state("consecutive_replace_failures", consecutive_replace_failures)
-                                    context.set_agent_state("force_apply_patch", True)
-                                    context.set_agent_state("force_apply_patch", True)
-
-                                    # Escalate suggestions based on failure count
-                                    if consecutive_replace_failures == 1:
-                                        # First failure: suggest apply_patch for a precise diff-based edit
-                                        noop_msg = (
-                                            f"{noop_msg}\n\n"
-                                            f"RECOVERY STEP 1 (Recommended): Use apply_patch with a unified diff.\n"
-                                            f"- Read the current file content\n"
-                                            f"- Create a minimal diff that updates only the relevant block\n"
-                                            f"- Apply via apply_patch to avoid full overwrites\n\n"
-                                            f"Alternative: Verify the exact 'find' text (character-for-character) from the file content provided, "
-                                            f"including ALL whitespace and indentation, then retry replace_in_file."
-                                        )
-                                    elif consecutive_replace_failures >= 2:
-                                        # Second+ failure: strongly recommend apply_patch with exact context
-                                        noop_msg = (
-                                            f"{noop_msg}\n\n"
-                                            f"RECOVERY STEP 2 (MANDATORY): Use apply_patch instead of replace_in_file.\n"
-                                            f"replace_in_file has failed {consecutive_replace_failures} times. The 'find' pattern is not matching.\n"
-                                            f"REQUIRED ACTION:\n"
-                                            f"1. Read the target file to get the exact current lines\n"
-                                            f"2. Craft a unified diff with precise context\n"
-                                            f"3. Apply the diff using apply_patch\n"
-                                            f"DO NOT attempt replace_in_file again - it will fail."
-                                        )
-
-                                self.request_replan(
-                                    context,
-                                    reason="Tool made no changes",
-                                    detailed_reason=noop_msg,
-                                )
-                                return self.make_recovery_request("tool_noop", noop_msg)
-                            return self.make_failure_signal("tool_noop", noop_msg)
-
-                        # Successful tool execution - reset consecutive failure counters
-                        if tool_name in {"replace_in_file", "apply_patch"}:
-                            context.set_agent_state("consecutive_replace_failures", 0)
-                            context.set_agent_state("force_apply_patch", False)
-
-                        print(f"  ✓ Successfully applied {tool_name}")
-                        return build_subagent_output(
-                            agent_name="CodeWriterAgent",
-                            tool_name=tool_name,
-                            tool_args=arguments,
-                            tool_output=raw_result,
-                            context=context,
-                            task_id=task.task_id,
-                        )
-
-            # If we reach here, there was an error
-            if error_type:
-                if error_type in {"text_instead_of_tool_call", "empty_tool_calls", "missing_tool_calls"}:
-                    retried = False
-                    recovered = recover_tool_call_from_text(
-                        response.get("message", {}).get("content", ""),
-                        allowed_tools=recovery_allowed_tools,
-                    )
-                    if not recovered:
-                        recovered = recover_tool_call_from_text_lenient(
-                            response.get("message", {}).get("content", ""),
-                            allowed_tools=recovery_allowed_tools,
-                        )
-                        if recovered:
-                            print("  [WARN] CodeWriterAgent: using lenient tool call recovery from text output")
-                    if not recovered:
-                        raw_content = response.get("message", {}).get("content", "") if isinstance(response, dict) else ""
-                        if raw_content:
-                            print("  [WARN] CodeWriterAgent: attempting tool call repair from text output")
-                        recovered = self._retry_with_tool_call_repair(
-                            messages,
-                            raw_content,
-                            allowed_tools=recovery_allowed_tools,
-                            tools=available_tools,
-                        )
-                    if not recovered:
-                        recovered = retry_tool_call_with_response_format(
-                            messages,
-                            available_tools,
-                            allowed_tools=recovery_allowed_tools,
-                        )
-                        if recovered:
-                            retried = True
-                            print(f"  -> Retried tool call with JSON format: {recovered.name}")
-                    if not recovered:
-                        recovered = self._retry_with_diff_or_file(
-                            messages,
-                            allowed_tools=recovery_allowed_tools,
-                        )
-                        if recovered:
-                            tool_name = recovered.name
-                            arguments = recovered.arguments
-                            if not tool_name:
-                                return self.make_failure_signal("missing_tool", "Recovered tool call missing name")
-                            if not arguments:
-                                return self.make_failure_signal("missing_tool_args", "Recovered tool call missing arguments")
-                            if not retried:
-                                print(f"  -> Recovered tool call from text output: {tool_name}")
-
-                            # For edit tasks, do NOT allow write_file to overwrite an existing file.
-                            # Force the LLM to use replace_in_file or apply_patch instead.
-                            if task.action_type.lower() == "edit" and tool_name == "write_file":
-                                target_path = arguments.get("path") or ""
-                                try:
-                                    resolved = resolve_workspace_path(target_path).abs_path
-                                    if resolved.exists():
-                                        msg = (
-                                            f"write_file is not allowed for edit tasks when the target already exists: {target_path}. "
-                                            "Use replace_in_file or apply_patch with a minimal diff."
-                                        )
-                                        if self.should_attempt_recovery(task, context):
-                                            self.request_replan(
-                                                context,
-                                                reason="write_file_not_allowed_for_edit",
-                                                detailed_reason=msg,
-                                            )
-                                            return self.make_recovery_request("write_file_not_allowed_for_edit", msg)
-                                        return self.make_failure_signal("write_file_not_allowed_for_edit", msg)
-                                except Exception:
-                                    pass
-
-                        if tool_name in ["write_file", "replace_in_file", "create_directory", "move_file", "copy_file", "apply_patch"]:
-                            self._display_change_preview(tool_name, arguments)
-
-                            file_path = arguments.get("path") or arguments.get("dest") or "unknown"
-                            conflict = _detect_path_conflict(file_path)
-                            if conflict:
-                                print(f"  [WARN] {conflict}")
-                                if self.should_attempt_recovery(task, context):
-                                    self.request_replan(
-                                        context,
-                                        reason="path_conflict",
-                                        detailed_reason=conflict,
-                                    )
-                                    return self.make_recovery_request("path_conflict", conflict)
-                                return self.make_failure_signal("path_conflict", conflict)
-                            if tool_name == "write_file":
-                                content = arguments.get("content", "")
-                                is_valid, warning_msg = self._validate_import_targets(file_path, content)
-                                if not is_valid:
-                                    print("\n  [WARN] Import validation warning:")
-                                    print(f"  {warning_msg}")
-                                    print("  Note: This file has imports that may not exist. Proceed with caution.")
-
-                            if not self._prompt_for_approval(tool_name, file_path, context):
-                                print("  [REJECTED] Change rejected by user")
-                                return "[USER_REJECTED] Change was not approved by user"
-
-                        ok_args, arg_msg = self._validate_tool_args(tool_name, arguments)
-                        if not ok_args:
-                            print(f"  Invalid tool args: {arg_msg}")
-                            if self._should_retry_invalid_tool_args(context, tool_name):
-                                self.request_replan(
-                                    context,
-                                    reason="Missing required tool arguments",
-                                    detailed_reason=self._invalid_args_guidance(tool_name, arg_msg),
-                                )
-                                return self.make_recovery_request("invalid_tool_args", arg_msg)
-                            return self.make_failure_signal("invalid_tool_args", arg_msg)
-
-                        print(f"  Applying {tool_name} to {arguments.get('path', 'file')}...")
-                        raw_result = execute_tool(tool_name, arguments, agent_name="code_writer")
-                        has_error, error_msg = self._tool_result_has_error(raw_result)
-                        if has_error:
-                            print(f"  Tool reported error: {error_msg}")
-                            if self.should_attempt_recovery(task, context):
-                                self.request_replan(
-                                    context,
-                                    reason="Tool execution failed",
-                                    detailed_reason=f"{tool_name} returned error: {error_msg}",
-                                )
-                                return self.make_recovery_request("tool_error", error_msg)
-                            return self.make_failure_signal("tool_error", error_msg)
-
-                        is_noop, noop_msg = self._tool_result_is_noop(tool_name, raw_result)
-                        if is_noop:
-                            print(f"  Tool made no changes: {noop_msg}")
-                            if self.should_attempt_recovery(task, context):
-                                if tool_name == "replace_in_file":
-                                    recovery_key = f"replace_noop_write::{task.task_id or 'unknown'}::{arguments.get('path', '')}"
-                                    already_attempted = context.agent_state.get(recovery_key, False)
-                                    if not already_attempted:
-                                        context.set_agent_state(recovery_key, True)
-                                        recovered = self._retry_with_diff_or_file(
-                                            messages,
-                                            allowed_tools=recovery_allowed_tools,
-                                        )
-                                        if recovered and recovered.name in {"apply_patch", "write_file"}:
-                                            tool_name = recovered.name
-                                            arguments = recovered.arguments
-                                            self._display_change_preview(tool_name, arguments)
-
-                                            file_path = arguments.get("path") or arguments.get("dest") or "unknown"
-                                            if tool_name == "write_file":
-                                                content = arguments.get("content", "")
-                                                is_valid, warning_msg = self._validate_import_targets(file_path, content)
-                                                if not is_valid:
-                                                    print("\n  [WARN] Import validation warning:")
-                                                    print(f"  {warning_msg}")
-                                                    print("  Note: This file has imports that may not exist. Proceed with caution.")
-
-                                            if not self._prompt_for_approval(tool_name, file_path, context):
-                                                print("  [REJECTED] Change rejected by user")
-                                                return "[USER_REJECTED] Change was not approved by user"
-
-                                            ok_args, arg_msg = self._validate_tool_args(tool_name, arguments)
-                                            if not ok_args:
-                                                print(f"  Invalid tool args: {arg_msg}")
-                                                return self.make_failure_signal("invalid_tool_args", arg_msg)
-
-                                            print(f"  Applying {tool_name} to {arguments.get('path', 'file')}...")
-                                            raw_result = execute_tool(tool_name, arguments, agent_name="code_writer")
-                                            has_error, error_msg = self._tool_result_has_error(raw_result)
-                                            if has_error:
-                                                print(f"  Tool reported error: {error_msg}")
-                                                return self.make_failure_signal("tool_error", error_msg)
-
-                                            is_noop, noop_msg = self._tool_result_is_noop(tool_name, raw_result)
-                                            if is_noop:
-                                                print(f"  Tool made no changes: {noop_msg}")
-                                                return self.make_failure_signal("tool_noop", noop_msg)
-
-                                            print(f"  ✓ Successfully applied {tool_name}")
-                                            return build_subagent_output(
-                                                agent_name="CodeWriterAgent",
-                                                tool_name=tool_name,
-                                                tool_args=arguments,
-                                                tool_output=raw_result,
-                                                context=context,
-                                                task_id=task.task_id,
-                                            )
-
-                                    # Track consecutive replace_in_file failures to escalate recovery suggestions
-                                    consecutive_replace_failures = context.agent_state.get("consecutive_replace_failures", 0)
-                                    consecutive_replace_failures += 1
-                                    context.set_agent_state("consecutive_replace_failures", consecutive_replace_failures)
-
-                                    # Escalate suggestions based on failure count
-                                    if consecutive_replace_failures == 1:
-                                        # First failure: suggest using apply_patch for more reliable replacement
-                                        noop_msg = (
-                                            f"{noop_msg}\n\n"
-                                            f"RECOVERY STEP 1 (Recommended): Switch to apply_patch tool instead.\n"
-                                            f"- Read the current file content\n"
-                                            f"- Craft a minimal unified diff that updates only the relevant block\n"
-                                            f"- Apply via apply_patch (more reliable than replace_in_file for multi-line changes)\n\n"
-                                            f"Alternative: Verify the exact 'find' text (character-for-character) from the file content provided, "
-                                            f"including ALL whitespace and indentation, then retry replace_in_file."
-                                        )
-                                    elif consecutive_replace_failures >= 2:
-                                        # Second+ failure: strongly recommend apply_patch
-                                        noop_msg = (
-                                            f"{noop_msg}\n\n"
-                                            f"RECOVERY STEP 2 (MANDATORY): You MUST use apply_patch instead of replace_in_file.\n"
-                                            f"replace_in_file has failed {consecutive_replace_failures} times. The 'find' pattern is not matching.\n"
-                                            f"REQUIRED ACTION:\n"
-                                            f"1. Request read_file for the target file to get current content\n"
-                                            f"2. Craft a unified diff with precise context\n"
-                                            f"3. Apply the diff using apply_patch\n"
-                                            f"DO NOT attempt replace_in_file again - it will fail."
-                                        )
-
-                                self.request_replan(
-                                    context,
-                                    reason="Tool made no changes",
-                                    detailed_reason=noop_msg,
-                                )
-                                return self.make_recovery_request("tool_noop", noop_msg)
-                            return self.make_failure_signal("tool_noop", noop_msg)
-
-                        # Successful tool execution - reset consecutive failure counters
-                        if tool_name in {"replace_in_file", "apply_patch"}:
-                            context.set_agent_state("consecutive_replace_failures", 0)
-                            context.set_agent_state("force_apply_patch", False)
-
-                        print(f"  Successfully applied {tool_name}")
-                        return build_subagent_output(
-                            agent_name="CodeWriterAgent",
-                            tool_name=tool_name,
-                            tool_args=arguments,
-                            tool_output=raw_result,
-                            context=context,
-                            task_id=task.task_id,
-                        )
-
-                print(f"  [WARN] CodeWriterAgent: {error_detail}")
-
-                # Check if we should attempt recovery
-                if self.should_attempt_recovery(task, context):
-                    print(f"  -> Requesting replan (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
-                    self.request_replan(
-                        context,
-                        reason="Tool call generation failed",
-                        detailed_reason=f"Error type: {error_type}. Details: {error_detail}. Please provide clearer task instructions."
-                    )
-                    return self.make_recovery_request(error_type, error_detail)
-                else:
-                    print(f"  -> Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
-                    context.add_error(f"CodeWriterAgent: {error_detail} (after {recovery_attempts} recovery attempts)")
-                    return self.make_failure_signal(error_type, error_detail)
+            # 5. Handle Failures
+            print(f"  [WARN] CodeWriterAgent: {error_detail or 'Tool call generation failed'}")
+            if self.should_attempt_recovery(task, context):
+                self.request_replan(context, reason="tool_generation_failed", detailed_reason=error_detail)
+                return self.make_recovery_request(error_type, error_detail)
+            return self.make_failure_signal(error_type, error_detail)
 
         except Exception as e:
-            error_msg = f"Exception in CodeWriterAgent: {e}"
-            print(f"  [WARN] {error_msg}")
-
-            # Request recovery for exceptions
+            print(f"  [WARN] CodeWriterAgent exception: {e}")
             if self.should_attempt_recovery(task, context):
-                print(f"  -> Requesting replan due to exception (attempt {recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS})...")
-                self.request_replan(
-                    context,
-                    reason="Exception during code writing",
-                    detailed_reason=str(e)
-                )
                 return self.make_recovery_request("exception", str(e))
-            else:
-                print(f"  -> Max recovery attempts ({self.MAX_RECOVERY_ATTEMPTS}) exhausted. Marking task as failed.")
-                context.add_error(error_msg)
-                return self.make_failure_signal("exception", error_msg)
+            return self.make_failure_signal("exception", str(e))
+
+            

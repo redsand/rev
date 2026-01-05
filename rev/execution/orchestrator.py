@@ -4657,7 +4657,7 @@ class Orchestrator:
                         and isinstance(last_code_change_iteration, int)
                         and last_code_change_iteration == prior_change
                     ):
-                        print(f"  [research-dedupe] Skipping duplicate research task: {sig}")
+                        # print(f"  [research-dedupe] Skipping duplicate research task: {sig}")
                         next_task.status = TaskStatus.STOPPED
                         next_task.result = json.dumps({
                             "skipped": True,
@@ -4904,7 +4904,7 @@ class Orchestrator:
                     and last_code_change_iteration >= 0
                     and last_code_change_iteration == seen_at
                 ):
-                    print(f"  [test-dedupe] Skipping duplicate test task with signature: {signature} (code_change_iter={last_code_change_iteration})")
+                    # print(f"  [test-dedupe] Skipping duplicate test task with signature: {signature} (code_change_iter={last_code_change_iteration})")
                     next_task.status = TaskStatus.STOPPED
                     next_task.result = json.dumps({
                         "skipped": True,
@@ -4916,7 +4916,7 @@ class Orchestrator:
                     _record_test_signature_state(self.context, signature, "blocked")
                     continue
                 if _signature_state_matches(self.context, signature, "blocked"):
-                    print(f"  [test-dedupe] Skipping blocked test signature: {signature} (code_change_iter={last_code_change_iteration})")
+                    # print(f"  [test-dedupe] Skipping blocked test signature: {signature} (code_change_iter={last_code_change_iteration})")
                     next_task.status = TaskStatus.STOPPED
                     next_task.result = json.dumps({
                         "skipped": True,
@@ -5239,7 +5239,8 @@ class Orchestrator:
                             log_entry = f"[COMPLETED] (skipped) {next_task.description}"
                             completed_tasks_log.append(log_entry)
                             self.context.work_history = completed_tasks_log
-                            print(f"  ✓ {log_entry}")
+                            display_entry = log_entry.replace("[COMPLETED]", colorize("OK", Colors.BRIGHT_GREEN, bold=True), 1)
+                            print(f"  ✓ {display_entry}")
                             continue
                 except Exception:
                     pass
@@ -6076,6 +6077,11 @@ class Orchestrator:
                         verification_part = " | Verification:" + v_split[1]
                 
                 display_entry = base_part + verification_part
+
+            if display_entry.startswith("[COMPLETED]"):
+                display_entry = display_entry.replace("[COMPLETED]", colorize("OK", Colors.BRIGHT_GREEN, bold=True), 1)
+            elif display_entry.startswith("[FAILED]"):
+                display_entry = display_entry.replace("[FAILED]", colorize("ERR", Colors.BRIGHT_RED, bold=True), 1)
 
             print(f"  {'✓' if next_task.status == TaskStatus.COMPLETED else '✗'} {display_entry}")
 
