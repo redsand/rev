@@ -1295,7 +1295,19 @@ class CodeWriterAgent(BaseAgent):
                     if self.should_attempt_recovery(task, context):
                         # Enhanced guidance for apply_patch failure
                         if tool_name == "apply_patch":
-                            tool_err += "\n\nRECOVERY: Patch failed. Try using replace_in_file for smaller changes or write_file to rewrite the entire file."
+                            # Check for corrupt patch errors specifically
+                            error_lower = str(tool_err).lower()
+                            if "corrupt patch" in error_lower or "patch fragment" in error_lower or "patch failed" in error_lower:
+                                print(f"  [RECOVERY] Corrupt patch detected - model may not support unified diff format")
+                                tool_err = (
+                                    f"Patch generation failed: {tool_err}\n\n"
+                                    "MANDATORY RECOVERY: The patch format is corrupt. You MUST use one of these alternatives:\n"
+                                    "1. Use 'replace_in_file' with exact old/new strings (for small changes)\n"
+                                    "2. Use 'write_file' with complete file content (for large changes)\n"
+                                    "DO NOT attempt apply_patch again - it will fail."
+                                )
+                            else:
+                                tool_err += "\n\nRECOVERY: Patch failed. Try using replace_in_file for smaller changes or write_file to rewrite the entire file."
                         self.request_replan(context, reason="tool_error", detailed_reason=tool_err)
                         return self.make_recovery_request("tool_error", tool_err)
                     return self.make_failure_signal("tool_error", tool_err)

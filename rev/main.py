@@ -643,6 +643,29 @@ def main():
     active_model = config.EXECUTION_MODEL or config.OLLAMA_MODEL
     _log(f"Provider: {config.LLM_PROVIDER}")
     _log(f"Model: {active_model}")
+
+    # Model capability warnings
+    MODEL_WARNINGS = {
+        "glm-4.7:cloud": {
+            "level": "warning",
+            "issues": ["may generate corrupt unified diff patches"],
+            "recommendation": "Consider using claude-sonnet-4.5 or gpt-4o for better patch generation"
+        },
+        "glm-4": {
+            "level": "warning",
+            "issues": ["may generate corrupt unified diff patches"],
+            "recommendation": "Consider using claude-sonnet-4.5 or gpt-4o for better patch generation"
+        },
+    }
+
+    if active_model in MODEL_WARNINGS:
+        warning = MODEL_WARNINGS[active_model]
+        _log(f"  ⚠️  Model Compatibility Warning:")
+        for issue in warning["issues"]:
+            _log(f"     - {issue}")
+        _log(f"     → {warning['recommendation']}")
+        _log("")
+
     if (config.LLM_PROVIDER or "").lower() == "ollama":
         _log(f"Ollama: {config.OLLAMA_BASE_URL}")
     _log(f"Repository: {config.ROOT}")

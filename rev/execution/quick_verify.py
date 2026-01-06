@@ -1198,16 +1198,21 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
         )
 
     if not _has_header_comment(file_path):
-        return VerificationResult(
-            passed=False,
-            message=f"New file {file_path.name} is missing the required top-of-file comment describing its purpose.",
-            details={
-                **details,
-                "missing_header_comment": True,
-                "suggestion": "Add a brief header comment at the top describing the file's role.",
-            },
-            should_replan=True,
-        )
+        if config.REQUIRE_FILE_COMMENTS:
+            # Strict mode: block on missing comment
+            return VerificationResult(
+                passed=False,
+                message=f"New file {file_path.name} is missing the required top-of-file comment describing its purpose.",
+                details={
+                    **details,
+                    "missing_header_comment": True,
+                    "suggestion": "Add a brief header comment at the top describing the file's role.",
+                },
+                should_replan=True,
+            )
+        else:
+            # Warning mode: log but don't block
+            print(f"  [WARNING] {file_path.name} missing top-of-file comment (non-blocking)")
 
     _log_syntax_result(context, file_path, ok=True, skipped=False, msg="valid")
     _ensure_test_request_for_file(context, file_path)
@@ -3998,16 +4003,21 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
         )
 
     if not _has_header_comment(file_path):
-        return VerificationResult(
-            passed=False,
-            message=f"Edited file {file_path.name} is missing the required top-of-file comment describing its purpose.",
-            details={
-                "file_path": str(file_path),
-                "missing_header_comment": True,
-                "suggestion": "Add a brief header comment at the top describing the file's role.",
-            },
-            should_replan=True,
-        )
+        if config.REQUIRE_FILE_COMMENTS:
+            # Strict mode: block on missing comment
+            return VerificationResult(
+                passed=False,
+                message=f"Edited file {file_path.name} is missing the required top-of-file comment describing its purpose.",
+                details={
+                    "file_path": str(file_path),
+                    "missing_header_comment": True,
+                    "suggestion": "Add a brief header comment at the top describing the file's role.",
+                },
+                should_replan=True,
+            )
+        else:
+            # Warning mode: log but don't block
+            print(f"  [WARNING] {file_path.name} missing top-of-file comment (non-blocking)")
 
     _log_syntax_result(context, file_path, ok=True, skipped=False, msg="valid")
     _ensure_test_request_for_file(context, file_path)

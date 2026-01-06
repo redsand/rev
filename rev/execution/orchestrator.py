@@ -1502,6 +1502,39 @@ def _has_python_markers(root: Path) -> bool:
     )
 
 
+def _is_command_functional(cmd: str, root: Path) -> bool:
+    """Check if a validation command is actually functional (doesn't fail due to missing deps)."""
+    import subprocess
+    try:
+        # Quick dry-run check - just see if the command can start without immediate errors
+        # Use --help or --version to avoid actually running the full command
+        if "npm run lint" in cmd:
+            test_cmd = ["npm", "run", "lint", "--", "--help"]
+        elif "npm run build" in cmd:
+            # For build, we can't easily dry-run, so just return True and let it fail later
+            return True
+        elif "npm run typecheck" in cmd:
+            test_cmd = ["npm", "run", "typecheck", "--", "--help"]
+        elif "npx eslint" in cmd:
+            test_cmd = ["npx", "eslint", "--version"]
+        else:
+            return True  # Unknown command, assume functional
+
+        result = subprocess.run(
+            test_cmd,
+            capture_output=True,
+            timeout=5,
+            cwd=str(root)
+        )
+        # rc=0 means it worked, rc=1-2 might mean missing deps
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+    except Exception:
+        # If check fails, assume command is OK (conservative)
+        return True
+
+
 def _select_js_validation_commands(root: Path) -> list[str]:
     scripts = _package_json_scripts(root)
     deps = _package_json_deps(root)
@@ -1517,7 +1550,17 @@ def _select_js_validation_commands(root: Path) -> list[str]:
             candidates.append("npx eslint .")
         if "vitest" in deps:
             candidates.append("npx vitest run")
-    return candidates[:2]
+
+    # Filter to only functional commands (lint can fail due to missing eslint plugins)
+    functional = [cmd for cmd in candidates if _is_command_functional(cmd, root)]
+
+    # If lint was filtered out but build exists, prioritize build
+    if functional:
+        return functional[:2]
+    elif "build" in scripts:
+        return ["npm run build"]
+    else:
+        return candidates[:2]  # Fallback to original behavior if all checks failed
 
 
 def _select_build_fallback_command(description: str, root: Path) -> Optional[str]:
