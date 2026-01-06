@@ -22,6 +22,147 @@ from rev.execution.ultrathink_prompts import ULTRATHINK_CODE_WRITER_PROMPT
 from rev.tools.workspace_resolver import resolve_workspace_path
 
 
+def _run_external_check(cmd: List[str], timeout: float = 5.0) -> Tuple[bool, str]:
+    """Run an external syntax check command.
+
+    Returns:
+        (passed, message) - True if command succeeds (exit code 0)
+    """
+    import subprocess
+    import shutil
+
+    # Check if command exists
+    if not shutil.which(cmd[0]):
+        return True, f"Skipped: {cmd[0]} not found"
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=config.WORKSPACE_ROOT if hasattr(config, 'WORKSPACE_ROOT') else None
+        )
+        if result.returncode == 0:
+            return True, f"{cmd[0]} check passed"
+        else:
+            # Extract first line of error
+            error = result.stderr.strip() or result.stdout.strip()
+            first_line = error.split('\n')[0][:200] if error else "Unknown error"
+            return False, f"{cmd[0]} error: {first_line}"
+    except subprocess.TimeoutExpired:
+        return True, f"Skipped: {cmd[0]} timeout"
+    except Exception as e:
+        return True, f"Skipped: {e}"
+
+
+def _quick_syntax_check(file_path: str) -> Tuple[bool, str]:
+    """Perform a quick syntax check on a file using external tools when available.
+
+    Returns:
+        (passed, message) - True if syntax is valid or check not applicable
+    """
+    try:
+        resolved = resolve_workspace_path(file_path)
+        if not resolved.abs_path.exists():
+            return True, "File does not exist (nothing to verify)"
+
+        abs_path = str(resolved.abs_path)
+        content = resolved.abs_path.read_text(encoding="utf-8", errors="replace")
+        suffix = resolved.abs_path.suffix.lower()
+
+        # Python syntax check - use py_compile for better error messages
+        if suffix == ".py":
+            # First try py_compile via subprocess for isolation
+            passed, msg = _run_external_check(["python", "-m", "py_compile", abs_path])
+            if not passed:
+                return False, msg
+
+            # Also try ast.parse for additional validation
+            import ast
+            try:
+                ast.parse(content)
+                return True, "Python syntax valid (py_compile + ast)"
+            except SyntaxError as e:
+                return False, f"Python syntax error at line {e.lineno}: {e.msg}"
+
+        # JSON syntax check
+        if suffix == ".json":
+            try:
+                json.loads(content)
+                return True, "JSON syntax valid"
+            except json.JSONDecodeError as e:
+                return False, f"JSON syntax error at line {e.lineno}: {e.msg}"
+
+        # TypeScript - use tsc --noEmit for syntax check
+        if suffix in (".ts", ".tsx"):
+            # Try tsc first
+            passed, msg = _run_external_check(["npx", "--yes", "tsc", "--noEmit", "--skipLibCheck", abs_path])
+            if not passed:
+                return False, msg
+            return True, "TypeScript syntax valid (tsc)"
+
+        # JavaScript - use node --check for syntax validation
+        if suffix in (".js", ".mjs", ".cjs"):
+            passed, msg = _run_external_check(["node", "--check", abs_path])
+            if not passed:
+                return False, msg
+            return True, "JavaScript syntax valid (node --check)"
+
+        # JSX files - try with babel or esbuild
+        if suffix == ".jsx":
+            # Try esbuild for JSX parsing
+            passed, msg = _run_external_check([
+                "npx", "--yes", "esbuild", abs_path,
+                "--bundle", "--outfile=/dev/null", "--platform=browser"
+            ])
+            if not passed:
+                # Fallback to basic bracket check
+                opens = content.count("{") + content.count("[") + content.count("(")
+                closes = content.count("}") + content.count("]") + content.count(")")
+                if opens != closes:
+                    return False, f"Unbalanced brackets: {opens} opens vs {closes} closes"
+            return True, "JSX syntax check passed"
+
+        # Vue files - check structure and try vue-tsc if available
+        if suffix == ".vue":
+            if "<template" not in content and "<script" not in content:
+                return False, "Vue file missing <template> or <script> section"
+            # Try vue-tsc for type checking
+            passed, msg = _run_external_check(["npx", "--yes", "vue-tsc", "--noEmit", abs_path])
+            if not passed and "error" in msg.lower():
+                return False, msg
+            return True, "Vue structure valid"
+
+        # Prisma schema - use prisma validate
+        if suffix == ".prisma":
+            if "datasource" not in content:
+                return False, "Prisma schema missing datasource block"
+            # Try prisma validate
+            passed, msg = _run_external_check(["npx", "--yes", "prisma", "validate"])
+            if not passed:
+                return False, msg
+            return True, "Prisma schema valid"
+
+        # YAML files
+        if suffix in (".yaml", ".yml"):
+            try:
+                import yaml
+                yaml.safe_load(content)
+                return True, "YAML syntax valid"
+            except yaml.YAMLError as e:
+                return False, f"YAML error: {str(e)[:100]}"
+            except ImportError:
+                return True, "Skipped: PyYAML not installed"
+
+        # For other file types, assume valid
+        return True, f"No syntax check available for {suffix}"
+
+    except Exception as e:
+        # If we can't check, don't block
+        return True, f"Syntax check skipped: {e}"
+
+
 def _looks_like_code_reference(text: str, context: str = "") -> bool:
     """Check if text looks like a code reference rather than a file path.
 
@@ -291,16 +432,46 @@ def _read_file_content_for_edit(file_path: str, max_lines: int = 2000) -> str | 
     For files over max_lines, falls back to using write_file strategy instead of replace_in_file.
     NOTE: Empty files are considered readable; callers should treat an empty string as valid content.
     """
+    def _detect_corruption(content: str) -> Optional[str]:
+        """Check for signs of file corruption (e.g. duplicated blocks)."""
+        if not content: return None
+        
+        # Check for multiple identical imports (sign of failed appends/edits)
+        import_lines = [l.strip() for l in content.splitlines() if l.strip().startswith(("import ", "from "))]
+        if len(import_lines) > 5:
+            from collections import Counter
+            counts = Counter(import_lines)
+            most_common, count = counts.most_common(1)[0]
+            if count >= 3:
+                return f"Multiple duplicate imports detected (e.g. '{most_common}' appears {count}x)."
+        
+        # Check for weird bracket-mid-line artifacts seen in logs
+        if re.search(r"\}\w+\.", content):
+            return "Malformed code blocks detected (e.g. closing bracket followed immediately by code on same line)."
+            
+        return None
+
     def _normalize_content(content: str) -> str:
         lines = content.split('\n')
+        warning = ""
+        
+        corruption_msg = _detect_corruption(content)
+        if corruption_msg:
+            warning = (
+                f"\n\nCRITICAL WARNING: This file appears to be CORRUPTED or malformed from previous failed edits.\n"
+                f"REASON: {corruption_msg}\n"
+                "DO NOT use `apply_patch` or `replace_in_file` on this file as the context is unreliable.\n"
+                "YOU MUST USE `write_file` to provide the COMPLETE, CLEAN content of the file.\n"
+            )
+
         if len(lines) > max_lines:
-            return (
-                content +
+            warning += (
                 f"\n\nWARNING: This file has {len(lines)} lines (>{max_lines}). "
                 "For large files, consider using write_file with the complete new content "
                 "instead of replace_in_file, as it's more reliable for extensive changes."
             )
-        return content
+        
+        return content + warning if warning else content
 
     def _try_read(path_value: str) -> Optional[str]:
         result = execute_registry_tool("read_file", {"path": path_value})
@@ -934,18 +1105,28 @@ class CodeWriterAgent(BaseAgent):
             # For EDIT, we prefer patching tools.
             tool_names = ['apply_patch', 'replace_in_file', 'copy_file', 'move_file']
             
-            # RECOVERY ESCALATION: If we are on attempt 3+, allow write_file as a last resort.
-            if recovery_attempts >= 2:
+            # RECOVERY ESCALATION: If we are on attempt 2+, allow write_file as a fallback.
+            if recovery_attempts >= 1:
                 tool_names.append('write_file')
                 print(f"  [RECOVERY] Enabling write_file fallback for EDIT (attempt {recovery_attempts + 1})")
             else:
-                # Only allow write_file for EDIT if the file DOES NOT exist or is empty
+                # Also allow write_file if the file is empty OR if it's corrupted
                 try:
                     target_paths = _extract_target_files_from_description(task.description)
                     if target_paths:
                         resolved = resolve_workspace_path(target_paths[0]).abs_path
                         if not resolved.exists() or resolved.stat().st_size == 0:
                             tool_names.append('write_file')
+                        else:
+                            # Direct check for corruption to enable tool immediately
+                            content = resolved.read_text(encoding="utf-8-sig", errors="ignore")
+                            if "import " in content and content.count("import ") > 10:
+                                # Quick proxy check for duplicated blocks
+                                from collections import Counter
+                                lines = [l.strip() for l in content.splitlines() if l.strip().startswith("import ")]
+                                if lines and Counter(lines).most_common(1)[0][1] >= 3:
+                                    tool_names.append('write_file')
+                                    print(f"  [CORRUPTION] Enabling write_file for corrupted file: {target_paths[0]}")
                 except:
                     pass
         elif task.action_type in {"move", "rename"}:
@@ -1061,17 +1242,22 @@ class CodeWriterAgent(BaseAgent):
 
             # 4. Validation and Execution
             if tool_name and not error_type:
-                # FOR EDIT TASKS: Enforce no overwrite via write_file
+                # FOR EDIT TASKS: Enforce no overwrite via write_file (unless recovery escalation)
                 if task.action_type.lower() == "edit" and tool_name == "write_file":
                     target_path = arguments.get("path") or ""
                     try:
                         resolved = resolve_workspace_path(target_path).abs_path
                         if resolved.exists():
-                            msg = f"write_file not allowed for edit tasks on existing file: {target_path}"
-                            if self.should_attempt_recovery(task, context):
-                                self.request_replan(context, reason="write_file_not_allowed_for_edit", detailed_reason=msg)
-                                return self.make_recovery_request("write_file_not_allowed_for_edit", msg)
-                            return self.make_failure_signal("write_file_not_allowed_for_edit", msg)
+                            # Allow write_file after multiple patch failures (recovery_attempts >= 2)
+                            # This handles cases where apply_patch repeatedly fails (e.g., model generates corrupt patches)
+                            if recovery_attempts >= 2:
+                                print(f"  [RECOVERY] Allowing write_file on existing file after {recovery_attempts + 1} attempts: {target_path}")
+                            else:
+                                msg = f"write_file not allowed for edit tasks on existing file: {target_path}"
+                                if self.should_attempt_recovery(task, context):
+                                    self.request_replan(context, reason="write_file_not_allowed_for_edit", detailed_reason=msg)
+                                    return self.make_recovery_request("write_file_not_allowed_for_edit", msg)
+                                return self.make_failure_signal("write_file_not_allowed_for_edit", msg)
                     except: pass
 
                 if tool_name in tool_names:
@@ -1117,6 +1303,43 @@ class CodeWriterAgent(BaseAgent):
                 is_noop, noop_msg = self._tool_result_is_noop(tool_name, raw_result)
                 if is_noop:
                     self._record_tool_event(task, context, tool_name, arguments, raw_result)
+
+                    # Check if LLM indicated the file is already in desired state
+                    # This handles cases where the model says "already correct/configured" and emits a no-op
+                    response_lower = raw_content.lower() if raw_content else ""
+                    already_correct_indicators = [
+                        "already correct", "already configured", "already implement",
+                        "already exists", "already in place", "already set up",
+                        "already defined", "no changes needed", "nothing to change",
+                        "file is correct", "code is correct", "already has",
+                    ]
+                    is_already_correct = any(ind in response_lower for ind in already_correct_indicators)
+
+                    if is_already_correct:
+                        # Verify syntax before accepting "already correct" claim
+                        target_path = arguments.get("path") or arguments.get("file") or ""
+                        if target_path:
+                            syntax_ok, syntax_msg = _quick_syntax_check(target_path)
+                            if not syntax_ok:
+                                print(f"  ✗ Syntax check failed: {syntax_msg}")
+                                print(f"  ? LLM claimed 'already correct' but file has syntax errors")
+                                return self.make_failure_signal(
+                                    "syntax_error_on_already_correct",
+                                    f"File claimed as 'already correct' has syntax errors: {syntax_msg}"
+                                )
+                            print(f"  ✓ Syntax verified: {syntax_msg}")
+
+                        print(f"  ✓ File already in desired state (no-op acceptable)")
+                        return build_subagent_output(
+                            agent_name="CodeWriterAgent",
+                            tool_name=tool_name,
+                            tool_args=arguments,
+                            tool_output=raw_result,
+                            context=context,
+                            task_id=task.task_id,
+                            note="File already in desired state - no changes needed"
+                        )
+
                     print(f"  ? Tool no-op: {noop_msg}")
                     return self.make_failure_signal("tool_noop", noop_msg)
 

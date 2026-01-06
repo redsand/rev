@@ -36,21 +36,25 @@ def _as_tool_call(name: str, arguments: Any, counter: int, seen_ids: set[str]) -
 def _parse_json_obj(obj: Any, counter: int, errors: List[str], calls: List[Dict[str, Any]], seen_ids: set[str]) -> int:
     """Parse JSON objects or arrays into tool calls."""
     if isinstance(obj, dict):
-        # Direct tool call object
-        if "name" in obj and "arguments" in obj:
-            calls.append(_as_tool_call(obj["name"], obj.get("arguments", {}), counter, seen_ids))
+        # Direct tool call object - support multiple naming conventions
+        name = obj.get("name") or obj.get("tool_name") or obj.get("tool")
+        arguments = obj.get("arguments") or obj.get("parameters") or obj.get("args")
+        
+        if name and arguments is not None:
+            calls.append(_as_tool_call(name, arguments, counter, seen_ids))
             return counter + 1
+            
         # OpenAI-style tool_calls wrapper
         if "tool_calls" in obj and isinstance(obj["tool_calls"], list):
             for tc in obj["tool_calls"]:
                 if not isinstance(tc, dict):
                     continue
-                name = tc.get("name") or tc.get("function", {}).get("name")
-                args = tc.get("arguments") or tc.get("function", {}).get("arguments", {})
-                if name is None:
+                tc_name = tc.get("name") or tc.get("function", {}).get("name") or tc.get("tool_name")
+                tc_args = tc.get("arguments") or tc.get("function", {}).get("arguments") or tc.get("parameters") or tc.get("args") or {}
+                if tc_name is None:
                     errors.append("Malformed tool call: missing name")
                     continue
-                calls.append(_as_tool_call(name, args if isinstance(args, (dict, list)) else {}, counter, seen_ids))
+                calls.append(_as_tool_call(tc_name, tc_args if isinstance(tc_args, (dict, list, str)) else {}, counter, seen_ids))
                 counter += 1
             return counter
     if isinstance(obj, list):
@@ -62,12 +66,12 @@ def _parse_json_obj(obj: Any, counter: int, errors: List[str], calls: List[Dict[
 def _extract_json_candidates(content: str) -> List[str]:
     """Collect potential JSON snippets from content (code fences and inline objects)."""
     candidates: List[str] = []
-    fence_pattern = re.compile(r"```(?:json)?\\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+    fence_pattern = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
     candidates.extend(match.group(1).strip() for match in fence_pattern.finditer(content))
 
-    # Inline JSON objects with "name" and "arguments"
-    inline_pattern = re.compile(r"\\{[^{}]*\"name\"[^{}]*\"arguments\"\\s*:\\s*\\{.*?\\}[^{}]*\\}", re.DOTALL)
-    candidates.extend(match.group(0) for match in inline_pattern.finditer(content))
+    # Inline JSON objects with "name" or "tool_name" and "arguments" or "parameters"
+    inline_pattern = re.compile(r"\{[^{}]*\"(?:tool_)?name\"[^{}]*\"(?:arguments|parameters)\"\s*:\s*\{.*?\}", re.DOTALL)
+    candidates.extend(match.group(0).strip() + "}" for match in inline_pattern.finditer(content))
 
     # Whole content as a candidate
     candidates.append(content.strip())

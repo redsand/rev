@@ -73,8 +73,9 @@ Tool discipline:
 - Avoid repeated exploration loops; if searches fail, change the query once, then decide and act.
 
 Patch requirements:
-- apply_patch accepts only unified diffs (diff --git or ---/+++ with @@ hunks).
-- Do not output '*** Begin Patch' blocks.
+- apply_patch accepts two formats:
+  1. Unified diffs: diff --git or ---/+++ with @@ hunks
+  2. Codex patches: *** Begin Patch / *** End Patch with *** Add File / *** Update File / *** Delete File headers
 
 Completion:
 - Reply with TASK_COMPLETE only after the current task’s goal is satisfied (and tests run when required)."""
@@ -88,8 +89,8 @@ When the task involves code changes:
 1. Understand first:
    - Use search_code, list_dir, tree_view, and read_file to inspect the relevant code.
 2. Make changes safely:
-   - Use apply_patch with unified diffs instead of overwriting files blindly.
-   - Do NOT output '*** Begin Patch' blocks; use unified diffs (diff --git or ---/+++ with @@ hunks).
+   - Use apply_patch instead of overwriting files blindly.
+   - apply_patch accepts unified diffs (---/+++ with @@ hunks) or Codex patches (*** Begin Patch).
    - Keep changes minimal, consistent, and well-structured.
    - If a file/class/function is missing, create it immediately instead of re-listing directories.
    - If resource or iteration budgets start warning, pause further exploration and finish the best viable patch.

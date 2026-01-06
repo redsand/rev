@@ -529,6 +529,11 @@ def _normalize_patch_text(patch: str) -> str:
     zero_width_pattern = re.compile(r'[\u200B-\u200D\uFEFF]')
     normalized = zero_width_pattern.sub('', normalized)
 
+    # Strip ANSI escape codes that some models (e.g., glm-4.7:cloud) emit in patches
+    # This handles color codes like \x1b[32m (green), \x1b[31m (red), \x1b[0m (reset)
+    ansi_escape = re.compile(r'\x1b\[[0-9;]*[mGKHF]')
+    normalized = ansi_escape.sub('', normalized)
+
     return normalized
 
 
@@ -1219,18 +1224,29 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
                     return chunk_result
 
             # If we reached here, all strategies failed.
-            # Use the first git error as the primary one, as it's usually most relevant.
-            primary_error = errors[0] if errors else "All patch strategies failed"
+            # Use the most informative error we have.
+            primary_error = "All patch strategies failed"
+            if errors:
+                # Prioritize git errors over others if available
+                git_errors = [e for e in errors if e.startswith("git:")]
+                primary_error = git_errors[0] if git_errors else errors[-1]
+
             if check_proc and check_proc.returncode == -1 and "INTERNAL ERROR" in check_proc.stderr:
                 primary_error = check_proc.stderr
 
-            return _result(
+            # If check_proc is None, create a dummy one for _result
+            if check_proc is None:
+                check_proc = subprocess.CompletedProcess("apply_patch", 1, "", primary_error)
+
+            res_json = json.loads(_result(
                 check_proc,
                 success=False,
                 phase="check",
                 hint=large_patch_hint,
                 retry_plan=retry_plan,
-            )
+            ))
+            res_json["error"] = primary_error
+            return json.dumps(res_json)
 
         if dry_run:
             return _result(check_proc, success=True, phase="check")
