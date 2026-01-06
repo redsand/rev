@@ -2815,9 +2815,10 @@ def _order_available_actions(actions: List[str]) -> List[str]:
 
 def _is_goal_achieved_response(response: Optional[str]) -> bool:
     """Detect when the planner says the goal is already achieved.
-    
+
     Strictly matches 'GOAL_ACHIEVED' or clear variations like 'Goal achieved'
     while avoiding false positives on rambling text.
+    Also handles prefixed responses like "[EDIT] GOAL_ACHIEVED".
     """
     if not response:
         return False
@@ -2825,16 +2826,23 @@ def _is_goal_achieved_response(response: Optional[str]) -> bool:
     normalized = re.sub(r"[\[\]_\s]+", " ", response).strip().lower()
     if not normalized:
         return False
-    
+
     # Precise matches only
     if normalized in {"goal achieved", "goal completed", "work complete", "task achieved"}:
         return True
-        
+
+    # Check if response is just an action type followed by goal achieved
+    # e.g., "edit goal achieved", "read goal achieved"
+    action_types = ["edit", "read", "create", "add", "delete", "refactor", "test", "analyze", "review", "tool"]
+    for action in action_types:
+        if normalized == f"{action} goal achieved":
+            return True
+
     # Allow slightly longer but still very clear success statements
     if normalized.startswith("goal "):
         # Must be exactly 'goal achieved', 'goal is achieved', etc.
         return bool(re.match(r"^goal (is )?(achieved|completed|done|finished)$", normalized))
-        
+
     return normalized == "goal achieved"
 
 
@@ -3913,6 +3921,19 @@ class Orchestrator:
 
         response_content = response_data.get("message", {}).get("content", "") or ""
         response_content = response_content.strip()
+
+        # Check if response indicates goal achievement BEFORE parsing as task
+        # Handle both plain "GOAL_ACHIEVED" and prefixed like "[EDIT] GOAL_ACHIEVED"
+        if _is_goal_achieved_response(response_content):
+            print(f"\n  [PLANNER] Detected goal achievement signal")
+            return None
+
+        # Also check if response contains GOAL_ACHIEVED as the description after action type
+        # e.g., "[EDIT] GOAL_ACHIEVED" should be treated as completion, not as a task
+        goal_in_desc_match = re.search(r"\[[A-Z_]+\]\s*(GOAL[_\s]ACHIEVED)", response_content, re.IGNORECASE)
+        if goal_in_desc_match:
+            print(f"\n  [PLANNER] Detected goal achievement in task description")
+            return None
 
         # Parse action/description from the LLM response
         description = ""
