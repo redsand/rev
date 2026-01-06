@@ -677,8 +677,12 @@ def main():
             debug_logger.log_workflow_phase("resume", {"checkpoint": checkpoint_path})
             print(f"Loading checkpoint: {checkpoint_path}\n")
             try:
-                plan = ExecutionPlan.load_checkpoint(checkpoint_path)
+                plan, restored_agent_state = ExecutionPlan.load_checkpoint(checkpoint_path)
                 state_manager = StateManager(plan)
+                # Store restored agent_state to be merged into context later
+                if restored_agent_state:
+                    state_manager.restored_agent_state = restored_agent_state
+                    print(f"  Restored agent state: {list(restored_agent_state.keys())}")
                 print(f"✓ Checkpoint loaded successfully")
                 print(f"  {plan.get_summary()}\n")
                 debug_logger.log("main", "CHECKPOINT_LOADED", {

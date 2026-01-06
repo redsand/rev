@@ -6339,6 +6339,7 @@ class Orchestrator:
                                 pass
                             ok, constraint_error = _enforce_action_tool_constraints(task)
                             if ok:
+                                task.status = TaskStatus.COMPLETED
                                 return True
                         else:
                             task_index = task.task_id if isinstance(task.task_id, int) else None
@@ -6368,6 +6369,7 @@ class Orchestrator:
                                         pass
                                     ok, constraint_error = _enforce_action_tool_constraints(task)
                                     if ok:
+                                        task.status = TaskStatus.COMPLETED
                                         return True
                             else:
                                 suggestion = _select_test_fallback_command(task.description or "", config.ROOT or Path.cwd())
@@ -6530,14 +6532,20 @@ class Orchestrator:
                     task.error = "Test action completed without executing tests (no run_cmd/run_tests detected)"
                     return False
 
-                task.status = TaskStatus.COMPLETED
-                try:
-                    # If the agent produced tool evidence, it may include artifact refs.
-                    if isinstance(task.result, str) and "outside allowed workspace roots" in task.result.lower():
-                        maybe_record_known_failure_from_error(error_text=task.result)
-                except Exception:
-                    pass
-                return True
+            task.status = TaskStatus.COMPLETED
+
+            # Display completion status
+            action_type = (task.action_type or "general").upper()
+            task_desc = task.description or ""
+            print(f"  {colorize('✓', Colors.BRIGHT_GREEN)} {colorize('COMPLETED', Colors.BRIGHT_GREEN, bold=True)} {task_desc}")
+
+            try:
+                # If the agent produced tool evidence, it may include artifact refs.
+                if isinstance(task.result, str) and "outside allowed workspace roots" in task.result.lower():
+                    maybe_record_known_failure_from_error(error_text=task.result)
+            except Exception:
+                pass
+            return True
         except Exception as e:
             task.status = TaskStatus.FAILED
             tb = traceback.format_exc()

@@ -1921,6 +1921,25 @@ IMPORTANT: Do not repeat failed commands or search unavailable paths listed abov
 
             # If model responds but doesn't use tools and doesn't complete task
             if not tool_calls and content:
+                # Check for TASK_COMPLETE signal even without tool calls
+                if "TASK_COMPLETE" in content or "task complete" in content.lower():
+                    print(f"  ✓ Task completed (no further tool calls)")
+                    redisplay_prompt()
+                    plan.mark_completed(content)
+                    if state_manager:
+                        state_manager.on_task_completed(current_task)
+                    session_tracker.track_task_completed(current_task.description)
+                    try:
+                        record_recent_changes(
+                            files_created=session_tracker.summary.files_created,
+                            files_modified=session_tracker.summary.files_modified,
+                            files_deleted=session_tracker.summary.files_deleted,
+                        )
+                    except Exception:
+                        pass
+                    task_complete = True
+                    break
+
                 # Model is thinking/responding without tool calls
                 print(f"  → {content[:200]}")
                 no_tool_call_streak += 1
