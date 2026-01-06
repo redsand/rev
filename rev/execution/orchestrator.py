@@ -4051,12 +4051,25 @@ class Orchestrator:
         if not completed_tasks_log:
             return False, "No work history to verify."
 
+        # Check if this is a read-only request
+        if user_request is None and self.context:
+            user_request = self.context.user_request
+        request_lower = (user_request or "").lower()
+
+        # Read-only indicators: request contains read/view/show/display verbs but no mutation verbs
+        read_verbs = ["read", "view", "show", "display", "inspect", "check", "look", "see", "get"]
+        mutation_verbs = ["write", "create", "add", "edit", "update", "delete", "remove", "modify", "change", "fix", "implement", "build"]
+
+        has_read_intent = any(verb in request_lower for verb in read_verbs)
+        has_mutation_intent = any(verb in request_lower for verb in mutation_verbs)
+        is_read_only_request = has_read_intent and not has_mutation_intent
+
         # A completion must reference:
         # 1. File diffs/writes
         # 2. Test output/artifact IDs
         # 3. Search results
         # 4. Runtime checks
-        
+
         evidence_found = {
             "files": False,
             "tests": False,
@@ -4072,8 +4085,8 @@ class Orchestrator:
             # 2. Test outputs
             if any(k in log_l for k in ["passed", "failed", "test suite", "pytest", "run_tests", "run_cmd"]):
                 evidence_found["tests"] = True
-            # 3. Search results
-            if any(k in log_l for k in ["found", "matches", "listing", "search", "read file", "list_dir", "read_file", "search_code", "rag_search"]):
+            # 3. Search/Read results - check for action_type hints or tool names
+            if any(k in log_l for k in ["found", "matches", "listing", "search", "read file", "list_dir", "read_file", "search_code", "rag_search", "(read)", "(analyze)", "(research)"]):
                 evidence_found["search"] = True
             # 4. Runtime checks
             if any(k in log_l for k in ["runtime", "log", "executed", "status", "exit code", "analyze_runtime_logs"]):
@@ -4082,20 +4095,19 @@ class Orchestrator:
         # Require at least Search (knowing what's there) AND either File/Test/Runtime (doing something)
         has_research = evidence_found["search"]
         has_action = evidence_found["files"] or evidence_found["tests"] or evidence_found["runtime"]
-        
+
         # TDD Check: If the request mentioned "test" or "application", require test evidence
-        if user_request is None and self.context:
-            user_request = self.context.user_request
-        request_lower = (user_request or "").lower()
         needs_tests = any(kw in request_lower for kw in ["test", "verify", "check", "application", "tdd"])
         if needs_tests and not evidence_found["tests"]:
             return False, "Completion rejected: The request implies test-driven development, but no test execution evidence was found."
 
         if not has_research:
             return False, "Completion rejected: No research/search evidence found. Agent acted without reading."
-        if not has_action:
+
+        # For read-only requests, don't require action evidence - reading IS the action
+        if not is_read_only_request and not has_action:
             return False, "Completion rejected: No concrete action (file edit, test run, or runtime check) verified."
-            
+
         return True, "Completion grounded in artifacts."
 
     def _continuous_sub_agent_execution(self, user_request: str, coding_mode: bool) -> bool:
@@ -5986,8 +5998,10 @@ class Orchestrator:
                     self.context.state_manager.on_task_failed(next_task)
 
             status_tag = f"[{next_task.status.name}]"
-            log_entry = f"{status_tag} {next_task.description}"
-            
+            # Include action_type hint for grounded completion detection
+            action_hint = f" ({next_task.action_type})" if next_task.action_type else ""
+            log_entry = f"{status_tag}{action_hint} {next_task.description}"
+
             error_detail = ""
             if next_task.status == TaskStatus.FAILED and next_task.error:
                 error_detail = str(next_task.error)
