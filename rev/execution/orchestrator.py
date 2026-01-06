@@ -5366,7 +5366,8 @@ class Orchestrator:
 
             # STEP 3: VERIFY - This is the critical addition
             if execution_success and not deferred_tdd_test:
-                # Only verify actions we have a handler for; otherwise skip verification noise.
+                # Only verify actions that modify state or have complex validation
+                # Skip verification for read-only operations (read, analyze, research, investigate)
                 verifiable_actions = {
                     "refactor",
                     "add",
@@ -5374,10 +5375,6 @@ class Orchestrator:
                     "edit",
                     "create_directory",
                     "test",
-                    "read",
-                    "analyze",
-                    "research",
-                    "investigate",
                 }
                 action_type = (next_task.action_type or "").lower()
                 if action_type in verifiable_actions:
