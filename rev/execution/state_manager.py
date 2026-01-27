@@ -53,6 +53,15 @@ class StateManager:
         # Generate session ID using a UUID4 for uniqueness across runs
         self.session_id = uuid.uuid4().hex
 
+        # Agent state for persistence (set by executor with RevContext.agent_state)
+        self._agent_state: Dict[str, Any] = {}
+        # Restored agent state from checkpoint (to be merged into context)
+        self.restored_agent_state: Dict[str, Any] = {}
+
+    def set_agent_state(self, agent_state: Dict[str, Any]):
+        """Set agent state for checkpoint persistence."""
+        self._agent_state = agent_state
+
     def save_checkpoint(
         self,
         reason: str = "manual",
@@ -79,7 +88,7 @@ class StateManager:
                 filepath = self.checkpoint_dir / filename
 
                 checkpoint_data = {
-                    "version": "1.0",
+                    "version": "1.1",  # Bumped for agent_state support
                     "session_id": self.session_id,
                     "checkpoint_number": self._checkpoint_count,
                     "timestamp": datetime.now().isoformat(),
@@ -87,6 +96,17 @@ class StateManager:
                     "plan": self.plan.to_dict(),
                     "resume_info": self._get_resume_info()
                 }
+
+                # Include recovery-related agent state for persistence
+                if self._agent_state:
+                    persistent_keys = [
+                        "total_recovery_attempts",
+                        "recovery_attempts",
+                        "task_recovery_counts",
+                    ]
+                    filtered_state = {k: v for k, v in self._agent_state.items() if k in persistent_keys}
+                    if filtered_state:
+                        checkpoint_data["agent_state"] = filtered_state
 
                 with open(filepath, "w") as f:
                     json.dump(checkpoint_data, f, indent=2)
@@ -328,6 +348,23 @@ class StateManager:
             FileNotFoundError: If checkpoint doesn't exist
             json.JSONDecodeError: If checkpoint is corrupted
         """
+        plan, _ = StateManager.load_from_checkpoint_with_state(checkpoint_path)
+        return plan
+
+    @staticmethod
+    def load_from_checkpoint_with_state(checkpoint_path: str) -> tuple:
+        """Load an execution plan and agent state from a checkpoint file.
+
+        Args:
+            checkpoint_path: Path to checkpoint file
+
+        Returns:
+            Tuple of (ExecutionPlan, agent_state dict)
+
+        Raises:
+            FileNotFoundError: If checkpoint doesn't exist
+            json.JSONDecodeError: If checkpoint is corrupted
+        """
         logger = get_logger()
 
         try:
@@ -335,16 +372,18 @@ class StateManager:
                 data = json.load(f)
 
             plan = ExecutionPlan.from_dict(data["plan"])
+            agent_state = data.get("agent_state", {})
 
             logger.log("state", "CHECKPOINT_LOADED", {
                 "filepath": checkpoint_path,
                 "session_id": data.get("session_id"),
                 "checkpoint_number": data.get("checkpoint_number"),
                 "timestamp": data.get("timestamp"),
-                "tasks_total": len(plan.tasks)
+                "tasks_total": len(plan.tasks),
+                "has_agent_state": bool(agent_state)
             }, "INFO")
 
-            return plan
+            return plan, agent_state
 
         except Exception as e:
             logger.log("state", "CHECKPOINT_LOAD_ERROR", {

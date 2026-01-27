@@ -518,6 +518,12 @@ REQUIRE_REUSE_JUSTIFICATION = os.getenv("REV_REQUIRE_JUSTIFICATION", "false").lo
 MAX_FILES_PER_FEATURE = int(os.getenv("REV_MAX_FILES", "5"))  # Encourage consolidation
 SIMILARITY_THRESHOLD = float(os.getenv("REV_SIMILARITY_THRESHOLD", "0.4"))  # For file name similarity (lowered to catch more duplicates)
 
+# Verification: File comment requirement (REV-012)
+# REQUIRE_FILE_COMMENTS: Require all new/edited files to have a top-of-file comment describing their purpose
+# Default: false (warning only - don't block on missing comments)
+# Set REV_REQUIRE_FILE_COMMENTS=true to enforce comment requirement (may cause unnecessary retries)
+REQUIRE_FILE_COMMENTS = os.getenv("REV_REQUIRE_FILE_COMMENTS", "false").lower() == "true"
+
 # Security: Tool Permission Policy (REV-011)
 # PERMISSIONS_FAIL_OPEN: When permission check fails (e.g., malformed policy), should we allow or deny?
 # Default: false (fail closed - deny execution on error for security)

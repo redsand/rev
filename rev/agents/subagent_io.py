@@ -52,6 +52,7 @@ def build_subagent_output(
     tool_output: str,
     context: RevContext,
     task_id: Optional[str] = None,
+    note: Optional[str] = None,
 ) -> str:
     """Return a JSON string representing standardized sub-agent output."""
 
@@ -81,5 +82,7 @@ def build_subagent_output(
         "tool_args": tool_args,
         "tool_output": tool_output,
     }
+    if note:
+        payload["note"] = note
     return json.dumps(payload, ensure_ascii=False)
 

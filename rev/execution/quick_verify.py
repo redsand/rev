@@ -1198,16 +1198,21 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
         )
 
     if not _has_header_comment(file_path):
-        return VerificationResult(
-            passed=False,
-            message=f"New file {file_path.name} is missing the required top-of-file comment describing its purpose.",
-            details={
-                **details,
-                "missing_header_comment": True,
-                "suggestion": "Add a brief header comment at the top describing the file's role.",
-            },
-            should_replan=True,
-        )
+        if config.REQUIRE_FILE_COMMENTS:
+            # Strict mode: block on missing comment
+            return VerificationResult(
+                passed=False,
+                message=f"New file {file_path.name} is missing the required top-of-file comment describing its purpose.",
+                details={
+                    **details,
+                    "missing_header_comment": True,
+                    "suggestion": "Add a brief header comment at the top describing the file's role.",
+                },
+                should_replan=True,
+            )
+        else:
+            # Warning mode: log but don't block
+            print(f"  [WARNING] {file_path.name} missing top-of-file comment (non-blocking)")
 
     _log_syntax_result(context, file_path, ok=True, skipped=False, msg="valid")
     _ensure_test_request_for_file(context, file_path)
@@ -3685,18 +3690,20 @@ def _run_syntax_check(file_path: Path) -> Tuple[bool, str, bool]:
         # Try node --check first (fastest)
         try:
             import subprocess
-            result = subprocess.run(
-                ['node', '--check', str(file_path)],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                return True, "", False
-            return False, f"JavaScript syntax error: {result.stderr.strip()}", False
-        except FileNotFoundError:
-            # Node not available, skip validation
-            return True, "", True
+            try:
+                result = subprocess.run(
+                    ['node', '--check', str(file_path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0:
+                    return True, "", False
+                return False, f"JavaScript syntax error: {result.stderr.strip()}", False
+            except FileNotFoundError:
+                # Node not directly available - this is unusual but handle gracefully
+                # Most systems with npm/npx will have node in PATH, so just skip
+                return True, "", True
         except Exception as e:
             return False, f"Failed to run syntax check: {str(e)}", False
 
@@ -3704,18 +3711,33 @@ def _run_syntax_check(file_path: Path) -> Tuple[bool, str, bool]:
         # Try TypeScript compiler if available
         try:
             import subprocess
-            result = subprocess.run(
-                ['tsc', '--noEmit', '--skipLibCheck', str(file_path)],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            if result.returncode == 0:
-                return True, "", False
-            return False, f"TypeScript error: {result.stdout.strip()}", False
-        except FileNotFoundError:
-            # TypeScript not available, skip validation
-            return True, "", True
+            # Try direct tsc first
+            try:
+                result = subprocess.run(
+                    ['tsc', '--noEmit', '--skipLibCheck', str(file_path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if result.returncode == 0:
+                    return True, "", False
+                return False, f"TypeScript error: {result.stdout.strip()}", False
+            except FileNotFoundError:
+                # Try npx tsc as fallback (for project-local TypeScript)
+                try:
+                    result = subprocess.run(
+                        ['npx', '-y', 'tsc', '--noEmit', '--skipLibCheck', str(file_path)],
+                        capture_output=True,
+                        text=True,
+                        timeout=15,
+                        cwd=file_path.parent
+                    )
+                    if result.returncode == 0:
+                        return True, "", False
+                    return False, f"TypeScript error: {result.stdout.strip()}", False
+                except FileNotFoundError:
+                    # Neither tsc nor npx available, skip validation
+                    return True, "", True
         except Exception as e:
             return False, f"Failed to run syntax check: {str(e)}", False
 
@@ -3981,16 +4003,21 @@ def _verify_file_edit(task: Task, context: RevContext) -> VerificationResult:
         )
 
     if not _has_header_comment(file_path):
-        return VerificationResult(
-            passed=False,
-            message=f"Edited file {file_path.name} is missing the required top-of-file comment describing its purpose.",
-            details={
-                "file_path": str(file_path),
-                "missing_header_comment": True,
-                "suggestion": "Add a brief header comment at the top describing the file's role.",
-            },
-            should_replan=True,
-        )
+        if config.REQUIRE_FILE_COMMENTS:
+            # Strict mode: block on missing comment
+            return VerificationResult(
+                passed=False,
+                message=f"Edited file {file_path.name} is missing the required top-of-file comment describing its purpose.",
+                details={
+                    "file_path": str(file_path),
+                    "missing_header_comment": True,
+                    "suggestion": "Add a brief header comment at the top describing the file's role.",
+                },
+                should_replan=True,
+            )
+        else:
+            # Warning mode: log but don't block
+            print(f"  [WARNING] {file_path.name} missing top-of-file comment (non-blocking)")
 
     _log_syntax_result(context, file_path, ok=True, skipped=False, msg="valid")
     _ensure_test_request_for_file(context, file_path)

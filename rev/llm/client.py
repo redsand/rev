@@ -105,9 +105,12 @@ def _sanitize_response_content(response: Dict[str, Any]) -> Dict[str, Any]:
     msg = dict(msg)
 
     content = msg.get("content", "")
-    thinking_raw = None
+    thinking_raw = msg.get("thinking") # Check for provider-provided thinking key (e.g. GLM-4.7)
+    
     if isinstance(content, str):
-        content, thinking_raw = _extract_thinking(content)
+        content, extracted_thinking = _extract_thinking(content)
+        if extracted_thinking:
+            thinking_raw = (thinking_raw + "\n\n" + extracted_thinking) if thinking_raw else extracted_thinking
     else:
         content = str(content) if content is not None else ""
 

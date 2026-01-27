@@ -529,6 +529,11 @@ def _normalize_patch_text(patch: str) -> str:
     zero_width_pattern = re.compile(r'[\u200B-\u200D\uFEFF]')
     normalized = zero_width_pattern.sub('', normalized)
 
+    # Strip ANSI escape codes that some models (e.g., glm-4.7:cloud) emit in patches
+    # This handles color codes like \x1b[32m (green), \x1b[31m (red), \x1b[0m (reset)
+    ansi_escape = re.compile(r'\x1b\[[0-9;]*[mGKHF]')
+    normalized = ansi_escape.sub('', normalized)
+
     return normalized
 
 
@@ -653,6 +658,117 @@ def _apply_codex_update(file_lines: list[str], hunks: list[list[str]]) -> Tuple[
         cursor = match_idx + len(target)
 
     return file_lines, None
+
+
+def _apply_patch_python(patch_text: str, dry_run: bool = False) -> Dict[str, Any]:
+    """Pure-Python implementation of a unified diff applier.
+    
+    This serves as a last-resort fallback when git/patch are unavailable.
+    """
+    import re
+    from rev.tools.workspace_resolver import resolve_workspace_path
+
+    lines = patch_text.splitlines()
+    files = []
+    current_file = None
+    current_hunk = None
+
+    # 1. Parse unified diff
+    for i, line in enumerate(lines):
+        if line.startswith("--- "):
+            if current_file: files.append(current_file)
+            path = line[4:].strip()
+            if path.startswith("a/"): path = path[2:]
+            current_file = {"path": path, "hunks": []}
+        elif line.startswith("+++ ") and current_file:
+            path = line[4:].strip()
+            if path.startswith("b/"): path = path[2:]
+            current_file["path"] = path # Use destination path
+        elif line.startswith("@@") and current_file:
+            match = re.match(r"@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@", line)
+            if match:
+                current_hunk = {
+                    "old_start": int(match.group(1)),
+                    "old_len": int(match.group(2) or 1),
+                    "new_start": int(match.group(3)),
+                    "new_len": int(match.group(4) or 1),
+                    "lines": []
+                }
+                current_file["hunks"].append(current_hunk)
+        elif current_hunk is not None:
+            if line.startswith(("+", "-", " ")):
+                current_hunk["lines"].append(line)
+            elif line == "\\ No newline at end of file":
+                continue
+            else:
+                current_hunk = None
+
+    if current_file: files.append(current_file)
+
+    if not files:
+        return {"success": False, "error": "No valid unified diff found in patch"}
+
+    # 2. Apply hunks
+    for f in files:
+        rel_path = f["path"]
+        try:
+            resolved = resolve_workspace_path(rel_path, purpose="python_patch")
+            full_path = resolved.abs_path
+        except Exception as e:
+            return {"success": False, "error": f"Path resolution failed for {rel_path}: {e}"}
+
+        if not full_path.exists():
+            # If all hunks for this file are additions, we can create it
+            all_adds = all(all(l.startswith("+") for l in h["lines"]) for h in f["hunks"])
+            if all_adds:
+                content = []
+                for h in f["hunks"]:
+                    content.extend([l[1:] for l in h["lines"]])
+                if not dry_run:
+                    full_path.parent.mkdir(parents=True, exist_ok=True)
+                    full_path.write_text("\n".join(content) + "\n", encoding="utf-8")
+                continue
+            return {"success": False, "error": f"File not found: {rel_path}"}
+
+        file_content = full_path.read_text(encoding="utf-8-sig", errors="ignore")
+        file_lines = file_content.splitlines()
+        
+        # Apply hunks in reverse order to keep line numbers valid
+        for hunk in sorted(f["hunks"], key=lambda h: h["old_start"], reverse=True):
+            old_lines = [l[1:] for l in hunk["lines"] if l.startswith((" ", "-"))]
+            new_lines = [l[1:] for l in hunk["lines"] if l.startswith((" ", "+"))]
+            
+            start_idx = hunk["old_start"] - 1
+            # Simple matching: check if context matches at expected position
+            match = False
+            # Try exact position
+            if 0 <= start_idx < len(file_lines):
+                if file_lines[start_idx:start_idx + len(old_lines)] == old_lines:
+                    match = True
+                    actual_start = start_idx
+            
+            # If no match, try searching around (fuzzing)
+            if not match:
+                for offset in range(1, 100):
+                    for direction in [-1, 1]:
+                        check_idx = start_idx + (offset * direction)
+                        if 0 <= check_idx <= len(file_lines) - len(old_lines):
+                            if file_lines[check_idx:check_idx + len(old_lines)] == old_lines:
+                                match = True
+                                actual_start = check_idx
+                                break
+                    if match: break
+            
+            if not match:
+                return {"success": False, "error": f"Hunk at {rel_path}:{hunk['old_start']} context mismatch"}
+            
+            if not dry_run:
+                file_lines[actual_start:actual_start + len(old_lines)] = new_lines
+
+        if not dry_run:
+            full_path.write_text("\n".join(file_lines) + "\n", encoding="utf-8")
+
+    return {"success": True}
 
 
 def _apply_codex_patch(patch: str, dry_run: bool) -> dict:
@@ -1045,11 +1161,18 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
             ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", "--ignore-whitespace", tfp], False, None),
             ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", "--ignore-whitespace", "-p0", tfp], False, ["git", "apply", "--inaccurate-eof", "--whitespace=nowarn", "--ignore-whitespace", "-p0", tfp]),
             ("git", ["git", "apply", "--check", "--inaccurate-eof", "--whitespace=nowarn", "--ignore-whitespace", "--3way", tfp], True, None),
-            ("patch", ["patch", "--batch", "--forward", "--dry-run", "-p1", "-i", tfp], False, None),
-            # More lenient patch attempts: ignore whitespace and different strip levels to salvage slightly misaligned diffs
-            ("patch", ["patch", "--batch", "--forward", "--dry-run", "--ignore-whitespace", "-p1", "-i", tfp], False, ["patch", "--batch", "--forward", "--ignore-whitespace", "-p1", "-i", tfp]),
-            ("patch", ["patch", "--batch", "--forward", "--dry-run", "--ignore-whitespace", "-p0", "-i", tfp], False, ["patch", "--batch", "--forward", "--ignore-whitespace", "-p0", "-i", tfp]),
         ]
+        
+        # Only offer system 'patch' on non-Windows platforms or if specifically forced
+        if os.name != "nt":
+            strategies.extend([
+                ("patch", ["patch", "--batch", "--forward", "--dry-run", "-p1", "-i", tfp], False, None),
+                ("patch", ["patch", "--batch", "--forward", "--dry-run", "--ignore-whitespace", "-p1", "-i", tfp], False, ["patch", "--batch", "--forward", "--ignore-whitespace", "-p1", "-i", tfp]),
+                ("patch", ["patch", "--batch", "--forward", "--dry-run", "--ignore-whitespace", "-p0", "-i", tfp], False, ["patch", "--batch", "--forward", "--ignore-whitespace", "-p0", "-i", tfp]),
+            ])
+            
+        # Always include the internal Python fallback as the final strategy
+        strategies.append(("python", [], False, None))
         
         if not is_git_repo():
             # Skip git strategies if not a repo to avoid 'fatal: not a git repository'
@@ -1063,6 +1186,15 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
         errors = []
 
         for runner, check_args, use_three_way_flag, apply_override_args in strategies:
+            if runner == "python":
+                py_result = _apply_patch_python(normalized_patch, dry_run=True)
+                if py_result.get("success"):
+                    apply_mode = "python"
+                    break
+                else:
+                    errors.append(f"python: {py_result.get('error')}")
+                continue
+
             check_proc = _run_shell(check_args)
 
             combined_output = (check_proc.stdout + check_proc.stderr).lower()
@@ -1092,18 +1224,29 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
                     return chunk_result
 
             # If we reached here, all strategies failed.
-            # Use the first git error as the primary one, as it's usually most relevant.
-            primary_error = errors[0] if errors else "All patch strategies failed"
+            # Use the most informative error we have.
+            primary_error = "All patch strategies failed"
+            if errors:
+                # Prioritize git errors over others if available
+                git_errors = [e for e in errors if e.startswith("git:")]
+                primary_error = git_errors[0] if git_errors else errors[-1]
+
             if check_proc and check_proc.returncode == -1 and "INTERNAL ERROR" in check_proc.stderr:
                 primary_error = check_proc.stderr
 
-            return _result(
+            # If check_proc is None, create a dummy one for _result
+            if check_proc is None:
+                check_proc = subprocess.CompletedProcess("apply_patch", 1, "", primary_error)
+
+            res_json = json.loads(_result(
                 check_proc,
                 success=False,
                 phase="check",
                 hint=large_patch_hint,
                 retry_plan=retry_plan,
-            )
+            ))
+            res_json["error"] = primary_error
+            return json.dumps(res_json)
 
         if dry_run:
             return _result(check_proc, success=True, phase="check")
@@ -1114,6 +1257,12 @@ def apply_patch(patch: str, dry_run: bool = False, *, _allow_chunking: bool = Tr
                 apply_args.append("--3way")
             apply_args.append(tfp)
             apply_proc = _run_shell(apply_args)
+        elif apply_mode == "python":
+            py_result = _apply_patch_python(normalized_patch, dry_run=False)
+            if py_result.get("success"):
+                apply_proc = subprocess.CompletedProcess("python_patch", 0, "", "")
+            else:
+                apply_proc = subprocess.CompletedProcess("python_patch", 1, "", py_result.get("error", "Python patch failed"))
         else:
             if apply_override:
                 apply_proc = _run_shell(apply_override)

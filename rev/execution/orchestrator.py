@@ -1502,6 +1502,39 @@ def _has_python_markers(root: Path) -> bool:
     )
 
 
+def _is_command_functional(cmd: str, root: Path) -> bool:
+    """Check if a validation command is actually functional (doesn't fail due to missing deps)."""
+    import subprocess
+    try:
+        # Quick dry-run check - just see if the command can start without immediate errors
+        # Use --help or --version to avoid actually running the full command
+        if "npm run lint" in cmd:
+            test_cmd = ["npm", "run", "lint", "--", "--help"]
+        elif "npm run build" in cmd:
+            # For build, we can't easily dry-run, so just return True and let it fail later
+            return True
+        elif "npm run typecheck" in cmd:
+            test_cmd = ["npm", "run", "typecheck", "--", "--help"]
+        elif "npx eslint" in cmd:
+            test_cmd = ["npx", "eslint", "--version"]
+        else:
+            return True  # Unknown command, assume functional
+
+        result = subprocess.run(
+            test_cmd,
+            capture_output=True,
+            timeout=5,
+            cwd=str(root)
+        )
+        # rc=0 means it worked, rc=1-2 might mean missing deps
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+    except Exception:
+        # If check fails, assume command is OK (conservative)
+        return True
+
+
 def _select_js_validation_commands(root: Path) -> list[str]:
     scripts = _package_json_scripts(root)
     deps = _package_json_deps(root)
@@ -1517,7 +1550,17 @@ def _select_js_validation_commands(root: Path) -> list[str]:
             candidates.append("npx eslint .")
         if "vitest" in deps:
             candidates.append("npx vitest run")
-    return candidates[:2]
+
+    # Filter to only functional commands (lint can fail due to missing eslint plugins)
+    functional = [cmd for cmd in candidates if _is_command_functional(cmd, root)]
+
+    # If lint was filtered out but build exists, prioritize build
+    if functional:
+        return functional[:2]
+    elif "build" in scripts:
+        return ["npm run build"]
+    else:
+        return candidates[:2]  # Fallback to original behavior if all checks failed
 
 
 def _select_build_fallback_command(description: str, root: Path) -> Optional[str]:
@@ -2815,9 +2858,10 @@ def _order_available_actions(actions: List[str]) -> List[str]:
 
 def _is_goal_achieved_response(response: Optional[str]) -> bool:
     """Detect when the planner says the goal is already achieved.
-    
+
     Strictly matches 'GOAL_ACHIEVED' or clear variations like 'Goal achieved'
     while avoiding false positives on rambling text.
+    Also handles prefixed responses like "[EDIT] GOAL_ACHIEVED".
     """
     if not response:
         return False
@@ -2825,16 +2869,23 @@ def _is_goal_achieved_response(response: Optional[str]) -> bool:
     normalized = re.sub(r"[\[\]_\s]+", " ", response).strip().lower()
     if not normalized:
         return False
-    
+
     # Precise matches only
     if normalized in {"goal achieved", "goal completed", "work complete", "task achieved"}:
         return True
-        
+
+    # Check if response is just an action type followed by goal achieved
+    # e.g., "edit goal achieved", "read goal achieved"
+    action_types = ["edit", "read", "create", "add", "delete", "refactor", "test", "analyze", "review", "tool"]
+    for action in action_types:
+        if normalized == f"{action} goal achieved":
+            return True
+
     # Allow slightly longer but still very clear success statements
     if normalized.startswith("goal "):
         # Must be exactly 'goal achieved', 'goal is achieved', etc.
         return bool(re.match(r"^goal (is )?(achieved|completed|done|finished)$", normalized))
-        
+
     return normalized == "goal achieved"
 
 
@@ -3914,6 +3965,19 @@ class Orchestrator:
         response_content = response_data.get("message", {}).get("content", "") or ""
         response_content = response_content.strip()
 
+        # Check if response indicates goal achievement BEFORE parsing as task
+        # Handle both plain "GOAL_ACHIEVED" and prefixed like "[EDIT] GOAL_ACHIEVED"
+        if _is_goal_achieved_response(response_content):
+            print(f"\n  [PLANNER] Detected goal achievement signal")
+            return None
+
+        # Also check if response contains GOAL_ACHIEVED as the description after action type
+        # e.g., "[EDIT] GOAL_ACHIEVED" should be treated as completion, not as a task
+        goal_in_desc_match = re.search(r"\[[A-Z_]+\]\s*(GOAL[_\s]ACHIEVED)", response_content, re.IGNORECASE)
+        if goal_in_desc_match:
+            print(f"\n  [PLANNER] Detected goal achievement in task description")
+            return None
+
         # Parse action/description from the LLM response
         description = ""
         action_type = ""
@@ -4030,12 +4094,25 @@ class Orchestrator:
         if not completed_tasks_log:
             return False, "No work history to verify."
 
+        # Check if this is a read-only request
+        if user_request is None and self.context:
+            user_request = self.context.user_request
+        request_lower = (user_request or "").lower()
+
+        # Read-only indicators: request contains read/view/show/display verbs but no mutation verbs
+        read_verbs = ["read", "view", "show", "display", "inspect", "check", "look", "see", "get"]
+        mutation_verbs = ["write", "create", "add", "edit", "update", "delete", "remove", "modify", "change", "fix", "implement", "build"]
+
+        has_read_intent = any(verb in request_lower for verb in read_verbs)
+        has_mutation_intent = any(verb in request_lower for verb in mutation_verbs)
+        is_read_only_request = has_read_intent and not has_mutation_intent
+
         # A completion must reference:
         # 1. File diffs/writes
         # 2. Test output/artifact IDs
         # 3. Search results
         # 4. Runtime checks
-        
+
         evidence_found = {
             "files": False,
             "tests": False,
@@ -4051,8 +4128,8 @@ class Orchestrator:
             # 2. Test outputs
             if any(k in log_l for k in ["passed", "failed", "test suite", "pytest", "run_tests", "run_cmd"]):
                 evidence_found["tests"] = True
-            # 3. Search results
-            if any(k in log_l for k in ["found", "matches", "listing", "search", "read file", "list_dir", "read_file", "search_code", "rag_search"]):
+            # 3. Search/Read results - check for action_type hints or tool names
+            if any(k in log_l for k in ["found", "matches", "listing", "search", "read file", "list_dir", "read_file", "search_code", "rag_search", "(read)", "(analyze)", "(research)"]):
                 evidence_found["search"] = True
             # 4. Runtime checks
             if any(k in log_l for k in ["runtime", "log", "executed", "status", "exit code", "analyze_runtime_logs"]):
@@ -4061,20 +4138,19 @@ class Orchestrator:
         # Require at least Search (knowing what's there) AND either File/Test/Runtime (doing something)
         has_research = evidence_found["search"]
         has_action = evidence_found["files"] or evidence_found["tests"] or evidence_found["runtime"]
-        
+
         # TDD Check: If the request mentioned "test" or "application", require test evidence
-        if user_request is None and self.context:
-            user_request = self.context.user_request
-        request_lower = (user_request or "").lower()
         needs_tests = any(kw in request_lower for kw in ["test", "verify", "check", "application", "tdd"])
         if needs_tests and not evidence_found["tests"]:
             return False, "Completion rejected: The request implies test-driven development, but no test execution evidence was found."
 
         if not has_research:
             return False, "Completion rejected: No research/search evidence found. Agent acted without reading."
-        if not has_action:
+
+        # For read-only requests, don't require action evidence - reading IS the action
+        if not is_read_only_request and not has_action:
             return False, "Completion rejected: No concrete action (file edit, test run, or runtime check) verified."
-            
+
         return True, "Completion grounded in artifacts."
 
     def _continuous_sub_agent_execution(self, user_request: str, coding_mode: bool) -> bool:
@@ -5333,7 +5409,8 @@ class Orchestrator:
 
             # STEP 3: VERIFY - This is the critical addition
             if execution_success and not deferred_tdd_test:
-                # Only verify actions we have a handler for; otherwise skip verification noise.
+                # Only verify actions that modify state or have complex validation
+                # Skip verification for read-only operations (read, analyze, research, investigate)
                 verifiable_actions = {
                     "refactor",
                     "add",
@@ -5341,10 +5418,6 @@ class Orchestrator:
                     "edit",
                     "create_directory",
                     "test",
-                    "read",
-                    "analyze",
-                    "research",
-                    "investigate",
                 }
                 action_type = (next_task.action_type or "").lower()
                 if action_type in verifiable_actions:
@@ -5965,8 +6038,10 @@ class Orchestrator:
                     self.context.state_manager.on_task_failed(next_task)
 
             status_tag = f"[{next_task.status.name}]"
-            log_entry = f"{status_tag} {next_task.description}"
-            
+            # Include action_type hint for grounded completion detection
+            action_hint = f" ({next_task.action_type})" if next_task.action_type else ""
+            log_entry = f"{status_tag}{action_hint} {next_task.description}"
+
             error_detail = ""
             if next_task.status == TaskStatus.FAILED and next_task.error:
                 error_detail = str(next_task.error)
@@ -6339,6 +6414,7 @@ class Orchestrator:
                                 pass
                             ok, constraint_error = _enforce_action_tool_constraints(task)
                             if ok:
+                                task.status = TaskStatus.COMPLETED
                                 return True
                         else:
                             task_index = task.task_id if isinstance(task.task_id, int) else None
@@ -6368,6 +6444,7 @@ class Orchestrator:
                                         pass
                                     ok, constraint_error = _enforce_action_tool_constraints(task)
                                     if ok:
+                                        task.status = TaskStatus.COMPLETED
                                         return True
                             else:
                                 suggestion = _select_test_fallback_command(task.description or "", config.ROOT or Path.cwd())
@@ -6530,14 +6607,20 @@ class Orchestrator:
                     task.error = "Test action completed without executing tests (no run_cmd/run_tests detected)"
                     return False
 
-                task.status = TaskStatus.COMPLETED
-                try:
-                    # If the agent produced tool evidence, it may include artifact refs.
-                    if isinstance(task.result, str) and "outside allowed workspace roots" in task.result.lower():
-                        maybe_record_known_failure_from_error(error_text=task.result)
-                except Exception:
-                    pass
-                return True
+            task.status = TaskStatus.COMPLETED
+
+            # Display completion status
+            action_type = (task.action_type or "general").upper()
+            task_desc = task.description or ""
+            print(f"  {colorize('✓', Colors.BRIGHT_GREEN)} {colorize('COMPLETED', Colors.BRIGHT_GREEN, bold=True)} {task_desc}")
+
+            try:
+                # If the agent produced tool evidence, it may include artifact refs.
+                if isinstance(task.result, str) and "outside allowed workspace roots" in task.result.lower():
+                    maybe_record_known_failure_from_error(error_text=task.result)
+            except Exception:
+                pass
+            return True
         except Exception as e:
             task.status = TaskStatus.FAILED
             tb = traceback.format_exc()

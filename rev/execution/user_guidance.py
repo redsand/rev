@@ -65,6 +65,21 @@ def request_user_guidance(
         error_preview = task.error[:150].replace('\n', ' ')
         print(f"{colorize('Last Error:', Colors.BRIGHT_CYAN)} {error_preview}")
 
+        # Provide specific debugging hints based on error type
+        error_lower = str(task.error).lower()
+        if "corrupt patch" in error_lower or "patch fragment" in error_lower:
+            print(f"{colorize('💡 Hint:', Colors.BRIGHT_YELLOW)} This model may not support unified diff patches.")
+            print(f"   Try: Use 'replace_in_file' or 'write_file' instead, or switch to a different model")
+        elif "cannot find package" in error_lower or "err_module_not_found" in error_lower:
+            print(f"{colorize('💡 Hint:', Colors.BRIGHT_YELLOW)} Missing npm dependency detected.")
+            print(f"   Try: Run 'npm install <missing-package>' or add it to package.json devDependencies")
+        elif "command failed (rc=2)" in error_lower:
+            print(f"{colorize('💡 Hint:', Colors.BRIGHT_YELLOW)} Validation command is failing.")
+            print(f"   Try: Check if linter/build config has missing dependencies")
+        elif "tool_noop" in error_lower or "made no changes" in error_lower:
+            print(f"{colorize('💡 Hint:', Colors.BRIGHT_YELLOW)} Tool executed but made no changes.")
+            print(f"   Try: File might already be correct, or search string doesn't match")
+
     # Try to use TUI if available
     from rev.terminal.tui import get_active_tui
     tui = get_active_tui()

@@ -5,7 +5,7 @@
 import re
 import threading
 from enum import Enum
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 from rev import config
 
@@ -722,11 +722,12 @@ class ExecutionPlan:
             if task.task_id is not None and task.task_id == self.current_index:
                 self.current_index += 1
 
-    def save_checkpoint(self, filepath: str = None):
+    def save_checkpoint(self, filepath: str = None, agent_state: Dict[str, Any] = None):
         """Save the current execution state to a checkpoint file.
 
         Args:
             filepath: Path to save checkpoint. If None, uses default location.
+            agent_state: Optional agent state dict to persist (e.g., recovery_attempts)
         """
         import json
         import os
@@ -739,10 +740,22 @@ class ExecutionPlan:
             filepath = os.path.join(checkpoint_dir, f"checkpoint_{timestamp}.json")
 
         checkpoint_data = {
-            "version": "1.0",
+            "version": "1.1",  # Bumped version for agent_state support
             "timestamp": datetime.now().isoformat(),
             "plan": self.to_dict()
         }
+
+        # Include agent_state if provided (for recovery_attempts persistence)
+        if agent_state:
+            # Only persist recovery-related state, not transient data
+            persistent_keys = [
+                "total_recovery_attempts",
+                "recovery_attempts",
+                "task_recovery_counts",
+            ]
+            filtered_state = {k: v for k, v in agent_state.items() if k in persistent_keys}
+            if filtered_state:
+                checkpoint_data["agent_state"] = filtered_state
 
         with open(filepath, "w") as f:
             json.dump(checkpoint_data, f, indent=2)
@@ -750,14 +763,14 @@ class ExecutionPlan:
         return filepath
 
     @classmethod
-    def load_checkpoint(cls, filepath: str) -> 'ExecutionPlan':
+    def load_checkpoint(cls, filepath: str) -> Tuple['ExecutionPlan', Dict[str, Any]]:
         """Load an execution plan from a checkpoint file.
 
         Args:
             filepath: Path to the checkpoint file
 
         Returns:
-            ExecutionPlan restored from checkpoint
+            Tuple of (ExecutionPlan, agent_state dict) restored from checkpoint
         """
         import json
 
@@ -765,7 +778,8 @@ class ExecutionPlan:
             checkpoint_data = json.load(f)
 
         plan = cls.from_dict(checkpoint_data["plan"])
-        return plan
+        agent_state = checkpoint_data.get("agent_state", {})
+        return plan, agent_state
 
     @classmethod
     def list_checkpoints(cls, checkpoint_dir: str = str(config.CHECKPOINTS_DIR)) -> List[Dict[str, Any]]:
