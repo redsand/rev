@@ -4,8 +4,7 @@
 
 from __future__ import annotations
 
-import curses
-import curses.textpad
+import importlib.util
 import threading
 import queue
 import time
@@ -15,11 +14,26 @@ import os.path
 from pathlib import Path
 from typing import Callable, Optional
 
+if importlib.util.find_spec("curses") is not None:  # pragma: no cover - platform dependent
+    import curses
+    import curses.textpad
+else:  # pragma: no cover - platform dependent
+    curses = None
+
 from rev.terminal.input import _get_command_suggestions
 
 
 # Global reference to active TUI instance (for menu callbacks)
 _active_tui: Optional['TUI'] = None
+
+
+def _require_curses() -> None:
+    if curses is None:
+        raise RuntimeError(
+            "The curses module is unavailable on this platform. "
+            "Install a compatible curses package (e.g., windows-curses on Windows) "
+            "or run without TUI mode."
+        )
 
 
 def get_active_tui() -> Optional['TUI']:
@@ -174,6 +188,7 @@ class TUI:
 
     def run(self, on_input: Callable[[str], None], *, initial_input: Optional[str] = None, on_feedback: Optional[Callable[[str], bool]] = None) -> None:
         """Start the curses UI and dispatch input lines to on_input."""
+        _require_curses()
         global _active_tui
         _active_tui = self  # Set global reference
 
@@ -390,6 +405,7 @@ class TUI:
         Returns:
             The index of the selected option (0-based), or -1 if cancelled
         """
+        _require_curses()
         if not hasattr(self, '_stdscr') or self._stdscr is None:
             # TUI not initialized yet, fall back to index 0
             return 0
