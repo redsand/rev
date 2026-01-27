@@ -1124,12 +1124,18 @@ def _verify_file_creation(task: Task, context: RevContext) -> VerificationResult
     details["file_path"] = str(file_path)
 
     if file_size == 0:
-        return VerificationResult(
-            passed=False,
-            message=f"File created but is empty: {file_path}",
-            details=details,
-            should_replan=True
-        )
+        # Allow empty files in lenient mode, reject in moderate/strict
+        if config.VERIFICATION_STRICTNESS == "lenient":
+            print(f"  [WARNING] File created but is empty: {file_path} (allowed in lenient mode)")
+            details["empty_allowed"] = True
+            # Continue verification - don't return failure
+        else:
+            return VerificationResult(
+                passed=False,
+                message=f"File created but is empty: {file_path}",
+                details=details,
+                should_replan=True
+            )
 
     # CRITICAL CHECK: Detect similar/duplicate files and fail verification
     # This forces replanning to extend existing files instead of creating duplicates

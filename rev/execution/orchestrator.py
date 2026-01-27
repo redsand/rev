@@ -4535,7 +4535,13 @@ class Orchestrator:
                 transformation_count = self.context.agent_state.get("transformation_count", 0)
                 was_transformed = False
 
-                if action_counts[action_sig] >= 2:
+                research_action_types = {"read", "analyze", "research", "investigate", "general", "verify"}
+                is_research_task = (next_task.action_type or "").lower() in research_action_types
+
+                # Be more lenient with research tasks (allow 3 identical actions instead of 2)
+                threshold = 3 if is_research_task else 2
+
+                if action_counts[action_sig] >= threshold:
                     # This is a redundant action - need to transform it
                     if transformation_count >= 3:
                         # Too many transformations - trigger circuit breaker instead
@@ -5140,7 +5146,7 @@ class Orchestrator:
                 return False
             if (
                 config.LOOP_GUARD_ENABLED
-                and action_counts[action_sig] == 2
+                and action_counts[action_sig] >= 3  # Increased from 2 to 3 for research tasks
                 and (next_task.action_type or "").lower() in {"read", "analyze", "research"}
             ):
                 print("  [loop-guard] Repeated READ/ANALYZE detected; checking if goal is achieved.")

@@ -14,10 +14,10 @@ import os.path
 from pathlib import Path
 from typing import Callable, Optional
 
-if importlib.util.find_spec("curses") is not None:  # pragma: no cover - platform dependent
+try:
     import curses
     import curses.textpad
-else:  # pragma: no cover - platform dependent
+except ImportError:  # pragma: no cover - platform dependent
     curses = None
 
 from rev.terminal.input import _get_command_suggestions
