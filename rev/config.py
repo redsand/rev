@@ -444,8 +444,8 @@ MAX_FILE_BYTES = 5 * 1024 * 1024
 READ_RETURN_LIMIT = 80_000
 SEARCH_MATCH_LIMIT = 2000
 LIST_LIMIT = 2000
-MAX_READ_FILE_PER_TASK = int(os.getenv("REV_MAX_READ_FILE_PER_TASK", "999"))
-MAX_SEARCH_CODE_PER_TASK = int(os.getenv("REV_MAX_SEARCH_CODE_PER_TASK", "999"))
+MAX_READ_FILE_PER_TASK = int(os.getenv("REV_MAX_READ_FILE_PER_TASK", "9999"))
+MAX_SEARCH_CODE_PER_TASK = int(os.getenv("REV_MAX_SEARCH_CODE_PER_TASK", "9999"))
 MAX_RUN_CMD_PER_TASK = int(os.getenv("REV_MAX_RUN_CMD_PER_TASK", "999"))
 MAX_EXECUTION_ITERATIONS = int(os.getenv("REV_MAX_EXEC_ITER", "45"))
 MAX_TASK_ITERATIONS = int(os.getenv("REV_MAX_TASK_ITER", "45"))
@@ -468,8 +468,8 @@ TDD_DEFER_TEST_EXECUTION = os.getenv("REV_TDD_DEFER_TESTS", "true").strip().lowe
 
 # Uncertainty detection - prompts user for guidance when Rev is uncertain
 UNCERTAINTY_DETECTION_ENABLED = os.getenv("REV_UNCERTAINTY_DETECTION_ENABLED", "true").strip().lower() == "true"
-UNCERTAINTY_THRESHOLD = int(os.getenv("REV_UNCERTAINTY_THRESHOLD", "5"))  # Score to trigger guidance request
-UNCERTAINTY_AUTO_SKIP_THRESHOLD = int(os.getenv("REV_UNCERTAINTY_AUTO_SKIP_THRESHOLD", "10"))  # Score to auto-skip
+UNCERTAINTY_THRESHOLD = int(os.getenv("REV_UNCERTAINTY_THRESHOLD", "8"))  # Score to trigger guidance request
+UNCERTAINTY_AUTO_SKIP_THRESHOLD = int(os.getenv("REV_UNCERTAINTY_AUTO_SKIP_THRESHOLD", "15"))  # Score to auto-skip
 
 EXCLUDE_DIRS = {
     ".git", ".hg", ".svn", ".idea", ".vscode", "__pycache__", ".pytest_cache",
@@ -493,8 +493,18 @@ VALIDATION_TIMEOUT_SECONDS = int(os.getenv("REV_VALIDATION_TIMEOUT", "180"))
 
 # ContextGuard Configuration
 ENABLE_CONTEXT_GUARD = os.getenv("REV_ENABLE_CONTEXT_GUARD", "true").lower() == "true"
-CONTEXT_GUARD_INTERACTIVE = os.getenv("REV_CONTEXT_GUARD_INTERACTIVE", "true").lower() == "true"
+CONTEXT_GUARD_INTERACTIVE = os.getenv("REV_CONTEXT_GUARD_INTERACTIVE", "false").lower() == "true"
 CONTEXT_GUARD_THRESHOLD = float(os.getenv("REV_CONTEXT_GUARD_THRESHOLD", "0.3"))
+
+# Review configuration
+REVIEW_STRICTNESS_DEFAULT = os.getenv("REV_REVIEW_STRICTNESS", "lenient").lower()
+if REVIEW_STRICTNESS_DEFAULT not in ("lenient", "moderate", "strict"):
+    REVIEW_STRICTNESS_DEFAULT = "lenient"
+
+# Verification configuration
+VERIFICATION_STRICTNESS = os.getenv("REV_VERIFICATION_STRICTNESS", "lenient").lower()
+if VERIFICATION_STRICTNESS not in ("lenient", "moderate", "strict"):
+    VERIFICATION_STRICTNESS = "lenient"
 
 # Logging configuration
 LOG_RETENTION_LIMIT_DEFAULT = int(os.getenv("REV_LOG_RETENTION", "7"))

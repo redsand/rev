@@ -140,8 +140,8 @@ def main():
     parser.add_argument(
         "--review-strictness",
         choices=["lenient", "moderate", "strict"],
-        default="moderate",
-        help="Review agent strictness level (default: moderate)"
+        default=config.REVIEW_STRICTNESS_DEFAULT,
+        help=f"Review agent strictness level (default: {config.REVIEW_STRICTNESS_DEFAULT})"
     )
     parser.add_argument(
         "--action-review",

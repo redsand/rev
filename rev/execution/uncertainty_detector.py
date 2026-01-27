@@ -328,6 +328,21 @@ def detect_uncertainty(
     # Calculate total score
     total_score = sum(signal.score for signal in all_signals)
 
+    # Reduce uncertainty score for research/read tasks (they're exploratory by nature)
+    research_action_types = {"read", "analyze", "research", "investigate", "general", "verify"}
+    task_action = (task.action_type or "").lower()
+    if task_action in research_action_types:
+        # Reduce score by 40% for research tasks
+        total_score = int(total_score * 0.6)
+        # Also add a note about research context
+        if all_signals:
+            all_signals.append(UncertaintySignal(
+                signal_type="research_context",
+                reason="Research task - uncertainty scores reduced",
+                score=0,
+                context={"action_type": task_action}
+            ))
+
     return total_score, all_signals
 
 
