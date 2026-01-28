@@ -5311,26 +5311,9 @@ class Orchestrator:
                         )
                         continue  # Skip to next iteration
 
-            # PERFORMANCE FIX 1: Block excessive consecutive research
-            if consecutive_reads >= MAX_CONSECUTIVE_READS and action_type_normalized in {'read', 'analyze', 'research', 'investigate', 'review'}:
-                print(f"  [research-budget-exceeded] {consecutive_reads} consecutive research tasks - forcing action phase")
-                # Force re-planning with constraint
-                forced_next_task = None  # Clear any forced task
-                # Add to failure notes for next planning iteration
-                self.context.add_agent_request(
-                    "RESEARCH_BUDGET_EXHAUSTED",
-                    {
-                        "agent": "Orchestrator",
-                        "reason": f"Research budget exhausted ({consecutive_reads} consecutive READ tasks)",
-                        "detailed_reason": (
-                            "RESEARCH BUDGET EXHAUSTED: You have completed extensive research. "
-                            "You MUST now propose a concrete action task (EDIT/ADD/TEST/DELETE), NOT another READ/ANALYZE/RESEARCH. "
-                            "All necessary context is available in the completed tasks."
-                        )
-                    }
-                )
-                consecutive_reads = 0  # Reset counter
-                continue  # Skip to next iteration with constraint
+            # REMOVED: Consecutive reads guard (PERFORMANCE FIX 1)
+            # Previous: forced action phase after MAX_CONSECUTIVE_READS (40) consecutive research tasks
+            # Removed to allow uninterrupted research - agent determines when to stop
 
             # P0-3: Circuit breaker based on CONSECUTIVE streak, not total count
             if repeat_same_action >= 3:
@@ -5409,12 +5392,12 @@ class Orchestrator:
                         matches = re.findall(read_file_pattern, task.description or "", re.IGNORECASE)
                         recent_read_files.extend(matches)
 
-                # Check if the same file has been read 3+ times
+                # Check if the same file has been read 5+ times (threshold increased from 2 to 5)
                 from collections import Counter
                 file_counts = Counter(recent_read_files)
                 most_read_file, read_count = file_counts.most_common(1)[0] if file_counts else (None, 0)
 
-                if read_count >= 2:
+                if read_count >= 5:
                     print(f"  [loop-guard] File '{most_read_file}' has been read {read_count} times - suggesting alternative approach.")
                     next_task.action_type = "debug"
                     next_task.description = (
