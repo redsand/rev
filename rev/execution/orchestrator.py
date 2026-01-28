@@ -5281,13 +5281,15 @@ class Orchestrator:
                 repeat_same_action = 1
                 last_task_signature = f"analyze::{next_task.description.strip().lower()}"
 
-            # PERFORMANCE FIX 3: Block redundant file reads (same file 2+ times)
+            # PERFORMANCE FIX 3: Block redundant file reads (same file 5+ times)
+            # Threshold increased from 2 to 5 to allow legitimate re-reading during debugging
             if action_type_normalized in {'read', 'analyze', 'research'}:
                 target_file = _extract_file_path_from_description(next_task.description)
                 if target_file:
                     # Count how many times this file has been read
                     read_count = _count_file_reads(target_file, completed_tasks)
-                    if read_count >= 2:
+                    # Increased threshold: only block after 5 reads (was 2)
+                    if read_count >= 5:
                         print(f"  [redundant-read] File '{target_file}' already read {read_count}x - BLOCKING")
                         # Block this specific action
                         blocked_sigs.add(action_sig)
