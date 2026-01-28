@@ -18,6 +18,7 @@ from rev.debug_logger import get_logger
 from rev.tools.permissions import get_permission_manager
 from rev.workspace import get_workspace
 from rev.tools.workspace_resolver import resolve_workspace_path, WorkspacePathError
+from rev.tools.errors import ToolError, ToolErrorType
 
 if TYPE_CHECKING:  # pragma: no cover - used only for type hints
     from rev.execution.timeout_manager import TimeoutManager, TimeoutConfig
@@ -861,6 +862,33 @@ def _normalize_args(args: dict, tool_name: str) -> dict:
     return normalized
 
 
+def _format_tool_error(error: Exception, tool_name: str) -> str:
+    """Format a tool error using unified ToolError structure.
+
+    This function converts any exception into a standardized ToolError format
+    for consistent error handling across all tools.
+
+    Args:
+        error: The exception that occurred
+        tool_name: Name of the tool that failed
+
+    Returns:
+        JSON string containing the ToolError structure
+    """
+    try:
+        # Use ToolError.from_exception to create structured error
+        tool_error = ToolError.from_exception(error, tool_name)
+        return json.dumps(tool_error.to_dict())
+    except Exception:
+        # Fallback to simple error format if ToolError creation fails
+        return json.dumps({
+            "error": f"{tool_name}: {str(error)}",
+            "error_type": "unknown",
+            "recoverable": True,
+            "suggested_recovery": [],
+        })
+
+
 def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "executor") -> str:
     """Execute a tool and return result.
 
@@ -1070,16 +1098,16 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "executor") 
                     ledger.record(name, args, result, duration, agent_name)
                     return result
                 except Exception as e:
-                    # Timeout or max retries exceeded
-                    error_msg = f"{type(e).__name__}: {e}"
-                    debug_logger.log_tool_execution(name, args, error=error_msg)
+                    # Timeout or max retries exceeded - use unified error format
+                    error_json = _format_tool_error(e, name)
+                    debug_logger.log_tool_execution(name, args, error=str(e))
                     debug_logger.log_transaction_event("TOOL_ERROR", {
                         "tool": name,
                         "arguments": args,
-                        "error": error_msg
+                        "error": str(e)
                     })
-                    ledger.record(name, args, error_msg, (time.time() - start_time) * 1000, agent_name, status="error")
-                    return json.dumps({"error": error_msg})
+                    ledger.record(name, args, str(e), (time.time() - start_time) * 1000, agent_name, status="error")
+                    return error_json
 
         # Execute the tool handler without timeout protection
         result = handler(args)
@@ -1095,15 +1123,16 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "executor") 
         return result
 
     except Exception as e:
-        error_msg = f"{type(e).__name__}: {e}"
-        debug_logger.log_tool_execution(name, args, error=error_msg)
+        # Use unified error format for all exceptions
+        error_json = _format_tool_error(e, name)
+        debug_logger.log_tool_execution(name, args, error=str(e))
         debug_logger.log_transaction_event("TOOL_ERROR", {
             "tool": name,
             "arguments": args,
-            "error": error_msg
+            "error": str(e)
         })
-        ledger.record(name, args, error_msg, (time.time() - start_time) * 1000, agent_name, status="error")
-        return json.dumps({"error": error_msg})
+        ledger.record(name, args, str(e), (time.time() - start_time) * 1000, agent_name, status="error")
+        return error_json
 
 
 def get_available_tools() -> list:
