@@ -471,6 +471,10 @@ UNCERTAINTY_DETECTION_ENABLED = os.getenv("REV_UNCERTAINTY_DETECTION_ENABLED", "
 UNCERTAINTY_THRESHOLD = int(os.getenv("REV_UNCERTAINTY_THRESHOLD", "8"))  # Score to trigger guidance request
 UNCERTAINTY_AUTO_SKIP_THRESHOLD = int(os.getenv("REV_UNCERTAINTY_AUTO_SKIP_THRESHOLD", "15"))  # Score to auto-skip
 
+# Deep reasoning mode - use DeepReasoningAgent for complex tasks
+DEEP_REASONING_ENABLED = os.getenv("REV_DEEP_REASONING_ENABLED", "false").strip().lower() == "true"
+DEEP_REASONING_COMPLEXITY_THRESHOLD = int(os.getenv("REV_DEEP_REASONING_COMPLEXITY_THRESHOLD", "7"))  # 1-10 scale
+
 EXCLUDE_DIRS = {
     ".git", ".hg", ".svn", ".idea", ".vscode", "__pycache__", ".pytest_cache",
     "node_modules", "dist", "build", ".next", "out", "coverage", ".cache",

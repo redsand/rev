@@ -9,6 +9,7 @@ from rev.agents.research import ResearchAgent
 from rev.agents.analysis import AnalysisAgent
 from rev.agents.tool_creation import ToolCreationAgent
 from rev.agents.tool_executor import ToolExecutorAgent
+from rev.agents.deep_reasoning import DeepReasoningAgent
 
 class AgentRegistry:
     """
@@ -73,3 +74,7 @@ AgentRegistry.register_agent("set_workdir", ResearchAgent)
 # Advanced agents
 AgentRegistry.register_agent("create_tool", ToolCreationAgent)
 AgentRegistry.register_agent("tool", ToolExecutorAgent)
+
+# Deep reasoning agent (for complex multi-step tasks)
+AgentRegistry.register_agent("deep_reasoning", DeepReasoningAgent)
+AgentRegistry.register_agent("complex", DeepReasoningAgent)  # Alias
