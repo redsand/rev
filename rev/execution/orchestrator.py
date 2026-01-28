@@ -18,6 +18,7 @@ and that validation is performed after each implementation step.
 """
 
 import os
+import hashlib
 from datetime import datetime
 import json
 import time
@@ -135,6 +136,63 @@ def _format_verification_feedback(result: VerificationResult) -> str:
         feedback += f"\n\nDebug Info:\n{json.dumps(details['debug'], indent=2)}"
 
     return feedback
+
+
+def _compute_code_state_hash(modified_files: List[str] = None) -> str:
+    """Compute a hash of the current code state based on modified files.
+
+    This allows test deduplication to be more accurate - tests should only be
+    deduped if both the test signature AND the code state match.
+
+    Args:
+        modified_files: List of file paths that were modified (optional)
+                      If None, will compute hash of all tracked modified files
+
+    Returns:
+        A hash string representing the current code state
+    """
+    workspace = get_workspace()
+    root = workspace.root
+
+    # Collect file content hashes
+    hasher = hashlib.sha256()
+
+    if modified_files:
+        # Use provided modified files list
+        files_to_hash = [root / f for f in modified_files]
+    else:
+        # Get modified files from recent git status or all files in common dirs
+        import subprocess
+        try:
+            # Try to get modified files from git
+            result = subprocess.run(
+                ["git", "diff", "--name-only"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            modified = result.stdout.strip().splitlines()
+            files_to_hash = [root / f for f in modified if f]
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            # Fallback: hash all Python/JS files in common directories
+            files_to_hash = []
+            for pattern in ["*.py", "*.js", "*.ts", "*.jsx", "*.tsx", "*.vue"]:
+                files_to_hash.extend(root.rglob(pattern))
+
+    # Compute hash of file contents
+    for file_path in sorted(set(files_to_hash)):  # Sort for deterministic hash
+        if file_path.is_file() and file_path.exists():
+            try:
+                # Include file path and content for hash
+                content = file_path.read_text(errors="ignore")
+                hasher.update(str(file_path.relative_to(root)).encode())
+                hasher.update(content.encode())
+            except Exception:
+                # Skip files that can't be read
+                continue
+
+    return hasher.hexdigest()[:16]  # Short hash for efficiency
 
 
 def _extract_critical_lint_errors(lint_output: str) -> str:
@@ -5046,7 +5104,8 @@ class Orchestrator:
                             blocked = {}
                         signature = f"read::{(next_task.description or '').strip().lower()}"
                         blocked[signature] = {
-                            "code_change_iteration": self.context.agent_state.get("last_code_change_iteration", -1)
+                            "code_change_iteration": self.context.agent_state.get("last_code_change_iteration", -1),
+                            "code_hash": _compute_code_state_hash(),
                         }
                         self.context.set_agent_state(missing_key, blocked)
                         continue
@@ -5099,6 +5158,7 @@ class Orchestrator:
                     if not isinstance(seen_sim, list):
                         seen_sim = []
                     canonical = None
+                    current_code_hash = _compute_code_state_hash()
                     if stem:
                         for entry in seen_sim:
                             try:
@@ -5106,6 +5166,7 @@ class Orchestrator:
                                     entry.get("stem") == stem
                                     and entry.get("code_change_iteration") == last_code_change_iteration
                                     and entry.get("path") != test_path
+                                    and entry.get("code_hash") == current_code_hash
                                 ):
                                     canonical = entry.get("path")
                                     break
@@ -5142,29 +5203,36 @@ class Orchestrator:
                                 f"Duplicate test detected: {test_path} is similar to {canonical}. Consider removing or archiving the duplicate."
                             )
                         continue
-                    else:
-                        if stem:
-                            seen_sim.append({
-                                "stem": stem,
-                                "path": test_path,
-                                "code_change_iteration": last_code_change_iteration,
-                            })
-                            self.context.set_agent_state("test_similarity_seen", seen_sim)
+                    # Store similarity entry with current code state hash (calculated before)
+                    if stem:
+                        seen_sim.append({
+                            "stem": stem,
+                            "path": test_path,
+                            "code_change_iteration": last_code_change_iteration,
+                            "code_hash": current_code_hash,
+                        })
+                        self.context.set_agent_state("test_similarity_seen", seen_sim)
 
                 # Allow first-run tests (code_change_iter = -1); only dedupe when we have a valid code-change iteration.
+                # Also check code state hash to ensure tests rerun when code actually changes.
+                seen_code_hash = seen_data.get("code_hash") if isinstance(seen_data, dict) else None
+
                 if (
                     isinstance(last_code_change_iteration, int)
                     and isinstance(seen_at, int)
                     and last_code_change_iteration >= 0
                     and last_code_change_iteration == seen_at
+                    and seen_code_hash is not None
+                    and seen_code_hash == current_code_hash
                 ):
-                    # print(f"  [test-dedupe] Skipping duplicate test task with signature: {signature} (code_change_iter={last_code_change_iteration})")
+                    # print(f"  [test-dedupe] Skipping duplicate test task with signature: {signature} (code_change_iter={last_code_change_iteration}, code_hash={current_code_hash})")
                     next_task.status = TaskStatus.STOPPED
                     next_task.result = json.dumps({
                         "skipped": True,
                         "reason": "duplicate test signature since last code change",
                         "signature": signature,
                         "code_change_iteration": last_code_change_iteration,
+                        "code_hash": current_code_hash,
                     })
                     completed_tasks_log.append(f"[STOPPED] {next_task.description} | Reason: duplicate test signature (code_change_iter={last_code_change_iteration})")
                     _record_test_signature_state(self.context, signature, "blocked")
@@ -5181,7 +5249,13 @@ class Orchestrator:
                     completed_tasks_log.append(f"[STOPPED] {next_task.description} | Reason: test signature blocked (code_change_iter={last_code_change_iteration})")
                     _record_test_signature_state(self.context, signature, "blocked")
                     continue
-                seen_tests[signature] = {"code_change_iteration": last_code_change_iteration}
+
+                # Store test signature with current code state hash
+                current_code_hash = _compute_code_state_hash()
+                seen_tests[signature] = {
+                    "code_change_iteration": last_code_change_iteration,
+                    "code_hash": current_code_hash,
+                }
                 self.context.set_agent_state("test_signature_seen", seen_tests)
 
             # Get or initialize blocked_action_sigs from context
