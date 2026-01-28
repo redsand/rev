@@ -3284,6 +3284,151 @@ class Orchestrator:
             if config.EXECUTION_MODE != 'sub-agent':
                 print(f"\nðŸ”¸ Entering phase: {new_phase.value}")
 
+    def _should_use_deep_reasoning(self, user_request: str) -> Tuple[bool, int]:
+        """Determine if a task should use DeepReasoningAgent based on complexity.
+
+        Returns:
+            Tuple of (should_use_deep_reasoning, complexity_score_1_to_10)
+        """
+        if not config.DEEP_REASONING_ENABLED:
+            return False, 0
+
+        # Complexity detection logic
+        complexity = 3  # Baseline
+
+        # Length-based complexity
+        word_count = len(user_request.split())
+        if word_count > 50:
+            complexity += 2
+        elif word_count > 100:
+            complexity += 3
+
+        # Keyword-based complexity
+        complex_keywords = [
+            "refactor", "restructure", "reorganize", "architecture", "system",
+            "integrate", "multiple", "complex", "difficult", "challenging",
+            "redesign", "migration", "port", "rewrite", "overhaul"
+        ]
+        desc_lower = user_request.lower()
+        for keyword in complex_keywords:
+            if keyword in desc_lower:
+                complexity += 1
+
+        # Multi-step indicators
+        multi_step_indicators = [
+            "first", "then", "next", "after", "step", "phase", "part",
+            "implement", "and", "also", "additionally", "furthermore"
+        ]
+        indicator_count = sum(1 for indicator in multi_step_indicators if indicator in desc_lower)
+        if indicator_count >= 3:
+            complexity += 1
+
+        # Scope indicators
+        scope_indicators = [
+            "entire", "whole", "all", "complete", "full", "system",
+            "project", "codebase", "repository"
+        ]
+        if any(indicator in desc_lower for indicator in scope_indicators):
+            complexity += 2
+
+        complexity = min(max(complexity, 1), 10)
+
+        should_use = complexity >= config.DEEP_REASONING_COMPLEXITY_THRESHOLD
+
+        if should_use:
+            print(f"  [DeepReasoning] Task complexity {complexity}/10 ≥ threshold {config.DEEP_REASONING_COMPLEXITY_THRESHOLD}")
+            print(f"  [DeepReasoning] Routing to DeepReasoningAgent for comprehensive analysis")
+
+        return should_use, complexity
+
+    def _handle_deep_reasoning_result(self, task: Task) -> bool:
+        """Process deep reasoning result and update context with execution plan.
+
+        Returns:
+            True if deep reasoning was successfully processed, False otherwise.
+        """
+        if not task.result:
+            print(f"  [DeepReasoning] No result from deep reasoning task")
+            return False
+
+        try:
+            # Parse the result - could be JSON string or plain text
+            result_text = task.result
+            if isinstance(result_text, str):
+                # Try to parse as JSON
+                try:
+                    result_data = json.loads(result_text)
+                except json.JSONDecodeError:
+                    # Not JSON, treat as plain text
+                    result_data = {"raw_content": result_text}
+            else:
+                result_data = {"raw_content": str(result_text)}
+
+            print(f"  [DeepReasoning] Processing deep reasoning result")
+
+            # Extract deep plan if present
+            deep_plan = None
+            if isinstance(result_data, dict):
+                if "deep_plan" in result_data:
+                    deep_plan = result_data["deep_plan"]
+                elif "delegation_instructions" in result_data:
+                    deep_plan = result_data
+                elif "execution_plan" in result_data:
+                    deep_plan = result_data
+
+            if deep_plan:
+                # Store deep plan in context for future reference
+                self.context.set_agent_state("deep_reasoning_plan", deep_plan)
+
+                # Extract execution plan tasks if available
+                execution_plan = deep_plan.get("execution_plan", [])
+                if execution_plan and isinstance(execution_plan, list):
+                    print(f"  [DeepReasoning] Found {len(execution_plan)} suggested tasks in deep plan")
+
+                    # Convert suggested tasks to Task objects and inject them
+                    injected_tasks = []
+                    for i, suggested_task in enumerate(execution_plan):
+                        if isinstance(suggested_task, dict):
+                            action_type = suggested_task.get("agent", suggested_task.get("action_type", "general"))
+                            description = suggested_task.get("task", suggested_task.get("description", ""))
+                            priority = suggested_task.get("priority", "medium")
+
+                            if description:
+                                task_obj = Task(
+                                    description=description,
+                                    action_type=action_type.lower()
+                                )
+                                # Mark as from deep reasoning
+                                task_obj._source = "deep_reasoning"
+                                injected_tasks.append(task_obj)
+
+                    if injected_tasks:
+                        # Store injected tasks for the orchestrator to process
+                        self.context.set_agent_state("deep_reasoning_injected_tasks", injected_tasks)
+                        print(f"  [DeepReasoning] Prepared {len(injected_tasks)} tasks for execution")
+
+                # Store reasoning insights
+                reasoning_steps = deep_plan.get("reasoning_steps", [])
+                if reasoning_steps:
+                    self.context.set_agent_state("deep_reasoning_insights", reasoning_steps)
+                    print(f"  [DeepReasoning] Captured {len(reasoning_steps)} reasoning steps")
+
+                # Store chosen approach
+                chosen_approach = deep_plan.get("chosen_approach", "")
+                if chosen_approach:
+                    self.context.set_agent_state("deep_reasoning_approach", chosen_approach)
+                    print(f"  [DeepReasoning] Chosen approach: {chosen_approach[:100]}...")
+
+            # Mark task as completed successfully
+            task.status = TaskStatus.COMPLETED
+            return True
+
+        except Exception as e:
+            print(f"  [DeepReasoning] Error processing deep reasoning result: {e}")
+            task.status = TaskStatus.FAILED
+            task.error = f"Failed to process deep reasoning result: {e}"
+            return False
+
     def _transform_redundant_action(self, task: Task, action_sig: str, count: int) -> Task:
         """Transform a redundant action into one that produces new evidence."""
         desc = task.description.lower()
@@ -4243,6 +4388,15 @@ class Orchestrator:
         forced_next_task: Optional[Task] = None
         pending_resume_tasks: List[Task] = []
         pending_injected_tasks: List[Task] = []
+
+        # Load deep reasoning injected tasks if available
+        deep_reasoning_tasks = self.context.agent_state.get("deep_reasoning_injected_tasks", [])
+        if deep_reasoning_tasks:
+            pending_injected_tasks.extend(deep_reasoning_tasks)
+            print(f"  [DeepReasoning] Added {len(deep_reasoning_tasks)} tasks from deep reasoning plan")
+            # Clear to avoid re-adding
+            self.context.agent_state.pop("deep_reasoning_injected_tasks", None)
+
         budget_warning_shown: bool = False
 
         # PERFORMANCE FIX 1: Track consecutive research tasks to prevent endless loops
@@ -4270,6 +4424,19 @@ class Orchestrator:
             self.context.set_agent_state("write_signature_state", {})
             # Code-change iteration is unknown on resume; permit initial listings
             self.context.set_agent_state("last_code_change_iteration", 0)
+
+        # Check if task should use DeepReasoningAgent
+        should_use_deep_reasoning, complexity_score = self._should_use_deep_reasoning(user_request)
+        if should_use_deep_reasoning and iteration == len(self.context.plan.tasks) and forced_next_task is None:
+            print(f"  [DeepReasoning] Complex task detected (score: {complexity_score}/10)")
+            print(f"  [DeepReasoning] Injecting deep reasoning task for comprehensive analysis")
+            forced_next_task = Task(
+                description=f"Perform deep reasoning analysis for: {user_request}",
+                action_type="deep_reasoning"
+            )
+            forced_next_task.task_id = -1  # Special ID for deep reasoning task
+            # Store complexity score in context for the agent
+            self.context.set_agent_state("task_complexity", complexity_score)
 
         while True:
             iteration += 1
@@ -5412,6 +5579,16 @@ class Orchestrator:
                 execution_success = True
             else:
                 execution_success = self._dispatch_to_sub_agents(self.context, next_task)
+
+            # Handle deep reasoning results (skip verification)
+            if execution_success and (next_task.action_type or "").lower() == "deep_reasoning":
+                print(f"  [DeepReasoning] Processing deep reasoning results...")
+                if self._handle_deep_reasoning_result(next_task):
+                    # Deep reasoning completed successfully, continue to next iteration
+                    continue
+                else:
+                    # Deep reasoning failed, mark as failed and continue
+                    execution_success = False
 
             # STEP 3: VERIFY - This is the critical addition
             if execution_success and not deferred_tdd_test:

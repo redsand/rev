@@ -144,6 +144,29 @@ def main():
         help=f"Review agent strictness level (default: {config.REVIEW_STRICTNESS_DEFAULT})"
     )
     parser.add_argument(
+        "--verification-strictness",
+        choices=["lenient", "moderate", "strict"],
+        default=config.VERIFICATION_STRICTNESS,
+        help=f"Verification agent strictness level (default: {config.VERIFICATION_STRICTNESS})"
+    )
+    parser.add_argument(
+        "--deep-reasoning-enabled",
+        action="store_true",
+        default=None,
+        help="Enable deep reasoning agent for complex tasks (overrides REV_DEEP_REASONING_ENABLED)"
+    )
+    parser.add_argument(
+        "--no-deep-reasoning",
+        action="store_true",
+        help="Disable deep reasoning agent"
+    )
+    parser.add_argument(
+        "--deep-reasoning-complexity-threshold",
+        type=int,
+        default=None,
+        help="Complexity threshold (1-10) for using deep reasoning agent (default: 7)"
+    )
+    parser.add_argument(
         "--action-review",
         action="store_true",
         help="Enable action-level review during execution (reviews each tool call)"
@@ -480,6 +503,52 @@ def main():
         context_guard_interactive = False  # Auto-approve in TUI mode
 
     context_guard_threshold = args.context_guard_threshold
+
+    # Verification strictness configuration
+    # Priority: CLI flags > Environment variables > defaults
+    verification_strictness = config.VERIFICATION_STRICTNESS  # Default from config
+
+    # Check environment variable
+    env_verification = os.getenv("REV_VERIFICATION_STRICTNESS", "").lower()
+    if env_verification in ("lenient", "moderate", "strict"):
+        verification_strictness = env_verification
+
+    # Override with CLI flag (highest priority)
+    if args.verification_strictness:
+        verification_strictness = args.verification_strictness
+
+    config.VERIFICATION_STRICTNESS = verification_strictness
+
+    # Deep reasoning configuration
+    # Priority: CLI flags > Environment variables > defaults
+    deep_reasoning_enabled = config.DEEP_REASONING_ENABLED  # Default from config
+    deep_reasoning_complexity_threshold = config.DEEP_REASONING_COMPLEXITY_THRESHOLD
+
+    # Check environment variables
+    env_enabled = os.getenv("REV_DEEP_REASONING_ENABLED", "").lower()
+    if env_enabled == "true":
+        deep_reasoning_enabled = True
+    elif env_enabled == "false":
+        deep_reasoning_enabled = False
+
+    env_threshold = os.getenv("REV_DEEP_REASONING_COMPLEXITY_THRESHOLD")
+    if env_threshold and env_threshold.isdigit():
+        threshold = int(env_threshold)
+        if 1 <= threshold <= 10:
+            deep_reasoning_complexity_threshold = threshold
+
+    # Override with CLI flags (highest priority)
+    if args.no_deep_reasoning:
+        deep_reasoning_enabled = False
+    if args.deep_reasoning_enabled is not None:
+        deep_reasoning_enabled = args.deep_reasoning_enabled
+    if args.deep_reasoning_complexity_threshold is not None:
+        threshold = args.deep_reasoning_complexity_threshold
+        if 1 <= threshold <= 10:
+            deep_reasoning_complexity_threshold = threshold
+
+    config.DEEP_REASONING_ENABLED = deep_reasoning_enabled
+    config.DEEP_REASONING_COMPLEXITY_THRESHOLD = deep_reasoning_complexity_threshold
 
     config.PREFLIGHT_ENABLED = args.preflight
 
