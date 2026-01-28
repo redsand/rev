@@ -6,6 +6,8 @@ import re
 import threading
 from enum import Enum
 from typing import Dict, Any, List, Optional, Tuple
+from dataclasses import dataclass, field
+from datetime import datetime
 
 from rev import config
 
@@ -55,6 +57,206 @@ class TaskStatus(Enum):
     STOPPED = "stopped"
 
 
+@dataclass
+class TaskStateTransition:
+    """Represents a single state transition in task lifecycle."""
+    from_state: TaskStatus
+    to_state: TaskStatus
+    timestamp: datetime = field(default_factory=datetime.now)
+    reason: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class InvalidTransitionError(Exception):
+    """Raised when an invalid task state transition is attempted."""
+
+    def __init__(self, from_state: TaskStatus, to_state: TaskStatus, reason: str = ""):
+        self.from_state = from_state
+        self.to_state = to_state
+        self.reason = reason
+        super().__init__(f"Invalid transition: {from_state.value} -> {to_state.value}. {reason}")
+
+
+class TaskStateMachine:
+    """State machine for validating and tracking task state transitions.
+
+    This class enforces valid state transitions for tasks and maintains a
+    history of all transitions for debugging and audit purposes.
+
+    Valid Transitions:
+    - PENDING -> IN_PROGRESS (start task)
+    - PENDING -> STOPPED (skip task)
+    - IN_PROGRESS -> COMPLETED (task succeeded)
+    - IN_PROGRESS -> FAILED (task failed)
+    - IN_PROGRESS -> STOPPED (abort task)
+    - FAILED -> IN_PROGRESS (retry task)
+    - STOPPED -> PENDING (replan/resume task)
+    - COMPLETED -> (terminal, no outgoing transitions)
+    """
+
+    # Valid transitions: from_state -> list of allowed to_states
+    VALID_TRANSITIONS: Dict[TaskStatus, List[TaskStatus]] = {
+        TaskStatus.PENDING: [TaskStatus.IN_PROGRESS, TaskStatus.STOPPED],
+        TaskStatus.IN_PROGRESS: [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.STOPPED],
+        TaskStatus.FAILED: [TaskStatus.IN_PROGRESS],
+        TaskStatus.STOPPED: [TaskStatus.PENDING],
+        TaskStatus.COMPLETED: [],  # Terminal state
+    }
+
+    # Terminal states (no valid outgoing transitions)
+    TERMINAL_STATES: frozenset = frozenset([TaskStatus.COMPLETED])
+
+    # Recoverable states (can transition back to IN_PROGRESS)
+    RECOVERABLE_STATES: frozenset = frozenset([TaskStatus.FAILED, TaskStatus.STOPPED])
+
+    def __init__(self, initial_state: TaskStatus = TaskStatus.PENDING):
+        """Initialize the state machine.
+
+        Args:
+            initial_state: Starting state (default: PENDING)
+        """
+        self.current_state = initial_state
+        self.transition_history: List[TaskStateTransition] = []
+
+        # Record initial state
+        self._record_transition(None, initial_state, "Initial state")
+
+    def can_transition(self, to_state: TaskStatus) -> bool:
+        """Check if a transition to the given state is valid.
+
+        Args:
+            to_state: The target state to check
+
+        Returns:
+            True if the transition is valid, False otherwise
+        """
+        return to_state in self.VALID_TRANSITIONS.get(self.current_state, [])
+
+    def transition(self, to_state: TaskStatus, reason: str = "", **kwargs) -> TaskStateTransition:
+        """Transition to a new state.
+
+        Args:
+            to_state: The target state
+            reason: Optional reason for the transition
+            **kwargs: Optional metadata to attach to the transition
+
+        Returns:
+            The created TaskStateTransition
+
+        Raises:
+            InvalidTransitionError: If the transition is not valid
+        """
+        if not self.can_transition(to_state):
+            valid_targets = self.VALID_TRANSITIONS.get(self.current_state, [])
+            raise InvalidTransitionError(
+                self.current_state,
+                to_state,
+                f"Valid transitions from {self.current_state.value} are: {[s.value for s in valid_targets]}"
+            )
+
+        # Extract metadata from kwargs - if metadata is passed as a keyword argument,
+        # use it directly; otherwise use all kwargs as metadata
+        metadata_dict = kwargs.get("metadata", {}) if "metadata" in kwargs else kwargs
+
+        # Record and perform transition
+        transition = self._record_transition(self.current_state, to_state, reason, metadata_dict or {})
+        self.current_state = to_state
+
+        return transition
+
+    def _record_transition(
+        self,
+        from_state: Optional[TaskStatus],
+        to_state: TaskStatus,
+        reason: str = "",
+        metadata: Dict[str, Any] = None
+    ) -> TaskStateTransition:
+        """Record a state transition in the history."""
+        transition = TaskStateTransition(
+            from_state=from_state,
+            to_state=to_state,
+            reason=reason,
+            metadata=metadata or {}
+        )
+        self.transition_history.append(transition)
+        return transition
+
+    def get_transition_history(self) -> List[TaskStateTransition]:
+        """Get the full transition history."""
+        return self.transition_history.copy()
+
+    def get_state_duration(self, state: TaskStatus) -> Optional[float]:
+        """Get the total duration spent in a given state.
+
+        Args:
+            state: The state to check
+
+        Returns:
+            Total seconds spent in the state, or None if never in that state
+        """
+        total_seconds = 0.0
+        in_state_since = None
+
+        for transition in self.transition_history:
+            if transition.to_state == state:
+                in_state_since = transition.timestamp
+            elif transition.from_state == state and in_state_since is not None:
+                total_seconds += (transition.timestamp - in_state_since).total_seconds()
+                in_state_since = None
+
+        # Handle case where we're still in the state
+        if in_state_since is not None and self.current_state == state:
+            total_seconds += (datetime.now() - in_state_since).total_seconds()
+
+        return total_seconds if total_seconds > 0 else None
+
+    def is_terminal(self) -> bool:
+        """Check if current state is terminal (no outgoing transitions)."""
+        return self.current_state in self.TERMINAL_STATES
+
+    def is_recoverable(self) -> bool:
+        """Check if the current state can recover to IN_PROGRESS."""
+        return self.current_state in self.RECOVERABLE_STATES
+
+    def get_valid_transitions(self) -> List[TaskStatus]:
+        """Get list of valid transitions from current state."""
+        return self.VALID_TRANSITIONS.get(self.current_state, []).copy()
+
+    @classmethod
+    def validate_transition(cls, from_state: TaskStatus, to_state: TaskStatus) -> bool:
+        """Check if a transition between two states is valid (static method).
+
+        This is useful for validation without creating a state machine instance.
+
+        Args:
+            from_state: The source state
+            to_state: The target state
+
+        Returns:
+            True if the transition is valid
+        """
+        return to_state in cls.VALID_TRANSITIONS.get(from_state, [])
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert state machine to dict for serialization."""
+        return {
+            "current_state": self.current_state.value,
+            "is_terminal": self.is_terminal(),
+            "is_recoverable": self.is_recoverable(),
+            "transition_count": len(self.transition_history),
+            "transitions": [
+                {
+                    "from": t.from_state.value if t.from_state else None,
+                    "to": t.to_state.value,
+                    "timestamp": t.timestamp.isoformat(),
+                    "reason": t.reason,
+                    "metadata": t.metadata,
+                }
+                for t in self.transition_history
+            ]
+        }
+
+
 class RiskLevel(Enum):
     """Risk levels for tasks."""
     LOW = "low"
@@ -68,7 +270,7 @@ class Task:
     def __init__(self, description: str, action_type: str = "general", dependencies: List[int] = None):
         self.description = description
         self.action_type = action_type  # edit, add, delete, rename, test, review
-        self.status = TaskStatus.PENDING
+        self._state_machine = TaskStateMachine(TaskStatus.PENDING)
         self.result = None
         self.error = None
         self.dependencies = dependencies or []  # List of task indices this task depends on
@@ -86,6 +288,63 @@ class Task:
         self.subtasks = []  # For complex tasks, list of subtask IDs
         self.priority = 0  # Task priority: higher values = more important (0 = normal)
         self.tool_events: List[Dict[str, Any]] = []  # Recorded tool executions
+
+    @property
+    def status(self) -> TaskStatus:
+        """Get the current task status."""
+        return self._state_machine.current_state
+
+    @status.setter
+    def status(self, new_status: TaskStatus):
+        """Set the task status with state machine validation.
+
+        Note: For backwards compatibility, this allows setting status directly.
+        Consider using set_status() instead for better error handling.
+        """
+        try:
+            self._state_machine.transition(new_status, reason="Direct status assignment")
+        except InvalidTransitionError:
+            # For backwards compatibility, log but don't raise
+            # In production, this should be a warning or error
+            self._state_machine.current_state = new_status
+            self._state_machine._record_transition(
+                self._state_machine.current_state,
+                new_status,
+                reason="Forced transition (invalid)"
+            )
+
+    def set_status(self, new_status: TaskStatus, reason: str = "", **metadata) -> None:
+        """Set the task status with validation and metadata.
+
+        Args:
+            new_status: The new status
+            reason: Reason for the status change
+            **metadata: Additional metadata about the transition
+
+        Raises:
+            InvalidTransitionError: If the transition is not valid
+        """
+        self._state_machine.transition(new_status, reason=reason, **metadata)
+
+    def get_state_history(self) -> List[TaskStateTransition]:
+        """Get the full state transition history for this task."""
+        return self._state_machine.get_transition_history()
+
+    def can_transition_to(self, status: TaskStatus) -> bool:
+        """Check if the task can transition to the given status."""
+        return self._state_machine.can_transition(status)
+
+    def is_terminal(self) -> bool:
+        """Check if the task is in a terminal state."""
+        return self._state_machine.is_terminal()
+
+    def is_recoverable(self) -> bool:
+        """Check if the task can be recovered (retried)."""
+        return self._state_machine.is_recoverable()
+
+    def get_valid_next_states(self) -> List[TaskStatus]:
+        """Get list of valid next states for this task."""
+        return self._state_machine.get_valid_transitions()
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -107,6 +366,7 @@ class Task:
             "subtasks": self.subtasks,
             "priority": self.priority,
             "tool_events": self.tool_events,
+            "state_machine": self._state_machine.to_dict(),
         }
 
     @classmethod
@@ -121,9 +381,15 @@ class Task:
         # Accept both plain values and enum-like strings (e.g., "TaskStatus.COMPLETED")
         status_value = status_raw.split(".")[-1]
         try:
-            task.status = TaskStatus(status_value)
+            target_status = TaskStatus(status_value)
+            # Use state machine to set status properly
+            task.set_status(target_status, reason="Restored from checkpoint")
         except Exception:
-            task.status = TaskStatus.PENDING
+            # Keep default PENDING status
+            pass
+        except InvalidTransitionError:
+            # For restoration from checkpoint, force the state
+            task._state_machine.current_state = target_status
         task.result = data.get("result")
         task.error = data.get("error")
         task.task_id = data.get("task_id")
@@ -301,35 +567,66 @@ class ExecutionPlan:
             # Return up to max_count
             return executable[:max_count]
 
-    def mark_task_in_progress(self, task: Task):
+    def mark_task_in_progress(self, task: Task, reason: str = "Starting task"):
         """Mark a task as in progress."""
         with self.lock:
-            task.status = TaskStatus.IN_PROGRESS
+            task.set_status(TaskStatus.IN_PROGRESS, reason=reason)
 
-    def mark_task_completed(self, task: Task, result: str = None):
+    def mark_task_completed(self, task: Task, result: str = None, reason: str = "Task completed successfully"):
         """Mark a specific task as completed."""
         with self.lock:
-            task.status = TaskStatus.COMPLETED
+            task.set_status(TaskStatus.COMPLETED, reason=reason)
             task.result = result
 
-    def mark_task_failed(self, task: Task, error: str):
+    def mark_task_failed(self, task: Task, error: str, reason: str = "Task failed"):
         """Mark a specific task as failed."""
         with self.lock:
-            task.status = TaskStatus.FAILED
+            task.set_status(TaskStatus.FAILED, reason=reason, error=error)
             task.error = error
 
+    def mark_task_stopped(self, task: Task, reason: str = "Task stopped"):
+        """Mark a specific task as stopped (for resume functionality).
+
+        Also advances current_index to prevent the execution loop from getting
+        stuck retrying the same task indefinitely.
+        """
+        with self.lock:
+            task.set_status(TaskStatus.STOPPED, reason=reason)
+            # Advance to next task so sequential execution doesn't get stuck
+            # on the same stopped task (similar to mark_failed behavior)
+            if task.task_id is not None and task.task_id == self.current_index:
+                self.current_index += 1
+
     def mark_completed(self, result: str = None):
-        """Legacy method for sequential execution compatibility."""
+        """Legacy method for sequential execution compatibility.
+
+        Note: For backwards compatibility, allows PENDING -> COMPLETED transition
+        by going through IN_PROGRESS implicitly. New code should use mark_task_in_progress
+        followed by mark_task_completed.
+        """
         if self.current_index < len(self.tasks):
-            self.tasks[self.current_index].status = TaskStatus.COMPLETED
-            self.tasks[self.current_index].result = result
+            task = self.tasks[self.current_index]
+            # For backwards compatibility, handle PENDING -> COMPLETED
+            if task.status == TaskStatus.PENDING:
+                task.set_status(TaskStatus.IN_PROGRESS, reason="Legacy mark_completed (implicit start)")
+            task.set_status(TaskStatus.COMPLETED, reason="Legacy mark_completed")
+            task.result = result
             self.current_index += 1
 
     def mark_failed(self, error: str):
-        """Legacy method for sequential execution compatibility."""
+        """Legacy method for sequential execution compatibility.
+
+        Note: For backwards compatibility, allows PENDING -> FAILED transition
+        by going through IN_PROGRESS implicitly. New code should use mark_task_in_progress
+        followed by mark_task_failed.
+        """
         if self.current_index < len(self.tasks):
-            self.tasks[self.current_index].status = TaskStatus.FAILED
-            self.tasks[self.current_index].error = error
+            task = self.tasks[self.current_index]
+            # For backwards compatibility, handle PENDING -> FAILED
+            if task.status == TaskStatus.PENDING:
+                task.set_status(TaskStatus.IN_PROGRESS, reason="Legacy mark_failed (implicit start)")
+            task.set_status(TaskStatus.FAILED, reason="Legacy mark_failed", error=error)
+            task.error = error
             # Advance to the next task so execution can continue instead of
             # repeatedly retrying the same failed task.
             self.current_index += 1
@@ -708,19 +1005,6 @@ class ExecutionPlan:
                 plan.goals = []
 
         return plan
-
-    def mark_task_stopped(self, task: Task):
-        """Mark a specific task as stopped (for resume functionality).
-
-        Also advances current_index to prevent the execution loop from getting
-        stuck retrying the same task indefinitely.
-        """
-        with self.lock:
-            task.status = TaskStatus.STOPPED
-            # Advance to next task so sequential execution doesn't get stuck
-            # on the same stopped task (similar to mark_failed behavior)
-            if task.task_id is not None and task.task_id == self.current_index:
-                self.current_index += 1
 
     def save_checkpoint(self, filepath: str = None, agent_state: Dict[str, Any] = None):
         """Save the current execution state to a checkpoint file.

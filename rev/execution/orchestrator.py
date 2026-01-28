@@ -18,6 +18,7 @@ and that validation is performed after each implementation step.
 """
 
 import os
+import hashlib
 from datetime import datetime
 import json
 import time
@@ -77,6 +78,10 @@ from rev.execution.action_normalizer import normalize_action_type
 from rev.execution.verification_utils import _detect_build_command_for_root
 from rev.execution.tool_constraints import allowed_tools_for_action, has_write_tool, WRITE_ACTIONS
 from rev.terminal.formatting import colorize, Colors, Symbols
+from rev.execution.task_runner import TaskRunner
+from rev.execution.recovery_manager import RecoveryManager
+from rev.execution.verification_coordinator import VerificationCoordinator
+from rev.tools.errors import ToolErrorType
 from difflib import SequenceMatcher
 
 # Global reference to the currently active context for real-time feedback
@@ -3260,6 +3265,10 @@ class Orchestrator:
         self.debug_logger = DebugLogger.get_instance()
         self._context_builder: Optional[ContextBuilder] = None
         self._project_roots_cache: Optional[List[Path]] = None
+        # Initialize orchestrator modules
+        self.task_runner = TaskRunner(self)
+        self.recovery_manager = RecoveryManager(self)
+        self.verification_coordinator = VerificationCoordinator(self)
         if config.WORKSPACE_ROOT_ONLY:
             workspace = get_workspace()
             workspace.current_working_dir = workspace.root
@@ -5046,7 +5055,8 @@ class Orchestrator:
                             blocked = {}
                         signature = f"read::{(next_task.description or '').strip().lower()}"
                         blocked[signature] = {
-                            "code_change_iteration": self.context.agent_state.get("last_code_change_iteration", -1)
+                            "code_change_iteration": self.context.agent_state.get("last_code_change_iteration", -1),
+                            "code_hash": self.verification_coordinator.compute_code_state_hash(),
                         }
                         self.context.set_agent_state(missing_key, blocked)
                         continue
@@ -5099,6 +5109,7 @@ class Orchestrator:
                     if not isinstance(seen_sim, list):
                         seen_sim = []
                     canonical = None
+                    current_code_hash = self.verification_coordinator.compute_code_state_hash()
                     if stem:
                         for entry in seen_sim:
                             try:
@@ -5106,6 +5117,7 @@ class Orchestrator:
                                     entry.get("stem") == stem
                                     and entry.get("code_change_iteration") == last_code_change_iteration
                                     and entry.get("path") != test_path
+                                    and entry.get("code_hash") == current_code_hash
                                 ):
                                     canonical = entry.get("path")
                                     break
@@ -5142,29 +5154,36 @@ class Orchestrator:
                                 f"Duplicate test detected: {test_path} is similar to {canonical}. Consider removing or archiving the duplicate."
                             )
                         continue
-                    else:
-                        if stem:
-                            seen_sim.append({
-                                "stem": stem,
-                                "path": test_path,
-                                "code_change_iteration": last_code_change_iteration,
-                            })
-                            self.context.set_agent_state("test_similarity_seen", seen_sim)
+                    # Store similarity entry with current code state hash (calculated before)
+                    if stem:
+                        seen_sim.append({
+                            "stem": stem,
+                            "path": test_path,
+                            "code_change_iteration": last_code_change_iteration,
+                            "code_hash": current_code_hash,
+                        })
+                        self.context.set_agent_state("test_similarity_seen", seen_sim)
 
                 # Allow first-run tests (code_change_iter = -1); only dedupe when we have a valid code-change iteration.
+                # Also check code state hash to ensure tests rerun when code actually changes.
+                seen_code_hash = seen_data.get("code_hash") if isinstance(seen_data, dict) else None
+
                 if (
                     isinstance(last_code_change_iteration, int)
                     and isinstance(seen_at, int)
                     and last_code_change_iteration >= 0
                     and last_code_change_iteration == seen_at
+                    and seen_code_hash is not None
+                    and seen_code_hash == current_code_hash
                 ):
-                    # print(f"  [test-dedupe] Skipping duplicate test task with signature: {signature} (code_change_iter={last_code_change_iteration})")
+                    # print(f"  [test-dedupe] Skipping duplicate test task with signature: {signature} (code_change_iter={last_code_change_iteration}, code_hash={current_code_hash})")
                     next_task.status = TaskStatus.STOPPED
                     next_task.result = json.dumps({
                         "skipped": True,
                         "reason": "duplicate test signature since last code change",
                         "signature": signature,
                         "code_change_iteration": last_code_change_iteration,
+                        "code_hash": current_code_hash,
                     })
                     completed_tasks_log.append(f"[STOPPED] {next_task.description} | Reason: duplicate test signature (code_change_iter={last_code_change_iteration})")
                     _record_test_signature_state(self.context, signature, "blocked")
@@ -5181,7 +5200,13 @@ class Orchestrator:
                     completed_tasks_log.append(f"[STOPPED] {next_task.description} | Reason: test signature blocked (code_change_iter={last_code_change_iteration})")
                     _record_test_signature_state(self.context, signature, "blocked")
                     continue
-                seen_tests[signature] = {"code_change_iteration": last_code_change_iteration}
+
+                # Store test signature with current code state hash
+                current_code_hash = _compute_code_state_hash()
+                seen_tests[signature] = {
+                    "code_change_iteration": last_code_change_iteration,
+                    "code_hash": current_code_hash,
+                }
                 self.context.set_agent_state("test_signature_seen", seen_tests)
 
             # Get or initialize blocked_action_sigs from context
@@ -5207,13 +5232,15 @@ class Orchestrator:
                 repeat_same_action = 1
                 last_task_signature = f"analyze::{next_task.description.strip().lower()}"
 
-            # PERFORMANCE FIX 3: Block redundant file reads (same file 2+ times)
+            # PERFORMANCE FIX 3: Block redundant file reads (same file 5+ times)
+            # Threshold increased from 2 to 5 to allow legitimate re-reading during debugging
             if action_type_normalized in {'read', 'analyze', 'research'}:
                 target_file = _extract_file_path_from_description(next_task.description)
                 if target_file:
                     # Count how many times this file has been read
                     read_count = _count_file_reads(target_file, completed_tasks)
-                    if read_count >= 2:
+                    # Increased threshold: only block after 5 reads (was 2)
+                    if read_count >= 5:
                         print(f"  [redundant-read] File '{target_file}' already read {read_count}x - BLOCKING")
                         # Block this specific action
                         blocked_sigs.add(action_sig)
@@ -5235,26 +5262,9 @@ class Orchestrator:
                         )
                         continue  # Skip to next iteration
 
-            # PERFORMANCE FIX 1: Block excessive consecutive research
-            if consecutive_reads >= MAX_CONSECUTIVE_READS and action_type_normalized in {'read', 'analyze', 'research', 'investigate', 'review'}:
-                print(f"  [research-budget-exceeded] {consecutive_reads} consecutive research tasks - forcing action phase")
-                # Force re-planning with constraint
-                forced_next_task = None  # Clear any forced task
-                # Add to failure notes for next planning iteration
-                self.context.add_agent_request(
-                    "RESEARCH_BUDGET_EXHAUSTED",
-                    {
-                        "agent": "Orchestrator",
-                        "reason": f"Research budget exhausted ({consecutive_reads} consecutive READ tasks)",
-                        "detailed_reason": (
-                            "RESEARCH BUDGET EXHAUSTED: You have completed extensive research. "
-                            "You MUST now propose a concrete action task (EDIT/ADD/TEST/DELETE), NOT another READ/ANALYZE/RESEARCH. "
-                            "All necessary context is available in the completed tasks."
-                        )
-                    }
-                )
-                consecutive_reads = 0  # Reset counter
-                continue  # Skip to next iteration with constraint
+            # REMOVED: Consecutive reads guard (PERFORMANCE FIX 1)
+            # Previous: forced action phase after MAX_CONSECUTIVE_READS (40) consecutive research tasks
+            # Removed to allow uninterrupted research - agent determines when to stop
 
             # P0-3: Circuit breaker based on CONSECUTIVE streak, not total count
             if repeat_same_action >= 3:
@@ -5333,12 +5343,12 @@ class Orchestrator:
                         matches = re.findall(read_file_pattern, task.description or "", re.IGNORECASE)
                         recent_read_files.extend(matches)
 
-                # Check if the same file has been read 3+ times
+                # Check if the same file has been read 5+ times (threshold increased from 2 to 5)
                 from collections import Counter
                 file_counts = Counter(recent_read_files)
                 most_read_file, read_count = file_counts.most_common(1)[0] if file_counts else (None, 0)
 
-                if read_count >= 2:
+                if read_count >= 5:
                     print(f"  [loop-guard] File '{most_read_file}' has been read {read_count} times - suggesting alternative approach.")
                     next_task.action_type = "debug"
                     next_task.description = (
@@ -6029,11 +6039,42 @@ class Orchestrator:
                             generic_repair_key = f"generic_repair::{failure_sig}"
                             generic_repair_attempts = self.context.agent_state.get(generic_repair_key, 0)
 
-                            # Track total recovery attempts across ALL errors to prevent infinite loops
-                            total_recovery_attempts = self.context.agent_state.get("total_recovery_attempts", 0)
+                            # RECOVERY BUDGET TRACKING: Track attempts per error type
+                            # Instead of a single global counter, track budgets by error type
+                            recovery_budgets_key = "recovery_budgets"
+                            recovery_budgets = self.context.agent_state.get(recovery_budgets_key, {})
 
-                            # HARD LIMIT: Stop if we've made 10 recovery attempts total, regardless of error type
-                            if total_recovery_attempts >= 10:
+                            # Classify error type for budget tracking
+                            error_type = self._classify_error_type(verification_result, next_task)
+
+                            # Get budget for this error type
+                            budget_key = f"{error_type.value}::{failure_sig}"
+                            current_attempts = recovery_budgets.get(budget_key, 0)
+
+                            # Define max attempts per error type
+                            MAX_ATTEMPTS_PER_ERROR_TYPE = {
+                                # Transient errors - allow more retries
+                                ToolErrorType.TRANSIENT: 8,
+                                ToolErrorType.TIMEOUT: 5,
+                                ToolErrorType.NETWORK: 5,
+
+                                # Recoverable errors - moderate retries
+                                ToolErrorType.NOT_FOUND: 3,
+                                ToolErrorType.SYNTAX_ERROR: 3,
+                                ToolErrorType.VALIDATION_ERROR: 3,
+
+                                # Non-recoverable errors - minimal retries
+                                ToolErrorType.PERMISSION_DENIED: 1,
+                                ToolErrorType.CONFLICT: 2,
+
+                                # Unknown - be conservative
+                                ToolErrorType.UNKNOWN: 5,
+                            }
+
+                            max_attempts = MAX_ATTEMPTS_PER_ERROR_TYPE.get(error_type, 5)
+
+                            # CHECK: Stop if this specific error type has exhausted its budget
+                            if current_attempts >= max_attempts:
                                 summary = self._build_failure_summary(
                                     next_task,
                                     verification_result,
@@ -6041,21 +6082,30 @@ class Orchestrator:
                                     failure_counts[failure_sig],
                                 )
 
+                                # Create detailed error info
+                                error_info = f"{error_type.value} error on '{next_task.action_type}'"
+
                                 # Last resort: Request user guidance before circuit breaker
                                 if config.UNCERTAINTY_DETECTION_ENABLED:
                                     from rev.execution.uncertainty_detector import UncertaintySignal
                                     from rev.execution.user_guidance import request_user_guidance, format_guidance_for_task
 
-                                    print(f"\n[{colorize('🛑 CIRCUIT BREAKER: RECOVERY LIMIT EXCEEDED', Colors.BRIGHT_RED, bold=True)}]")
-                                    print(f"{colorize(f'Made {total_recovery_attempts} recovery attempts across all errors.', Colors.BRIGHT_WHITE)}")
-                                    print(f"{colorize('This indicates a fundamental issue that cannot be auto-fixed.', Colors.BRIGHT_WHITE)}")
+                                    print(f"\n[{colorize('🛑 CIRCUIT BREAKER: ERROR TYPE BUDGET EXHAUSTED', Colors.BRIGHT_RED, bold=True)}]")
+                                    print(f"{colorize(f'{current_attempts} attempts for {error_info}.', Colors.BRIGHT_WHITE)}")
+                                    print(f"{colorize(f'Max attempts for {error_type.value}: {max_attempts}', Colors.BRIGHT_WHITE)}")
 
                                     # Create a high-severity uncertainty signal for circuit breaker
                                     circuit_breaker_signal = UncertaintySignal(
                                         signal_type="circuit_breaker",
-                                        reason=f"Circuit breaker triggered after {total_recovery_attempts} recovery attempts",
+                                        reason=f"Circuit breaker triggered after {current_attempts} attempts for {error_type.value}",
                                         score=10,  # Maximum score
-                                        context={"total_attempts": total_recovery_attempts, "summary": summary}
+                                        context={
+                                            "error_type": error_type.value,
+                                            "attempts": current_attempts,
+                                            "max_attempts": max_attempts,
+                                            "failure_sig": failure_sig,
+                                            "summary": summary
+                                        }
                                     )
 
                                     guidance_response = request_user_guidance(
@@ -6063,7 +6113,9 @@ class Orchestrator:
                                         task=next_task,
                                         context={
                                             "circuit_breaker": True,
-                                            "total_recovery_attempts": total_recovery_attempts
+                                            "error_type": error_type.value,
+                                            "attempts": current_attempts,
+                                            "max_attempts": max_attempts
                                         }
                                     )
 
@@ -6071,14 +6123,15 @@ class Orchestrator:
                                         # User provided override guidance - give it one more try
                                         print(f"  [{colorize('USER OVERRIDE', Colors.BRIGHT_GREEN)}] {guidance_response.guidance[:100]}")
                                         next_task.description += format_guidance_for_task(guidance_response.guidance, next_task)
-                                        # Reset counters to give user guidance a fair chance
-                                        self.context.set_agent_state("total_recovery_attempts", 0)
+                                        # Reset budget for this error type to give user guidance a chance
+                                        recovery_budgets[budget_key] = 0
+                                        self.context.set_agent_state(recovery_budgets_key, recovery_budgets)
                                         failure_counts[failure_sig] = 0
                                         self.context.add_agent_request(
                                             "USER_CIRCUIT_BREAKER_OVERRIDE",
                                             {
                                                 "agent": "User",
-                                                "reason": "User provided override guidance at circuit breaker",
+                                                "reason": f"User provided override guidance for {error_type.value} error",
                                                 "guidance": guidance_response.guidance
                                             }
                                         )
@@ -6098,7 +6151,10 @@ class Orchestrator:
 
                                 # Increment generic repair counter
                                 self.context.set_agent_state(generic_repair_key, generic_repair_attempts + 1)
-                                self.context.set_agent_state("total_recovery_attempts", total_recovery_attempts + 1)
+
+                                # Increment per-error-type budget
+                                recovery_budgets[budget_key] = current_attempts + 1
+                                self.context.set_agent_state(recovery_budgets_key, recovery_budgets)
 
                                 # Create a generic repair task with full error context
                                 repair_task = _create_generic_repair_task(
@@ -6847,6 +6903,42 @@ class Orchestrator:
                 print(f"  - {err}")
 
         print()
+
+    def _classify_error_type(self, verification_result, task: Optional[Task] = None) -> ToolErrorType:
+        """Classify a verification result into a ToolErrorType for budget tracking.
+
+        This method delegates to the RecoveryManager for error classification.
+
+        Args:
+            verification_result: The VerificationResult from quick_verify
+            task: Optional task being executed (for additional context)
+
+        Returns:
+            ToolErrorType enum value indicating the error type
+        """
+        return self.recovery_manager.classify_error(verification_result, task)
+
+    def _build_failure_summary(
+        self,
+        task: Task,
+        verification_result,
+        failure_sig: str,
+        failure_count: int
+    ) -> str:
+        """Build a detailed failure summary for circuit breaker context.
+
+        This method delegates to the RecoveryManager.
+
+        Args:
+            task: The task that failed
+            verification_result: The verification result showing failure details
+            failure_sig: The error signature for this failure
+            failure_count: How many times this error has occurred
+
+        Returns:
+            A detailed failure summary string
+        """
+        return self.recovery_manager.build_failure_summary(task, verification_result, failure_sig, failure_count)
 
 def run_orchestrated(
     user_request: str,

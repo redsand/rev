@@ -18,6 +18,7 @@ from rev.debug_logger import get_logger
 from rev.tools.permissions import get_permission_manager
 from rev.workspace import get_workspace
 from rev.tools.workspace_resolver import resolve_workspace_path, WorkspacePathError
+from rev.tools.errors import ToolError, ToolErrorType
 
 if TYPE_CHECKING:  # pragma: no cover - used only for type hints
     from rev.execution.timeout_manager import TimeoutManager, TimeoutConfig
@@ -764,6 +765,130 @@ def _format_description(name: str, args: Dict[str, Any]) -> str:
     return descriptions.get(name, f"{name}({', '.join(f'{k}={v!r}' for k, v in args.items())})")
 
 
+# Simplified argument normalization configuration
+# Maps canonical parameter names to alternative names that LLMs might emit
+_PARAM_ALIASES = {
+    # Global aliases (apply to all tools)
+    "path": ["file_path", "filepath"],
+    "content": ["text", "contents", "new_content"],
+
+    # Tool-specific aliases
+    "pattern": ["path", "dir", "directory", "folder", "glob"],  # list_dir
+    "find": ["old_string"],  # replace_in_file
+    "replace": ["new_string"],  # replace_in_file
+    "source_path": ["module_path", "module"],  # split_python_module_classes
+    "target_directory": ["output_dir", "target_dir", "dest"],  # split_python_module_classes
+    "cmd": ["command", "cmdline", "run", "shell_command"],  # run_cmd, run_tests
+    "cwd": ["workdir", "working_dir", "workingdir"],  # run_cmd, run_tests
+}
+
+# Maps tools to their canonical parameter mappings (if tool has unique aliases)
+_TOOL_PARAM_ALIASES = {
+    "read_file": {"path": ["file", "src", "source", "module"]},
+    "get_file_info": {"path": ["file", "src", "source", "module"]},
+    "delete_file": {"path": ["file", "src", "source", "module"]},
+    "file_exists": {"path": ["file", "src", "source", "module"]},
+    "write_file": {"path": ["file", "dst", "destination", "target"]},
+    "append_to_file": {"path": ["file", "dst", "destination", "target"]},
+    "create_directory": {"path": ["dir", "dir_path", "directory", "folder"]},
+    "list_dir": {"pattern": ["path", "dir", "directory", "folder", "glob"]},
+    "replace_in_file": {"path": ["file", "target"]},
+    "split_python_module_classes": {
+        "source_path": ["module_path", "module", "path", "source", "file"],
+        "target_directory": ["output_dir", "target_dir", "directory", "dest", "target", "folder"],
+    },
+    "run_cmd": {"cmd": ["command", "cmdline", "run", "shell_command"]},
+    "run_tests": {"cmd": ["command", "cmdline", "run", "shell_command"]},
+}
+
+
+def _normalize_args(args: dict, tool_name: str) -> dict:
+    """Normalize tool arguments using configuration-driven alias mapping.
+
+    This simplifies the original ~100 lines of per-tool if statements into
+    a data-driven approach. It handles:
+    1. Kebab-to-snake case conversion (e.g., "file-path" -> "file_path")
+    2. Global aliases (apply to all tools)
+    3. Tool-specific aliases (apply only to specific tools)
+
+    Args:
+        args: Original tool arguments
+        tool_name: Name of the tool being called
+
+    Returns:
+        Normalized arguments dictionary
+    """
+    if not isinstance(args, dict):
+        return args
+
+    # Unwrap nested arguments (e.g., {"arguments": {...}})
+    while (
+        isinstance(args, dict)
+        and len(args) == 1
+        and isinstance(args.get("arguments"), dict)
+    ):
+        args = args["arguments"]
+
+    # Kebab-to-snake conversion
+    normalized = {str(k).replace("-", "_"): v for k, v in args.items()}
+
+    # Merge global and tool-specific aliases
+    tool_lower = (tool_name or "").lower()
+    all_aliases = _PARAM_ALIASES.copy()
+    if tool_lower in _TOOL_PARAM_ALIASES:
+        for param, aliases in _TOOL_PARAM_ALIASES[tool_lower].items():
+            if param in all_aliases:
+                all_aliases[param].extend(aliases)
+            else:
+                all_aliases[param] = aliases
+
+    # Apply aliases: if canonical param not present, try alternatives
+    # Use case-insensitive matching for aliases
+    for canonical, alternatives in all_aliases.items():
+        if canonical in normalized:
+            continue  # Already has canonical name
+
+        # Create lowercase mapping of normalized args for case-insensitive lookup
+        normalized_lower = {k.lower(): k for k in normalized.keys()}
+
+        for alt in alternatives:
+            alt_lower = alt.lower()
+            if alt_lower in normalized_lower:
+                # Use the actual key from normalized dict to preserve original casing
+                actual_key = normalized_lower[alt_lower]
+                normalized[canonical] = normalized[actual_key]
+                break
+
+    return normalized
+
+
+def _format_tool_error(error: Exception, tool_name: str) -> str:
+    """Format a tool error using unified ToolError structure.
+
+    This function converts any exception into a standardized ToolError format
+    for consistent error handling across all tools.
+
+    Args:
+        error: The exception that occurred
+        tool_name: Name of the tool that failed
+
+    Returns:
+        JSON string containing the ToolError structure
+    """
+    try:
+        # Use ToolError.from_exception to create structured error
+        tool_error = ToolError.from_exception(error, tool_name)
+        return json.dumps(tool_error.to_dict())
+    except Exception:
+        # Fallback to simple error format if ToolError creation fails
+        return json.dumps({
+            "error": f"{tool_name}: {str(error)}",
+            "error_type": "unknown",
+            "recoverable": True,
+            "suggested_recovery": [],
+        })
+
+
 def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "executor") -> str:
     """Execute a tool and return result.
 
@@ -797,102 +922,9 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "executor") 
             "blocked": True,
         })
 
-    # Compatibility shim: normalize common alternate argument names that some models emit
-    # (e.g. "file_path" vs the canonical "path") so tools don't KeyError.
+    # Normalize tool arguments
     if isinstance(args, dict):
-        # Some models mistakenly wrap tool args one level deep (e.g. {"arguments": {...}}).
-        # Unwrap safely to avoid tools defaulting to empty args and doing the wrong thing.
-        while (
-            isinstance(args, dict)
-            and len(args) == 1
-            and isinstance(args.get("arguments"), dict)
-        ):
-            args = args["arguments"]
-
-        # 1. Kebab-to-snake conversion (e.g. "file-path" -> "file_path")
-        normalized_args = {str(k).replace("-", "_"): v for k, v in args.items()}
-
-        tool = (name or "").lower()
-
-        # 2. Global common aliases
-        if "file_path" in normalized_args and "path" not in normalized_args:
-            normalized_args["path"] = normalized_args["file_path"]
-        if "filepath" in normalized_args and "path" not in normalized_args:
-            normalized_args["path"] = normalized_args["filepath"]
-
-        # 3. Tool-specific mapping
-        if tool in {"read_file", "get_file_info", "delete_file", "file_exists"}:
-            if "path" not in normalized_args:
-                for alt in ("file", "src", "source", "module"):
-                    if isinstance(normalized_args.get(alt), str):
-                        normalized_args["path"] = normalized_args[alt]
-                        break
-
-        if tool in {"write_file", "append_to_file"}:
-            if "path" not in normalized_args:
-                for alt in ("file", "dst", "destination", "target"):
-                    if isinstance(normalized_args.get(alt), str):
-                        normalized_args["path"] = normalized_args[alt]
-                        break
-            if tool == "write_file" and "content" not in normalized_args:
-                for alt in ("text", "contents", "new_content"):
-                    if isinstance(normalized_args.get(alt), str):
-                        normalized_args["content"] = normalized_args[alt]
-                        break
-
-        if tool == "list_dir":
-            if "pattern" not in normalized_args:
-                for alt in ("path", "dir", "directory", "folder", "glob"):
-                    if isinstance(normalized_args.get(alt), str):
-                        normalized_args["pattern"] = normalized_args[alt]
-                        break
-
-        if tool == "replace_in_file":
-            if "path" not in normalized_args:
-                for alt in ("file", "target"):
-                    if isinstance(normalized_args.get(alt), str):
-                        normalized_args["path"] = normalized_args[alt]
-                        break
-            if "find" not in normalized_args and isinstance(normalized_args.get("old_string"), str):
-                normalized_args["find"] = normalized_args["old_string"]
-            if "replace" not in normalized_args and isinstance(normalized_args.get("new_string"), str):
-                normalized_args["replace"] = normalized_args["new_string"]
-
-        if tool == "create_directory":
-            if "path" not in normalized_args:
-                for alt in ("dir", "dir_path", "directory", "folder"):
-                    if isinstance(normalized_args.get(alt), str):
-                        normalized_args["path"] = normalized_args[alt]
-                        break
-
-        if tool == "split_python_module_classes":
-            if "source_path" not in normalized_args:
-                for alt in ("module_path", "module", "path", "source", "file"):
-                    if isinstance(normalized_args.get(alt), str):
-                        normalized_args["source_path"] = normalized_args[alt]
-                        break
-            if "target_directory" not in normalized_args:
-                for alt in ("output_dir", "target_dir", "directory", "dest", "target", "folder"):
-                    if isinstance(normalized_args.get(alt), str):
-                        normalized_args["target_directory"] = normalized_args[alt]
-                        break
-            if "delete_source" not in normalized_args:
-                # Default to False - let LLM handle the original source file
-                normalized_args["delete_source"] = False
-
-        if tool in {"run_cmd", "run_tests"}:
-            if "cmd" not in normalized_args:
-                for alt in ("command", "cmdline", "run", "shell_command"):
-                    if isinstance(normalized_args.get(alt), (str, list)):
-                        normalized_args["cmd"] = normalized_args[alt]
-                        break
-            if "cwd" not in normalized_args:
-                for alt in ("workdir", "working_dir", "workingdir"):
-                    if isinstance(normalized_args.get(alt), str):
-                        normalized_args["cwd"] = normalized_args[alt]
-                        break
-
-        args = normalized_args
+        args = _normalize_args(args, name)
 
     # Guard against passing command-like strings to file path tools.
     tool_lower = (name or "").lower()
@@ -1010,7 +1042,7 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "executor") 
     # Get debug logger
     debug_logger = get_logger()
 
-    global _LAST_TOOL_CALL
+    # Track last tool call for debugging
     if isinstance(args, dict):
         _LAST_TOOL_CALL = {"name": name, "args": dict(args)}
     else:
@@ -1066,16 +1098,16 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "executor") 
                     ledger.record(name, args, result, duration, agent_name)
                     return result
                 except Exception as e:
-                    # Timeout or max retries exceeded
-                    error_msg = f"{type(e).__name__}: {e}"
-                    debug_logger.log_tool_execution(name, args, error=error_msg)
+                    # Timeout or max retries exceeded - use unified error format
+                    error_json = _format_tool_error(e, name)
+                    debug_logger.log_tool_execution(name, args, error=str(e))
                     debug_logger.log_transaction_event("TOOL_ERROR", {
                         "tool": name,
                         "arguments": args,
-                        "error": error_msg
+                        "error": str(e)
                     })
-                    ledger.record(name, args, error_msg, (time.time() - start_time) * 1000, agent_name, status="error")
-                    return json.dumps({"error": error_msg})
+                    ledger.record(name, args, str(e), (time.time() - start_time) * 1000, agent_name, status="error")
+                    return error_json
 
         # Execute the tool handler without timeout protection
         result = handler(args)
@@ -1091,15 +1123,16 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "executor") 
         return result
 
     except Exception as e:
-        error_msg = f"{type(e).__name__}: {e}"
-        debug_logger.log_tool_execution(name, args, error=error_msg)
+        # Use unified error format for all exceptions
+        error_json = _format_tool_error(e, name)
+        debug_logger.log_tool_execution(name, args, error=str(e))
         debug_logger.log_transaction_event("TOOL_ERROR", {
             "tool": name,
             "arguments": args,
-            "error": error_msg
+            "error": str(e)
         })
-        ledger.record(name, args, error_msg, (time.time() - start_time) * 1000, agent_name, status="error")
-        return json.dumps({"error": error_msg})
+        ledger.record(name, args, str(e), (time.time() - start_time) * 1000, agent_name, status="error")
+        return error_json
 
 
 def get_available_tools() -> list:
