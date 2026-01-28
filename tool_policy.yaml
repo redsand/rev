@@ -168,6 +168,30 @@ agent_roles:
       - git_commit
       - git_push
 
+  # Quick Verify Agent - Verification with limited command access
+  quick_verify:
+    description: "Quick verification agent - can run verification commands safely"
+    allowed_tools:
+      - read_file
+      - list_dir
+      - search_code
+      - file_exists
+      - get_file_info
+      - run_cmd  # For compilation and verification
+      - set_workdir
+      - analyze_*
+      - check_*
+      - scan_*
+      - detect_*
+    denied_tools:
+      - write_file
+      - delete_file
+      - git_commit
+      - git_push
+      - "run_cmd: [\"rm -rf\", \"del /f /s /q\", \"format\", \"shutdown\", \"reboot\"]"
+    max_calls_per_session:
+      run_cmd: 50
+
   # Default - Minimal safe access for unknown agents
   default:
     description: "Default role for unspecified agents - minimal safe access"

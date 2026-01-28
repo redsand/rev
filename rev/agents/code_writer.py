@@ -586,6 +586,9 @@ def _is_path_valid_for_task(path_str: str, task: Task) -> Tuple[bool, str]:
         # allow creation if it's in a reasonable directory
         if any(path_str.startswith(d) for d in ("src/", "tests/", "prisma/", "public/")):
             return True, ""
+        # Also allow root-level files if filename is mentioned in description (common for simple modules)
+        if "/" not in path_str and "\\" not in path_str and filename in desc:
+            return True, ""
 
     return False, f"Path '{path_str}' is not mentioned in the task and does not exist. It may be a hallucination."
 
