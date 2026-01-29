@@ -315,7 +315,8 @@ def _extract_target_files_from_description(description: str) -> list[str]:
 
     # Match bare paths like src/module/file.ext or backend/prisma/schema.prisma
     # Pattern: word chars, slashes, dots, hyphens + dot + extension
-    bare_pattern = r'\b([\w./\\-]+\.\w+)\b'
+    # Also handles trailing colons (e.g., "file.py:") and parentheses
+    bare_pattern = r'\b([\w./\\-]+\.\w+)(?=[:\s\)\],]|\b|$)'
     allowed_bare = {
         "package.json",
         "tsconfig.json",
@@ -342,16 +343,17 @@ def _extract_target_files_from_description(description: str) -> list[str]:
         if end_idx < len(description) and description[end_idx] == "(":
             # Avoid method-like tokens such as express.json()
             continue
+        # Accept files with slashes, colon separator, or in allowed list
         if '/' in candidate or '\\' in candidate:
             paths.append(candidate)
             continue
         if candidate.lower() in allowed_bare:
             paths.append(candidate)
             continue
-        # Check for file-related verbs in preceding context
+        # Check for file-related verbs in preceding context OR colon after filename
         verb_context_start = max(0, match.start() - 25)
         verb_context = description[verb_context_start:match.start()]
-        if verb_hint.search(verb_context):
+        if verb_hint.search(verb_context) or (end_idx < len(description) and description[end_idx] == ':'):
             paths.append(candidate)
 
     return paths
@@ -530,12 +532,17 @@ def _task_is_command_only(description: str) -> bool:
 CODE_WRITER_SYSTEM_PROMPT = """You are a specialized Code Writer agent. Your sole purpose is to execute a single coding task by calling the ONLY available tool.
 
 CRITICAL: TOOL EXECUTION IS MANDATORY
-You MUST call a tool. Do NOT return text or explanations. 
+You MUST call a tool. Do NOT return text or explanations.
 
 TOOL SELECTION RULES:
-1.  For EDITING existing files: You MUST use `apply_patch` or `replace_in_file`. 
-2.  Do NOT use `write_file` to overwrite existing files; it will be rejected. 
-3.  Use `apply_patch` for any multi-line change. Use `replace_in_file` ONLY for small, exact string swaps.
+1. For CREATING NEW files (action_type=ADD): You MUST use `write_file`.
+   - NEVER use read_file, apply_patch, or replace_in_file for creating new files.
+   - Provide the COMPLETE file content from the first line.
+   - Do not read source files first - write the new file directly.
+
+2. For EDITING existing files: You MUST use `apply_patch` or `replace_in_file`.
+   - Do NOT use `write_file` to overwrite existing files; it will be rejected.
+   - Use `apply_patch` for any multi-line change. Use `replace_in_file` ONLY for small, exact string swaps.
 
 `apply_patch` RULES:
 - Provide a standard unified diff (--- a/file / +++ b/file).

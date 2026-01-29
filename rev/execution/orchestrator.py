@@ -3204,6 +3204,9 @@ class OrchestratorConfig:
     plan_regen_retries: int = MAX_PLAN_REGEN_RETRIES
     validation_retries: int = MAX_VALIDATION_RETRIES
     adaptive_replan_attempts: int = MAX_ADAPTIVE_REPLANS
+    # Direct mode - disables aggressive verification loops (research-guard, UCCT, continuous verify)
+    # Enabled by default for Claude Code-like direct behavior
+    direct_mode: bool = True
     # Prompt optimization
     enable_prompt_optimization: bool = True
     auto_optimize_prompt: bool = False
@@ -4678,9 +4681,9 @@ class Orchestrator:
                         print("\n❌ Planner failed to produce a next action (LLM error).")
                         print(f"  Error: {planner_error}")
                         return False
-                    
-                    # UCCT Anchoring check before declaring victory
-                    if config.UCCT_ENABLED:
+
+                    # UCCT Anchoring check before declaring victory (skip in direct_mode)
+                    if config.UCCT_ENABLED and not self.config.direct_mode:
                         anchoring_decision = self._evaluate_anchoring(user_request, completed_tasks_log)
                         if anchoring_decision == AnchoringDecision.RE_SEARCH:
                             print("\n  [UCCT] Goal may be achieved, but evidence density is low. Forcing one more search.")
@@ -4691,8 +4694,8 @@ class Orchestrator:
                             forced_next_task = Task(description="Run a structural consistency check on the modified modules to ensure no unresolved symbols remain.", action_type="analyze")
                             continue
 
-                    # Grounded Completion Check (Bait Density)
-                    if config.UCCT_ENABLED:
+                    # Grounded Completion Check (Bait Density) (skip in direct_mode)
+                    if config.UCCT_ENABLED and not self.config.direct_mode:
                         is_grounded, grounding_msg = self._is_completion_grounded(completed_tasks_log, user_request)
                         if not is_grounded:
                             print(f"\n  {colorize(Symbols.INFO, Colors.BRIGHT_BLUE)} {colorize(grounding_msg + ' Forcing verification.', Colors.BRIGHT_BLACK)}")
@@ -4739,7 +4742,8 @@ class Orchestrator:
                     print(f"  [transformation-tracking] Count: {transformation_count + 1}/3")
 
                 next_action_normalized = (next_task.action_type or "").strip().lower()
-                if next_action_normalized in {"add", "edit"} and not _has_recent_research_evidence(completed_tasks):
+                # Skip research-guard in direct_mode for Claude Code-like direct behavior
+                if next_action_normalized in {"add", "edit"} and not _has_recent_research_evidence(completed_tasks) and not self.config.direct_mode:
                     guard_sig = f"missing_research_guard::{next_action_normalized}::{(next_task.description or '').strip().lower()}"
                     last_injected = self.context.agent_state.get(guard_sig)
                     if last_injected != iteration:
@@ -5601,7 +5605,8 @@ class Orchestrator:
                     execution_success = False
 
             # STEP 3: VERIFY - This is the critical addition
-            if execution_success and not deferred_tdd_test:
+            # In direct_mode, skip continuous verification to behave like Claude Code
+            if execution_success and not deferred_tdd_test and not self.config.direct_mode:
                 # Only verify actions that modify state or have complex validation
                 # Skip verification for read-only operations (read, analyze, research, investigate)
                 verifiable_actions = {
@@ -5631,6 +5636,13 @@ class Orchestrator:
                         message="Verification skipped",
                         details={"action_type": action_type, "skipped": True},
                     )
+            else:
+                # In direct_mode or when deferred TDD, skip continuous verification
+                verification_result = VerificationResult(
+                    passed=True,
+                    message="Verification skipped (direct_mode or deferred)",
+                    details={"skipped": True, "reason": "direct_mode" if self.config.direct_mode else "deferred_tdd"},
+                )
 
                 # If tests are being skipped because nothing has changed since a failure,
                 # don't treat this as a verification failure (it causes loops). Instead,
@@ -6957,6 +6969,7 @@ def run_orchestrated(
     orchestrator_retries: int = MAX_ORCHESTRATOR_RETRIES,
     plan_regen_retries: int = MAX_PLAN_REGEN_RETRIES,
     validation_retries: int = MAX_VALIDATION_RETRIES,
+    direct_mode: bool = True,
     enable_prompt_optimization: bool = True,
     auto_optimize_prompt: bool = False,
     enable_context_guard: bool = True,
@@ -6981,6 +6994,7 @@ def run_orchestrated(
         orchestrator_retries=orchestrator_retries,
         plan_regen_retries=plan_regen_retries,
         validation_retries=validation_retries,
+        direct_mode=direct_mode,
         enable_prompt_optimization=enable_prompt_optimization,
         auto_optimize_prompt=auto_optimize_prompt,
         enable_context_guard=enable_context_guard,

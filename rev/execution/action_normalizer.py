@@ -29,6 +29,7 @@ _EXACT_ALIASES: dict[str, str] = {
     "view": "read",
     "explain": "read",
     "list": "read",
+    "search": "read",  # Added for direct_mode - searching files is a read operation
     # file operation aliases
     "rename_file": "rename",
     "move_file": "move",
