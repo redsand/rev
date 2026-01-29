@@ -384,12 +384,13 @@ class Task:
             target_status = TaskStatus(status_value)
             # Use state machine to set status properly
             task.set_status(target_status, reason="Restored from checkpoint")
-        except Exception:
-            # Keep default PENDING status
-            pass
         except InvalidTransitionError:
             # For restoration from checkpoint, force the state
+            # (state machine doesn't allow PENDING -> COMPLETED transition)
             task._state_machine.current_state = target_status
+        except Exception:
+            # Keep default PENDING status on other errors
+            pass
         task.result = data.get("result")
         task.error = data.get("error")
         task.task_id = data.get("task_id")
@@ -632,9 +633,14 @@ class ExecutionPlan:
             self.current_index += 1
 
     def is_complete(self) -> bool:
-        """Check if all tasks are done (completed, failed, or stopped)."""
+        """Check if all tasks are done (completed or failed).
+
+        Note: STOPPED tasks are NOT considered complete - they were skipped/aborted
+        and don't have a result. A plan is only complete when all tasks have a definitive
+        result (COMPLETED or FAILED).
+        """
         return all(
-            task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.STOPPED]
+            task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED]
             for task in self.tasks
         )
 

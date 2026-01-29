@@ -773,7 +773,6 @@ def main():
 
                 # Restore model configuration from checkpoint if available
                 if model_config:
-                    import os
                     if model_config.get("provider"):
                         os.environ["REV_LLM_PROVIDER"] = model_config["provider"]
                         print(f"  [resume] Restored LLM provider: {model_config['provider']}")

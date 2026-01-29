@@ -90,7 +90,7 @@ def test_checkpoint_save_and_load():
         assert os.path.exists(checkpoint_path)
 
         # Load checkpoint
-        restored_plan = ExecutionPlan.load_checkpoint(checkpoint_path)
+        restored_plan, _, _ = ExecutionPlan.load_checkpoint(checkpoint_path)
         assert len(restored_plan.tasks) == 3
         assert restored_plan.tasks[0].status == TaskStatus.COMPLETED
         assert restored_plan.tasks[0].result == "Task 1 completed successfully"
@@ -107,11 +107,12 @@ def test_checkpoint_default_location():
     # Save without specifying path
     checkpoint_path = plan.save_checkpoint()
     try:
-        assert ".rev/checkpoints" in checkpoint_path
+        # Check for checkpoint directory (handle both / and \ for cross-platform)
+        assert os.path.normpath(".rev/checkpoints") in os.path.normpath(checkpoint_path) or ".rev/checkpoints" in checkpoint_path
         assert os.path.exists(checkpoint_path)
 
         # Load it back
-        restored_plan = ExecutionPlan.load_checkpoint(checkpoint_path)
+        restored_plan, _, _ = ExecutionPlan.load_checkpoint(checkpoint_path)
         assert len(restored_plan.tasks) == 1
         assert restored_plan.tasks[0].status == TaskStatus.STOPPED
     finally:
@@ -258,7 +259,7 @@ def test_checkpoint_preserves_dependencies():
         checkpoint_path = os.path.join(tmpdir, "test_deps.json")
         plan.save_checkpoint(checkpoint_path)
 
-        restored_plan = ExecutionPlan.load_checkpoint(checkpoint_path)
+        restored_plan, _, _ = ExecutionPlan.load_checkpoint(checkpoint_path)
         assert restored_plan.tasks[1].dependencies == [0]
         assert restored_plan.tasks[2].dependencies == [0, 1]
 
@@ -285,7 +286,7 @@ def test_checkpoint_preserves_task_metadata():
         checkpoint_path = os.path.join(tmpdir, "test_metadata.json")
         plan.save_checkpoint(checkpoint_path)
 
-        restored_plan = ExecutionPlan.load_checkpoint(checkpoint_path)
+        restored_plan, _, _ = ExecutionPlan.load_checkpoint(checkpoint_path)
         restored_task = restored_plan.tasks[0]
 
         assert restored_task.status == TaskStatus.STOPPED
