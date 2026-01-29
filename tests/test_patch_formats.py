@@ -127,7 +127,7 @@ class TestCheckpointAgentState:
         plan.save_checkpoint(str(checkpoint_path), agent_state=agent_state)
 
         # Load and verify
-        loaded_plan, loaded_state = ExecutionPlan.load_checkpoint(str(checkpoint_path))
+        loaded_plan, loaded_state, loaded_model_config = ExecutionPlan.load_checkpoint(str(checkpoint_path))
 
         assert loaded_state.get("total_recovery_attempts") == 5
         assert loaded_state.get("recovery_attempts") == {"task_1": 2}
@@ -142,7 +142,7 @@ class TestCheckpointAgentState:
         checkpoint_path = tmp_path / "test_checkpoint.json"
         plan.save_checkpoint(str(checkpoint_path))
 
-        loaded_plan, loaded_state = ExecutionPlan.load_checkpoint(str(checkpoint_path))
+        loaded_plan, loaded_state, loaded_model_config = ExecutionPlan.load_checkpoint(str(checkpoint_path))
         assert loaded_state == {}
 
 

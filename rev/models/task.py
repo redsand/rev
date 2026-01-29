@@ -1024,10 +1024,29 @@ class ExecutionPlan:
             filepath = os.path.join(checkpoint_dir, f"checkpoint_{timestamp}.json")
 
         checkpoint_data = {
-            "version": "1.1",  # Bumped version for agent_state support
+            "version": "1.2",  # Bumped version for model_config support
             "timestamp": datetime.now().isoformat(),
             "plan": self.to_dict()
         }
+
+        # Include model/provider configuration for resume compatibility
+        import os
+        model_config = {}
+        if os.getenv("REV_LLM_PROVIDER"):
+            model_config["provider"] = os.getenv("REV_LLM_PROVIDER")
+        if os.getenv("OLLAMA_MODEL"):
+            model_config["model"] = os.getenv("OLLAMA_MODEL")
+        if os.getenv("OLLAMA_BASE_URL"):
+            model_config["base_url"] = os.getenv("OLLAMA_BASE_URL")
+        if os.getenv("OPENAI_MODEL"):
+            model_config["model"] = os.getenv("OPENAI_MODEL")
+        if os.getenv("OPENAI_API_KEY"):
+            # Don't save API keys for security
+            pass
+        if os.getenv("ANTHROPIC_MODEL"):
+            model_config["model"] = os.getenv("ANTHROPIC_MODEL")
+        if model_config:
+            checkpoint_data["model_config"] = model_config
 
         # Include agent_state if provided (for recovery_attempts persistence)
         if agent_state:
@@ -1047,14 +1066,14 @@ class ExecutionPlan:
         return filepath
 
     @classmethod
-    def load_checkpoint(cls, filepath: str) -> Tuple['ExecutionPlan', Dict[str, Any]]:
+    def load_checkpoint(cls, filepath: str) -> Tuple['ExecutionPlan', Dict[str, Any], Dict[str, Any]]:
         """Load an execution plan from a checkpoint file.
 
         Args:
             filepath: Path to the checkpoint file
 
         Returns:
-            Tuple of (ExecutionPlan, agent_state dict) restored from checkpoint
+            Tuple of (ExecutionPlan, agent_state dict, model_config dict) restored from checkpoint
         """
         import json
 
@@ -1063,7 +1082,8 @@ class ExecutionPlan:
 
         plan = cls.from_dict(checkpoint_data["plan"])
         agent_state = checkpoint_data.get("agent_state", {})
-        return plan, agent_state
+        model_config = checkpoint_data.get("model_config", {})
+        return plan, agent_state, model_config
 
     @classmethod
     def list_checkpoints(cls, checkpoint_dir: str = str(config.CHECKPOINTS_DIR)) -> List[Dict[str, Any]]:

@@ -769,7 +769,27 @@ def main():
             debug_logger.log_workflow_phase("resume", {"checkpoint": checkpoint_path})
             print(f"Loading checkpoint: {checkpoint_path}\n")
             try:
-                plan, restored_agent_state = ExecutionPlan.load_checkpoint(checkpoint_path)
+                plan, restored_agent_state, model_config = ExecutionPlan.load_checkpoint(checkpoint_path)
+
+                # Restore model configuration from checkpoint if available
+                if model_config:
+                    import os
+                    if model_config.get("provider"):
+                        os.environ["REV_LLM_PROVIDER"] = model_config["provider"]
+                        print(f"  [resume] Restored LLM provider: {model_config['provider']}")
+                    if model_config.get("model"):
+                        # Set the appropriate model variable based on provider
+                        provider = model_config.get("provider", "")
+                        if "ollama" in provider.lower():
+                            os.environ["OLLAMA_MODEL"] = model_config["model"]
+                        elif "openai" in provider.lower():
+                            os.environ["OPENAI_MODEL"] = model_config["model"]
+                        elif "anthropic" in provider.lower():
+                            os.environ["ANTHROPIC_MODEL"] = model_config["model"]
+                        print(f"  [resume] Restored model: {model_config['model']}")
+                    if model_config.get("base_url"):
+                        os.environ["OLLAMA_BASE_URL"] = model_config["base_url"]
+
                 state_manager = StateManager(plan)
                 # Store restored agent_state to be merged into context later
                 if restored_agent_state:
@@ -780,7 +800,8 @@ def main():
                 debug_logger.log("main", "CHECKPOINT_LOADED", {
                     "checkpoint": args.resume,
                     "task_count": len(plan.tasks),
-                    "summary": plan.get_summary()
+                    "summary": plan.get_summary(),
+                    "model_config": model_config
                 })
                 resume_checkpoint = checkpoint_path
                 resume_context = True
