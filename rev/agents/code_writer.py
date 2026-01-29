@@ -314,9 +314,10 @@ def _extract_target_files_from_description(description: str) -> list[str]:
         paths.append(candidate)
 
     # Match bare paths like src/module/file.ext or backend/prisma/schema.prisma
-    # Pattern: word chars, slashes, dots, hyphens + dot + extension
+    # Also handles ./file.py or /absolute/path/file.py
+    # Pattern: word boundary OR start of string + word chars, slashes, dots, hyphens + dot + extension
     # Also handles trailing colons (e.g., "file.py:") and parentheses
-    bare_pattern = r'\b([\w./\\-]+\.\w+)(?=[:\s\)\],]|\b|$)'
+    bare_pattern = r'(^|\b)([\w./\\-]+\.\w+)(?=[:\s\)\],]|\b|$)'
     allowed_bare = {
         "package.json",
         "tsconfig.json",
@@ -329,8 +330,12 @@ def _extract_target_files_from_description(description: str) -> list[str]:
     }
     verb_hint = re.compile(r"\b(edit|update|modify|create|add|remove|delete|replace|rename|refactor|fix|read|inspect|open|write)\b", re.IGNORECASE)
     for match in re.finditer(bare_pattern, description, re.IGNORECASE):
-        candidate = match.group(1)
-        if candidate in paths or candidate.startswith('.'):
+        candidate = match.group(2)  # Use group 2 since group 1 is (^|\b)
+        if candidate in paths:
+            continue
+        # Skip hidden files (starting with dot with no slash) like .gitignore
+        # But allow relative paths like ./file.py or ../file.py
+        if candidate.startswith('.') and '/' not in candidate and '\\' not in candidate:
             continue
         # Extract context around the match for code reference detection
         context_start = max(0, match.start() - 50)

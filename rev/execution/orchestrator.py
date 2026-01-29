@@ -39,6 +39,11 @@ from rev.execution.validator import (
     ValidationReport,
     format_validation_feedback_for_llm,
 )
+from rev.execution.validation_loop import (
+    run_validation_loop,
+    quick_validate,
+    format_test_summary,
+)
 from rev.execution.researcher import research_codebase, ResearchFindings
 from rev.execution.learner import LearningAgent, display_learning_suggestions
 from rev.execution.executor import execution_mode, concurrent_execution_mode, fix_validation_failures
@@ -3816,8 +3821,38 @@ class Orchestrator:
             if execution_mode_val == 'sub-agent':
                 self._update_phase(AgentPhase.EXECUTION)
                 execution_success = self._continuous_sub_agent_execution(user_request, coding_mode)
-                result.success = execution_success
-                result.phase_reached = AgentPhase.COMPLETE if execution_success else AgentPhase.FAILED
+                validation_ok = True
+
+                # Run validation if enabled and execution was successful
+                if execution_success and self.config.enable_validation:
+                    self._update_phase(AgentPhase.VALIDATION)
+                    print("\n→ Starting validation loop...")
+                    try:
+                        validation_result = run_validation_loop(
+                            project_root=self.project_root,
+                            user_request=user_request,
+                            test_cmd=None,  # Auto-detect test command
+                            max_retries=self.config.validation_retries,
+                            timeout=config.VALIDATION_TIMEOUT_SECONDS,
+                            enable_fix=self.config.enable_auto_fix,
+                        )
+                        validation_ok = validation_result.success
+                        print(f"→ Validation completed: {'PASS' if validation_ok else 'FAIL'}")
+
+                        if not validation_ok:
+                            if validation_result.message:
+                                result.errors.append(f"Validation failed: {validation_result.message}")
+                            if validation_result.final_failures:
+                                failure_names = [f.test_name for f in validation_result.final_failures[:5]]
+                                result.errors.append(f"Failed tests: {', '.join(failure_names)}")
+                    except Exception as e:
+                        print(f"→ Validation error: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        validation_ok = False
+
+                result.success = execution_success and validation_ok
+                result.phase_reached = AgentPhase.COMPLETE if result.success else (AgentPhase.VALIDATION if not validation_ok else AgentPhase.FAILED)
                 result.no_retry = bool(self.context.agent_state.get("no_retry")) if self.context else False
                 if not execution_success:
                     result.errors.append("Sub-agent execution failed or was halted.")
@@ -3933,11 +3968,36 @@ class Orchestrator:
                 budget=self.context.resource_budget,
             )
 
+        validation_ok = True  # Default to True if validation not enabled
         if self.config.enable_validation:
             self._update_phase(AgentPhase.VALIDATION)
-        
+            print("\n→ Starting validation loop...")
+            # Run the new validation loop with automatic fix retry
+            try:
+                validation_result = run_validation_loop(
+                    project_root=config.ROOT,
+                    user_request=self.context.user_request,
+                    test_cmd=None,  # Auto-detect test command
+                    max_retries=self.config.validation_retries,
+                    timeout=config.VALIDATION_TIMEOUT_SECONDS,
+                    enable_fix=self.config.enable_auto_fix,
+                )
+                validation_ok = validation_result.success
+                print(f"→ Validation completed: {'PASS' if validation_ok else 'FAIL'}")
+
+                # Store validation results for reporting
+                if not validation_ok:
+                    self.context.add_error(f"Validation failed: {validation_result.message}")
+                    if validation_result.final_failures:
+                        failure_names = [f.test_name for f in validation_result.final_failures[:5]]
+                        self.context.add_error(f"Failed tests: {', '.join(failure_names)}")
+            except Exception as e:
+                print(f"→ Validation error: {e}")
+                import traceback
+                traceback.print_exc()
+                validation_ok = False
+
         all_tasks_handled = all(t.status == TaskStatus.COMPLETED for t in self.context.plan.tasks)
-        validation_ok = True
         result.success = all_tasks_handled and validation_ok
         result.phase_reached = AgentPhase.COMPLETE if result.success else AgentPhase.VALIDATION
 
