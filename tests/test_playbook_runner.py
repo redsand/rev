@@ -12,7 +12,7 @@ if sys.platform == "win32":
     sys.stderr = codecs.getwriter("utf-8")(sys.stderr.buffer, 'strict')
 
 os.environ["REV_LLM_PROVIDER"] = "ollama"
-os.environ["OLLAMA_MODEL"] = "glm-4.7:cloud"
+os.environ.setdefault("OLLAMA_MODEL", "glm-4.7:cloud")
 os.environ["OLLAMA_BASE_URL"] = "http://localhost:11434"
 
 print("Testing REV on playbook 01...")

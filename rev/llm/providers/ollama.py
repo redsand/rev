@@ -382,6 +382,23 @@ class OllamaProvider(LLMProvider):
                     except json.JSONDecodeError:
                         return {"error": f"Ollama API error: {resp.status_code} {resp.reason}"}
 
+                # Handle 429 (rate limiting) with optional Retry-After
+                if resp.status_code == 429:
+                    should_retry = retry_forever or attempt < max_attempts - 1
+                    if not should_retry:
+                        return {"error": f"Ollama API error: {resp.status_code} {resp.reason}"}
+                    retry_after = None
+                    try:
+                        retry_after = float(resp.headers.get("Retry-After", ""))
+                    except Exception:
+                        retry_after = None
+                    if retry_after is not None and retry_after > 0:
+                        time.sleep(retry_after)
+                    else:
+                        self._sleep_before_retry(retry_backoff, max_backoff, attempt)
+                    attempt += 1
+                    continue
+
                 # Try safer fallbacks if the model rejects tool_choice/tool payloads
                 if resp.status_code == 400 and tools_provided:
                     # 1) If explicit tool_choice was set, downshift to auto (keep tools)
@@ -477,7 +494,7 @@ class OllamaProvider(LLMProvider):
 
             except requests.exceptions.HTTPError as e:
                 status_code = resp.status_code if 'resp' in locals() else None
-                retryable_http = status_code is not None and status_code >= 500
+                retryable_http = status_code is not None and (status_code >= 500 or status_code == 429)
                 should_retry = retryable_http and (retry_forever or attempt < max_attempts - 1)
                 if should_retry:
                     self._sleep_before_retry(retry_backoff, max_backoff, attempt)

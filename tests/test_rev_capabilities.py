@@ -28,9 +28,9 @@ if sys.platform == "win32":
     sys.stderr = codecs.getwriter("utf-8")(sys.stderr.buffer, 'strict')
 
 
-# Configure REV to use ollama with glm-4.7:cloud
+# Configure REV to use ollama with glm-4.7:cloud (allow env override)
 os.environ["REV_LLM_PROVIDER"] = "ollama"
-os.environ["OLLAMA_MODEL"] = "glm-4.7:cloud"
+os.environ.setdefault("OLLAMA_MODEL", "glm-4.7:cloud")
 os.environ["OLLAMA_BASE_URL"] = "http://localhost:11434"
 os.environ["REV_TDD_ENABLED"] = "true"
 os.environ["REV_EXECUTION_MODE"] = "sub-agent"
