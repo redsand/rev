@@ -4,7 +4,7 @@ packaging>=24.0
 libcst>=1.4.0
 
 # Optional: For SSH remote execution
-# paramiko>=3.0.0
+paramiko>=3.0.0
 openai
 pywinrm
 playwright
@@ -12,7 +12,9 @@ colorama
 setuptools
 anthropic
 google-generativeai
-windows-curses; platform_system == "Windows"
+# windows-curses; platform_system == "Windows"
+
+pyyaml
 
 # IDE Integration dependencies
 pygls >= 1.0.0  # Language Server Protocol
