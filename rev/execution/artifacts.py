@@ -178,7 +178,7 @@ def write_tool_output_artifact(
     pid = os.getpid()
     tool_safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in (tool or "tool"))[:64] or "tool"
     sid_safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in (session_id or "session"))[:64] or "session"
-    tid_safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in (task_id or "task"))[:64] or "task"
+    tid_safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in str(task_id or "task"))[:64] or "task"
 
     filename = f"{stamp}_{counter:06d}_{pid}_{sid_safe}_{tid_safe}_{tool_safe}.json"
     final_path = config.TOOL_OUTPUTS_DIR / filename

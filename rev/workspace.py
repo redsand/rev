@@ -183,6 +183,13 @@ class Workspace:
         """
         raw = _clean_path_input(path)
 
+        # On Windows, convert Unix-style absolute paths (starting with "/") to relative.
+        # Unix-style root paths like "/JavaScript" don't make sense on Windows and should
+        # be treated as relative to the current working directory.
+        if os.name == "nt" and raw.startswith("/"):
+            # Remove the leading "/" to make it relative
+            raw = raw[1:] if len(raw) > 1 else "."
+
         # Guard against LLM "nesting" mistake: prefixing workspace-relative path
         # with the workspace folder name (e.g., in `C:\repo\project` emitting
         # `project/src/...` which creates `<ROOT>/project/src`).
