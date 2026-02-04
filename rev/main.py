@@ -138,6 +138,11 @@ def main():
         help="Disable review agent"
     )
     parser.add_argument(
+        "--no-planning",
+        action="store_true",
+        help="Disable planning phase for small requests (execute directly)"
+    )
+    parser.add_argument(
         "--review-strictness",
         choices=["lenient", "moderate", "strict"],
         default=config.REVIEW_STRICTNESS_DEFAULT,
@@ -971,16 +976,26 @@ def main():
                 sys.exit(0)
 
             # Standard mode - manual agent coordination
-            debug_logger.log_workflow_phase("planning", {"task": task_description})
-            plan = planning_mode(
-                task_description,
-                max_plan_tasks=config.MAX_PLAN_TASKS,
-                max_planning_iterations=config.MAX_PLANNING_TOOL_ITERATIONS,
-            )
+            enable_planning = not args.no_planning
+
+            if enable_planning:
+                debug_logger.log_workflow_phase("planning", {"task": task_description})
+                plan = planning_mode(
+                    task_description,
+                    max_plan_tasks=config.MAX_PLAN_TASKS,
+                    max_planning_iterations=config.MAX_PLANNING_TOOL_ITERATIONS,
+                )
+            else:
+                # Skip planning - create a simple direct execution plan
+                debug_logger.log_workflow_phase("planning", {"task": task_description, "mode": "direct (no-planning)"})
+                from rev.models.task import ExecutionPlan
+                plan = ExecutionPlan()
+                plan.add_task(task_description, action_type="general")
+                print(f"[no-planning] Direct execution mode: will execute '{task_description}' without planning")
             state_manager = StateManager(plan)
             debug_logger.log("main", "PLAN_GENERATED", {
                 "task_count": len(plan.tasks),
-                "tasks": [{"id": t.id, "description": t.description[:100]} for t in plan.tasks]
+                "tasks": [{"id": t.task_id, "description": t.description[:100]} for t in plan.tasks]
             })
 
             # Review phase - Review Agent validates the plan

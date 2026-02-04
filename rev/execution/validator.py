@@ -100,17 +100,95 @@ def _get_common_dirs() -> Dict[str, List[str]]:
     """Discover common source and test directories dynamically."""
     from pathlib import Path
     root = Path.cwd()
-    
+
     source_candidates = ["src", "lib", "app", "core", "pkg"]
     test_candidates = ["tests", "test", "spec", "unit_tests"]
-    
+
     found_sources = [d for d in source_candidates if (root / d).is_dir()]
     found_tests = [d for d in test_candidates if (root / d).is_dir()]
-    
+
     return {
         "sources": found_sources or ["."],
         "tests": found_tests or ["tests"]  # Default to tests if nothing found
     }
+
+
+def _has_npm_script(script_name: str) -> bool:
+    """Check if a script exists in package.json.
+
+    Args:
+        script_name: Name of the npm script to check (e.g., "build", "lint")
+
+    Returns:
+        True if the script exists in package.json, False otherwise
+    """
+    from pathlib import Path
+    pkg_json_path = Path.cwd() / "package.json"
+    if not pkg_json_path.exists():
+        return False
+    try:
+        pkg_data = json.loads(pkg_json_path.read_text(errors='ignore'))
+        scripts = pkg_data.get("scripts", {})
+        return script_name in scripts
+    except Exception:
+        return False
+
+
+def _has_linter_config(project_type: str) -> bool:
+    """Check if a linter config file exists for the project type.
+
+    Args:
+        project_type: The detected project type (python, node, etc.)
+
+    Returns:
+        True if a linter config file exists, False otherwise
+    """
+    from pathlib import Path
+    root = Path.cwd()
+
+    if project_type == "python":
+        # Check for ruff.toml, .ruff.toml, pyproject.toml with ruff section, setup.cfg
+        config_files = ["ruff.toml", ".ruff.toml", "pyproject.toml", "setup.cfg", ".flake8", ".pylintrc"]
+        return any((root / f).exists() for f in config_files)
+
+    elif project_type in ("node", "vue", "react", "nextjs"):
+        # Check for eslint config files (ESLint v9+ uses eslint.config.js, older uses .eslintrc.*)
+        eslint_configs = [
+            "eslint.config.js", "eslint.config.mjs", "eslint.config.cjs",  # ESLint v9+
+            ".eslintrc.js", ".eslintrc.cjs", ".eslintrc.mjs", ".eslintrc.json", ".eslintrc.yml", ".eslintrc.yaml",  # ESLint v8-
+        ]
+        return any((root / f).exists() for f in eslint_configs)
+
+    elif project_type == "go":
+        # go vet doesn't need a config, always available
+        return True
+
+    elif project_type == "rust":
+        # cargo clippy doesn't need a config, always available
+        return True
+
+    return False
+
+
+def _has_build_script(project_type: str) -> bool:
+    """Check if the project has a build script available.
+
+    Args:
+        project_type: The detected project type
+
+    Returns:
+        True if a build command can be run, False otherwise
+    """
+    if project_type in ("node", "vue", "react", "nextjs"):
+        return _has_npm_script("build")
+    elif project_type == "python":
+        # Python doesn't typically have a build script for simple projects
+        return _has_npm_script("build")  # Check anyway for setuptools projects
+    elif project_type == "go":
+        return True  # go build always works
+    elif project_type == "rust":
+        return True  # cargo check always works
+    return False
 
 
 def _semantic_validation_check(plan: ExecutionPlan) -> ValidationResult:
@@ -417,21 +495,44 @@ def validate_execution(
             test_cmd = syntax_cmd
         elif validation_mode == "targeted":
             test_cmd = f"pytest -q {primary_test_dir}/ --maxfail=1"
-            lint_cmd = "ruff check . --select E9,F63,F7,F82 --output-format=json"
+            # Only run linter if config exists
+            if _has_linter_config(project_type):
+                lint_cmd = "ruff check . --select E9,F63,F7,F82 --output-format=json"
+            else:
+                run_linter = False
         else: # full
             test_cmd = f"pytest -q {primary_test_dir}/"
-            lint_cmd = "ruff check . --output-format=json"
+            # Only run linter if config exists
+            if _has_linter_config(project_type):
+                lint_cmd = "ruff check . --output-format=json"
+            else:
+                run_linter = False
             
     elif project_type in ("node", "vue", "react", "nextjs"):
-        syntax_cmd = "npm run build" # Best effort for generic syntax check
+        # Only run build if the script exists
+        if _has_npm_script("build"):
+            syntax_cmd = "npm run build"
+        else:
+            check_syntax = False  # Skip syntax check if no build script
+
         if validation_mode == "smoke":
             test_cmd = "npm test -- --run" # Try Vitest/Jest run once
         elif validation_mode == "targeted":
             test_cmd = "npm test -- --run"
-            lint_cmd = "npx --yes eslint . --quiet"
+            # Only run linter if config exists
+            if _has_linter_config(project_type):
+                lint_cmd = "npx --yes eslint . --quiet"
+            else:
+                run_linter = False
         else: # full
             test_cmd = "npm test"
-            lint_cmd = "npm run lint"
+            # Only run lint script if it exists
+            if _has_npm_script("lint"):
+                lint_cmd = "npm run lint"
+            elif _has_linter_config(project_type):
+                lint_cmd = "npx --yes eslint . --quiet"
+            else:
+                run_linter = False
             
     elif project_type == "go":
         syntax_cmd = "go build ./..."
@@ -602,7 +703,7 @@ def _check_syntax(cmd: str = "python -m compileall -q .") -> ValidationResult:
         # Use 'executor' agent name to bypass restricted permissions in validator
         result = execute_tool("run_cmd", {"cmd": cmd, "timeout": config.VALIDATION_TIMEOUT_SECONDS}, agent_name="executor")
         result_data = json.loads(result)
-        
+
         if "error" in result_data:
             return ValidationResult(
                 name="syntax_check",
@@ -613,6 +714,14 @@ def _check_syntax(cmd: str = "python -m compileall -q .") -> ValidationResult:
         # compileall returns non-zero if there are errors
         rc = result_data.get("rc", 0)
         output = result_data.get("stdout", "") + result_data.get("stderr", "")
+
+        # Check for "Missing script" error from npm - skip rather than fail
+        if "npm" in cmd.lower() and "missing script" in output.lower():
+            return ValidationResult(
+                name="syntax_check",
+                status=ValidationStatus.SKIPPED,
+                message="npm script not found - skipped"
+            )
 
         if rc != 0:
             return ValidationResult(
@@ -649,6 +758,33 @@ def _run_test_suite(cmd: str | list[str]) -> ValidationResult:
 
         rc = result_data.get("rc", 1)
         output = result_data.get("stdout", "") + result_data.get("stderr", "")
+
+        # Check for missing package.json - skip tests instead of failing
+        if "npm" in cmd.lower() and "package.json" in output.lower():
+            if "enoent" in output.lower() or "not found" in output.lower() or "no such file" in output.lower():
+                return ValidationResult(
+                    name="test_suite",
+                    status=ValidationStatus.SKIPPED,
+                    message="package.json not found - skipped"
+                )
+
+        # Check for test runner startup errors (e.g., ReferenceError, SyntaxError)
+        # These indicate the test framework itself failed to load, not that tests ran
+        startup_error_patterns = [
+            r'ReferenceError:\s+\w+\s+is not defined',
+            r'SyntaxError:\s+',
+            r'Cannot find module',
+            r'Module not found',
+            r'Error:\s+Cannot find',
+        ]
+        for pattern in startup_error_patterns:
+            if re.search(pattern, output):
+                return ValidationResult(
+                    name="test_suite",
+                    status=ValidationStatus.FAILED,
+                    message="Test runner failed to start - check test framework configuration",
+                    details={"return_code": rc, "output": output[-1000:]}
+                )
 
         # Pytest return codes:
         # 0 = All tests passed
@@ -726,6 +862,32 @@ def _run_linter(cmd: str | list[str]) -> ValidationResult:
         stdout = result_data.get("stdout", "")
         stderr = result_data.get("stderr", "")
         rc = result_data.get("rc", 0)
+        combined_output = (stdout + "\n" + stderr).strip()
+
+        # Check for ESLint v9+ config error - skip rather than fail
+        if "eslint" in cmd.lower() and "couldn't find an eslint.config" in combined_output.lower():
+            return ValidationResult(
+                name="linter",
+                status=ValidationStatus.SKIPPED,
+                message="ESLint config not found - skipped"
+            )
+
+        # Check for ESLint v8- config error - skip rather than fail
+        if "eslint" in cmd.lower() and ("no eslint configuration" in combined_output.lower() or
+                                        "configuration file not found" in combined_output.lower()):
+            return ValidationResult(
+                name="linter",
+                status=ValidationStatus.SKIPPED,
+                message="ESLint config not found - skipped"
+            )
+
+        # Check for ruff config error - skip rather than fail
+        if "ruff" in cmd.lower() and "no ruff configuration" in combined_output.lower():
+            return ValidationResult(
+                name="linter",
+                status=ValidationStatus.SKIPPED,
+                message="Ruff config not found - skipped"
+            )
 
         # Try to parse as JSON if it looks like JSON
         stripped_stdout = stdout.strip()
@@ -758,7 +920,6 @@ def _run_linter(cmd: str | list[str]) -> ValidationResult:
                 pass
 
         # Fallback to plain text analysis if JSON parsing failed or wasn't expected
-        combined_output = (stdout + "\n" + stderr).strip()
         if rc == 0:
             return ValidationResult(
                 name="linter",
@@ -780,8 +941,26 @@ def _run_linter(cmd: str | list[str]) -> ValidationResult:
         )
 
 
+def _is_git_initialized() -> bool:
+    """Check if git is initialized in the current directory.
+
+    Returns:
+        True if .git directory exists, False otherwise
+    """
+    from pathlib import Path
+    return (Path.cwd() / ".git").exists()
+
+
 def _check_git_diff(plan: ExecutionPlan) -> ValidationResult:
     """Check git diff to verify changes were made."""
+    # Skip if git is not initialized
+    if not _is_git_initialized():
+        return ValidationResult(
+            name="git_diff",
+            status=ValidationStatus.SKIPPED,
+            message="Git not initialized - skipped"
+        )
+
     try:
         result = execute_tool("git_diff", {}, agent_name="executor")
         result_data = json.loads(result)
