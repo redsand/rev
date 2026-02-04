@@ -73,6 +73,7 @@ AgentRegistry.register_agent("set_workdir", ResearchAgent)
 
 # Advanced agents
 AgentRegistry.register_agent("create_tool", ToolCreationAgent)
+AgentRegistry.register_agent("create_utility", ToolCreationAgent)
 AgentRegistry.register_agent("tool", ToolExecutorAgent)
 
 # Deep reasoning agent (for complex multi-step tasks)

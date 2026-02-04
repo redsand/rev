@@ -78,6 +78,7 @@ agent_roles:
       - set_workdir
       - analyze_*
       - find_*
+      - create_directory
     denied_tools:
       - delete_file
       - run_cmd

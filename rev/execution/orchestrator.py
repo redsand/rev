@@ -3847,7 +3847,6 @@ class Orchestrator:
                                 result.errors.append(f"Failed tests: {', '.join(failure_names)}")
                     except Exception as e:
                         print(f"→ Validation error: {e}")
-                        import traceback
                         traceback.print_exc()
                         validation_ok = False
 
