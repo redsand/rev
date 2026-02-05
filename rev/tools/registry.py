@@ -1032,13 +1032,9 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "executor") 
     from rev.execution.ledger import get_ledger
     ledger = get_ledger()
 
-    from rev.terminal.formatting import colorize, Colors, Symbols
+    from rev.terminal.formatting import colorize, Colors, Symbols, Spinner
     friendly_desc = _get_friendly_description(name, args)
     
-    # Professional tool execution line
-    tool_tag = colorize(f" {Symbols.ARROW} {name}", Colors.BRIGHT_BLACK)
-    print(f"  {tool_tag} {colorize(friendly_desc, Colors.BRIGHT_BLACK)}")
-
     # Get debug logger
     debug_logger = get_logger()
 
@@ -1048,11 +1044,83 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "executor") 
     else:
         _LAST_TOOL_CALL = {"name": name, "args": args}
 
+    sp = None
+    result = None
     try:
-        # Check if it's an MCP tool (special handling for lazy imports)
-        start_time = time.time()
-        if name.startswith("mcp_"):
-            result = _handle_mcp_tool(name, args)
+        with Spinner(friendly_desc, tool_name=name) as sp:
+            # Check if it's an MCP tool (special handling for lazy imports)
+            start_time = time.time()
+            if name.startswith("mcp_"):
+                result = _handle_mcp_tool(name, args)
+                duration = (time.time() - start_time) * 1000
+                debug_logger.log_tool_execution(name, args, result, duration_ms=duration)
+                debug_logger.log_transaction_event("TOOL_RESULT", {
+                    "tool": name,
+                    "arguments": args,
+                    "result": result,
+                    "duration_ms": duration
+                })
+                ledger.record(name, args, result, duration, agent_name)
+                
+                # Check for errors in MCP result
+                if isinstance(result, str) and '"error":' in result:
+                    sp.success = False
+                return result
+
+            # O(1) dictionary lookup
+            handler = _DYNAMIC_DISPATCH.get(name) or _TOOL_DISPATCH.get(name)
+            if handler is None:
+                error_msg = f"Unknown tool: {name}"
+                debug_logger.log_tool_execution(name, args, error=error_msg)
+                debug_logger.log_transaction_event("TOOL_ERROR", {
+                    "tool": name,
+                    "arguments": args,
+                    "error": error_msg
+                })
+                ledger.record(name, args, error_msg, 0, agent_name, status="error")
+                sp.success = False
+                result = json.dumps({"error": error_msg})
+                return result
+
+            # Execute with timeout protection if applicable
+            if name in _TIMEOUT_PROTECTED_TOOLS:
+                timeout_mgr = _get_timeout_manager()
+                if timeout_mgr:
+                    try:
+                        result = timeout_mgr.execute_with_retry(
+                            handler,
+                            f"{name}({', '.join(f'{k}={v!r}' for k, v in list(args.items())[:2])})",
+                            args
+                        )
+                        duration = (time.time() - start_time) * 1000
+                        debug_logger.log_tool_execution(name, args, result, duration_ms=duration)
+                        debug_logger.log_transaction_event("TOOL_RESULT", {
+                            "tool": name,
+                            "arguments": args,
+                            "result": result,
+                            "duration_ms": duration
+                        })
+                        ledger.record(name, args, result, duration, agent_name)
+                        
+                        if isinstance(result, str) and '"error":' in result:
+                            sp.success = False
+                        return result
+                    except Exception as e:
+                        # Timeout or max retries exceeded - use unified error format
+                        error_json = _format_tool_error(e, name)
+                        debug_logger.log_tool_execution(name, args, error=str(e))
+                        debug_logger.log_transaction_event("TOOL_ERROR", {
+                            "tool": name,
+                            "arguments": args,
+                            "error": str(e)
+                        })
+                        ledger.record(name, args, str(e), (time.time() - start_time) * 1000, agent_name, status="error")
+                        sp.success = False
+                        result = error_json
+                        return error_json
+
+            # Execute the tool handler without timeout protection
+            result = handler(args)
             duration = (time.time() - start_time) * 1000
             debug_logger.log_tool_execution(name, args, result, duration_ms=duration)
             debug_logger.log_transaction_event("TOOL_RESULT", {
@@ -1062,65 +1130,12 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "executor") 
                 "duration_ms": duration
             })
             ledger.record(name, args, result, duration, agent_name)
+            
+            # Check for error in result
+            if isinstance(result, str) and '"error":' in result:
+                sp.success = False
+            
             return result
-
-        # O(1) dictionary lookup
-        handler = _DYNAMIC_DISPATCH.get(name) or _TOOL_DISPATCH.get(name)
-        if handler is None:
-            error_msg = f"Unknown tool: {name}"
-            debug_logger.log_tool_execution(name, args, error=error_msg)
-            debug_logger.log_transaction_event("TOOL_ERROR", {
-                "tool": name,
-                "arguments": args,
-                "error": error_msg
-            })
-            ledger.record(name, args, error_msg, 0, agent_name, status="error")
-            return json.dumps({"error": error_msg})
-
-        # Execute with timeout protection if applicable
-        if name in _TIMEOUT_PROTECTED_TOOLS:
-            timeout_mgr = _get_timeout_manager()
-            if timeout_mgr:
-                try:
-                    result = timeout_mgr.execute_with_retry(
-                        handler,
-                        f"{name}({', '.join(f'{k}={v!r}' for k, v in list(args.items())[:2])})",
-                        args
-                    )
-                    duration = (time.time() - start_time) * 1000
-                    debug_logger.log_tool_execution(name, args, result, duration_ms=duration)
-                    debug_logger.log_transaction_event("TOOL_RESULT", {
-                        "tool": name,
-                        "arguments": args,
-                        "result": result,
-                        "duration_ms": duration
-                    })
-                    ledger.record(name, args, result, duration, agent_name)
-                    return result
-                except Exception as e:
-                    # Timeout or max retries exceeded - use unified error format
-                    error_json = _format_tool_error(e, name)
-                    debug_logger.log_tool_execution(name, args, error=str(e))
-                    debug_logger.log_transaction_event("TOOL_ERROR", {
-                        "tool": name,
-                        "arguments": args,
-                        "error": str(e)
-                    })
-                    ledger.record(name, args, str(e), (time.time() - start_time) * 1000, agent_name, status="error")
-                    return error_json
-
-        # Execute the tool handler without timeout protection
-        result = handler(args)
-        duration = (time.time() - start_time) * 1000
-        debug_logger.log_tool_execution(name, args, result, duration_ms=duration)
-        debug_logger.log_transaction_event("TOOL_RESULT", {
-            "tool": name,
-            "arguments": args,
-            "result": result,
-            "duration_ms": duration
-        })
-        ledger.record(name, args, result, duration, agent_name)
-        return result
 
     except Exception as e:
         # Use unified error format for all exceptions
@@ -1132,7 +1147,32 @@ def execute_tool(name: str, args: Dict[str, Any], agent_name: str = "executor") 
             "error": str(e)
         })
         ledger.record(name, args, str(e), (time.time() - start_time) * 1000, agent_name, status="error")
+        result = error_json
         return error_json
+    finally:
+        # Show associated error output if it failed
+        if sp and not sp.success and result:
+            try:
+                data = json.loads(result)
+                error_detail = data.get("error")
+                stdout = data.get("stdout") or data.get("stdout_tail")
+                stderr = data.get("stderr") or data.get("stderr_tail")
+                
+                if error_detail:
+                    print(f"    {colorize('Error:', Colors.BRIGHT_RED)} {error_detail}")
+                if stdout and stdout.strip():
+                    # Limit output to avoid flooding
+                    stdout_lines = stdout.strip().splitlines()
+                    if len(stdout_lines) > 20:
+                        stdout = "\n".join(stdout_lines[:10] + ["..."] + stdout_lines[-10:])
+                    print(f"    {colorize('Stdout:', Colors.BRIGHT_BLACK)}\n{stdout}")
+                if stderr and stderr.strip():
+                    stderr_lines = stderr.strip().splitlines()
+                    if len(stderr_lines) > 20:
+                        stderr = "\n".join(stderr_lines[:10] + ["..."] + stderr_lines[-10:])
+                    print(f"    {colorize('Stderr:', Colors.BRIGHT_RED)}\n{stderr}")
+            except:
+                pass
 
 
 def get_available_tools() -> list:

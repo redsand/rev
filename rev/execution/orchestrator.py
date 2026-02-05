@@ -6477,13 +6477,15 @@ class Orchestrator:
 
             # Determine status symbol
             if next_task.status == TaskStatus.COMPLETED:
-                status_symbol = "✓"
+                # Silenced as per user request to avoid "✓ OK" repetition
+                status_symbol = None
             elif next_task.status == TaskStatus.IN_PROGRESS:
                 status_symbol = colorize(Symbols.ELLIPSIS, Colors.BRIGHT_YELLOW)
             else:
-                status_symbol = "✗"
+                status_symbol = colorize(Symbols.CROSS, Colors.BRIGHT_RED)
 
-            print(f"  {status_symbol} {display_entry}")
+            if status_symbol:
+                print(f"  {status_symbol} {display_entry}")
 
             # Check for replan requests from agents
             if self.context and self.context.agent_requests:
@@ -6918,11 +6920,6 @@ class Orchestrator:
                     return False
 
             task.status = TaskStatus.COMPLETED
-
-            # Display completion status
-            action_type = (task.action_type or "general").upper()
-            task_desc = task.description or ""
-            print(f"  {colorize('✓', Colors.BRIGHT_GREEN)} {colorize('COMPLETED', Colors.BRIGHT_GREEN, bold=True)} {task_desc}")
 
             try:
                 # If the agent produced tool evidence, it may include artifact refs.
