@@ -1,0 +1,74 @@
+{
+  "timestamp": "2026-01-28T14:04:24.353987",
+  "provider": "ollama",
+  "model": "glm-4.7:cloud",
+  "summary": {
+    "total": 5,
+    "passed": 2,
+    "failed": 3,
+    "pass_rate": 40.0,
+    "duration": 6568.7265038490295
+  },
+  "results": [
+    {
+      "playbook_id": "01_simple_string_manipulation",
+      "playbook_name": "Simple String Manipulation",
+      "success": true,
+      "duration": 6534.508970737457,
+      "error": null,
+      "metrics": {
+        "readme": "# Playbook 01: Simple - String Manipulation\n\n## Level: Simple\n\n## Goal\nAdd utility functions to manipulate and analyze strings for a CLI tool.\n\n## Initial State\n- Basic Python package structure\n- Empty `string_utils.py` module\n- Tests that will pass after implementation\n\n## Task\nImplement the following functions in `string_utils.py`:\n\n1. `reverse_string(s: str) -> str` - Return the reversed string\n2. `count_vowels(s: str) -> int` - Count vowels (a, e, i, o, u) case-insensitively\n3. `is_palindrom",
+        "task_description": "Implement utility functions in string_utils.py: reverse_string(s), count_vowels(s), is_palindrome(s), capitalize_words(s). Make sure to handle empty strings and include docstrings."
+      },
+      "timestamp": "2026-01-28T12:14:55.381303"
+    },
+    {
+      "playbook_id": "02_advanced_shopping_cart",
+      "playbook_name": "Advanced Shopping Cart",
+      "success": true,
+      "duration": 6.926899194717407,
+      "error": null,
+      "metrics": {
+        "readme": "# Playbook 02: Advanced - Shopping Cart with Error Handling\n\n## Level: Advanced\n\n## Goal\nImplement a shopping cart system with class-based design, error handling, and edge cases.\n\n## Initial State\n- Package structure with interfaces defined\n- Empty implementations to fill in\n- Tests that will pass after implementation\n\n## Task\nImplement a shopping cart system with the following components:\n\n### `product.py`:\n- `Product` class with `id`, `name`, `price`, `stock_quantity`\n- `validate()` method to ",
+        "task_description": "Implement a shopping cart system in cart.py and product.py: Product class with id, name, price, stock_quantity, validate(), apply_discount(), is_in_stock(). ShoppingCart class with add_item(), remove_item(), update_quantity(), get_total(), clear(). Add custom exceptions: OutOfStockError, ItemNotFoundError, InvalidQuantityError."
+      },
+      "timestamp": "2026-01-28T14:03:49.965049"
+    },
+    {
+      "playbook_id": "03_complex_task_manager",
+      "playbook_name": "Complex Task Manager",
+      "success": false,
+      "duration": 13.720241069793701,
+      "error": null,
+      "metrics": {
+        "readme": "# Playbook 03: Complex - Async Task Manager with Inheritance\n\n## Level: Complex\n\n## Goal\nImplement an asynchronous task management system with inheritance, decorators, and error handling.\n\n## Initial State\n- Package structure with interfaces\n- Empty implementations to fill in\n- Tests that will pass after implementation\n\n## Task\nImplement a task management system with the following components:\n\n### `models.py`:\n- Abstract `Task` class with `execute()` and `cancel()` methods\n- `AsyncTask` subclass",
+        "task_description": "Implement an async task manager in task_manager.py: Task model, TaskStatus enum, @timeout and @retry decorators, TaskScheduler with run(), stop(), cancel(). Include validation with TaskValidationError exception."
+      },
+      "timestamp": "2026-01-28T14:03:56.955721"
+    },
+    {
+      "playbook_id": "04_very_complex_microservice",
+      "playbook_name": "Very Complex Microservice",
+      "success": false,
+      "duration": 6.748063325881958,
+      "error": null,
+      "metrics": {
+        "readme": "# Playbook 04: Very Complex - REST API Microservice\n\n## Level: Very Complex\n\n## Goal\nImplement a full REST API microservice with database, authentication, and comprehensive testing.\n\n## Initial State\n- Package structure with stub files\n- Database schema definitions\n- API endpoint stubs\n- Test infrastructure\n\n## Task\nImplement a REST API microservice with the following components:\n\n### `models/`:\n- `User` model (id, username, email, hashed_password, created_at, is_active)\n- `Product` model (id, n",
+        "task_description": "Implement a REST API microservice in models.py, repositories.py, routes.py: User and Product models, UserRepository and ProductRepository, API routes with endpoints for CRUD operations, JWT authentication."
+      },
+      "timestamp": "2026-01-28T14:04:10.728430"
+    },
+    {
+      "playbook_id": "05_integration_e2e_multi_service",
+      "playbook_name": "Integration E2E Multi-Service",
+      "success": false,
+      "duration": 6.822329521179199,
+      "error": null,
+      "metrics": {
+        "readme": "# Playbook 05: Integration - E2E Multi-Service Application\n\n## Level: Integration / End-to-End\n\n## Goal\nImplement a multi-service distributed application with networking, state management, message passing, and comprehensive E2E testing.\n\n## Initial State\n- Multi-project structure\n- Service interfaces defined\n- Docker Compose configuration\n- Integration test framework\n\n## Task\nImplement a distributed e-commerce system with the following services:\n\n### **Services:**\n\n1. **User Service** (user-serv",
+        "task_description": "Implement a multi-service distributed application: UserService, ProductService, OrderService, NotificationService, API Gateway. Service communication via API calls, request/response models."
+      },
+      "timestamp": "2026-01-28T14:04:17.530832"
+    }
+  ]
+}

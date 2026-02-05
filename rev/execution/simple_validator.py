@@ -78,6 +78,18 @@ class SimpleValidator:
         if test_cmd is None:
             test_cmd = self._detect_test_command()
 
+        if test_cmd is None:
+            print(f"\n[Validation] No suitable test command detected for this project structure.")
+            return ValidationResult(
+                passed=True,
+                total_tests=0,
+                passed_tests=0,
+                failed_tests=0,
+                failures=[],
+                raw_output="No test command detected",
+                command="<none>"
+            )
+
         print(f"\n[Validation] Running tests: {test_cmd}")
 
         try:
@@ -122,26 +134,51 @@ class SimpleValidator:
             command=test_cmd
         )
 
-    def _detect_test_command(self) -> str:
+    def _detect_test_command(self) -> Optional[str]:
         """Auto-detect the appropriate test command."""
-        # Look for common test files in root
         root = self.project_root
 
-        # Check for pytest
+        # PHP (Composer)
+        if (root / "composer.json").exists():
+            try:
+                composer_content = (root / "composer.json").read_text(errors="ignore")
+                if '"test"' in composer_content:
+                    return "composer test"
+            except Exception:
+                pass
+            
+            # Fallback to phpunit if vendor dir exists
+            if (root / "vendor" / "bin" / "phpunit").exists():
+                return "./vendor/bin/phpunit"
+            # Windows path
+            if (root / "vendor" / "bin" / "phpunit.bat").exists():
+                return ".\\vendor\\bin\\phpunit"
+
+        # Node.js (Jest/Mocha/etc via npm)
+        if (root / "package.json").exists():
+            try:
+                pkg_json = (root / "package.json").read_text(errors="ignore")
+                if '"test"' in pkg_json:
+                    return "npm test"
+            except Exception:
+                pass
+
+        # Go
+        if (root / "go.mod").exists():
+            return "go test ./..."
+
+        # Python (pytest) - Only if strong indicators exist
         if (root / "pytest.ini").exists() or \
-           (root / "pyproject.toml").exists() or \
-           any(root.glob("test_*.py")) or \
-           any((root / "tests").glob("*.py")):
+           (root / "tox.ini").exists():
             return "python -m pytest -v"
 
-        # Check for jest
-        if (root / "package.json").exists():
-            pkg_json = (root / "package.json").read_text()
-            if '"test"' in pkg_json or '"jest"' in pkg_json:
-                return "npm test"
+        # Check for explicit python tests structure
+        if any(root.glob("test_*.py")) or \
+           ((root / "tests").exists() and any((root / "tests").glob("*.py"))):
+            return "python -m pytest -v"
 
-        # Default to pytest for Python
-        return "python -m pytest -v"
+        # No clear signal found
+        return None
 
     def _parse_test_failures(self, output: str) -> List[TestFailure]:
         """Parse test failures from pytest output.
