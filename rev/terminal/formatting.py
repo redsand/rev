@@ -148,6 +148,61 @@ class Symbols:
     SEPARATOR = '━'
 
 
+class Spinner:
+    """A simple terminal spinner context manager."""
+    def __init__(self, message: str, tool_name: str = ""):
+        self.message = message
+        self.tool_name = tool_name
+        self.frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        self.stop_event = None
+        self.thread = None
+        self._start_time = 0
+        self.success = True
+
+    def _spin(self):
+        import time
+        import threading
+        i = 0
+        while not self.stop_event.is_set():
+            frame = colorize(self.frames[i % len(self.frames)], Colors.BRIGHT_CYAN)
+            tool_part = f"{colorize(self.tool_name, Colors.BRIGHT_BLACK)} " if self.tool_name else ""
+            line = f"\r  {frame} {tool_part}{colorize(self.message, Colors.BRIGHT_BLACK)}"
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            i += 1
+            time.sleep(0.08)
+
+    def __enter__(self):
+        import threading
+        import time
+        self._start_time = time.time()
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._spin, daemon=True)
+        self.thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        import time
+        self.stop_event.set()
+        if self.thread:
+            self.thread.join()
+        
+        # Clear the spinner line
+        sys.stdout.write("\r" + " " * 120 + "\r")
+        sys.stdout.flush()
+        
+        duration = time.time() - self._start_time
+        duration_str = f" ({duration:.1f}s)" if duration > 0.5 else ""
+        
+        tool_part = f"{colorize(self.tool_name, Colors.BRIGHT_BLACK)} " if self.tool_name else ""
+        if exc_type is None and self.success:
+            symbol = colorize(Symbols.CHECK, Colors.BRIGHT_GREEN)
+            print(f"  {symbol} {tool_part}{colorize(self.message, Colors.BRIGHT_BLACK)}{colorize(duration_str, Colors.BRIGHT_BLACK)}")
+        else:
+            symbol = colorize(Symbols.CROSS, Colors.BRIGHT_RED)
+            print(f"  {symbol} {tool_part}{colorize(self.message, Colors.BRIGHT_BLACK)}{colorize(duration_str, Colors.BRIGHT_RED)}")
+
+
 def colorize(text: str, color: str, bold: bool = False) -> str:
     """Colorize text if terminal supports it.
 
