@@ -587,6 +587,37 @@ def _build_tool_dispatch() -> Dict[str, callable]:
         "analyze_dependencies": lambda args: analyze_dependencies(args["target"], args.get("depth", 3)),
         "analyze_semantic_diff": lambda args: analyze_semantic_diff(args["file_path"], args.get("compare_to", "HEAD")),
 
+        # Meta / agent-coordination tools (handled specially by ToolExecutorAgent)
+        "request_replanning": lambda args: json.dumps({
+            "status": "replanning_requested",
+            "reason": args.get("reason", "Tool requested replanning"),
+            "suggestion": args.get("suggestion", ""),
+        }),
+        "request_research": lambda args: json.dumps({
+            "status": "research_requested",
+            "query": args.get("query", ""),
+            "reason": args.get("reason", ""),
+        }),
+        "request_user_guidance": lambda args: json.dumps({
+            "status": "user_guidance_requested",
+            "question": args.get("question", ""),
+            "options": args.get("options", []),
+        }),
+        "inject_tasks": lambda args: json.dumps({
+            "status": "tasks_injected",
+            "tasks": args.get("tasks", []),
+        }),
+        "escalate_strategy": lambda args: json.dumps({
+            "status": "strategy_escalated",
+            "reason": args.get("reason", ""),
+            "suggestion": args.get("suggestion", ""),
+        }),
+        "add_insight": lambda args: json.dumps({
+            "status": "insight_added",
+            "key": args.get("key", ""),
+            "value": args.get("value", ""),
+        }),
+
         # Cache operations
         "get_cache_stats": lambda args: get_cache_stats(),
         "clear_caches": lambda args: clear_caches(args.get("cache_name", "all")),
@@ -2686,7 +2717,114 @@ def get_available_tools() -> list:
                     "required": ["file_path"]
                 }
             }
-        }
+        },
+        # Meta / agent-coordination tools
+        {
+            "type": "function",
+            "function": {
+                "name": "request_replanning",
+                "description": "Request the orchestrator to replan the current task. Use this when the current approach cannot succeed (e.g., required tool is missing, wrong strategy, missing dependencies) and a different plan is needed.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "reason": {"type": "string", "description": "Why replanning is needed"},
+                        "suggestion": {"type": "string", "description": "Optional suggestion for the new plan (e.g., 'use CREATE_TOOL to build a custom tool')"}
+                    },
+                    "required": ["reason"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "request_research",
+                "description": "Request the orchestrator to perform codebase research before proceeding. Use when you need more context about the codebase, architecture, or dependencies to make informed decisions.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "What to research (e.g., 'how is authentication implemented', 'find all test fixtures')"},
+                        "reason": {"type": "string", "description": "Why this research is needed before proceeding"}
+                    },
+                    "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "request_user_guidance",
+                "description": "Escalate to the user for guidance when facing ambiguity or uncertainty. Use when multiple valid approaches exist and the user's preference matters, or when a critical decision needs human approval.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string", "description": "The question or decision to escalate to the user"},
+                        "options": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Available options for the user to choose from (if applicable)"
+                        }
+                    },
+                    "required": ["question"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "inject_tasks",
+                "description": "Dynamically add new tasks to the current execution plan. Use when you discover that additional steps are needed that were not in the original plan (e.g., missing dependency installation, prerequisite configuration).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "tasks": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "description": {"type": "string", "description": "Task description"},
+                                    "action_type": {"type": "string", "description": "Action type: 'tool', 'code', 'test', 'research', 'create_tool'"},
+                                    "priority": {"type": "string", "description": "Priority: 'high', 'medium', 'low'", "default": "medium"}
+                                },
+                                "required": ["description"]
+                            },
+                            "description": "List of tasks to inject into the plan"
+                        },
+                        "reason": {"type": "string", "description": "Why these tasks need to be added"}
+                    },
+                    "required": ["tasks"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "escalate_strategy",
+                "description": "Escalate the current approach to a different strategy. Use when the current strategy has failed repeatedly and a fundamentally different approach is needed (e.g., switching from replace_in_file to write_file, or from manual edits to AST-based rewrites).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "reason": {"type": "string", "description": "Why the current strategy is failing"},
+                        "suggestion": {"type": "string", "description": "Suggested alternative strategy"}
+                    },
+                    "required": ["reason"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "add_insight",
+                "description": "Share a discovery or insight with other agents. Use to record findings about the codebase, patterns, or constraints that other agents should know about during this execution.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "key": {"type": "string", "description": "Short identifier for the insight (e.g., 'test_framework', 'auth_pattern', 'breaking_change')"},
+                        "value": {"type": "string", "description": "The insight content"}
+                    },
+                    "required": ["key", "value"]
+                }
+            }
+        },
     ]
 
     _enforce_registry_guard(tools)

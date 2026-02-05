@@ -1,5 +1,6 @@
 {
   "tool_names": [
+    "add_insight",
     "analyze_ast_patterns",
     "analyze_code_context",
     "analyze_code_structures",
@@ -30,6 +31,7 @@
     "delete_file",
     "detect_flaky_tests",
     "detect_secrets",
+    "escalate_strategy",
     "execute_python",
     "extract_constants",
     "fetch_url",
@@ -49,6 +51,7 @@
     "git_diff",
     "git_log",
     "git_status",
+    "inject_tasks",
     "inspect_module_hierarchy",
     "install_package",
     "kill_background_process",
@@ -66,6 +69,9 @@
     "remove_unused_imports",
     "rename_imported_symbols",
     "replace_in_file",
+    "request_replanning",
+    "request_research",
+    "request_user_guidance",
     "rewrite_python_function_parameters",
     "rewrite_python_imports",
     "rewrite_python_keyword_args",

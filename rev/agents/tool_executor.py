@@ -19,9 +19,17 @@ You will be given a task that should be completed by calling an EXISTING tool fr
 
 CRITICAL RULES:
 1. You MUST respond with a single tool call in JSON format. Do NOT provide any other text, explanations, or markdown.
-2. Do NOT create new tools. If no existing tool can do the job, request replanning to use [CREATE_TOOL] instead.
+2. Do NOT create new tools. If no existing tool can do the job, call `request_replanning` with a suggestion to use [CREATE_TOOL] instead.
 3. Prefer purpose-built tools over shell commands. Avoid `run_cmd` unless absolutely necessary.
 4. Your response MUST be a single, valid JSON object representing the tool call.
+
+COORDINATION TOOLS (use these when the task cannot be completed with a normal tool):
+- `request_replanning`: When the current plan/approach won't work and a different strategy is needed.
+- `request_research`: When you need more codebase context before you can act effectively.
+- `request_user_guidance`: When facing ambiguity that requires human decision-making.
+- `inject_tasks`: When you discover prerequisite steps missing from the plan.
+- `escalate_strategy`: When the current approach has failed and a fundamentally different method is needed.
+- `add_insight`: When you discover something other agents should know about.
 """
 
 
@@ -94,6 +102,8 @@ class ToolExecutorAgent(BaseAgent):
         parsed = _parse_cli_style_invocation(task.description or "")
         if parsed:
             tool_name, tool_args = parsed
+            if self._is_meta_tool(tool_name):
+                return self._handle_meta_tool(context, tool_name, tool_args)
             if tool_name in allowed_tool_names:
                 raw_result = execute_tool(tool_name, tool_args, agent_name="ToolExecutorAgent")
                 return build_subagent_output(
@@ -143,6 +153,8 @@ class ToolExecutorAgent(BaseAgent):
                     if recovered:
                         print("  [WARN] ToolExecutorAgent: using lenient tool call recovery from text output")
                 if recovered:
+                    if self._is_meta_tool(recovered.name):
+                        return self._handle_meta_tool(context, recovered.name, recovered.arguments or {})
                     raw_result = execute_tool(recovered.name, recovered.arguments, agent_name="ToolExecutorAgent")
                     return build_subagent_output(
                         agent_name="ToolExecutorAgent",
@@ -158,6 +170,8 @@ class ToolExecutorAgent(BaseAgent):
                     allowed_tools=tool_names,
                 )
                 if recovered:
+                    if self._is_meta_tool(recovered.name):
+                        return self._handle_meta_tool(context, recovered.name, recovered.arguments or {})
                     raw_result = execute_tool(recovered.name, recovered.arguments, agent_name="ToolExecutorAgent")
                     return build_subagent_output(
                         agent_name="ToolExecutorAgent",
@@ -189,6 +203,8 @@ class ToolExecutorAgent(BaseAgent):
                             error_detail = f"Invalid JSON in tool arguments: {str(arguments_str)[:200]}"
 
                     if not error_type:
+                        if self._is_meta_tool(tool_name):
+                            return self._handle_meta_tool(context, tool_name, tool_args)
                         if tool_name not in allowed_tool_names:
                             error_type = "unknown_tool"
                             error_detail = f"Tool '{tool_name}' is not available"
@@ -231,6 +247,8 @@ class ToolExecutorAgent(BaseAgent):
                             return self.make_failure_signal("missing_tool", "Recovered tool call missing name")
                         if not recovered.arguments:
                             return self.make_failure_signal("missing_tool_args", "Recovered tool call missing arguments")
+                        if self._is_meta_tool(recovered.name):
+                            return self._handle_meta_tool(context, recovered.name, recovered.arguments or {})
                         if not retried:
                             print(f"  -> Recovered tool call from text output: {recovered.name}")
                         raw_result = execute_tool(recovered.name, recovered.arguments, agent_name="ToolExecutorAgent")
@@ -262,3 +280,91 @@ class ToolExecutorAgent(BaseAgent):
                 return self.make_recovery_request("exception", str(e))
             context.add_error(error_msg)
             return self.make_failure_signal("exception", error_msg)
+
+    # -- Meta-tool names that trigger agent coordination instead of normal execution --
+    _META_TOOLS = {
+        "request_replanning", "request_research", "request_user_guidance",
+        "inject_tasks", "escalate_strategy", "add_insight",
+    }
+
+    def _is_meta_tool(self, tool_name: str) -> bool:
+        """Check if this is a meta/coordination tool handled by the agent."""
+        return tool_name in self._META_TOOLS
+
+    def _handle_meta_tool(self, context: RevContext, tool_name: str, args: dict) -> str:
+        """Dispatch a meta-tool call to the appropriate agent coordination mechanism."""
+        handler = {
+            "request_replanning": self._handle_replanning,
+            "request_research": self._handle_research,
+            "request_user_guidance": self._handle_user_guidance,
+            "inject_tasks": self._handle_inject_tasks,
+            "escalate_strategy": self._handle_escalate_strategy,
+            "add_insight": self._handle_add_insight,
+        }.get(tool_name)
+        if handler:
+            return handler(context, args)
+        return self.make_failure_signal("unknown_meta_tool", f"No handler for meta-tool '{tool_name}'")
+
+    def _handle_replanning(self, context: RevContext, args: dict) -> str:
+        """Handle an LLM request to replan the current task."""
+        reason = args.get("reason", "LLM requested replanning")
+        suggestion = args.get("suggestion", "")
+        detailed = f"{reason}. Suggestion: {suggestion}" if suggestion else reason
+        print(f"  -> ToolExecutorAgent: LLM requested replanning: {reason}")
+        self.request_replan(context, reason="LLM requested replanning", detailed_reason=detailed)
+        return self.make_recovery_request("replanning_requested", detailed)
+
+    def _handle_research(self, context: RevContext, args: dict) -> str:
+        """Handle an LLM request for codebase research."""
+        query = args.get("query", "")
+        reason = args.get("reason", "LLM requested research")
+        print(f"  -> ToolExecutorAgent: LLM requested research: {query}")
+        self.request_research(context, query=query, reason=reason)
+        return self.make_recovery_request("research_requested", f"Research query: {query}")
+
+    def _handle_user_guidance(self, context: RevContext, args: dict) -> str:
+        """Handle an LLM request to escalate to user for guidance."""
+        question = args.get("question", "LLM needs user guidance")
+        options = args.get("options", [])
+        detailed = f"Question: {question}"
+        if options:
+            detailed += f" Options: {', '.join(options)}"
+        print(f"  -> ToolExecutorAgent: LLM requesting user guidance: {question}")
+        context.add_agent_request("USER_GUIDANCE", {
+            "agent": "ToolExecutorAgent",
+            "reason": question,
+            "guidance": detailed,
+        })
+        return self.make_recovery_request("user_guidance_requested", detailed)
+
+    def _handle_inject_tasks(self, context: RevContext, args: dict) -> str:
+        """Handle an LLM request to inject new tasks into the plan."""
+        tasks = args.get("tasks", [])
+        reason = args.get("reason", "LLM identified missing tasks")
+        print(f"  -> ToolExecutorAgent: LLM injecting {len(tasks)} task(s): {reason}")
+        context.add_agent_request("INJECT_TASKS", {
+            "tasks": tasks,
+        })
+        task_descs = [t.get("description", "?") for t in tasks if isinstance(t, dict)]
+        return self.make_recovery_request("tasks_injected", f"Injected {len(tasks)} task(s): {'; '.join(task_descs)}")
+
+    def _handle_escalate_strategy(self, context: RevContext, args: dict) -> str:
+        """Handle an LLM request to escalate the current strategy."""
+        reason = args.get("reason", "LLM requested strategy escalation")
+        suggestion = args.get("suggestion", "")
+        detailed = f"{reason}. Suggestion: {suggestion}" if suggestion else reason
+        print(f"  -> ToolExecutorAgent: LLM escalating strategy: {reason}")
+        context.add_agent_request("EDIT_STRATEGY_ESCALATION", {
+            "agent": "ToolExecutorAgent",
+            "reason": reason,
+            "detailed_reason": detailed,
+        })
+        return self.make_recovery_request("strategy_escalated", detailed)
+
+    def _handle_add_insight(self, context: RevContext, args: dict) -> str:
+        """Handle an LLM sharing an insight with other agents."""
+        key = args.get("key", "unknown")
+        value = args.get("value", "")
+        print(f"  -> ToolExecutorAgent: LLM sharing insight: {key}")
+        context.add_insight("ToolExecutorAgent", key, value)
+        return f"Insight recorded: {key} = {value}"
